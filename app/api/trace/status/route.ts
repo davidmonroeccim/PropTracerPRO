@@ -90,14 +90,39 @@ export async function GET(request: Request) {
     // Results ready - parse them
     let result: TraceResult | null = null;
 
-    if (statusResult.results && statusResult.results.length > 0) {
-      // Find the real result (exclude padding row), prefer results with contact data
-      const targetResult = statusResult.results.find(
-        (r) => r.address !== '0 Padding Row' &&
-          (r.primary_phone || r.mobile_1 || r.email_1)
-      ) || statusResult.results.find(
+    // Empty results array means Tracerfy hasn't finished processing
+    if (!statusResult.results || statusResult.results.length === 0) {
+      console.log('Empty results array - still processing');
+      return NextResponse.json({
+        success: true,
+        status: 'processing',
+        trace_id: trace.id,
+      });
+    }
+
+    if (statusResult.results.length > 0) {
+      // Filter out padding rows
+      const nonPaddingResults = statusResult.results.filter(
         (r) => r.address !== '0 Padding Row'
       );
+
+      console.log('Results:', statusResult.results.length, 'total,',
+        nonPaddingResults.length, 'non-padding');
+
+      // If we only got padding rows back, the real record is still processing
+      if (nonPaddingResults.length === 0) {
+        console.log('Only padding rows returned - still processing');
+        return NextResponse.json({
+          success: true,
+          status: 'processing',
+          trace_id: trace.id,
+        });
+      }
+
+      // Find the best result - prefer ones with contact data
+      const targetResult = nonPaddingResults.find(
+        (r) => r.primary_phone || r.mobile_1 || r.email_1
+      ) || nonPaddingResults[0];
 
       console.log('Target result:', targetResult?.address,
         '| phone:', targetResult?.primary_phone,
