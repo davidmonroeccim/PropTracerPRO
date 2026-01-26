@@ -78,6 +78,12 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         trace_id: trace.id,
+        _debug: {
+          tracerfy_job_id: trace.tracerfy_job_id,
+          tracerfy_success: statusResult.success,
+          tracerfy_pending: statusResult.pending,
+          tracerfy_raw: statusResult.rawData,
+        },
       });
     }
 
@@ -160,6 +166,16 @@ export async function GET(request: Request) {
       result,
       charge,
       is_cached: false,
+      _debug: {
+        tracerfy_job_id: trace.tracerfy_job_id,
+        results_count: statusResult.results?.length || 0,
+        is_successful: isSuccessful,
+        raw_first_result: statusResult.results?.[0] ? {
+          address: statusResult.results[0].address,
+          primary_phone: statusResult.results[0].primary_phone,
+          email_1: statusResult.results[0].email_1,
+        } : null,
+      },
     });
   } catch (error) {
     console.error('Trace status error:', error);

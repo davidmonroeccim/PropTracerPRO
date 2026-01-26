@@ -142,7 +142,7 @@ export async function submitBulkTrace(
  */
 export async function getJobStatus(
   jobId: string
-): Promise<{ success: boolean; pending?: boolean; results?: TracerfyResult[]; error?: string }> {
+): Promise<{ success: boolean; pending?: boolean; results?: TracerfyResult[]; rawData?: unknown; error?: string }> {
   if (!API_KEY) {
     return { success: false, error: 'Tracerfy API key not configured' };
   }
@@ -167,15 +167,17 @@ export async function getJobStatus(
 
     // Results ready - Tracerfy returns an array when complete
     if (Array.isArray(data)) {
-      return { success: true, pending: false, results: data as TracerfyResult[] };
+      return { success: true, pending: false, results: data as TracerfyResult[], rawData: data };
     }
 
     // Still pending - Tracerfy returns an object with pending: true
     if (data && data.pending === true) {
-      return { success: true, pending: true };
+      return { success: true, pending: true, rawData: data };
     }
 
-    return { success: true, pending: false, results: [] };
+    // Unknown response format - log it and treat as pending rather than empty
+    console.error('Unexpected Tracerfy response format:', JSON.stringify(data));
+    return { success: true, pending: true, rawData: data };
   } catch (error) {
     console.error('Tracerfy job status error:', error);
     return { success: false, error: 'Tracerfy service unavailable' };
