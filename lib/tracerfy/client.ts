@@ -137,8 +137,8 @@ export async function submitBulkTrace(
 
 /**
  * Get the status and results of a trace job.
- * Tracerfy returns a JSON array when results are ready,
- * or an object with pending:true while still processing.
+ * First checks /queues/ list for pending status, then fetches results from /queue/{id}.
+ * This avoids reading stale accumulated results before the job finishes.
  */
 export async function getJobStatus(
   jobId: string
@@ -148,6 +148,33 @@ export async function getJobStatus(
   }
 
   try {
+    // First check the queues list to see if this job is still pending
+    const listResponse = await fetch(`${BASE_URL}queues/`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+      },
+    });
+
+    if (!listResponse.ok) {
+      return { success: false, error: 'Failed to check job status' };
+    }
+
+    const jobs = await listResponse.json();
+    const job = Array.isArray(jobs)
+      ? jobs.find((j: { id: number }) => j.id === parseInt(jobId, 10))
+      : null;
+
+    if (!job) {
+      return { success: false, error: 'Job not found' };
+    }
+
+    // Job still processing
+    if (job.pending === true) {
+      return { success: true, pending: true };
+    }
+
+    // Job complete - now fetch the actual results
     const response = await fetch(`${BASE_URL}queue/${jobId}`, {
       method: 'GET',
       headers: {
@@ -156,34 +183,16 @@ export async function getJobStatus(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Tracerfy job status error:', errorText);
-      return { success: false, error: 'Failed to get job status' };
+      return { success: false, error: 'Failed to get job results' };
     }
 
     const data = await response.json();
-    console.log('Tracerfy queue response type:', Array.isArray(data) ? 'array' : 'object');
-    console.log('Tracerfy queue response:', JSON.stringify(data).substring(0, 500));
 
-    // When results are ready, Tracerfy returns a JSON array of results
     if (Array.isArray(data)) {
       return { success: true, pending: false, results: data as TracerfyResult[] };
     }
 
-    // When still processing, returns an object with pending field
-    if (data.pending === true) {
-      return { success: true, pending: true };
-    }
-
-    // If pending is false but response is an object (has download_url), treat as complete with no inline results
-    if (data.pending === false && data.download_url) {
-      console.log('Tracerfy download URL:', data.download_url);
-      return { success: true, pending: false, results: [] };
-    }
-
-    // Unknown format - log and treat as pending
-    console.log('Tracerfy unknown response format:', JSON.stringify(data));
-    return { success: true, pending: true };
+    return { success: true, pending: false, results: [] };
   } catch (error) {
     console.error('Tracerfy job status error:', error);
     return { success: false, error: 'Tracerfy service unavailable' };

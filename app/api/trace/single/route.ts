@@ -60,25 +60,37 @@ export async function POST(request: Request) {
       }
     }
 
-    // Check for duplicate (cached result)
-    const cachedResult = await checkSingleDuplicate(user.id, address, city, state, zip);
-
-    if (cachedResult) {
-      // Return cached result - no charge
-      return NextResponse.json({
-        success: true,
-        is_cached: true,
-        trace_id: cachedResult.id,
-        result: cachedResult.trace_result as TraceResult | null,
-        charge: 0,
-      });
-    }
-
     // Create normalized address and hash
     const normalizedAddress = normalizeAddress(address, city, state, zip);
     const addressHash = createAddressHash(normalizedAddress);
 
     const adminClient = createAdminClient();
+
+    // Check for duplicate (cached result)
+    const cachedResult = await checkSingleDuplicate(user.id, address, city, state, zip);
+
+    if (cachedResult) {
+      const cached = cachedResult.trace_result as TraceResult | null;
+      const hasData = cached &&
+        ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
+
+      if (hasData) {
+        // Return cached result with actual data - no charge
+        return NextResponse.json({
+          success: true,
+          is_cached: true,
+          trace_id: cachedResult.id,
+          result: cached,
+          charge: 0,
+        });
+      }
+
+      // Cached result has no contact data - delete it and re-trace
+      await adminClient
+        .from('trace_history')
+        .delete()
+        .eq('id', cachedResult.id);
+    }
 
     // Delete any existing failed traces for this address (to allow retry)
     await adminClient
