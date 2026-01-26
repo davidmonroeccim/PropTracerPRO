@@ -107,7 +107,7 @@ export async function POST(request: Request) {
     if (insertError) {
       console.error('Failed to create trace record:', insertError);
       return NextResponse.json(
-        { success: false, error: 'Failed to process request' },
+        { success: false, error: `Failed to process request: ${insertError.message}` },
         { status: 500 }
       );
     }
@@ -238,8 +238,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('Single trace error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: `Internal server error: ${message}` },
       { status: 500 }
     );
   }
