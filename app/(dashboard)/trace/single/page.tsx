@@ -143,13 +143,15 @@ export default function SingleTracePage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="owner">Owner Name (Optional)</Label>
+                  <Label htmlFor="owner">Owner Name *</Label>
                   <Input
                     id="owner"
                     placeholder="John Smith"
                     value={ownerName}
                     onChange={(e) => setOwnerName(e.target.value)}
+                    required
                   />
+                  <p className="text-xs text-gray-500">Required for skip trace lookup</p>
                 </div>
               </div>
 

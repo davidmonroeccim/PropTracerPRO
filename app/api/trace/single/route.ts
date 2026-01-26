@@ -155,7 +155,16 @@ export async function POST(request: Request) {
       // Results are ready
       if (statusResult.pending === false) {
         if (statusResult.results && statusResult.results.length > 0) {
-          result = parseTracerfyResult(statusResult.results[0]);
+          // Filter for the target address (exclude padding row and duplicates from other jobs)
+          const targetResult = statusResult.results.find(
+            (r) => r.address?.toUpperCase() === address.toUpperCase() &&
+              (r.primary_phone || r.mobile_1 || r.email_1 || r.first_name)
+          ) || statusResult.results.find(
+            (r) => r.address?.toUpperCase() === address.toUpperCase()
+          );
+          if (targetResult) {
+            result = parseTracerfyResult(targetResult);
+          }
         }
         break;
       }

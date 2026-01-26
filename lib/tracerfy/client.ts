@@ -15,6 +15,8 @@ interface TracerfySubmitResponse {
 /**
  * Submit a single address for skip tracing.
  * Tracerfy requires CSV file upload with column mapping parameters.
+ * The API is batch-oriented, so we include a padding row to ensure 2+ rows.
+ * Mail fields must be populated (use property address as fallback).
  */
 export async function submitSingleTrace(data: {
   address: string;
@@ -33,33 +35,33 @@ export async function submitSingleTrace(data: {
     const firstName = nameParts[0] || '';
     const lastName = nameParts.slice(1).join(' ') || '';
 
-    // Create CSV content with required columns
-    // Tracerfy expects: address, city, state, zip, first_name, last_name, mail_address, mail_city, mail_state
+    // Escape CSV values (handle commas and quotes in addresses)
+    const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+
+    // Create CSV content matching Tracerfy's expected format (no zip column).
+    // Mail fields filled with property address (required by Tracerfy).
+    // Includes a padding row because Tracerfy's batch API ignores single-row uploads.
     const csvContent = [
-      'address,city,state,zip,first_name,last_name,mail_address,mail_city,mail_state',
-      `"${data.address}","${data.city}","${data.state}","${data.zip}","${firstName}","${lastName}","","",""`,
+      'address,city,state,first_name,last_name,mail_address,mail_city,mail_state',
+      `${esc(data.address)},${esc(data.city)},${esc(data.state)},${esc(firstName)},${esc(lastName)},${esc(data.address)},${esc(data.city)},${esc(data.state)}`,
+      `"0 Padding Row","${data.city}","${data.state}","X","X","0 Padding Row","${data.city}","${data.state}"`,
     ].join('\n');
 
     const formData = new FormData();
     const blob = new Blob([csvContent], { type: 'text/csv' });
     formData.append('csv_file', blob, 'trace.csv');
 
-    // Required column mapping parameters
+    // Column mapping parameters (matching working Tracerfy notebook - no zip_column)
     formData.append('address_column', 'address');
     formData.append('city_column', 'city');
     formData.append('state_column', 'state');
-    formData.append('zip_column', 'zip');
     formData.append('first_name_column', 'first_name');
     formData.append('last_name_column', 'last_name');
     formData.append('mail_address_column', 'mail_address');
     formData.append('mail_city_column', 'mail_city');
     formData.append('mail_state_column', 'mail_state');
 
-    const url = `${BASE_URL}trace/`;
-    console.log('Tracerfy request URL:', url);
-    console.log('Tracerfy API key present:', !!API_KEY);
-
-    const response = await fetch(url, {
+    const response = await fetch(`${BASE_URL}trace/`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${API_KEY}`,
@@ -67,13 +69,10 @@ export async function submitSingleTrace(data: {
       body: formData,
     });
 
-    console.log('Tracerfy response status:', response.status);
-
     if (!response.ok) {
       const errorText = await response.text();
       console.error('Tracerfy submit error:', errorText);
 
-      // Handle rate limiting specifically
       if (response.status === 429) {
         return { success: false, error: 'Rate limit exceeded. Please wait a moment before trying again.' };
       }
@@ -82,7 +81,6 @@ export async function submitSingleTrace(data: {
     }
 
     const result: TracerfySubmitResponse = await response.json();
-    console.log('Tracerfy submit result:', JSON.stringify(result));
     return { success: true, jobId: result.queue_id?.toString() || result.job_id };
   } catch (error) {
     console.error('Tracerfy submit error:', error);
@@ -105,11 +103,10 @@ export async function submitBulkTrace(
     const blob = new Blob([csvContent], { type: 'text/csv' });
     formData.append('csv_file', blob, 'bulk-trace.csv');
 
-    // Required column mapping parameters - assumes CSV has these column headers
+    // Column mapping parameters (no zip_column - matches Tracerfy's expected format)
     formData.append('address_column', 'address');
     formData.append('city_column', 'city');
     formData.append('state_column', 'state');
-    formData.append('zip_column', 'zip');
     formData.append('first_name_column', 'first_name');
     formData.append('last_name_column', 'last_name');
     formData.append('mail_address_column', 'mail_address');
