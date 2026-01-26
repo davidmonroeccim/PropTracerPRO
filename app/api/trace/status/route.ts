@@ -68,6 +68,10 @@ export async function GET(request: Request) {
 
     const statusResult = await getJobStatus(trace.tracerfy_job_id);
 
+    console.log('Trace status check:', trace.id, '| job:', trace.tracerfy_job_id,
+      '| success:', statusResult.success, '| pending:', statusResult.pending,
+      '| results:', statusResult.results?.length || 0);
+
     // Tracerfy still processing
     if (!statusResult.success || statusResult.pending === true) {
       return NextResponse.json({
@@ -88,6 +92,11 @@ export async function GET(request: Request) {
       ) || statusResult.results.find(
         (r) => r.address !== '0 Padding Row'
       );
+
+      console.log('Target result:', targetResult?.address,
+        '| phone:', targetResult?.primary_phone,
+        '| email:', targetResult?.email_1);
+
       if (targetResult) {
         result = parseTracerfyResult(targetResult);
       }
@@ -96,6 +105,9 @@ export async function GET(request: Request) {
     // Determine success
     const isSuccessful = result !== null &&
       ((result.phones?.length || 0) > 0 || (result.emails?.length || 0) > 0);
+
+    console.log('Parse result:', '| phones:', result?.phones?.length || 0,
+      '| emails:', result?.emails?.length || 0, '| successful:', isSuccessful);
 
     const charge = isSuccessful ? PRICING.CHARGE_PER_SUCCESS : 0;
 

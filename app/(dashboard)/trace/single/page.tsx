@@ -69,10 +69,11 @@ export default function SingleTracePage() {
       if (data.status === 'processing' && data.trace_id) {
         const traceId = data.trace_id;
         let attempts = 0;
-        const maxAttempts = 30; // 90 seconds (3s intervals)
+        const maxAttempts = 20; // ~65 seconds total
 
         while (attempts < maxAttempts && !abortRef.current) {
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          // Wait 5s before first poll (Tracerfy needs processing time), then 3s
+          await new Promise((resolve) => setTimeout(resolve, attempts === 0 ? 5000 : 3000));
           attempts++;
 
           const statusResponse = await fetch(
@@ -243,7 +244,7 @@ export default function SingleTracePage() {
             <Card className="h-full flex items-center justify-center">
               <CardContent className="text-center py-12">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto mb-4" />
-                <p className="text-gray-700 font-medium">Searching Tracerfy...</p>
+                <p className="text-gray-700 font-medium">Searching...</p>
                 <p className="text-gray-500 text-sm mt-1">This may take 10-30 seconds</p>
               </CardContent>
             </Card>
