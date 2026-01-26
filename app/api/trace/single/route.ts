@@ -105,21 +105,9 @@ export async function POST(request: Request) {
       .single();
 
     if (insertError) {
-      console.error('Failed to create trace record:', JSON.stringify(insertError));
-      console.error('Admin key length:', process.env.SUPABASE_SERVICE_ROLE_KEY?.length);
-      console.error('Supabase URL:', process.env.NEXT_PUBLIC_SUPABASE_URL);
+      console.error('Failed to create trace record:', insertError.message);
       return NextResponse.json(
-        {
-          success: false,
-          error: `Failed to process request: ${insertError.message}`,
-          debug: {
-            code: insertError.code,
-            hint: insertError.hint,
-            details: insertError.details,
-            keyLength: process.env.SUPABASE_SERVICE_ROLE_KEY?.length,
-            urlSet: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-          },
-        },
+        { success: false, error: 'Failed to process request' },
         { status: 500 }
       );
     }
@@ -160,17 +148,19 @@ export async function POST(request: Request) {
 
       const statusResult = await getJobStatus(submitResult.jobId);
 
-      if (statusResult.success && statusResult.data) {
-        if (statusResult.data.status === 'completed') {
-          const results = statusResult.data.results;
-          if (results && results.length > 0) {
-            result = parseTracerfyResult(results[0]);
-          }
-          break;
-        } else if (statusResult.data.status === 'failed') {
-          break;
-        }
+      if (!statusResult.success) {
+        break;
       }
+
+      // Results are ready
+      if (statusResult.pending === false) {
+        if (statusResult.results && statusResult.results.length > 0) {
+          result = parseTracerfyResult(statusResult.results[0]);
+        }
+        break;
+      }
+
+      // Still pending - continue polling
     }
 
     // Determine success

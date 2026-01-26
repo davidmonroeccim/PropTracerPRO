@@ -213,23 +213,39 @@ export interface BulkTraceResponse {
 // Tracerfy API Types
 // ===================
 
-export interface TracerfyJobResponse {
-  job_id: string;
-  status: 'processing' | 'completed' | 'failed';
-  total_records?: number;
-  matched_records?: number;
-  results?: TracerfyResult[];
+// Tracerfy returns an object with pending:true while processing
+export interface TracerfyPendingResponse {
+  id: number;
+  created_at: string;
+  pending: true;
+  service_type?: string;
 }
 
+// Tracerfy returns a flat result per record when complete
 export interface TracerfyResult {
-  input_address: string;
-  owner_name: string | null;
-  phones: Array<{
-    number: string;
-    type: string;
-  }>;
-  emails: string[];
-  mailing_address: string | null;
+  created_at?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  first_name?: string;
+  last_name?: string;
+  primary_phone?: string;
+  mobile_1?: string;
+  mobile_2?: string;
+  mobile_3?: string;
+  mobile_4?: string;
+  mobile_5?: string;
+  landline_1?: string;
+  landline_2?: string;
+  landline_3?: string;
+  email_1?: string;
+  email_2?: string;
+  email_3?: string;
+  email_4?: string;
+  email_5?: string;
+  mail_address?: string;
+  mail_city?: string;
+  mail_state?: string;
 }
 
 // ===================

@@ -1,5 +1,5 @@
 import { TRACERFY } from '@/lib/constants';
-import type { TracerfyJobResponse, TracerfyResult } from '@/types';
+import type { TracerfyResult } from '@/types';
 
 const API_KEY = process.env.TRACERFY_API_KEY;
 const BASE_URL = process.env.TRACERFY_API_URL || TRACERFY.BASE_URL;
@@ -140,10 +140,12 @@ export async function submitBulkTrace(
 
 /**
  * Get the status and results of a trace job.
+ * Tracerfy returns a JSON array when results are ready,
+ * or an object with pending:true while still processing.
  */
 export async function getJobStatus(
   jobId: string
-): Promise<{ success: boolean; data?: TracerfyJobResponse; error?: string }> {
+): Promise<{ success: boolean; pending?: boolean; results?: TracerfyResult[]; error?: string }> {
   if (!API_KEY) {
     return { success: false, error: 'Tracerfy API key not configured' };
   }
@@ -162,8 +164,29 @@ export async function getJobStatus(
       return { success: false, error: 'Failed to get job status' };
     }
 
-    const data: TracerfyJobResponse = await response.json();
-    return { success: true, data };
+    const data = await response.json();
+    console.log('Tracerfy queue response type:', Array.isArray(data) ? 'array' : 'object');
+    console.log('Tracerfy queue response:', JSON.stringify(data).substring(0, 500));
+
+    // When results are ready, Tracerfy returns a JSON array of results
+    if (Array.isArray(data)) {
+      return { success: true, pending: false, results: data as TracerfyResult[] };
+    }
+
+    // When still processing, returns an object with pending field
+    if (data.pending === true) {
+      return { success: true, pending: true };
+    }
+
+    // If pending is false but response is an object (has download_url), treat as complete with no inline results
+    if (data.pending === false && data.download_url) {
+      console.log('Tracerfy download URL:', data.download_url);
+      return { success: true, pending: false, results: [] };
+    }
+
+    // Unknown format - log and treat as pending
+    console.log('Tracerfy unknown response format:', JSON.stringify(data));
+    return { success: true, pending: true };
   } catch (error) {
     console.error('Tracerfy job status error:', error);
     return { success: false, error: 'Tracerfy service unavailable' };
@@ -240,21 +263,57 @@ export async function getAnalytics(): Promise<{
 }
 
 /**
- * Parse Tracerfy result into our internal format.
+ * Parse Tracerfy flat result into our internal TraceResult format.
+ * Tracerfy returns flat fields: primary_phone, mobile_1-5, landline_1-3, email_1-5, etc.
  */
 export function parseTracerfyResult(result: TracerfyResult) {
+  // Build owner name from first_name + last_name
+  const firstName = result.first_name?.trim() || '';
+  const lastName = result.last_name?.trim() || '';
+  const ownerName = [firstName, lastName].filter(Boolean).join(' ') || null;
+
+  // Collect phones from flat fields
+  const phones: Array<{ number: string; type: 'mobile' | 'landline' | 'voip' | 'unknown' }> = [];
+
+  // Primary phone
+  if (result.primary_phone) {
+    phones.push({ number: result.primary_phone, type: 'mobile' });
+  }
+
+  // Mobile phones 1-5
+  const mobileFields = [result.mobile_1, result.mobile_2, result.mobile_3, result.mobile_4, result.mobile_5];
+  for (const num of mobileFields) {
+    if (num && !phones.some((p) => p.number === num)) {
+      phones.push({ number: num, type: 'mobile' });
+    }
+  }
+
+  // Landline phones 1-3
+  const landlineFields = [result.landline_1, result.landline_2, result.landline_3];
+  for (const num of landlineFields) {
+    if (num && !phones.some((p) => p.number === num)) {
+      phones.push({ number: num, type: 'landline' });
+    }
+  }
+
+  // Collect emails from flat fields
+  const emails: string[] = [];
+  const emailFields = [result.email_1, result.email_2, result.email_3, result.email_4, result.email_5];
+  for (const email of emailFields) {
+    if (email) {
+      emails.push(email);
+    }
+  }
+
   return {
-    owner_name: result.owner_name || null,
+    owner_name: ownerName,
     owner_name_2: null,
-    phones: (result.phones || []).slice(0, TRACERFY.MAX_PHONES).map((p) => ({
-      number: p.number,
-      type: (p.type?.toLowerCase() || 'unknown') as 'mobile' | 'landline' | 'voip' | 'unknown',
-    })),
-    emails: (result.emails || []).slice(0, TRACERFY.MAX_EMAILS),
-    mailing_address: result.mailing_address || null,
-    mailing_city: null,
-    mailing_state: null,
+    phones: phones.slice(0, TRACERFY.MAX_PHONES),
+    emails: emails.slice(0, TRACERFY.MAX_EMAILS),
+    mailing_address: result.mail_address || null,
+    mailing_city: result.mail_city || null,
+    mailing_state: result.mail_state || null,
     mailing_zip: null,
-    match_confidence: result.phones?.length || result.emails?.length ? 80 : 0,
+    match_confidence: phones.length > 0 || emails.length > 0 ? 80 : 0,
   };
 }

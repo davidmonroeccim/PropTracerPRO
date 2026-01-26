@@ -73,7 +73,7 @@ export const API_LIMITS = {
 // ===================
 
 export const TRACERFY = {
-  BASE_URL: process.env.TRACERFY_API_URL || 'https://api.tracerfy.com',
+  BASE_URL: process.env.TRACERFY_API_URL || 'https://tracerfy.com/v1/api/',
   MAX_PHONES: 8,
   MAX_EMAILS: 5,
 } as const;
