@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -27,13 +27,17 @@ export default function SingleTracePage() {
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
 
+  const abortRef = useRef(false);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResult(null);
+    abortRef.current = false;
 
     try {
+      // Submit the trace
       const response = await fetch('/api/trace/single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -50,9 +54,62 @@ export default function SingleTracePage() {
 
       if (!response.ok) {
         setError(data.error || 'Failed to trace property');
+        setLoading(false);
         return;
       }
 
+      // Cached result - show immediately
+      if (data.is_cached || data.result) {
+        setResult(data);
+        setLoading(false);
+        return;
+      }
+
+      // Processing - poll for results
+      if (data.status === 'processing' && data.trace_id) {
+        const traceId = data.trace_id;
+        let attempts = 0;
+        const maxAttempts = 30; // 90 seconds (3s intervals)
+
+        while (attempts < maxAttempts && !abortRef.current) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          attempts++;
+
+          const statusResponse = await fetch(
+            `/api/trace/status?trace_id=${traceId}`
+          );
+          const statusData = await statusResponse.json();
+
+          if (!statusData.success) {
+            setError(statusData.error || 'Failed to check trace status');
+            setLoading(false);
+            return;
+          }
+
+          // Still processing
+          if (statusData.status === 'processing') {
+            continue;
+          }
+
+          // Results ready (success or no_match)
+          setResult({
+            success: true,
+            is_cached: statusData.is_cached || false,
+            trace_id: statusData.trace_id,
+            result: statusData.result,
+            charge: statusData.charge || 0,
+          });
+          setLoading(false);
+          return;
+        }
+
+        // Timed out
+        setError('Trace is taking longer than expected. Check History for results.');
+        setLoading(false);
+        return;
+      }
+
+      // Unexpected response
       setResult(data);
     } catch {
       setError('Failed to connect to server');
@@ -62,6 +119,7 @@ export default function SingleTracePage() {
   };
 
   const handleClear = () => {
+    abortRef.current = true;
     setAddress('');
     setCity('');
     setState('');
@@ -69,6 +127,7 @@ export default function SingleTracePage() {
     setOwnerName('');
     setResult(null);
     setError(null);
+    setLoading(false);
   };
 
   return (
@@ -180,6 +239,14 @@ export default function SingleTracePage() {
               charge={result.charge}
               address={`${address}, ${city}, ${state} ${zip}`}
             />
+          ) : loading ? (
+            <Card className="h-full flex items-center justify-center">
+              <CardContent className="text-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto mb-4" />
+                <p className="text-gray-700 font-medium">Searching Tracerfy...</p>
+                <p className="text-gray-500 text-sm mt-1">This may take 10-30 seconds</p>
+              </CardContent>
+            </Card>
           ) : (
             <Card className="h-full flex items-center justify-center">
               <CardContent className="text-center py-12">

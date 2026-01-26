@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
-import { submitSingleTrace, getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
+import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { PRICING } from '@/lib/constants';
 import type { SingleTraceRequest, TraceResult } from '@/types';
 
@@ -149,115 +149,20 @@ export async function POST(request: Request) {
       );
     }
 
-    // Poll for results (with timeout)
-    let result: TraceResult | null = null;
-    let attempts = 0;
-    const maxAttempts = 20; // 60 seconds max (3s intervals)
-
-    while (attempts < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      attempts++;
-
-      const statusResult = await getJobStatus(submitResult.jobId);
-
-      if (!statusResult.success) {
-        break;
-      }
-
-      // Results are ready
-      if (statusResult.pending === false) {
-        if (statusResult.results && statusResult.results.length > 0) {
-          // Filter for the target address (exclude padding row and duplicates from other jobs)
-          const targetResult = statusResult.results.find(
-            (r) => r.address?.toUpperCase() === address.toUpperCase() &&
-              (r.primary_phone || r.mobile_1 || r.email_1 || r.first_name)
-          ) || statusResult.results.find(
-            (r) => r.address?.toUpperCase() === address.toUpperCase()
-          );
-          if (targetResult) {
-            result = parseTracerfyResult(targetResult);
-          }
-        }
-        break;
-      }
-
-      // Still pending - continue polling
-    }
-
-    // Determine success
-    const isSuccessful = result !== null &&
-      ((result.phones?.length || 0) > 0 || (result.emails?.length || 0) > 0);
-
-    // Calculate charge
-    const charge = isSuccessful ? PRICING.CHARGE_PER_SUCCESS : 0;
-
-    // Update trace record
+    // Save Tracerfy job ID and return immediately.
+    // Client will poll /api/trace/status for results.
     await adminClient
       .from('trace_history')
       .update({
-        status: isSuccessful ? 'success' : 'no_match',
         tracerfy_job_id: submitResult.jobId,
-        trace_result: result,
-        phone_count: result?.phones?.length || 0,
-        email_count: result?.emails?.length || 0,
-        is_successful: isSuccessful,
-        cost: PRICING.COST_PER_RECORD,
-        charge: charge,
       })
       .eq('id', traceRecord.id);
 
-    // Charge user if successful
-    if (isSuccessful && charge > 0) {
-      if (profile.subscription_tier === 'wallet') {
-        // Deduct from wallet
-        const { error: deductError } = await adminClient.rpc('deduct_wallet_balance', {
-          p_user_id: user.id,
-          p_amount: charge,
-          p_trace_history_id: traceRecord.id,
-          p_description: 'Skip trace - successful match',
-        });
-
-        if (deductError) {
-          console.error('Failed to deduct wallet balance:', deductError);
-        }
-
-        // Check if rebill needed
-        const { data: updatedProfile } = await adminClient
-          .from('user_profiles')
-          .select('wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled')
-          .eq('id', user.id)
-          .single();
-
-        if (
-          updatedProfile &&
-          updatedProfile.wallet_balance < updatedProfile.wallet_low_balance_threshold &&
-          updatedProfile.wallet_auto_rebill_enabled
-        ) {
-          // TODO: Trigger wallet rebill via Stripe
-          console.log('Wallet rebill needed for user:', user.id);
-        }
-      } else {
-        // Record usage for Stripe metered billing
-        await adminClient.from('usage_records').insert({
-          user_id: user.id,
-          trace_history_id: traceRecord.id,
-          quantity: 1,
-          unit_price: PRICING.CHARGE_PER_SUCCESS,
-          total_amount: charge,
-          billing_period_start: new Date().toISOString().substring(0, 10),
-          billing_period_end: new Date().toISOString().substring(0, 10),
-        });
-
-        // TODO: Report to Stripe usage-based billing
-      }
-    }
-
     return NextResponse.json({
       success: true,
-      is_cached: false,
+      status: 'processing',
       trace_id: traceRecord.id,
-      result,
-      charge,
+      tracerfy_job_id: submitResult.jobId,
     });
   } catch (error) {
     console.error('Single trace error:', error);
