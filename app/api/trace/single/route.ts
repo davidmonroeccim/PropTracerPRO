@@ -152,10 +152,10 @@ export async function POST(request: Request) {
     // Poll for results (with timeout)
     let result: TraceResult | null = null;
     let attempts = 0;
-    const maxAttempts = 30; // 30 seconds max
+    const maxAttempts = 20; // 60 seconds max (3s intervals)
 
     while (attempts < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       attempts++;
 
       const statusResult = await getJobStatus(submitResult.jobId);

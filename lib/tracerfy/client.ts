@@ -137,8 +137,8 @@ export async function submitBulkTrace(
 
 /**
  * Get the status and results of a trace job.
- * First checks /queues/ list for pending status, then fetches results from /queue/{id}.
- * This avoids reading stale accumulated results before the job finishes.
+ * Polls /queue/{id} directly - returns { pending: true } object while processing,
+ * or an array of results when complete.
  */
 export async function getJobStatus(
   jobId: string
@@ -148,33 +148,6 @@ export async function getJobStatus(
   }
 
   try {
-    // First check the queues list to see if this job is still pending
-    const listResponse = await fetch(`${BASE_URL}queues/`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-      },
-    });
-
-    if (!listResponse.ok) {
-      return { success: false, error: 'Failed to check job status' };
-    }
-
-    const jobs = await listResponse.json();
-    const job = Array.isArray(jobs)
-      ? jobs.find((j: { id: number }) => j.id === parseInt(jobId, 10))
-      : null;
-
-    if (!job) {
-      return { success: false, error: 'Job not found' };
-    }
-
-    // Job still processing
-    if (job.pending === true) {
-      return { success: true, pending: true };
-    }
-
-    // Job complete - now fetch the actual results
     const response = await fetch(`${BASE_URL}queue/${jobId}`, {
       method: 'GET',
       headers: {
@@ -183,13 +156,23 @@ export async function getJobStatus(
     });
 
     if (!response.ok) {
+      if (response.status === 503 || response.status === 429) {
+        // Rate limited - treat as still pending
+        return { success: true, pending: true };
+      }
       return { success: false, error: 'Failed to get job results' };
     }
 
     const data = await response.json();
 
+    // Results ready - Tracerfy returns an array when complete
     if (Array.isArray(data)) {
       return { success: true, pending: false, results: data as TracerfyResult[] };
+    }
+
+    // Still pending - Tracerfy returns an object with pending: true
+    if (data && data.pending === true) {
+      return { success: true, pending: true };
     }
 
     return { success: true, pending: false, results: [] };
