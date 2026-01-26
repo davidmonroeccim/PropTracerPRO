@@ -105,9 +105,21 @@ export async function POST(request: Request) {
       .single();
 
     if (insertError) {
-      console.error('Failed to create trace record:', insertError);
+      console.error('Failed to create trace record:', JSON.stringify(insertError));
+      console.error('Admin key length:', process.env.SUPABASE_SERVICE_ROLE_KEY?.length);
+      console.error('Supabase URL:', process.env.NEXT_PUBLIC_SUPABASE_URL);
       return NextResponse.json(
-        { success: false, error: `Failed to process request: ${insertError.message}` },
+        {
+          success: false,
+          error: `Failed to process request: ${insertError.message}`,
+          debug: {
+            code: insertError.code,
+            hint: insertError.hint,
+            details: insertError.details,
+            keyLength: process.env.SUPABASE_SERVICE_ROLE_KEY?.length,
+            urlSet: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+          },
+        },
         { status: 500 }
       );
     }
