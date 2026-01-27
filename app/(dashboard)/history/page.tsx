@@ -18,15 +18,23 @@ type HistoryEntry =
   | { type: 'single'; date: string; data: TraceHistory }
   | { type: 'bulk'; date: string; data: TraceJob };
 
-async function getTraceHistory(userId: string) {
+async function getSingleTraces(userId: string, bulkTracerfyJobIds: string[]) {
   const supabase = await createClient();
 
-  const { data, error } = await supabase
+  let query = supabase
     .from('trace_history')
     .select('*')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(100);
+
+  if (bulkTracerfyJobIds.length > 0) {
+    // Exclude rows that belong to bulk jobs so the 100-row limit
+    // only counts actual single traces
+    query = query.not('tracerfy_job_id', 'in', `(${bulkTracerfyJobIds.join(',')})`);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     console.error('Failed to fetch trace history:', error);
@@ -60,16 +68,15 @@ export default async function HistoryPage() {
 
   if (!user) return null;
 
-  const [allTraces, jobs] = await Promise.all([
-    getTraceHistory(user.id),
-    getTraceJobs(user.id),
-  ]);
+  // Fetch jobs first so we can exclude their trace_history rows from the single-trace query.
+  // Without this, the 100-row limit on trace_history would be consumed by bulk rows,
+  // hiding older single traces.
+  const jobs = await getTraceJobs(user.id);
+  const bulkTracerfyJobIds = jobs
+    .map(j => j.tracerfy_job_id)
+    .filter((id): id is string => id !== null);
 
-  // Filter out trace_history rows that belong to bulk jobs
-  const bulkJobIds = new Set(jobs.map(j => j.tracerfy_job_id).filter(Boolean));
-  const singleTraces = allTraces.filter(
-    t => !t.tracerfy_job_id || !bulkJobIds.has(t.tracerfy_job_id)
-  );
+  const singleTraces = await getSingleTraces(user.id, bulkTracerfyJobIds);
 
   // Merge into unified sorted list
   const entries: HistoryEntry[] = [
