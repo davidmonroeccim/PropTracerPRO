@@ -28,8 +28,8 @@ export async function POST() {
       );
     }
 
-    // Generate new API key
-    const bytes = new Uint8Array(32);
+    // Generate new API key (ptp_ prefix + 60 hex chars = 64 chars to fit VARCHAR(64))
+    const bytes = new Uint8Array(30);
     globalThis.crypto.getRandomValues(bytes);
     const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
     const apiKey = `ptp_${hex}`;
