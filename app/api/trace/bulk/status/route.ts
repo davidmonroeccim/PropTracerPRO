@@ -89,7 +89,26 @@ export async function GET(request: Request) {
       });
     }
 
-    // Results ready — process each one
+    // Tracerfy returns one result per input row. If we got back fewer
+    // results than we submitted, Tracerfy is still processing (partial results).
+    if (statusResult.results.length < traceJob.records_submitted) {
+      console.log(
+        'Bulk status: partial results',
+        statusResult.results.length,
+        'of',
+        traceJob.records_submitted,
+        '- still processing'
+      );
+      return NextResponse.json({
+        success: true,
+        status: 'processing',
+        job_id: traceJob.id,
+        records_submitted: traceJob.records_submitted,
+        results_so_far: statusResult.results.length,
+      });
+    }
+
+    // All results ready — process each one
     const results = statusResult.results;
     let recordsMatched = 0;
     let totalCharge = 0;

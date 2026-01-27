@@ -44,9 +44,24 @@ function detectMapping(headers: string[]): Record<string, OurField> {
     }
   }
 
-  // If mail_city missing, fall back to city mapping
-  if (!usedFields.has('mail_city') && usedFields.has('city')) {
-    // We'll handle this during record building, not in mapping display
+  // Fallback: if property address fields missing but mail fields found,
+  // use mail fields as property fields (e.g. Bexar County records only have mailing address)
+  const fallbacks: [OurField, OurField][] = [
+    ['address', 'mail_address'],
+    ['city', 'mail_city'],
+    ['state', 'mail_state'],
+  ];
+
+  for (const [required, fallback] of fallbacks) {
+    if (!usedFields.has(required) && usedFields.has(fallback)) {
+      // Find the header that was mapped to the fallback field and remap it
+      const header = Object.entries(mapping).find(([, f]) => f === fallback)?.[0];
+      if (header) {
+        mapping[header] = required;
+        usedFields.add(required);
+        usedFields.delete(fallback);
+      }
+    }
   }
 
   return mapping;
@@ -147,6 +162,7 @@ export default function BulkUploadPage() {
 
   // Processing phase
   const [jobStats, setJobStats] = useState<JobStats | null>(null);
+  const [pollProgress, setPollProgress] = useState<string | null>(null);
   const abortRef = useRef(false);
 
   // Complete phase
@@ -328,6 +344,9 @@ export default function BulkUploadPage() {
         }
 
         if (statusData.status === 'processing') {
+          if (statusData.results_so_far && statusData.records_submitted) {
+            setPollProgress(`${statusData.results_so_far} of ${statusData.records_submitted} records processed`);
+          }
           continue;
         }
 
@@ -374,6 +393,7 @@ export default function BulkUploadPage() {
     setTotalRows(0);
     setMappingErrors([]);
     setJobStats(null);
+    setPollProgress(null);
     setCompleteStats(null);
     setJobId(null);
   };
@@ -578,7 +598,11 @@ export default function BulkUploadPage() {
 
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto" />
             <p className="text-gray-700 font-medium">Processing your upload...</p>
-            <p className="text-gray-500 text-sm">This may take several minutes for large uploads. Please keep this page open.</p>
+            {pollProgress ? (
+              <p className="text-gray-500 text-sm">{pollProgress}</p>
+            ) : (
+              <p className="text-gray-500 text-sm">This may take several minutes for large uploads. Please keep this page open.</p>
+            )}
 
             {error && (
               <p className="text-sm text-red-600 mt-4">{error}</p>
