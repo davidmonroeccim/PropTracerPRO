@@ -363,3 +363,25 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing
 - Verify plan with user before beginning implementation
+
+---
+
+### History Page Redesign — Unified Trace + Bulk View
+
+**Date:** January 27, 2026
+
+**1 file modified:** `app/(dashboard)/history/page.tsx`
+
+**Changes:**
+1. Added imports — `TraceJob` type, `PRICING` constant, `Download` icon from lucide-react
+2. Added `getTraceJobs()` — queries `trace_jobs` table, same pattern as `getTraceHistory()`
+3. Parallel fetch with `Promise.all` for both datasets
+4. Bulk row filtering — removes `trace_history` rows whose `tracerfy_job_id` matches a job
+5. Unified sorted list — discriminated union `HistoryEntry` merges singles and bulk jobs, sorted by date desc
+6. Updated table columns: Date, Description, Status, Results, Charge, Action
+7. Single trace rows adapted to new layout (empty Action cell)
+8. Bulk job rows: purple "Bulk" badge, file name, total/submitted counts, match results, computed charge, "Download CSV" link
+9. Added `completed`, `pending`, `failed` status badges for job statuses
+10. Updated header text to "Your recent traces and bulk uploads."
+
+**No new files, no new API routes, no database changes.**

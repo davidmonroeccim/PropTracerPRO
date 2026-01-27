@@ -10,7 +10,13 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { format } from 'date-fns';
-import type { TraceHistory } from '@/types';
+import { Download } from 'lucide-react';
+import type { TraceHistory, TraceJob } from '@/types';
+import { PRICING } from '@/lib/constants';
+
+type HistoryEntry =
+  | { type: 'single'; date: string; data: TraceHistory }
+  | { type: 'bulk'; date: string; data: TraceJob };
 
 async function getTraceHistory(userId: string) {
   const supabase = await createClient();
@@ -30,13 +36,46 @@ async function getTraceHistory(userId: string) {
   return data as TraceHistory[];
 }
 
+async function getTraceJobs(userId: string) {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from('trace_jobs')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (error) {
+    console.error('Failed to fetch trace jobs:', error);
+    return [];
+  }
+
+  return data as TraceJob[];
+}
+
 export default async function HistoryPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
   if (!user) return null;
 
-  const traces = await getTraceHistory(user.id);
+  const [allTraces, jobs] = await Promise.all([
+    getTraceHistory(user.id),
+    getTraceJobs(user.id),
+  ]);
+
+  // Filter out trace_history rows that belong to bulk jobs
+  const bulkJobIds = new Set(jobs.map(j => j.tracerfy_job_id).filter(Boolean));
+  const singleTraces = allTraces.filter(
+    t => !t.tracerfy_job_id || !bulkJobIds.has(t.tracerfy_job_id)
+  );
+
+  // Merge into unified sorted list
+  const entries: HistoryEntry[] = [
+    ...singleTraces.map(t => ({ type: 'single' as const, date: t.created_at, data: t })),
+    ...jobs.map(j => ({ type: 'bulk' as const, date: j.created_at, data: j })),
+  ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -47,9 +86,14 @@ export default async function HistoryPage() {
       case 'no_match':
         return <Badge className="bg-yellow-100 text-yellow-700">No Match</Badge>;
       case 'error':
+      case 'failed':
         return <Badge variant="destructive">Error</Badge>;
       case 'processing':
         return <Badge variant="outline">Processing</Badge>;
+      case 'completed':
+        return <Badge className="bg-green-100 text-green-700">Completed</Badge>;
+      case 'pending':
+        return <Badge variant="outline">Pending</Badge>;
       default:
         return <Badge variant="outline">{status}</Badge>;
     }
@@ -73,11 +117,11 @@ export default async function HistoryPage() {
         <CardHeader>
           <CardTitle>Recent Traces</CardTitle>
           <CardDescription>
-            Showing your last 100 traces. Cached results are free.
+            Your recent traces and bulk uploads.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {traces.length === 0 ? (
+          {entries.length === 0 ? (
             <p className="text-center text-gray-500 py-8">
               No traces yet. Start by looking up a property!
             </p>
@@ -86,47 +130,107 @@ export default async function HistoryPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Date</TableHead>
-                  <TableHead>Address</TableHead>
+                  <TableHead>Description</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Results</TableHead>
                   <TableHead className="text-right">Charge</TableHead>
+                  <TableHead>Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {traces.map((trace) => (
-                  <TableRow key={trace.id}>
-                    <TableCell className="whitespace-nowrap">
-                      {format(new Date(trace.created_at), 'MMM d, yyyy h:mm a')}
-                    </TableCell>
-                    <TableCell>
-                      <div>
-                        <p className="font-medium">{trace.normalized_address}</p>
-                        <p className="text-sm text-gray-500">
-                          {trace.city}, {trace.state} {trace.zip}
-                        </p>
-                      </div>
-                    </TableCell>
-                    <TableCell>{getStatusBadge(trace.status)}</TableCell>
-                    <TableCell>
-                      {trace.is_successful ? (
-                        <div className="text-sm">
-                          <span className="text-green-600">{trace.phone_count} phones</span>
-                          {', '}
-                          <span className="text-blue-600">{trace.email_count} emails</span>
+                {entries.map((entry) => {
+                  if (entry.type === 'single') {
+                    const trace = entry.data;
+                    return (
+                      <TableRow key={`trace-${trace.id}`}>
+                        <TableCell className="whitespace-nowrap">
+                          {format(new Date(trace.created_at), 'MMM d, yyyy h:mm a')}
+                        </TableCell>
+                        <TableCell>
+                          <div>
+                            <p className="font-medium">{trace.normalized_address}</p>
+                            <p className="text-sm text-gray-500">
+                              {trace.city}, {trace.state} {trace.zip}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell>{getStatusBadge(trace.status)}</TableCell>
+                        <TableCell>
+                          {trace.is_successful ? (
+                            <div className="text-sm">
+                              <span className="text-green-600">{trace.phone_count} phones</span>
+                              {', '}
+                              <span className="text-blue-600">{trace.email_count} emails</span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {trace.charge > 0 ? (
+                            formatCurrency(trace.charge)
+                          ) : (
+                            <span className="text-gray-400">Free</span>
+                          )}
+                        </TableCell>
+                        <TableCell />
+                      </TableRow>
+                    );
+                  }
+
+                  // Bulk job row
+                  const job = entry.data;
+                  const bulkCharge = job.records_matched * PRICING.CHARGE_PER_SUCCESS;
+
+                  return (
+                    <TableRow key={`job-${job.id}`}>
+                      <TableCell className="whitespace-nowrap">
+                        {format(new Date(job.created_at), 'MMM d, yyyy h:mm a')}
+                      </TableCell>
+                      <TableCell>
+                        <div>
+                          <p className="font-medium">
+                            <Badge className="bg-purple-100 text-purple-700 mr-2">Bulk</Badge>
+                            {job.file_name || 'Bulk Upload'}
+                          </p>
+                          <p className="text-sm text-gray-500">
+                            {job.total_records} total, {job.records_submitted} submitted
+                          </p>
                         </div>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {trace.charge > 0 ? (
-                        formatCurrency(trace.charge)
-                      ) : (
-                        <span className="text-gray-400">Free</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell>{getStatusBadge(job.status)}</TableCell>
+                      <TableCell>
+                        {job.status === 'completed' ? (
+                          <div className="text-sm">
+                            <span className="text-green-600">
+                              {job.records_matched} of {job.records_submitted} matched
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {bulkCharge > 0 ? (
+                          formatCurrency(bulkCharge)
+                        ) : (
+                          <span className="text-gray-400">Free</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {job.status === 'completed' && (
+                          <a
+                            href={`/api/trace/bulk/download?job_id=${job.id}`}
+                            className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800"
+                          >
+                            <Download className="h-4 w-4" />
+                            CSV
+                          </a>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
