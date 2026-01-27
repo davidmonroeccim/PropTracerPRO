@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import crypto from 'crypto';
 
 export async function POST() {
   try {
@@ -30,7 +29,10 @@ export async function POST() {
     }
 
     // Generate new API key
-    const apiKey = `ptp_${crypto.randomBytes(32).toString('hex')}`;
+    const bytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const apiKey = `ptp_${hex}`;
 
     // Save to database
     const adminClient = createAdminClient();
