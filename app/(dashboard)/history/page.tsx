@@ -141,8 +141,8 @@ export default async function HistoryPage() {
                   <TableHead>Date</TableHead>
                   <TableHead>Description</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="hidden md:table-cell">Results</TableHead>
-                  <TableHead className="hidden md:table-cell text-right">Charge</TableHead>
+                  <TableHead className="hidden lg:table-cell">Results</TableHead>
+                  <TableHead className="hidden lg:table-cell text-right">Charge</TableHead>
                   <TableHead>Action</TableHead>
                 </TableRow>
               </TableHeader>
@@ -152,7 +152,7 @@ export default async function HistoryPage() {
                     const trace = entry.data;
                     return (
                       <TableRow key={`trace-${trace.id}`}>
-                        <TableCell className="md:whitespace-nowrap">
+                        <TableCell className="lg:whitespace-nowrap">
                           {format(new Date(trace.created_at), 'MMM d, yyyy h:mm a')}
                         </TableCell>
                         <TableCell>
@@ -164,7 +164,7 @@ export default async function HistoryPage() {
                           </div>
                         </TableCell>
                         <TableCell>{getStatusBadge(trace.status)}</TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden lg:table-cell">
                           {trace.is_successful ? (
                             <div className="text-sm">
                               <span className="text-green-600">{trace.phone_count} phones</span>
@@ -175,7 +175,7 @@ export default async function HistoryPage() {
                             <span className="text-gray-400">-</span>
                           )}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell text-right">
+                        <TableCell className="hidden lg:table-cell text-right">
                           {trace.charge > 0 ? (
                             formatCurrency(trace.charge)
                           ) : (
@@ -197,7 +197,7 @@ export default async function HistoryPage() {
 
                   return (
                     <TableRow key={`job-${job.id}`}>
-                      <TableCell className="md:whitespace-nowrap">
+                      <TableCell className="lg:whitespace-nowrap">
                         {format(new Date(job.created_at), 'MMM d, yyyy h:mm a')}
                       </TableCell>
                       <TableCell>
@@ -212,7 +212,7 @@ export default async function HistoryPage() {
                         </div>
                       </TableCell>
                       <TableCell>{getStatusBadge(job.status)}</TableCell>
-                      <TableCell className="hidden md:table-cell">
+                      <TableCell className="hidden lg:table-cell">
                         {job.status === 'completed' ? (
                           <div className="text-sm">
                             <span className="text-green-600">
@@ -223,7 +223,7 @@ export default async function HistoryPage() {
                           <span className="text-gray-400">-</span>
                         )}
                       </TableCell>
-                      <TableCell className="hidden md:table-cell text-right">
+                      <TableCell className="hidden lg:table-cell text-right">
                         {bulkCharge > 0 ? (
                           formatCurrency(bulkCharge)
                         ) : (
