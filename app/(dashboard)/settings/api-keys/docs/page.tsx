@@ -79,7 +79,7 @@ export default function ApiDocsPage() {
         </CardHeader>
         <CardContent>
           <CodeBlock
-            code={`https://app.proptracerpro.com/api/v1`}
+            code={`https://proptracerpro.vercel.app/api/v1`}
             section="base"
           />
         </CardContent>
@@ -119,19 +119,18 @@ export default function ApiDocsPage() {
   "cached": false,
   "charge": 0.07,
   "result": {
-    "owners": ["John Smith", "Jane Smith"],
+    "owner_name": "John Smith",
+    "owner_name_2": null,
     "phones": [
-      { "number": "+15125551234", "type": "mobile", "dnc": false },
-      { "number": "+15125555678", "type": "landline", "dnc": false }
+      { "number": "5125551234", "type": "mobile" },
+      { "number": "5125555678", "type": "landline" }
     ],
     "emails": ["john.smith@email.com"],
-    "mailingAddress": {
-      "address": "456 Oak Ave",
-      "city": "Austin",
-      "state": "TX",
-      "zip": "78702"
-    },
-    "confidence": 0.95
+    "mailing_address": "456 Oak Ave",
+    "mailing_city": "Austin",
+    "mailing_state": "TX",
+    "mailing_zip": "78702",
+    "match_confidence": 95
   }
 }`}
               section="single-response"
@@ -230,7 +229,7 @@ export default function ApiDocsPage() {
             </div>
           </div>
           <p className="text-gray-500 text-sm mt-4">
-            Rate limit headers are included in all responses: <code className="bg-gray-100 px-1 rounded">X-RateLimit-Remaining</code>
+            Exceeding rate limits returns a <code className="bg-gray-100 px-1 rounded">429 Too Many Requests</code> response.
           </p>
         </CardContent>
       </Card>
@@ -260,7 +259,7 @@ export default function ApiDocsPage() {
                 <p className="font-medium text-sm">1. Add HTTP Request Action</p>
                 <CodeBlock
                   code={`Method: POST
-URL: https://app.proptracerpro.com/api/v1/trace/single
+URL: https://proptracerpro.vercel.app/api/v1/trace/single
 
 Headers:
   Authorization: Bearer ptp_your_api_key
@@ -286,7 +285,10 @@ Body (JSON):
                 <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
                   <li><code>result.phones[0].number</code> → Phone field</li>
                   <li><code>result.emails[0]</code> → Email field</li>
-                  <li><code>result.mailingAddress.address</code> → Mailing Address</li>
+                  <li><code>result.mailing_address</code> → Mailing Address</li>
+                  <li><code>result.mailing_city</code> → Mailing City</li>
+                  <li><code>result.mailing_state</code> → Mailing State</li>
+                  <li><code>result.mailing_zip</code> → Mailing Zip</li>
                 </ul>
               </div>
             </TabsContent>
@@ -302,7 +304,7 @@ Body (JSON):
                 <CodeBlock
                   code={`Module: HTTP - Make a request
 
-URL: https://app.proptracerpro.com/api/v1/trace/single
+URL: https://proptracerpro.vercel.app/api/v1/trace/single
 Method: POST
 
 Headers:
@@ -348,7 +350,7 @@ Parse response: Yes`}
       "type": "n8n-nodes-base.httpRequest",
       "parameters": {
         "method": "POST",
-        "url": "https://app.proptracerpro.com/api/v1/trace/single",
+        "url": "https://proptracerpro.vercel.app/api/v1/trace/single",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
@@ -392,7 +394,7 @@ Parse response: Yes`}
               </p>
 
               <CodeBlock
-                code={`curl -X POST https://app.proptracerpro.com/api/v1/trace/single \\
+                code={`curl -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
   -H "Authorization: Bearer ptp_your_api_key" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -412,32 +414,75 @@ Parse response: Yes`}
       <Card>
         <CardHeader>
           <CardTitle>Webhook Events</CardTitle>
-          <CardDescription>Receive notifications for bulk job completions</CardDescription>
+          <CardDescription>Receive trace results when traces complete</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-gray-600 text-sm">
-            Configure your webhook URL in the API Keys settings to receive notifications.
+            Configure your webhook URL in Settings → Integrations or Settings → API Keys.
+            PropTracerPRO will POST to your URL when traces complete.
           </p>
 
-          <h5 className="font-medium text-sm">Webhook Payload:</h5>
+          <h5 className="font-medium text-sm">Single Trace Completion:</h5>
           <CodeBlock
             code={`{
-  "event": "job.completed",
-  "jobId": "job_abc123",
-  "status": "completed",
-  "totalRecords": 95,
-  "recordsMatched": 82,
-  "totalCharge": 5.74,
-  "resultsUrl": "https://app.proptracerpro.com/api/v1/trace/jobs/job_abc123/results",
-  "timestamp": "2024-12-23T14:30:00Z"
+  "event": "trace.completed",
+  "trace_id": "uuid",
+  "status": "success",
+  "address": "123 MAIN ST",
+  "city": "DALLAS",
+  "state": "TX",
+  "zip": "75201",
+  "result": {
+    "owner_name": "John Smith",
+    "phones": [{ "number": "5551234567", "type": "mobile" }],
+    "emails": ["john@example.com"],
+    "mailing_address": "456 OAK AVE",
+    "mailing_city": "DALLAS",
+    "mailing_state": "TX",
+    "mailing_zip": "75202",
+    "match_confidence": 95
+  },
+  "charge": 0.07,
+  "timestamp": "2026-01-27T15:30:00Z"
 }`}
-            section="webhook"
+            section="webhook-single"
+          />
+
+          <h5 className="font-medium text-sm">Bulk Job Completion:</h5>
+          <CodeBlock
+            code={`{
+  "event": "bulk_job.completed",
+  "job_id": "uuid",
+  "records_submitted": 100,
+  "records_matched": 86,
+  "total_charge": 6.02,
+  "results": [
+    {
+      "address": "123 MAIN ST",
+      "city": "DALLAS",
+      "state": "TX",
+      "result": {
+        "owner_name": "John Smith",
+        "phones": [{ "number": "5551234567", "type": "mobile" }],
+        "emails": ["john@example.com"],
+        "mailing_address": "456 OAK AVE",
+        "mailing_city": "DALLAS",
+        "mailing_state": "TX",
+        "mailing_zip": "75202",
+        "match_confidence": 95
+      }
+    }
+  ],
+  "timestamp": "2026-01-27T15:30:00Z"
+}`}
+            section="webhook-bulk"
           />
 
           <div className="bg-gray-50 border rounded-lg p-4">
             <p className="text-gray-700 text-sm">
-              <strong>Verification:</strong> Webhook requests include a <code className="bg-gray-200 px-1 rounded">X-PropTracer-Signature</code> header
-              for request verification using your webhook secret.
+              Webhooks are sent as <code className="bg-gray-200 px-1 rounded">POST</code> requests
+              with <code className="bg-gray-200 px-1 rounded">Content-Type: application/json</code>.
+              Delivery is fire-and-forget — failures are logged but not retried.
             </p>
           </div>
         </CardContent>

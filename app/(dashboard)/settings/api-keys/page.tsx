@@ -210,7 +210,7 @@ export default function ApiKeysPage() {
         <CardHeader>
           <CardTitle>Webhook URL</CardTitle>
           <CardDescription>
-            Receive notifications when bulk jobs complete
+            Receive trace results when single or bulk traces complete
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
