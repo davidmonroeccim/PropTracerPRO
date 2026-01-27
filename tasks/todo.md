@@ -122,14 +122,18 @@ Build PropTracerPRO, a white-label skip tracing web application for commercial r
   - [x] Return results
 
 ### 11. Bulk CSV Upload
-- [ ] Create `app/(dashboard)/trace/bulk/page.tsx`
-  - [ ] Drag-and-drop CSV upload
-  - [ ] CSV parsing and validation
-  - [ ] Preview with dedupe results
-  - [ ] Submit for processing
-  - [ ] Progress indicator
-  - [ ] Download results as CSV
-- [ ] Create `app/api/trace/bulk/route.ts`
+- [x] Create `app/(dashboard)/trace/bulk/page.tsx`
+  - [x] Drag-and-drop CSV upload
+  - [x] CSV parsing and validation (PapaParse + SheetJS)
+  - [x] Auto-detect column mapping (CoStar, Reonomy, county records)
+  - [x] Preview with dedupe results
+  - [x] Submit for processing
+  - [x] Progress indicator with polling
+  - [x] Download results as CSV
+- [x] Create `app/api/trace/bulk/route.ts` (submit endpoint)
+- [x] Create `app/api/trace/bulk/status/route.ts` (poll endpoint)
+- [x] Create `app/api/trace/bulk/download/route.ts` (download endpoint)
+- [x] Install `xlsx` npm package for Excel support
 
 ### 12. Trace History
 - [x] Create `app/(dashboard)/history/page.tsx`
@@ -309,6 +313,49 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 - TypeScript compiles successfully
 - Build requires environment variables (Supabase, Stripe) to be set
 - Uses Next.js 16 with middleware (deprecated warning - can migrate to proxy pattern later)
+
+---
+
+### Bulk CSV Upload Implementation Review
+
+**Date:** January 27, 2026
+
+**Package added:** `xlsx` (SheetJS) for Excel file support
+
+**4 files created:**
+
+1. **`app/api/trace/bulk/route.ts`** — POST submit endpoint
+   - Authenticates user, parses AddressInput records, checks wallet balance
+   - Runs `removeBatchDuplicates()` then `checkDuplicates()` for 90-day history
+   - Creates `trace_jobs` row, builds Tracerfy CSV (no zip column), submits via `submitBulkTrace()`
+   - Inserts pending `trace_history` rows for each record with `tracerfy_job_id`
+   - Returns job summary with dedup stats and estimated cost
+
+2. **`app/api/trace/bulk/status/route.ts`** — GET poll endpoint
+   - Looks up `trace_jobs` by job_id + user_id
+   - If already completed/failed, returns stored stats
+   - Otherwise polls Tracerfy via `getJobStatus()`, processes results when ready
+   - For each result: `parseTracerfyResult()`, updates `trace_history`, bills per match
+   - Marks remaining unmatched rows as `no_match`, updates job as completed
+
+3. **`app/api/trace/bulk/download/route.ts`** — GET download endpoint
+   - Verifies job ownership and completed status
+   - Queries `trace_history` by `tracerfy_job_id`
+   - Builds CSV with address, owner, status, phones, emails, mailing info, charge
+   - Returns as `text/csv` attachment
+
+4. **`app/(dashboard)/trace/bulk/page.tsx`** — Frontend page
+   - 3 phases: upload → processing → complete
+   - Template download button for blank CSV
+   - Drag-and-drop + file picker for .csv, .xlsx, .xls
+   - Auto-detect column mapping from CoStar, Reonomy, Bexar County, etc.
+   - Shows detected mapping, preview table (first 5 rows), record count
+   - Validates required columns (address, city, state)
+   - Splits owner_name from first/last if needed
+   - Polls status endpoint every 5s, max 120 attempts (10 min)
+   - Download Results CSV button on completion
+
+**No existing files modified.** All backend infrastructure reused as-is.
 
 ---
 
