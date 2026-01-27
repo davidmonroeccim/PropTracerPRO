@@ -33,14 +33,15 @@ async function getUsageStats(userId: string) {
     .eq('is_successful', true)
     .gte('created_at', startOfMonth.toISOString());
 
-  // Get total spend this month
-  const { data: usageData } = await supabase
-    .from('usage_records')
-    .select('total_amount')
+  // Get total spend this month from actual trace charges
+  const { data: chargeData } = await supabase
+    .from('trace_history')
+    .select('charge')
     .eq('user_id', userId)
-    .gte('created_at', startOfMonth.toISOString());
+    .gte('created_at', startOfMonth.toISOString())
+    .gt('charge', 0);
 
-  const spendThisMonth = usageData?.reduce((sum, record) => sum + (record.total_amount || 0), 0) || 0;
+  const spendThisMonth = chargeData?.reduce((sum, row) => sum + (row.charge || 0), 0) || 0;
 
   return {
     tracesToday: tracesToday || 0,
