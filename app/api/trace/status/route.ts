@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
+import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
@@ -181,6 +182,48 @@ export async function GET(request: Request) {
           billing_period_start: new Date().toISOString().substring(0, 10),
           billing_period_end: new Date().toISOString().substring(0, 10),
         });
+      }
+    }
+
+    // Fire-and-forget: webhook dispatch + HighLevel push
+    const { data: integrationProfile } = await adminClient
+      .from('user_profiles')
+      .select('webhook_url, highlevel_api_key, highlevel_location_id')
+      .eq('id', user.id)
+      .single();
+
+    if (integrationProfile) {
+      // Webhook dispatch — send for all completed traces
+      if (integrationProfile.webhook_url) {
+        fetch(integrationProfile.webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: 'trace.completed',
+            trace_id: trace.id,
+            status: isSuccessful ? 'success' : 'no_match',
+            address: trace.normalized_address,
+            city: trace.city,
+            state: trace.state,
+            zip: trace.zip,
+            result,
+            charge,
+            timestamp: new Date().toISOString(),
+          }),
+        }).catch((err) => console.error('Webhook dispatch error:', err));
+      }
+
+      // HighLevel push — only for successful traces with results
+      if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
+        pushTraceToHighLevel({
+          apiKey: integrationProfile.highlevel_api_key,
+          locationId: integrationProfile.highlevel_location_id,
+          traceResult: result,
+          propertyAddress: trace.normalized_address,
+          propertyCity: trace.city || undefined,
+          propertyState: trace.state || undefined,
+          propertyZip: trace.zip || undefined,
+        }).catch((err) => console.error('HighLevel push error:', err));
       }
     }
 

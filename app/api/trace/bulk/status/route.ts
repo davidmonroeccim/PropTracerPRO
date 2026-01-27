@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
+import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING } from '@/lib/constants';
-import type { TraceJob } from '@/types';
+import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
   try {
@@ -116,9 +117,12 @@ export async function GET(request: Request) {
     // Get user profile for billing
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('subscription_tier')
+      .select('subscription_tier, webhook_url, highlevel_api_key, highlevel_location_id')
       .eq('id', user.id)
       .single();
+
+    // Collect successful results for HighLevel push
+    const successfulResults: { parsed: TraceResult; rawResult: TracerfyResult }[] = [];
 
     for (const rawResult of results) {
       const parsed = parseTracerfyResult(rawResult);
@@ -129,6 +133,7 @@ export async function GET(request: Request) {
       if (isSuccessful) {
         recordsMatched++;
         totalCharge += charge;
+        successfulResults.push({ parsed, rawResult });
       }
 
       // Find the matching trace_history row by tracerfy_job_id + address match
@@ -209,6 +214,45 @@ export async function GET(request: Request) {
         completed_at: new Date().toISOString(),
       })
       .eq('id', traceJob.id);
+
+    // Fire-and-forget: webhook dispatch + HighLevel push
+    if (profile) {
+      // Webhook dispatch — send bulk job summary
+      if (profile.webhook_url) {
+        fetch(profile.webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: 'bulk_job.completed',
+            job_id: traceJob.id,
+            records_submitted: traceJob.records_submitted,
+            records_matched: recordsMatched,
+            total_charge: totalCharge,
+            results: successfulResults.map(({ parsed, rawResult }) => ({
+              address: rawResult.address,
+              city: rawResult.city,
+              state: rawResult.state,
+              result: parsed,
+            })),
+            timestamp: new Date().toISOString(),
+          }),
+        }).catch((err) => console.error('Bulk webhook dispatch error:', err));
+      }
+
+      // HighLevel push — push each successful result
+      if (profile.highlevel_api_key && profile.highlevel_location_id) {
+        for (const { parsed, rawResult } of successfulResults) {
+          pushTraceToHighLevel({
+            apiKey: profile.highlevel_api_key,
+            locationId: profile.highlevel_location_id,
+            traceResult: parsed,
+            propertyAddress: rawResult.address,
+            propertyCity: rawResult.city,
+            propertyState: rawResult.state,
+          }).catch((err) => console.error('Bulk HighLevel push error:', err));
+        }
+      }
+    }
 
     return NextResponse.json({
       success: true,

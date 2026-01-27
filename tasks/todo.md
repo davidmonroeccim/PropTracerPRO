@@ -181,10 +181,9 @@ Build PropTracerPRO, a white-label skip tracing web application for commercial r
 ## Phase 2: Post-MVP (Future)
 
 ### Integrations
-- [ ] HighLevel CRM - push traced contacts to CRM
-- [ ] Zapier integration
-- [ ] Make (Integromat) integration
-- [ ] n8n webhook support
+- [x] HighLevel CRM - push traced contacts to CRM
+- [x] Universal webhook support (Zapier, Make, n8n, Kartra, ClickFunnels, RealNex, etc.)
+- [x] Integrations settings page
 
 ### Admin Dashboard
 - [ ] User management (view, suspend, impersonate)
@@ -363,6 +362,42 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing
 - Verify plan with user before beginning implementation
+
+---
+
+### Integrations Page — CRM + Automation Platform Connections
+
+**Date:** January 27, 2026
+
+**4 files created, 3 files modified:**
+
+1. **`app/(dashboard)/settings/integrations/page.tsx`** — New settings page
+   - HighLevel CRM card: API key + Location ID inputs, show/hide toggle, Test Connection / Save / Disconnect buttons, connection status badge
+   - Webhook & Automation card: webhook URL input + save, collapsible payload preview, API key display with copy, link to API docs
+
+2. **`app/api/integrations/highlevel/save/route.ts`** — POST endpoint
+   - Auth check, validates API key + location ID from body, saves to user_profiles via adminClient
+
+3. **`app/api/integrations/highlevel/test/route.ts`** — POST endpoint
+   - Auth check, reads credentials from body, tests GET to HighLevel contacts endpoint, returns connected/error
+
+4. **`app/api/integrations/highlevel/disconnect/route.ts`** — POST endpoint
+   - Auth check, nulls out highlevel_api_key and highlevel_location_id on user_profiles
+
+5. **`lib/highlevel/client.ts`** — Modified
+   - Added `pushTraceToHighLevel()` function: accepts user's API key + location ID, searches for existing contact by phone/email, creates or updates, tags with `proptracerpro`
+
+6. **`app/api/trace/status/route.ts`** — Modified
+   - After billing, fetches user's integration profile (webhook_url, highlevel fields)
+   - Webhook dispatch: POSTs `trace.completed` event to webhook URL (fire-and-forget)
+   - HighLevel push: calls `pushTraceToHighLevel()` for successful traces (fire-and-forget)
+
+7. **`app/api/trace/bulk/status/route.ts`** — Modified
+   - Expanded profile fetch to include integration fields
+   - Collects successful results during processing loop
+   - After job completion: webhook dispatch with `bulk_job.completed` summary, HighLevel push for each successful result
+
+**No database changes.** All columns (`highlevel_api_key`, `highlevel_location_id`, `webhook_url`) already existed in `user_profiles`.
 
 ---
 
