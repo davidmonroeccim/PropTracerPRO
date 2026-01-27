@@ -245,6 +245,7 @@ export default function SingleTracePage() {
               isCached={result.is_cached}
               charge={result.charge}
               address={`${address}, ${city}, ${state} ${zip}`}
+              traceId={result.trace_id}
             />
           ) : loading ? (
             <Card className="h-full flex items-center justify-center">

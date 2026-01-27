@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/table';
 import { format } from 'date-fns';
 import { Download } from 'lucide-react';
+import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceHistory, TraceJob } from '@/types';
 import { PRICING } from '@/lib/constants';
 
@@ -180,7 +181,11 @@ export default async function HistoryPage() {
                             <span className="text-gray-400">Free</span>
                           )}
                         </TableCell>
-                        <TableCell />
+                        <TableCell>
+                          {trace.is_successful && (
+                            <PushToCrmButton traceId={trace.id} />
+                          )}
+                        </TableCell>
                       </TableRow>
                     );
                   }
@@ -226,13 +231,16 @@ export default async function HistoryPage() {
                       </TableCell>
                       <TableCell>
                         {job.status === 'completed' && (
-                          <a
-                            href={`/api/trace/bulk/download?job_id=${job.id}`}
-                            className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800"
-                          >
-                            <Download className="h-4 w-4" />
-                            CSV
-                          </a>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`/api/trace/bulk/download?job_id=${job.id}`}
+                              className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800"
+                            >
+                              <Download className="h-4 w-4" />
+                              CSV
+                            </a>
+                            <PushToCrmButton jobId={job.id} label="CRM" />
+                          </div>
                         )}
                       </TableCell>
                     </TableRow>

@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Copy, Check, Phone, Mail, MapPin, User } from 'lucide-react';
+import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceResult } from '@/types';
 
 interface TraceResultCardProps {
@@ -12,9 +13,10 @@ interface TraceResultCardProps {
   isCached: boolean;
   charge: number;
   address: string;
+  traceId?: string;
 }
 
-export function TraceResultCard({ result, isCached, charge, address }: TraceResultCardProps) {
+export function TraceResultCard({ result, isCached, charge, address, traceId }: TraceResultCardProps) {
   const [copiedItem, setCopiedItem] = useState<string | null>(null);
 
   const copyToClipboard = async (text: string, id: string) => {
@@ -254,6 +256,13 @@ export function TraceResultCard({ result, isCached, charge, address }: TraceResu
               />
             </div>
             <span className="text-sm font-medium">{result.match_confidence}%</span>
+          </div>
+        )}
+
+        {/* Push to CRM */}
+        {traceId && (
+          <div className="pt-4 border-t">
+            <PushToCrmButton traceId={traceId} />
           </div>
         )}
       </CardContent>

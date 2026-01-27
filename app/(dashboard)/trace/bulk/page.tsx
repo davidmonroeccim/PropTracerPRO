@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
@@ -650,13 +651,21 @@ export default function BulkUploadPage() {
 
               <div className="flex gap-3">
                 {jobId && (
-                  <Button
-                    onClick={() => {
-                      window.location.href = `/api/trace/bulk/download?job_id=${jobId}`;
-                    }}
-                  >
-                    Download Results CSV
-                  </Button>
+                  <>
+                    <Button
+                      onClick={() => {
+                        window.location.href = `/api/trace/bulk/download?job_id=${jobId}`;
+                      }}
+                    >
+                      Download Results CSV
+                    </Button>
+                    <PushToCrmButton
+                      jobId={jobId}
+                      variant="outline"
+                      size="default"
+                      label="Add All to CRM"
+                    />
+                  </>
                 )}
                 <Button variant="outline" onClick={handleReset}>
                   Start New Upload
