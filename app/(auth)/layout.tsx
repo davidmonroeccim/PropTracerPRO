@@ -21,7 +21,7 @@ export default function AuthLayout({
         </div>
       </div>
       <footer className="py-6 text-center text-xs text-gray-500 space-y-1">
-        <p>&copy;2026 Premier Apartment Services - dba PropTracerPRO&trade; All Rights Reserved</p>
+        <p>&copy;2026 Premier Apartment Services, LLC - dba PropTracerPRO&trade; All Rights Reserved</p>
         <p>853 Dauphin St. Suite C Mobile, AL 36602</p>
         <p>
           <a href="https://goacquisitionpro.com/privacy-policy" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">Privacy Policy</a>

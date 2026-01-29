@@ -3,7 +3,7 @@ export function Footer() {
     <footer className="border-t border-gray-200 bg-white py-6 mt-8">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center text-xs text-gray-500 space-y-1">
         <p>
-          &copy;2026 Premier Apartment Services - dba PropTracerPRO&trade; All Rights Reserved
+          &copy;2026 Premier Apartment Services, LLC - dba PropTracerPRO&trade; All Rights Reserved
         </p>
         <p>
           853 Dauphin St. Suite C Mobile, AL 36602
