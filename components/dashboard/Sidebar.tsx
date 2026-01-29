@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
@@ -35,8 +36,8 @@ export function Sidebar() {
     <div className="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-64 lg:flex-col">
       <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 bg-white px-6 pb-4">
         <div className="flex h-16 shrink-0 items-center">
-          <Link href="/" className="text-xl font-bold text-gray-900">
-            PropTracerPRO
+          <Link href="/">
+            <Image src="/logo.png" alt="PropTracerPRO" width={180} height={40} priority />
           </Link>
         </div>
         <nav className="flex flex-1 flex-col">

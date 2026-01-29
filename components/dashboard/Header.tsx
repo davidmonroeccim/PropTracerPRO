@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
@@ -87,8 +88,8 @@ export function Header({ profile }: HeaderProps) {
             <Menu className="h-6 w-6" />
           </button>
           {/* Mobile logo — links to dashboard */}
-          <Link href="/" className="lg:hidden text-xl font-bold text-gray-900">
-            PropTracerPRO
+          <Link href="/" className="lg:hidden">
+            <Image src="/logo.png" alt="PropTracerPRO" width={150} height={33} priority />
           </Link>
         </div>
 
@@ -175,8 +176,8 @@ export function Header({ profile }: HeaderProps) {
         {/* Panel */}
         <div className="fixed inset-y-0 left-0 w-64 bg-white shadow-xl">
           <div className="flex h-16 items-center justify-between px-6 border-b border-gray-200">
-            <Link href="/" className="text-xl font-bold text-gray-900" onClick={() => setMobileMenuOpen(false)}>
-              PropTracerPRO
+            <Link href="/" onClick={() => setMobileMenuOpen(false)}>
+              <Image src="/logo.png" alt="PropTracerPRO" width={150} height={33} />
             </Link>
             <button type="button" className="-m-2.5 p-2.5 text-gray-700" onClick={() => setMobileMenuOpen(false)}>
               <X className="h-6 w-6" />

@@ -10,6 +10,10 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "PropTracerPRO - Skip Tracing for Real Estate Professionals",
   description: "Find property owner contact information with PropTracerPRO. Skip tracing made simple for commercial real estate professionals.",
+  icons: {
+    icon: "/favicon.png",
+    apple: "/favicon.png",
+  },
 };
 
 export default function RootLayout({
