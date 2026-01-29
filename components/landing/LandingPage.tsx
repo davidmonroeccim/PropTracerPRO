@@ -80,10 +80,10 @@ function Hero() {
     <section className="bg-gradient-to-b from-white to-[#4A8CC7]/10 py-20 lg:py-28">
       <div className="mx-auto max-w-4xl px-4 sm:px-6 text-center">
         <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-[#1B3A5C] leading-tight">
-          Skip Tracing Built for Commercial Real Estate
+          The Lowest Cost Per Found Lead. Fully Automated.
         </h1>
         <p className="mt-6 text-lg sm:text-xl text-gray-600 max-w-2xl mx-auto">
-          Find property owner phone numbers and emails in seconds. Single lookups or bulk upload up to 10,000 records. Pay only for successful matches.
+          PropTracerPRO is the only skip tracing platform with full inbound and outbound API access &mdash; so you can send addresses in, get results back, and push to your CRM without ever touching a spreadsheet. Starting at just $0.07 per found lead.
         </p>
         <div className="mt-10 flex flex-col sm:flex-row gap-4 justify-center">
           <Link href="/register">
@@ -106,8 +106,8 @@ function Hero() {
 
 function SocialProof() {
   const stats = [
-    { value: '10,000+', label: 'Records per bulk upload' },
-    { value: '90-Day', label: 'Smart deduplication cache' },
+    { value: '$0.07', label: 'Per found lead on Pro' },
+    { value: '2-Way API', label: 'The only skip tracer with full API automation' },
     { value: '$0', label: 'Charge for no-match results' },
   ];
 
@@ -145,14 +145,14 @@ const features = [
   },
   {
     icon: Key,
-    title: 'API Access',
-    description: 'Integrate skip tracing directly into your workflow with our RESTful API.',
-    badge: 'Pro',
+    title: 'Inbound + Outbound API',
+    description: 'The only skip tracer with full 2-way API access. Send addresses in via API, receive results back via webhooks. Zero manual steps.',
+    badge: 'Exclusive',
   },
   {
     icon: LinkIcon,
     title: 'CRM Integration',
-    description: 'Push traced contacts to HighLevel CRM or trigger webhooks to Zapier, Make, and more.',
+    description: 'Auto-push traced contacts to HighLevel CRM or trigger webhooks to Zapier, Make, and more. Build a fully hands-off pipeline.',
     badge: 'Pro',
   },
   {
@@ -167,9 +167,9 @@ function Features() {
     <section id="features" className="py-20 bg-gray-50">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-14">
-          <h2 className="text-3xl font-bold text-[#1B3A5C]">Everything You Need to Find Property Owners</h2>
+          <h2 className="text-3xl font-bold text-[#1B3A5C]">The Lowest Cost. The Only Full-Automation Platform.</h2>
           <p className="mt-3 text-gray-600 max-w-2xl mx-auto">
-            Purpose-built for commercial real estate professionals who need reliable owner contact data.
+            Other skip tracers make you download CSVs and re-upload everywhere. PropTracerPRO connects your entire pipeline &mdash; at the lowest per-lead price in the industry.
           </p>
         </div>
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -182,7 +182,11 @@ function Features() {
                 <div className="flex-1">
                   <CardTitle className="text-base flex items-center gap-2">
                     {f.title}
-                    {f.badge && <Badge className="bg-purple-100 text-purple-700 text-xs">{f.badge}</Badge>}
+                    {f.badge && (
+                      <Badge className={`text-xs ${f.badge === 'Exclusive' ? 'bg-[#E8872A]/10 text-[#E8872A]' : 'bg-purple-100 text-purple-700'}`}>
+                        {f.badge}
+                      </Badge>
+                    )}
                   </CardTitle>
                 </div>
               </CardHeader>
@@ -255,10 +259,10 @@ const plans = [
     description: 'For power users who need integrations and lower rates.',
     features: [
       'Everything in Pay-As-You-Go',
-      'Lower per-trace rate ($0.07)',
-      'API access',
-      'HighLevel CRM integration',
-      'Webhook automations',
+      'Lowest per-lead rate ($0.07)',
+      'Full inbound + outbound API access',
+      'HighLevel CRM auto-push',
+      'Webhook automations (Zapier, Make, etc.)',
     ],
     cta: 'Start Pro',
     highlight: true,
@@ -285,8 +289,8 @@ function Pricing() {
     <section id="pricing" className="py-20 bg-gray-50">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-14">
-          <h2 className="text-3xl font-bold text-[#1B3A5C]">Simple, Transparent Pricing</h2>
-          <p className="mt-3 text-gray-600">Pay only for successful matches. No charge for no-match results.</p>
+          <h2 className="text-3xl font-bold text-[#1B3A5C]">The Lowest Cost Per Found Lead</h2>
+          <p className="mt-3 text-gray-600">Pay only for successful matches. No charge for no-match results. No hidden fees. No contracts.</p>
         </div>
         <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto">
           {plans.map((p) => (
@@ -357,6 +361,10 @@ const faqs = [
     a: 'Yes. We support CSV, XLS, and XLSX files. Our system auto-detects column mappings from common formats like CoStar, Reonomy, and county assessor exports.',
   },
   {
+    q: 'What makes PropTracerPRO different from other skip tracers?',
+    a: 'Two things. First, we offer the lowest cost per found lead starting at $0.07. Second, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM — no manual exports, no spreadsheets, no extra steps.',
+  },
+  {
     q: 'How does wallet billing work?',
     a: 'You pre-fund your wallet with any amount. Each successful trace deducts from your balance. You can enable auto-refill to automatically top up when your balance gets low.',
   },
@@ -406,9 +414,9 @@ function FinalCTA() {
   return (
     <section className="py-20 bg-[#1B3A5C]">
       <div className="mx-auto max-w-3xl px-4 sm:px-6 text-center">
-        <h2 className="text-3xl font-bold text-white">Ready to Find Property Owners?</h2>
+        <h2 className="text-3xl font-bold text-white">Stop Overpaying. Start Automating.</h2>
         <p className="mt-4 text-lg text-gray-300">
-          Create a free account and start tracing in minutes. No credit card required to sign up.
+          The lowest cost per found lead and the only skip tracer with full API automation. Create a free account in 60 seconds &mdash; no credit card required.
         </p>
         <div className="mt-8">
           <Link href="/register">
