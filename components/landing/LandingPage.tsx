@@ -83,7 +83,7 @@ function Hero() {
           The Lowest Cost Per Found Lead. Fully Automated.
         </h1>
         <p className="mt-6 text-lg sm:text-xl text-gray-600 max-w-2xl mx-auto">
-          PropTracerPRO is the only skip tracing platform with full inbound and outbound API access &mdash; so you can send addresses in, get results back, and push to your CRM without ever touching a spreadsheet. Starting at just $0.07 per found lead.
+          PropTracerPRO&trade; is the only skip tracing platform with full inbound and outbound API access &mdash; so you can send addresses in, get results back, and push to your CRM without ever touching a spreadsheet. Starting at just $0.07 per found lead.
         </p>
         <div className="mt-10 flex flex-col sm:flex-row gap-4 justify-center">
           <Link href="/register">
@@ -169,7 +169,7 @@ function Features() {
         <div className="text-center mb-14">
           <h2 className="text-3xl font-bold text-[#1B3A5C]">The Lowest Cost. The Only Full-Automation Platform.</h2>
           <p className="mt-3 text-gray-600 max-w-2xl mx-auto">
-            Other skip tracers make you download CSVs and re-upload everywhere. PropTracerPRO connects your entire pipeline &mdash; at the lowest per-lead price in the industry.
+            Other skip tracers make you download CSVs and re-upload everywhere. PropTracerPRO&trade; connects your entire pipeline &mdash; at the lowest per-lead price in the industry.
           </p>
         </div>
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -268,11 +268,11 @@ const plans = [
     highlight: true,
   },
   {
-    name: 'AcquisitionPRO Members',
+    name: 'AcquisitionPRO\u00AE Members',
     price: '$0',
     period: '/mo',
     perTrace: '$0.07',
-    description: 'Included with your AcquisitionPRO membership.',
+    description: 'Included with your AcquisitionPRO\u00AE membership.',
     features: [
       'Everything in Pro',
       'Pro-rate pricing ($0.07)',
@@ -361,7 +361,7 @@ const faqs = [
     a: 'Yes. We support CSV, XLS, and XLSX files. Our system auto-detects column mappings from common formats like CoStar, Reonomy, and county assessor exports.',
   },
   {
-    q: 'What makes PropTracerPRO different from other skip tracers?',
+    q: 'What makes PropTracerPRO\u2122 different from other skip tracers?',
     a: 'Two things. First, we offer the lowest cost per found lead starting at $0.07. Second, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM — no manual exports, no spreadsheets, no extra steps.',
   },
   {
@@ -369,8 +369,8 @@ const faqs = [
     a: 'You pre-fund your wallet with any amount. Each successful trace deducts from your balance. You can enable auto-refill to automatically top up when your balance gets low.',
   },
   {
-    q: 'What is AcquisitionPRO membership?',
-    a: 'AcquisitionPRO\u00AE is the ONLY fully automated platform with CRM, Pipeline, Underwriting Tools, fully automated Market Analysis tools, prospecting tools, and more. Members get Pro-level access to PropTracerPRO at no monthly fee, with the lower $0.07 per-trace rate.',
+    q: 'What is AcquisitionPRO\u00AE membership?',
+    a: 'AcquisitionPRO\u00AE is the ONLY fully automated platform with CRM, Pipeline, Underwriting Tools, fully automated Market Analysis tools, prospecting tools, and more. Members get Pro-level access to PropTracerPRO\u2122 at no monthly fee, with the lower $0.07 per-trace rate.',
   },
 ];
 
