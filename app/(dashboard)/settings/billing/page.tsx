@@ -17,6 +17,11 @@ export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const [topUpAmount, setTopUpAmount] = useState('25');
+  const [autoRefillEnabled, setAutoRefillEnabled] = useState(false);
+  const [autoRefillThreshold, setAutoRefillThreshold] = useState('5');
+  const [autoRefillAmount, setAutoRefillAmount] = useState(25);
+  const [savingAutoRefill, setSavingAutoRefill] = useState(false);
+  const [autoRefillMessage, setAutoRefillMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const success = searchParams.get('success');
   const canceled = searchParams.get('canceled');
@@ -37,6 +42,11 @@ export default function BillingPage() {
         .single();
 
       setProfile(data);
+      if (data) {
+        setAutoRefillEnabled(data.wallet_auto_rebill_enabled);
+        setAutoRefillThreshold(String(data.wallet_low_balance_threshold));
+        setAutoRefillAmount(data.wallet_auto_rebill_amount);
+      }
     }
     setLoading(false);
   };
@@ -89,6 +99,41 @@ export default function BillingPage() {
     } finally {
       setCheckoutLoading(null);
     }
+  };
+
+  const handleSaveAutoRefill = async () => {
+    if (!profile) return;
+    const threshold = parseFloat(autoRefillThreshold);
+    if (isNaN(threshold) || threshold < PRICING.WALLET_MIN_BALANCE_THRESHOLD) {
+      setAutoRefillMessage({ type: 'error', text: `Minimum threshold is $${PRICING.WALLET_MIN_BALANCE_THRESHOLD}` });
+      return;
+    }
+
+    setSavingAutoRefill(true);
+    setAutoRefillMessage(null);
+
+    const supabase = createClient();
+    const { error } = await supabase
+      .from('user_profiles')
+      .update({
+        wallet_auto_rebill_enabled: autoRefillEnabled,
+        wallet_low_balance_threshold: threshold,
+        wallet_auto_rebill_amount: autoRefillAmount,
+      })
+      .eq('id', profile.id);
+
+    if (error) {
+      setAutoRefillMessage({ type: 'error', text: 'Failed to save auto-refill settings' });
+    } else {
+      setAutoRefillMessage({ type: 'success', text: 'Auto-refill settings saved' });
+      setProfile({
+        ...profile,
+        wallet_auto_rebill_enabled: autoRefillEnabled,
+        wallet_low_balance_threshold: threshold,
+        wallet_auto_rebill_amount: autoRefillAmount,
+      });
+    }
+    setSavingAutoRefill(false);
   };
 
   const handleManageBilling = async () => {
@@ -189,8 +234,8 @@ export default function BillingPage() {
                 <p className="text-3xl font-bold">{formatCurrency(profile.wallet_balance)}</p>
                 <p className="text-sm text-gray-500">Available balance</p>
               </div>
-              <Badge variant={profile.wallet_auto_rebill_enabled ? 'default' : 'outline'}>
-                {profile.wallet_auto_rebill_enabled ? 'Auto-rebill ON' : 'Auto-rebill OFF'}
+              <Badge variant={autoRefillEnabled ? 'default' : 'outline'}>
+                {autoRefillEnabled ? 'Auto-refill ON' : 'Auto-refill OFF'}
               </Badge>
             </div>
 
@@ -221,6 +266,74 @@ export default function BillingPage() {
               <p className="text-xs text-gray-500 mt-2">
                 Minimum: ${PRICING.WALLET_MIN_REBILL_AMOUNT}
               </p>
+            </div>
+
+            {/* Auto-Refill Settings */}
+            <div className="border-t pt-4 mt-4">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <Label>Auto-Refill</Label>
+                  <p className="text-xs text-gray-500">Automatically add funds when your balance is low</p>
+                </div>
+                <Button
+                  variant={autoRefillEnabled ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setAutoRefillEnabled(!autoRefillEnabled)}
+                >
+                  {autoRefillEnabled ? 'ON' : 'OFF'}
+                </Button>
+              </div>
+
+              {autoRefillEnabled && (
+                <div className="space-y-4">
+                  <div>
+                    <Label htmlFor="refill-threshold">When balance drops below</Label>
+                    <div className="relative mt-1">
+                      <span className="absolute left-3 top-2.5 text-gray-500">$</span>
+                      <Input
+                        id="refill-threshold"
+                        type="number"
+                        min={PRICING.WALLET_MIN_BALANCE_THRESHOLD}
+                        step="1"
+                        value={autoRefillThreshold}
+                        onChange={(e) => setAutoRefillThreshold(e.target.value)}
+                        className="pl-7"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">Minimum: ${PRICING.WALLET_MIN_BALANCE_THRESHOLD}</p>
+                  </div>
+
+                  <div>
+                    <Label>Auto-refill amount</Label>
+                    <div className="flex gap-2 mt-1">
+                      {PRICING.WALLET_AUTO_REFILL_AMOUNTS.map((amount) => (
+                        <Button
+                          key={amount}
+                          variant={autoRefillAmount === amount ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setAutoRefillAmount(amount)}
+                        >
+                          ${amount}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {autoRefillMessage && (
+                <p className={`text-sm mt-2 ${autoRefillMessage.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                  {autoRefillMessage.text}
+                </p>
+              )}
+
+              <Button
+                onClick={handleSaveAutoRefill}
+                disabled={savingAutoRefill}
+                className="mt-4"
+              >
+                {savingAutoRefill ? 'Saving...' : 'Save Auto-Refill Settings'}
+              </Button>
             </div>
           </CardContent>
         </Card>
