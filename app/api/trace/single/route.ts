@@ -49,7 +49,7 @@ export async function POST(request: Request) {
 
     // Check wallet balance for pay-as-you-go users
     if (profile.subscription_tier === 'wallet') {
-      if (profile.wallet_balance < PRICING.CHARGE_PER_SUCCESS) {
+      if (profile.wallet_balance < PRICING.CHARGE_PER_SUCCESS_WALLET) {
         return NextResponse.json(
           {
             success: false,

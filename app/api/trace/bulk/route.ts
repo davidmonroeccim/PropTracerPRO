@@ -78,7 +78,7 @@ export async function POST(request: Request) {
     }
 
     // Check wallet balance for pay-as-you-go users
-    const estimatedCost = newRecords.length * PRICING.CHARGE_PER_SUCCESS;
+    const estimatedCost = newRecords.length * PRICING.CHARGE_PER_SUCCESS_WALLET;
     if (profile.subscription_tier === 'wallet') {
       if (profile.wallet_balance < estimatedCost) {
         return NextResponse.json(

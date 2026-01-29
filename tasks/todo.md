@@ -378,6 +378,35 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+---
+
+### Tiered Per-Trace Pricing ($0.11 Wallet, $0.07 Pro/AcquisitionPRO)
+
+**Date:** January 29, 2026
+
+**11 files modified:**
+
+1. **`lib/constants.ts`** — Added `CHARGE_PER_SUCCESS_WALLET: 0.11`, updated `SUBSCRIPTION_TIERS.wallet.perTrace` to use it, added `getChargePerTrace(subscriptionTier, isAcquisitionProMember)` helper function
+2. **`app/api/trace/status/route.ts`** — Moved profile fetch before charge calc, added `is_acquisition_pro_member` to select, replaced flat `CHARGE_PER_SUCCESS` with `getChargePerTrace()` for charge and usage_records
+3. **`app/api/trace/bulk/status/route.ts`** — Added `is_acquisition_pro_member` to profile select, added `chargePerTrace` via helper, updated all 3 charge references (already-completed return, per-result loop, usage_records insert)
+4. **`app/api/trace/single/route.ts`** — Wallet balance check now uses `CHARGE_PER_SUCCESS_WALLET` ($0.11)
+5. **`app/api/trace/bulk/route.ts`** — Estimated cost uses `CHARGE_PER_SUCCESS_WALLET` ($0.11)
+6. **`app/api/v1/trace/single/route.ts`** — Wallet balance check uses `CHARGE_PER_SUCCESS_WALLET`
+7. **`app/api/v1/trace/bulk/route.ts`** — Estimated cost uses `CHARGE_PER_SUCCESS_WALLET`
+8. **`app/(dashboard)/page.tsx`** — Fetches user profile, computes `perTrace` via helper, uses it for bulk job charge display
+9. **`app/(dashboard)/history/page.tsx`** — Same pattern: fetches profile, uses `getChargePerTrace()` for bulk charge display
+10. **`app/(dashboard)/settings/billing/page.tsx`** — Pay-As-You-Go card text changed from `$0.07` to `$0.11`, Pro card stays `$0.07`
+11. **`app/(dashboard)/trace/bulk/page.tsx`** — Added profile fetch on mount, replaced hardcoded `0.07` with tier-aware `perTraceRate` state
+
+**Key design decisions:**
+- Wallet balance checks always use the higher $0.11 rate (worst-case for wallet users, which is the only tier that hits these checks)
+- Actual billing uses `getChargePerTrace()` which returns $0.07 for Pro/AcquisitionPRO, $0.11 for everyone else
+- Fallback when profile can't be loaded defaults to $0.11 (wallet rate) to avoid undercharging
+
+**TypeScript compiles clean.** No new files created. No database changes.
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing

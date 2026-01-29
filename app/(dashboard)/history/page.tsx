@@ -13,7 +13,7 @@ import { format } from 'date-fns';
 import { Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceHistory, TraceJob } from '@/types';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 
 type HistoryEntry =
   | { type: 'single'; date: string; data: TraceHistory }
@@ -69,10 +69,16 @@ export default async function HistoryPage() {
 
   if (!user) return null;
 
-  // Fetch jobs first so we can exclude their trace_history rows from the single-trace query.
-  // Without this, the 100-row limit on trace_history would be consumed by bulk rows,
-  // hiding older single traces.
-  const jobs = await getTraceJobs(user.id);
+  // Fetch jobs and profile in parallel
+  const [jobs, profileResult] = await Promise.all([
+    getTraceJobs(user.id),
+    supabase.from('user_profiles').select('subscription_tier, is_acquisition_pro_member').eq('id', user.id).single(),
+  ]);
+
+  const userProfile = profileResult.data;
+  const perTrace = userProfile
+    ? getChargePerTrace(userProfile.subscription_tier, userProfile.is_acquisition_pro_member)
+    : PRICING.CHARGE_PER_SUCCESS_WALLET;
   const bulkTracerfyJobIds = jobs
     .map(j => j.tracerfy_job_id)
     .filter((id): id is string => id !== null);
@@ -193,7 +199,7 @@ export default async function HistoryPage() {
 
                   // Bulk job row
                   const job = entry.data;
-                  const bulkCharge = job.records_matched * PRICING.CHARGE_PER_SUCCESS;
+                  const bulkCharge = job.records_matched * perTrace;
 
                   return (
                     <TableRow key={`job-${job.id}`}>

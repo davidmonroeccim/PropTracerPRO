@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -50,13 +50,23 @@ export async function GET(request: Request) {
 
     // Already completed or failed — return stored stats
     if (traceJob.status === 'completed' || traceJob.status === 'failed') {
+      // Fetch profile for tier-aware pricing
+      const { data: doneProfile } = await adminClient
+        .from('user_profiles')
+        .select('subscription_tier, is_acquisition_pro_member')
+        .eq('id', user.id)
+        .single();
+      const doneCharge = doneProfile
+        ? getChargePerTrace(doneProfile.subscription_tier, doneProfile.is_acquisition_pro_member)
+        : PRICING.CHARGE_PER_SUCCESS_WALLET;
+
       return NextResponse.json({
         success: true,
         status: traceJob.status,
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
-        total_charge: traceJob.records_matched * PRICING.CHARGE_PER_SUCCESS,
+        total_charge: traceJob.records_matched * doneCharge,
         error_message: traceJob.error_message,
       });
     }
@@ -117,9 +127,13 @@ export async function GET(request: Request) {
     // Get user profile for billing
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('subscription_tier, webhook_url, highlevel_api_key, highlevel_location_id')
+      .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id')
       .eq('id', user.id)
       .single();
+
+    const chargePerTrace = profile
+      ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+      : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
     // Collect successful results for HighLevel push
     const successfulResults: { parsed: TraceResult; rawResult: TracerfyResult }[] = [];
@@ -128,7 +142,7 @@ export async function GET(request: Request) {
       const parsed = parseTracerfyResult(rawResult);
       const isSuccessful =
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-      const charge = isSuccessful ? PRICING.CHARGE_PER_SUCCESS : 0;
+      const charge = isSuccessful ? chargePerTrace : 0;
 
       if (isSuccessful) {
         recordsMatched++;
@@ -182,7 +196,7 @@ export async function GET(request: Request) {
               user_id: user.id,
               trace_history_id: historyId,
               quantity: 1,
-              unit_price: PRICING.CHARGE_PER_SUCCESS,
+              unit_price: chargePerTrace,
               total_amount: charge,
               billing_period_start: new Date().toISOString().substring(0, 10),
               billing_period_end: new Date().toISOString().substring(0, 10),

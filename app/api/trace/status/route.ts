@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -141,7 +141,17 @@ export async function GET(request: Request) {
     console.log('Parse result:', '| phones:', result?.phones?.length || 0,
       '| emails:', result?.emails?.length || 0, '| successful:', isSuccessful);
 
-    const charge = isSuccessful ? PRICING.CHARGE_PER_SUCCESS : 0;
+    // Fetch profile for tier-aware pricing
+    const { data: profile } = await adminClient
+      .from('user_profiles')
+      .select('subscription_tier, wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled, is_acquisition_pro_member')
+      .eq('id', user.id)
+      .single();
+
+    const chargePerTrace = profile
+      ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+      : PRICING.CHARGE_PER_SUCCESS_WALLET;
+    const charge = isSuccessful ? chargePerTrace : 0;
 
     // Update trace record
     await adminClient
@@ -159,12 +169,6 @@ export async function GET(request: Request) {
 
     // Charge user if successful
     if (isSuccessful && charge > 0) {
-      const { data: profile } = await adminClient
-        .from('user_profiles')
-        .select('subscription_tier, wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled')
-        .eq('id', user.id)
-        .single();
-
       if (profile?.subscription_tier === 'wallet') {
         await adminClient.rpc('deduct_wallet_balance', {
           p_user_id: user.id,
@@ -177,7 +181,7 @@ export async function GET(request: Request) {
           user_id: user.id,
           trace_history_id: trace.id,
           quantity: 1,
-          unit_price: PRICING.CHARGE_PER_SUCCESS,
+          unit_price: chargePerTrace,
           total_amount: charge,
           billing_period_start: new Date().toISOString().substring(0, 10),
           billing_period_end: new Date().toISOString().substring(0, 10),

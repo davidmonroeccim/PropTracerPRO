@@ -10,6 +10,7 @@ export const PRICING = {
 
   // Per-trace charges
   CHARGE_PER_SUCCESS: 0.07,
+  CHARGE_PER_SUCCESS_WALLET: 0.11,
 
   // Our cost from Tracerfy
   COST_PER_RECORD: 0.009,
@@ -29,7 +30,7 @@ export const SUBSCRIPTION_TIERS = {
   wallet: {
     name: 'Pay-As-You-Go',
     monthlyFee: 0,
-    perTrace: PRICING.CHARGE_PER_SUCCESS,
+    perTrace: PRICING.CHARGE_PER_SUCCESS_WALLET,
     apiAccess: false,
     description: 'Perfect for occasional users. No monthly fee, pay only for successful traces.',
   },
@@ -69,6 +70,20 @@ export const HIGHLEVEL = {
   BASE_URL: 'https://services.leadconnectorhq.com',
   API_VERSION: '2021-07-28',
 } as const;
+
+// ===================
+// Pricing Helper
+// ===================
+
+export function getChargePerTrace(
+  subscriptionTier: string,
+  isAcquisitionProMember: boolean
+): number {
+  if (subscriptionTier === 'pro' || isAcquisitionProMember) {
+    return PRICING.CHARGE_PER_SUCCESS;
+  }
+  return PRICING.CHARGE_PER_SUCCESS_WALLET;
+}
 
 // ===================
 // US States

@@ -1,9 +1,11 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
@@ -169,6 +171,27 @@ export default function BulkUploadPage() {
   // Complete phase
   const [completeStats, setCompleteStats] = useState<CompleteStats | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+
+  // Per-trace rate (tier-aware)
+  const [perTraceRate, setPerTraceRate] = useState<number>(PRICING.CHARGE_PER_SUCCESS_WALLET);
+
+  useEffect(() => {
+    const loadRate = async () => {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data } = await supabase
+          .from('user_profiles')
+          .select('subscription_tier, is_acquisition_pro_member')
+          .eq('id', user.id)
+          .single();
+        if (data) {
+          setPerTraceRate(getChargePerTrace(data.subscription_tier, data.is_acquisition_pro_member));
+        }
+      }
+    };
+    loadRate();
+  }, []);
 
   // Drag state
   const [dragActive, setDragActive] = useState(false);
@@ -552,7 +575,7 @@ export default function BulkUploadPage() {
                           {allRecords.length} valid records ready to submit
                         </p>
                         <p className="text-sm text-gray-500">
-                          Estimated max cost: ${(allRecords.length * 0.07).toFixed(2)} ($0.07 per successful match)
+                          Estimated max cost: ${(allRecords.length * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
                         </p>
                       </div>
                       <div className="flex gap-3">

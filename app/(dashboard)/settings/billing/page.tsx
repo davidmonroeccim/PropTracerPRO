@@ -240,7 +240,7 @@ export default function BillingPage() {
             <div className={`border rounded-lg p-4 ${profile.subscription_tier !== 'pro' ? 'border-blue-500 bg-blue-50' : ''}`}>
               <h3 className="font-semibold">Pay-As-You-Go</h3>
               <p className="text-2xl font-bold mt-2">$0<span className="text-sm font-normal">/month</span></p>
-              <p className="text-sm text-gray-500 mt-1">+ $0.07 per successful trace</p>
+              <p className="text-sm text-gray-500 mt-1">+ $0.11 per successful trace</p>
               <ul className="mt-4 space-y-2 text-sm">
                 <li>No monthly commitment</li>
                 <li>Wallet-based billing</li>
