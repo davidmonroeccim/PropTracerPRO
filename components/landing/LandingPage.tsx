@@ -370,7 +370,7 @@ const faqs = [
   },
   {
     q: 'What is AcquisitionPRO membership?',
-    a: 'AcquisitionPRO is a commercial real estate training and tools platform. Members get Pro-level access to PropTracerPRO at no monthly fee, with the lower $0.07 per-trace rate.',
+    a: 'AcquisitionPRO\u00AE is the ONLY fully automated platform with CRM, Pipeline, Underwriting Tools, fully automated Market Analysis tools, prospecting tools, and more. Members get Pro-level access to PropTracerPRO at no monthly fee, with the lower $0.07 per-trace rate.',
   },
 ];
 
