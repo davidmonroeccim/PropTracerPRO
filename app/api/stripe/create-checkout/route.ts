@@ -12,10 +12,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { priceId, tier } = await request.json();
+    const { tier } = await request.json();
 
-    if (!priceId || !tier) {
-      return NextResponse.json({ error: 'Price ID and tier required' }, { status: 400 });
+    if (!tier) {
+      return NextResponse.json({ error: 'Tier is required' }, { status: 400 });
+    }
+
+    // Resolve price ID server-side from env
+    const priceId = tier === 'pro' ? process.env.STRIPE_PRICE_PRO : null;
+
+    if (!priceId) {
+      return NextResponse.json({ error: 'Invalid tier or missing price configuration' }, { status: 400 });
     }
 
     // Get user profile

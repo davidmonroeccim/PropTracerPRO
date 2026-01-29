@@ -44,14 +44,11 @@ export default function BillingPage() {
   const handleSubscribe = async () => {
     setCheckoutLoading('pro');
 
-    const priceId = process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO;
-    const tier = 'pro';
-
     try {
       const response = await fetch('/api/stripe/create-checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ priceId, tier }),
+        body: JSON.stringify({ tier: 'pro' }),
       });
 
       const data = await response.json();
