@@ -93,8 +93,8 @@ export function Header({ profile }: HeaderProps) {
         </div>
 
         <div className="flex items-center gap-x-4 lg:gap-x-6">
-          {/* Wallet Balance */}
-          {profile.subscription_tier === 'wallet' && (
+          {/* Wallet Balance (hide for AcquisitionPRO members) */}
+          {profile.subscription_tier === 'wallet' && !profile.is_acquisition_pro_member && (
             <div className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-1.5">
               <Wallet className="h-4 w-4 text-gray-500" />
               <span className="text-sm font-medium text-gray-900">

@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { SUBSCRIPTION_TIERS, PRICING } from '@/lib/constants';
+import { SUBSCRIPTION_TIERS, PRICING, getChargePerTrace } from '@/lib/constants';
 import type { UserProfile } from '@/types';
 
 export default function BillingPage() {
@@ -126,6 +126,7 @@ export default function BillingPage() {
   }
 
   const currentTier = SUBSCRIPTION_TIERS[profile.subscription_tier as keyof typeof SUBSCRIPTION_TIERS];
+  const userPerTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
 
   return (
     <div className="space-y-6">
@@ -166,7 +167,7 @@ export default function BillingPage() {
                 <span className="text-2xl font-bold">${currentTier.monthlyFee}</span>
                 <span className="text-gray-500">/month</span>
                 {' + '}
-                <span className="text-gray-500">${currentTier.perTrace} per successful trace</span>
+                <span className="text-gray-500">${userPerTrace.toFixed(2)} per successful trace</span>
               </p>
             </div>
             {profile.stripe_subscription_id && (
@@ -178,8 +179,8 @@ export default function BillingPage() {
         </CardContent>
       </Card>
 
-      {/* Wallet Balance (for wallet tier) */}
-      {profile.subscription_tier === 'wallet' && (
+      {/* Wallet Balance (for wallet tier, not AcquisitionPRO members) */}
+      {profile.subscription_tier === 'wallet' && !profile.is_acquisition_pro_member && (
         <Card>
           <CardHeader>
             <CardTitle>Wallet Balance</CardTitle>
