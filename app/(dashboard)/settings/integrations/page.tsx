@@ -194,6 +194,43 @@ export default function IntegrationsPage() {
     return <div className="text-center py-12">Profile not found</div>;
   }
 
+  const hasProAccess = profile.subscription_tier === 'pro' || profile.is_acquisition_pro_member;
+
+  if (!hasProAccess) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Integrations</h1>
+          <p className="text-gray-500">Connect PropTracerPRO to your CRM and automation tools</p>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Pro Plan Required</CardTitle>
+            <CardDescription>
+              Integrations are available for Pro subscribers and AcquisitionPRO members.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              <p className="text-gray-600">
+                Upgrade to Pro ($97/month) to unlock integrations, including:
+              </p>
+              <ul className="list-disc list-inside text-gray-600 space-y-1">
+                <li>HighLevel CRM — push contacts automatically</li>
+                <li>Webhook support for any CRM or automation platform</li>
+                <li>Full API access</li>
+              </ul>
+              <Button onClick={() => window.location.href = '/settings/billing'}>
+                Upgrade to Pro
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>

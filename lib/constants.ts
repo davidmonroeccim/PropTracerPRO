@@ -6,7 +6,6 @@
 
 export const PRICING = {
   // Monthly subscription fees
-  STARTER_MONTHLY: 47,
   PRO_MONTHLY: 97,
 
   // Per-trace charges
@@ -33,13 +32,6 @@ export const SUBSCRIPTION_TIERS = {
     perTrace: PRICING.CHARGE_PER_SUCCESS,
     apiAccess: false,
     description: 'Perfect for occasional users. No monthly fee, pay only for successful traces.',
-  },
-  starter: {
-    name: 'Starter',
-    monthlyFee: PRICING.STARTER_MONTHLY,
-    perTrace: PRICING.CHARGE_PER_SUCCESS,
-    apiAccess: false,
-    description: 'For regular users. Monthly subscription with usage-based billing.',
   },
   pro: {
     name: 'Pro',

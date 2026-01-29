@@ -4,7 +4,7 @@
 // User & Profile Types
 // ===================
 
-export type SubscriptionTier = 'wallet' | 'starter' | 'pro';
+export type SubscriptionTier = 'wallet' | 'pro';
 
 export interface UserProfile {
   id: string;

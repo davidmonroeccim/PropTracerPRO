@@ -41,12 +41,11 @@ export default function BillingPage() {
     setLoading(false);
   };
 
-  const handleSubscribe = async (tier: 'starter' | 'pro') => {
-    setCheckoutLoading(tier);
+  const handleSubscribe = async () => {
+    setCheckoutLoading('pro');
 
-    const priceId = tier === 'starter'
-      ? process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER
-      : process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO;
+    const priceId = process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO;
+    const tier = 'pro';
 
     try {
       const response = await fetch('/api/stripe/create-checkout', {
@@ -236,9 +235,9 @@ export default function BillingPage() {
           <CardDescription>Choose the plan that works best for you</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2">
             {/* Pay-As-You-Go */}
-            <div className={`border rounded-lg p-4 ${profile.subscription_tier === 'wallet' ? 'border-blue-500 bg-blue-50' : ''}`}>
+            <div className={`border rounded-lg p-4 ${profile.subscription_tier !== 'pro' ? 'border-blue-500 bg-blue-50' : ''}`}>
               <h3 className="font-semibold">Pay-As-You-Go</h3>
               <p className="text-2xl font-bold mt-2">$0<span className="text-sm font-normal">/month</span></p>
               <p className="text-sm text-gray-500 mt-1">+ $0.07 per successful trace</p>
@@ -247,32 +246,8 @@ export default function BillingPage() {
                 <li>Wallet-based billing</li>
                 <li>Full access to skip tracing</li>
               </ul>
-              {profile.subscription_tier === 'wallet' && (
+              {profile.subscription_tier !== 'pro' && (
                 <Badge className="mt-4">Current Plan</Badge>
-              )}
-            </div>
-
-            {/* Starter */}
-            <div className={`border rounded-lg p-4 ${profile.subscription_tier === 'starter' ? 'border-blue-500 bg-blue-50' : ''}`}>
-              <h3 className="font-semibold">Starter</h3>
-              <p className="text-2xl font-bold mt-2">$47<span className="text-sm font-normal">/month</span></p>
-              <p className="text-sm text-gray-500 mt-1">+ $0.07 per successful trace</p>
-              <ul className="mt-4 space-y-2 text-sm">
-                <li>Monthly subscription</li>
-                <li>Usage-based billing</li>
-                <li>Priority support</li>
-              </ul>
-              {profile.subscription_tier === 'starter' ? (
-                <Badge className="mt-4">Current Plan</Badge>
-              ) : (
-                <Button
-                  className="w-full mt-4"
-                  variant="outline"
-                  onClick={() => handleSubscribe('starter')}
-                  disabled={!!checkoutLoading}
-                >
-                  {checkoutLoading === 'starter' ? 'Processing...' : 'Subscribe'}
-                </Button>
               )}
             </div>
 
@@ -285,7 +260,6 @@ export default function BillingPage() {
               <p className="text-2xl font-bold mt-2">$97<span className="text-sm font-normal">/month</span></p>
               <p className="text-sm text-gray-500 mt-1">+ $0.07 per successful trace</p>
               <ul className="mt-4 space-y-2 text-sm">
-                <li>Everything in Starter</li>
                 <li className="font-medium text-purple-700">Full API access</li>
                 <li>Webhook support</li>
                 <li>Integrations</li>
@@ -299,7 +273,7 @@ export default function BillingPage() {
               ) : (
                 <Button
                   className="w-full mt-4"
-                  onClick={() => handleSubscribe('pro')}
+                  onClick={() => handleSubscribe()}
                   disabled={!!checkoutLoading}
                 >
                   {checkoutLoading === 'pro' ? 'Processing...' : 'Subscribe'}

@@ -68,8 +68,6 @@ export function Header({ profile }: HeaderProps) {
     switch (profile.subscription_tier) {
       case 'pro':
         return <Badge className="bg-purple-100 text-purple-800">Pro</Badge>;
-      case 'starter':
-        return <Badge className="bg-blue-100 text-blue-800">Starter</Badge>;
       default:
         return <Badge variant="outline">Pay-As-You-Go</Badge>;
     }

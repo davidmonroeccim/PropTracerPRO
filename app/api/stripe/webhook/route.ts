@@ -33,9 +33,7 @@ export async function POST(request: Request) {
         const priceId = subscription.items.data[0]?.price.id;
         let tier = 'wallet';
 
-        if (priceId === process.env.STRIPE_PRICE_STARTER) {
-          tier = 'starter';
-        } else if (priceId === process.env.STRIPE_PRICE_PRO) {
+        if (priceId === process.env.STRIPE_PRICE_PRO) {
           tier = 'pro';
         }
 

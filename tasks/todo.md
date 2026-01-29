@@ -358,6 +358,26 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+### Remove Starter Plan & Gate Pro-Only Features
+
+**Date:** January 29, 2026
+
+**7 files modified:**
+
+1. **`types/index.ts`** — Removed `'starter'` from `SubscriptionTier` union type
+2. **`lib/constants.ts`** — Removed `STARTER_MONTHLY: 47` from `PRICING`, removed `starter` entry from `SUBSCRIPTION_TIERS`
+3. **`app/(dashboard)/settings/billing/page.tsx`** — Removed Starter plan card, changed grid from 3-col to 2-col, simplified `handleSubscribe` to only support Pro, removed "Everything in Starter" from Pro features, Pay-As-You-Go card now highlights for all non-Pro users (including legacy starter users)
+4. **`app/api/stripe/webhook/route.ts`** — Removed `STRIPE_PRICE_STARTER` branch; unrecognized prices default to `'wallet'`
+5. **`components/dashboard/Header.tsx`** — Removed `case 'starter'` from tier badge switch; starter users now fall through to default Pay-As-You-Go badge
+6. **`app/(dashboard)/settings/integrations/page.tsx`** — Added Pro-only gate: non-Pro/non-AcquisitionPRO users see an upgrade card instead of integrations content
+7. **`app/api/integrations/highlevel/push/route.ts`** — Added Pro-only check: returns 403 with upgrade message for non-Pro/non-AcquisitionPRO users
+
+**No database changes.** Existing starter users in the DB will be treated as wallet-tier (Pay-As-You-Go).
+
+**TypeScript compiles clean.** Zero references to `'starter'` remain in the codebase.
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing

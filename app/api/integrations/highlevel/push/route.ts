@@ -20,13 +20,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'trace_id or job_id required' }, { status: 400 });
     }
 
-    // Get user's HighLevel credentials
+    // Get user's HighLevel credentials and subscription info
     const adminClient = createAdminClient();
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('highlevel_api_key, highlevel_location_id')
+      .select('highlevel_api_key, highlevel_location_id, subscription_tier, is_acquisition_pro_member')
       .eq('id', user.id)
       .single();
+
+    if (!profile || (profile.subscription_tier !== 'pro' && !profile.is_acquisition_pro_member)) {
+      return NextResponse.json(
+        { error: 'CRM push requires a Pro subscription. Upgrade at Settings → Billing.' },
+        { status: 403 }
+      );
+    }
 
     if (!profile?.highlevel_api_key || !profile?.highlevel_location_id) {
       return NextResponse.json(
