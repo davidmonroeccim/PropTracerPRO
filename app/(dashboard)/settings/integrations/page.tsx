@@ -310,14 +310,17 @@ export default function IntegrationsPage() {
                 </div>
 
                 <div>
-                  <h4 className="font-semibold text-gray-800">GHL v2 (API Keys Page)</h4>
+                  <h4 className="font-semibold text-gray-800">GHL v2 (Private Integration)</h4>
+                  <p className="mt-1 mb-1 text-xs text-gray-500">HighLevel is phasing out legacy API keys. New accounts should use Private Integrations instead.</p>
                   <ol className="list-decimal list-inside mt-1 space-y-1">
                     <li>Log in to your HighLevel sub-account</li>
-                    <li>Go to <strong>Settings → Company → API Keys</strong></li>
-                    <li>Click <strong>Create API Key</strong></li>
-                    <li>Give it a name (e.g. &quot;PropTracerPRO&quot;) and enable the <strong>contacts</strong> scope</li>
-                    <li>Copy the generated key and paste it above</li>
+                    <li>Go to <strong>Settings → Private Integrations</strong></li>
+                    <li>Click <strong>Create new Integration</strong></li>
+                    <li>Name it (e.g. &quot;PropTracerPRO&quot;) and select the <strong>contacts</strong> scope</li>
+                    <li>Copy the generated token immediately — <strong>you won&apos;t be able to see it again</strong></li>
+                    <li>Paste the token in the API Key field above</li>
                   </ol>
+                  <p className="mt-1 text-xs text-gray-500">If you don&apos;t see Private Integrations, enable it under <strong>Settings → Labs</strong> first.</p>
                 </div>
 
                 <div>
