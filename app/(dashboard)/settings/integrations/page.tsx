@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Eye, EyeOff, Copy, Check, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
+import { Eye, EyeOff, Copy, Check, ExternalLink, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
 import type { UserProfile } from '@/types';
 
 const WEBHOOK_PAYLOAD_EXAMPLE = `{
@@ -44,6 +44,9 @@ export default function IntegrationsPage() {
   const [testResult, setTestResult] = useState<{ connected: boolean; error?: string } | null>(null);
   const [savingHl, setSavingHl] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+
+  // Help toggle
+  const [showHlHelp, setShowHlHelp] = useState(false);
 
   // Webhook state
   const [webhookUrl, setWebhookUrl] = useState('');
@@ -281,6 +284,50 @@ export default function IntegrationsPage() {
               <Button onClick={saveHighLevel} disabled={savingHl || !hlApiKey || !hlLocationId}>
                 {savingHl ? 'Saving...' : 'Save'}
               </Button>
+            )}
+          </div>
+
+          {/* GHL Setup Help */}
+          <div className="pt-4 border-t">
+            <button
+              onClick={() => setShowHlHelp(!showHlHelp)}
+              className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+            >
+              <HelpCircle className="h-4 w-4" />
+              {showHlHelp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              Where do I find my API Key &amp; Location ID?
+            </button>
+            {showHlHelp && (
+              <div className="mt-3 space-y-4 text-sm text-gray-600 bg-gray-50 p-4 rounded border">
+                <div>
+                  <h4 className="font-semibold text-gray-800">GHL v1 (Legacy API Key)</h4>
+                  <ol className="list-decimal list-inside mt-1 space-y-1">
+                    <li>Log in to your HighLevel sub-account</li>
+                    <li>Go to <strong>Settings → Business Profile</strong></li>
+                    <li>Scroll down to the <strong>API Key</strong> field</li>
+                    <li>Copy the key and paste it above</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold text-gray-800">GHL v2 (API Keys Page)</h4>
+                  <ol className="list-decimal list-inside mt-1 space-y-1">
+                    <li>Log in to your HighLevel sub-account</li>
+                    <li>Go to <strong>Settings → Company → API Keys</strong></li>
+                    <li>Click <strong>Create API Key</strong></li>
+                    <li>Give it a name (e.g. &quot;PropTracerPRO&quot;) and enable the <strong>contacts</strong> scope</li>
+                    <li>Copy the generated key and paste it above</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold text-gray-800">Finding Your Location ID</h4>
+                  <ul className="list-disc list-inside mt-1 space-y-1">
+                    <li><strong>Option A:</strong> Go to <strong>Settings → Business Profile</strong> and look for <strong>Location ID</strong></li>
+                    <li><strong>Option B:</strong> Look at your browser URL — it follows the pattern <code className="bg-gray-200 px-1 rounded text-xs">app.gohighlevel.com/location/<strong>LOCATION_ID</strong>/...</code></li>
+                  </ul>
+                </div>
+              </div>
             )}
           </div>
 

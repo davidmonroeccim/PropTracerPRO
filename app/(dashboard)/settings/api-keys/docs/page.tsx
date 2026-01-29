@@ -212,28 +212,6 @@ export default function ApiDocsPage() {
         </CardContent>
       </Card>
 
-      {/* Rate Limits */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Rate Limits</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <p className="font-medium">Requests per minute</p>
-              <p className="text-2xl font-bold text-blue-600">100</p>
-            </div>
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <p className="font-medium">Records per day</p>
-              <p className="text-2xl font-bold text-blue-600">10,000</p>
-            </div>
-          </div>
-          <p className="text-gray-500 text-sm mt-4">
-            Exceeding rate limits returns a <code className="bg-gray-100 px-1 rounded">429 Too Many Requests</code> response.
-          </p>
-        </CardContent>
-      </Card>
-
       {/* Integration Examples */}
       <Card>
         <CardHeader>
@@ -518,11 +496,6 @@ Parse response: Yes`}
                   <td className="py-2 pr-4 font-mono">402</td>
                   <td className="py-2 pr-4">Payment Required</td>
                   <td className="py-2">Insufficient wallet balance</td>
-                </tr>
-                <tr className="border-b">
-                  <td className="py-2 pr-4 font-mono">429</td>
-                  <td className="py-2 pr-4">Too Many Requests</td>
-                  <td className="py-2">Rate limit exceeded</td>
                 </tr>
                 <tr>
                   <td className="py-2 pr-4 font-mono">500</td>

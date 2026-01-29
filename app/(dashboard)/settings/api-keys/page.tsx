@@ -125,7 +125,6 @@ export default function ApiKeysPage() {
               <ul className="list-disc list-inside text-gray-600 space-y-1">
                 <li>REST API for single and bulk traces</li>
                 <li>Webhook notifications</li>
-                <li>Rate limit: 100 requests/minute, 10,000 records/day</li>
               </ul>
               <Button onClick={() => window.location.href = '/settings/billing'}>
                 Upgrade to Pro
@@ -257,11 +256,6 @@ export default function ApiKeysPage() {
               <code className="block bg-gray-100 p-2 rounded mt-1">
                 POST /api/v1/trace/bulk
               </code>
-            </div>
-
-            <div>
-              <h4 className="font-semibold">Rate Limits</h4>
-              <p className="text-gray-600">100 requests/minute, 10,000 records/day</p>
             </div>
 
             <div className="pt-4 border-t">

@@ -60,15 +60,6 @@ export const DEDUPE = {
 } as const;
 
 // ===================
-// API Rate Limits
-// ===================
-
-export const API_LIMITS = {
-  REQUESTS_PER_MINUTE: 100,
-  RECORDS_PER_DAY: 10000,
-} as const;
-
-// ===================
 // Tracerfy
 // ===================
 

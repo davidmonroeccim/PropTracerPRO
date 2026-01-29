@@ -150,10 +150,10 @@ Build PropTracerPRO, a white-label skip tracing web application for commercial r
   - [x] Webhook URL configuration
   - [x] API documentation
 - [x] Create `app/api/user/generate-api-key/route.ts`
-- [ ] Create `app/api/v1/trace/single/route.ts`
-- [ ] Create `app/api/v1/trace/bulk/route.ts`
-- [ ] Create API authentication middleware
-- [ ] Implement rate limiting (100 req/min, 10k records/day)
+- [x] Create `app/api/v1/trace/single/route.ts`
+- [x] Create `app/api/v1/trace/bulk/route.ts`
+- [x] Create API authentication middleware (`lib/api/auth.ts`)
+- [x] ~~Implement rate limiting~~ — removed per user decision (no rate limits)
 
 ### 14. Results Display Components
 - [x] Create `components/trace/TraceResultCard.tsx`
@@ -420,3 +420,43 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 10. Updated header text to "Your recent traces and bulk uploads."
 
 **No new files, no new API routes, no database changes.**
+
+---
+
+### Public API Endpoints, GHL Instructions, Rate Limit Removal
+
+**Date:** January 29, 2026
+
+**3 files created, 4 files modified:**
+
+1. **`lib/api/auth.ts`** — New API key authentication helper
+   - `validateApiKey(request)` — extracts Bearer token, looks up `user_profiles` by `api_key`, verifies Pro tier or AcquisitionPRO membership, logs to `api_logs`
+   - `isAuthError()` — type guard for error handling
+   - No rate limiting
+
+2. **`app/api/v1/trace/single/route.ts`** — Public single trace endpoint
+   - POST with JSON `{ address, city, state, zip, ownerName? }`
+   - Uses `validateApiKey()` then reuses same dedup + Tracerfy + billing logic as internal `/api/trace/single`
+   - Returns processing status with trace ID for polling
+
+3. **`app/api/v1/trace/bulk/route.ts`** — Public bulk trace endpoint
+   - POST with JSON `{ records: [...], webhookUrl? }`
+   - Uses `validateApiKey()` then reuses same dedup + Tracerfy + billing logic as internal `/api/trace/bulk`
+   - Returns job ID for status polling via existing `/api/trace/bulk/status`
+
+4. **`app/(dashboard)/settings/integrations/page.tsx`** — Modified
+   - Added collapsible "Where do I find my API Key & Location ID?" help section inside HighLevel CRM card
+   - Covers GHL v1 (Business Profile → API Key), GHL v2 (Settings → Company → API Keys with contacts scope), and Location ID (Business Profile or URL)
+
+5. **`app/(dashboard)/settings/api-keys/page.tsx`** — Modified
+   - Removed "Rate limit: 100 requests/minute, 10,000 records/day" from upgrade card features list
+   - Removed "Rate Limits" section from API quick reference
+
+6. **`app/(dashboard)/settings/api-keys/docs/page.tsx`** — Modified
+   - Removed entire Rate Limits card (100 req/min, 10k records/day)
+   - Removed 429 Too Many Requests from error codes table
+
+7. **`lib/constants.ts`** — Modified
+   - Removed `API_LIMITS` constant (`REQUESTS_PER_MINUTE`, `RECORDS_PER_DAY`)
+
+**No database changes.** All tables (`user_profiles`, `trace_history`, `trace_jobs`, `api_logs`) already existed.
