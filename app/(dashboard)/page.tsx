@@ -1,8 +1,12 @@
 import { createClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
-import { Search, FileUp, ArrowRight } from 'lucide-react';
+import { Search, FileUp, ArrowRight, Download } from 'lucide-react';
+import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
+import { PRICING } from '@/lib/constants';
+import type { TraceHistory, TraceJob } from '@/types';
 
 async function getUsageStats(userId: string) {
   const supabase = await createClient();
@@ -51,17 +55,39 @@ async function getUsageStats(userId: string) {
   };
 }
 
-async function getRecentTraces(userId: string) {
+type RecentEntry =
+  | { type: 'single'; date: string; data: TraceHistory }
+  | { type: 'bulk'; date: string; data: TraceJob };
+
+async function getRecentJobs(userId: string) {
   const supabase = await createClient();
 
   const { data } = await supabase
+    .from('trace_jobs')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  return (data || []) as TraceJob[];
+}
+
+async function getRecentSingleTraces(userId: string, bulkTracerfyJobIds: string[]) {
+  const supabase = await createClient();
+
+  let query = supabase
     .from('trace_history')
     .select('*')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(10);
 
-  return data || [];
+  if (bulkTracerfyJobIds.length > 0) {
+    query = query.not('tracerfy_job_id', 'in', `(${bulkTracerfyJobIds.join(',')})`);
+  }
+
+  const { data } = await query;
+  return (data || []) as TraceHistory[];
 }
 
 export default async function DashboardPage() {
@@ -70,10 +96,23 @@ export default async function DashboardPage() {
 
   if (!user) return null;
 
-  const [stats, recentTraces] = await Promise.all([
+  const [stats, recentJobs] = await Promise.all([
     getUsageStats(user.id),
-    getRecentTraces(user.id),
+    getRecentJobs(user.id),
   ]);
+
+  const bulkTracerfyJobIds = recentJobs
+    .map(j => j.tracerfy_job_id)
+    .filter((id): id is string => id !== null);
+
+  const recentSingles = await getRecentSingleTraces(user.id, bulkTracerfyJobIds);
+
+  const recentEntries: RecentEntry[] = [
+    ...recentSingles.map(t => ({ type: 'single' as const, date: t.created_at, data: t })),
+    ...recentJobs.map(j => ({ type: 'bulk' as const, date: j.created_at, data: j })),
+  ]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 7);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -170,7 +209,7 @@ export default async function DashboardPage() {
           <div className="flex items-center justify-between">
             <div>
               <CardTitle>Recent Traces</CardTitle>
-              <CardDescription>Your latest property lookups</CardDescription>
+              <CardDescription>Your latest traces and bulk uploads</CardDescription>
             </div>
             <Link href="/history">
               <Button variant="ghost" size="sm">
@@ -181,48 +220,109 @@ export default async function DashboardPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {recentTraces.length === 0 ? (
+          {recentEntries.length === 0 ? (
             <p className="text-sm text-gray-500 text-center py-8">
               No traces yet. Start by looking up a property!
             </p>
           ) : (
             <div className="space-y-4">
-              {recentTraces.map((trace) => (
-                <div
-                  key={trace.id}
-                  className="flex items-center justify-between border-b border-gray-100 pb-4 last:border-0 last:pb-0"
-                >
-                  <div>
-                    <p className="text-sm font-medium text-gray-900">
-                      {trace.normalized_address}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      {trace.city}, {trace.state} {trace.zip}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <span
-                      className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                        trace.status === 'success'
-                          ? 'bg-green-100 text-green-700'
-                          : trace.status === 'cached'
-                          ? 'bg-blue-100 text-blue-700'
-                          : trace.status === 'no_match'
-                          ? 'bg-yellow-100 text-yellow-700'
-                          : 'bg-gray-100 text-gray-700'
-                      }`}
+              {recentEntries.map((entry) => {
+                if (entry.type === 'single') {
+                  const trace = entry.data;
+                  return (
+                    <div
+                      key={`trace-${trace.id}`}
+                      className="flex items-center justify-between border-b border-gray-100 pb-4 last:border-0 last:pb-0"
                     >
-                      {trace.status === 'success'
-                        ? `${trace.phone_count} phones, ${trace.email_count} emails`
-                        : trace.status === 'cached'
-                        ? 'Cached'
-                        : trace.status === 'no_match'
-                        ? 'No Match'
-                        : trace.status}
-                    </span>
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">
+                          {trace.normalized_address}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {trace.city}, {trace.state} {trace.zip}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
+                            trace.status === 'success'
+                              ? 'bg-green-100 text-green-700'
+                              : trace.status === 'cached'
+                              ? 'bg-blue-100 text-blue-700'
+                              : trace.status === 'no_match'
+                              ? 'bg-yellow-100 text-yellow-700'
+                              : 'bg-gray-100 text-gray-700'
+                          }`}
+                        >
+                          {trace.status === 'success'
+                            ? `${trace.phone_count} phones, ${trace.email_count} emails`
+                            : trace.status === 'cached'
+                            ? 'Cached'
+                            : trace.status === 'no_match'
+                            ? 'No Match'
+                            : trace.status}
+                        </span>
+                        {trace.is_successful && (
+                          <PushToCrmButton traceId={trace.id} size="sm" />
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Bulk job entry
+                const job = entry.data;
+                const bulkCharge = job.records_matched * PRICING.CHARGE_PER_SUCCESS;
+
+                return (
+                  <div
+                    key={`job-${job.id}`}
+                    className="flex items-center justify-between border-b border-gray-100 pb-4 last:border-0 last:pb-0"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">
+                        <Badge className="bg-purple-100 text-purple-700 mr-2">Bulk</Badge>
+                        {job.file_name || 'Bulk Upload'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {job.total_records} total, {job.records_submitted} submitted
+                        {job.status === 'completed' && (
+                          <> &middot; {job.records_matched} matched &middot; {formatCurrency(bulkCharge)}</>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
+                          job.status === 'completed'
+                            ? 'bg-green-100 text-green-700'
+                            : job.status === 'failed'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}
+                      >
+                        {job.status === 'completed'
+                          ? 'Completed'
+                          : job.status === 'failed'
+                          ? 'Failed'
+                          : 'Processing'}
+                      </span>
+                      {job.status === 'completed' && (
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={`/api/trace/bulk/download?job_id=${job.id}`}
+                            className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800"
+                          >
+                            <Download className="h-4 w-4" />
+                            CSV
+                          </a>
+                          <PushToCrmButton jobId={job.id} label="CRM" size="sm" />
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
