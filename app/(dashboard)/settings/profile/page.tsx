@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -92,7 +93,7 @@ export default function ProfilePage() {
 
           <div>
             <Label>Account Type</Label>
-            <div className="flex gap-2 mt-1">
+            <div className="flex items-center gap-2 mt-1">
               <Badge variant="outline" className="capitalize">
                 {profile.subscription_tier}
               </Badge>
@@ -100,6 +101,13 @@ export default function ProfilePage() {
                 <Badge className="bg-green-100 text-green-800">
                   AcquisitionPRO Member
                 </Badge>
+              )}
+              {profile.subscription_tier !== 'pro' && !profile.is_acquisition_pro_member && (
+                <Link href="/settings/billing">
+                  <Button variant="link" size="sm" className="h-auto p-0 text-blue-600">
+                    Upgrade
+                  </Button>
+                </Link>
               )}
             </div>
           </div>
