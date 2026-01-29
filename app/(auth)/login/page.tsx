@@ -36,8 +36,8 @@ export default function LoginPage() {
       return;
     }
 
-    router.push('/');
-    router.refresh();
+    // Full page navigation ensures cookies are sent properly in iframe contexts
+    window.location.href = '/';
   };
 
   const handleMagicLink = async (e: React.FormEvent) => {
