@@ -79,7 +79,7 @@ export default function OnboardingPage() {
         return;
       }
 
-      window.location.href = '/';
+      window.location.href = '/dashboard';
     } catch {
       setError('Failed to save profile. Please try again.');
       setLoading(false);

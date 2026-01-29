@@ -414,6 +414,37 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+### Marketing Landing Page Implementation
+
+**Date:** January 29, 2026
+
+**3 files created, 6 files modified:**
+
+1. **`app/(dashboard)/page.tsx`** — Moved to `app/(dashboard)/dashboard/page.tsx` (no content changes)
+2. **`app/page.tsx`** — New server component: checks auth, redirects logged-in users to `/dashboard`, renders `<LandingPage />` for visitors
+3. **`components/landing/LandingPage.tsx`** — Full marketing landing page with 9 sections:
+   - Sticky Nav (logo, anchor links, Sign In / Get Started, mobile hamburger)
+   - Hero (gradient bg, headline, subhead, 2 CTAs)
+   - Social Proof Bar (3 stats)
+   - Features (3x2 card grid with icons, Pro badges)
+   - How It Works (3 numbered steps)
+   - Pricing (3 cards: Pay-As-You-Go $0.11, Pro $97/mo $0.07, AcquisitionPRO $0.07)
+   - FAQ (6 expandable questions)
+   - Final CTA (navy bg, orange button)
+   - Footer (same copyright/address/links as dashboard footer)
+4. **`app/globals.css`** — Added brand color CSS variables (navy, navy-light, brand-orange, brand-orange-light, steel-blue) + smooth scrolling
+5. **`lib/supabase/middleware.ts`** — Added `'/'` to public routes, changed authenticated redirect from `'/'` to `'/dashboard'`
+6. **`components/dashboard/Sidebar.tsx`** — Dashboard href `'/'` → `'/dashboard'`, logo href `'/'` → `'/dashboard'`
+7. **`components/dashboard/Header.tsx`** — Dashboard href `'/'` → `'/dashboard'`, both mobile logo links `'/'` → `'/dashboard'`
+8. **`app/(auth)/login/page.tsx`** — `window.location.href` from `'/'` to `'/dashboard'`
+9. **`app/(auth)/onboarding/page.tsx`** — `window.location.href` from `'/'` to `'/dashboard'`
+
+**No new dependencies.** Uses existing `next/image`, `next/link`, `lucide-react`, shadcn `Button`/`Card`/`Badge`.
+
+**TypeScript compiles clean.**
+
+---
+
 ### Integrations Page — CRM + Automation Platform Connections
 
 **Date:** January 27, 2026

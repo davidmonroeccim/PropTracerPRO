@@ -39,7 +39,7 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   // Define public routes that don't require authentication
-  const publicRoutes = ['/login', '/register', '/verify', '/auth/callback'];
+  const publicRoutes = ['/', '/login', '/register', '/verify', '/auth/callback'];
   const isPublicRoute = publicRoutes.some(
     (route) =>
       request.nextUrl.pathname === route ||
@@ -56,7 +56,7 @@ export async function updateSession(request: NextRequest) {
   // Redirect authenticated users away from auth pages
   if (user && isPublicRoute && request.nextUrl.pathname !== '/auth/callback') {
     const url = request.nextUrl.clone();
-    url.pathname = '/';
+    url.pathname = '/dashboard';
     return NextResponse.redirect(url);
   }
 

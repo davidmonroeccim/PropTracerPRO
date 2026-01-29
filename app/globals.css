@@ -44,10 +44,20 @@
   --radius-2xl: calc(var(--radius) + 8px);
   --radius-3xl: calc(var(--radius) + 12px);
   --radius-4xl: calc(var(--radius) + 16px);
+  --color-navy: var(--navy);
+  --color-navy-light: var(--navy-light);
+  --color-brand-orange: var(--brand-orange);
+  --color-brand-orange-light: var(--brand-orange-light);
+  --color-steel-blue: var(--steel-blue);
 }
 
 :root {
   --radius: 0.625rem;
+  --navy: #1B3A5C;
+  --navy-light: #234B75;
+  --brand-orange: #E8872A;
+  --brand-orange-light: #F09A45;
+  --steel-blue: #4A8CC7;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -113,6 +123,10 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 @layer base {
