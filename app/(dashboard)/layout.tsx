@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { Sidebar } from '@/components/dashboard/Sidebar';
 import { Header } from '@/components/dashboard/Header';
+import { Footer } from '@/components/dashboard/Footer';
 
 export default async function DashboardLayout({
   children,
@@ -40,6 +41,7 @@ export default async function DashboardLayout({
             {children}
           </div>
         </main>
+        <Footer />
       </div>
     </div>
   );
