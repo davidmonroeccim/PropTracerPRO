@@ -176,8 +176,8 @@ export default function BillingPage() {
         </CardContent>
       </Card>
 
-      {/* Wallet Balance (for wallet tier, not AcquisitionPRO members) */}
-      {profile.subscription_tier === 'wallet' && !profile.is_acquisition_pro_member && (
+      {/* Wallet Balance — all users pay via wallet */}
+      {(
         <Card>
           <CardHeader>
             <CardTitle>Wallet Balance</CardTitle>

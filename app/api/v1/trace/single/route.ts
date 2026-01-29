@@ -4,7 +4,7 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 export async function POST(request: Request) {
@@ -29,14 +29,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check wallet balance for pay-as-you-go users
-    if (profile.subscription_tier === 'wallet') {
-      if (profile.wallet_balance < PRICING.CHARGE_PER_SUCCESS_WALLET) {
-        return NextResponse.json(
-          { success: false, error: 'Insufficient wallet balance' },
-          { status: 402 }
-        );
-      }
+    // Check wallet balance for all users
+    const minBalance = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    if (profile.wallet_balance < minBalance) {
+      return NextResponse.json(
+        { success: false, error: 'Insufficient wallet balance' },
+        { status: 402 }
+      );
     }
 
     // Normalize address and create hash

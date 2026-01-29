@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { AddressInput } from '@/types';
 
 const MAX_RECORDS = 10000;
@@ -77,18 +77,17 @@ export async function POST(request: Request) {
       });
     }
 
-    // Check wallet balance for pay-as-you-go users
-    const estimatedCost = newRecords.length * PRICING.CHARGE_PER_SUCCESS_WALLET;
-    if (profile.subscription_tier === 'wallet') {
-      if (profile.wallet_balance < estimatedCost) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: `Insufficient wallet balance. Need $${estimatedCost.toFixed(2)} but have $${profile.wallet_balance.toFixed(2)}. Please add funds.`,
-          },
-          { status: 402 }
-        );
-      }
+    // Check wallet balance for all users
+    const perTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    const estimatedCost = newRecords.length * perTrace;
+    if (profile.wallet_balance < estimatedCost) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Insufficient wallet balance. Need $${estimatedCost.toFixed(2)} but have $${profile.wallet_balance.toFixed(2)}. Please add funds.`,
+        },
+        { status: 402 }
+      );
     }
 
     const adminClient = createAdminClient();

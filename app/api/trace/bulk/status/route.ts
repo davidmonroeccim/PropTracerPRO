@@ -182,26 +182,14 @@ export async function GET(request: Request) {
           })
           .eq('id', historyId);
 
-        // Bill for successful match
+        // Bill for successful match — all tiers use wallet deduction
         if (isSuccessful && charge > 0) {
-          if (profile?.subscription_tier === 'wallet') {
-            await adminClient.rpc('deduct_wallet_balance', {
-              p_user_id: user.id,
-              p_amount: charge,
-              p_trace_history_id: historyId,
-              p_description: 'Bulk skip trace - successful match',
-            });
-          } else {
-            await adminClient.from('usage_records').insert({
-              user_id: user.id,
-              trace_history_id: historyId,
-              quantity: 1,
-              unit_price: chargePerTrace,
-              total_amount: charge,
-              billing_period_start: new Date().toISOString().substring(0, 10),
-              billing_period_end: new Date().toISOString().substring(0, 10),
-            });
-          }
+          await adminClient.rpc('deduct_wallet_balance', {
+            p_user_id: user.id,
+            p_amount: charge,
+            p_trace_history_id: historyId,
+            p_description: 'Bulk skip trace - successful match',
+          });
         }
       }
     }
