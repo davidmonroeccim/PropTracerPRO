@@ -63,6 +63,10 @@ export const TRACERFY = {
   MAX_EMAILS: 5,
 } as const;
 
+export const FASTAPPEND = {
+  BASE_URL: 'https://app.fastappend.com/v1/api/',
+} as const;
+
 // ===================
 // HighLevel
 // ===================

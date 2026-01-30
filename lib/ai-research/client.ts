@@ -2,8 +2,7 @@
 // Uses Brave Search + Claude to extract property owner information
 
 import { searchBrave, searchBraveBatch } from '@/lib/brave/client';
-import { submitBusinessTrace, parseBusinessTraceResult } from '@/lib/tracerfy/client';
-import { getJobStatus } from '@/lib/tracerfy/client';
+import { submitBusinessTrace, getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/tracerfy/client';
 import { AI_RESEARCH } from '@/lib/constants';
 import type { AIResearchResult } from '@/types';
 
@@ -288,24 +287,20 @@ async function resolveEntityChain(
       const traceSubmit = await submitBusinessTrace({ business_name: entityToResolve, state });
 
       if (traceSubmit.success && traceSubmit.jobId) {
-        // Poll for results (up to ~30s)
+        // Poll for results (up to ~45s)
         let traceResult = null;
-        for (let poll = 0; poll < 10; poll++) {
+        for (let poll = 0; poll < 15; poll++) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
-          const status = await getJobStatus(traceSubmit.jobId!);
+          const status = await getBusinessTraceStatus(traceSubmit.jobId!);
 
           if (!status.success) {
             console.log(`[Entity Resolution] Business trace poll failed: ${status.error}`);
             break;
           }
 
-          if (!status.pending && status.results) {
-            // Filter out padding rows
-            const realResults = status.results.filter(
-              (r) => r.first_name !== 'X' || r.last_name !== 'X'
-            );
-            if (realResults.length > 0) {
-              traceResult = parseBusinessTraceResult(realResults[0]);
+          if (!status.pending) {
+            if (status.downloadUrl) {
+              traceResult = await downloadBusinessTraceResults(status.downloadUrl);
             }
             break;
           }
