@@ -298,7 +298,7 @@ export default function SingleTracePage() {
                     </Button>
                   </div>
                   <p className="text-xs text-gray-500">
-                    Required for skip trace. Use AI Search ($0.15) to find the owner, or type manually.
+                    Required for skip trace. Use AI Search ($0.15 per name found) to find the owner, or type manually.
                   </p>
                 </div>
               </div>
