@@ -206,15 +206,20 @@ const STATE_NAMES: Record<string, string> = {
 // Build SOS/corporate-focused queries to resolve a business entity to a person
 function buildEntityResolutionQueries(entityName: string, state: string): string[] {
   const fullState = STATE_NAMES[state.toUpperCase()] || state;
+  // Extract key words from entity name for unquoted/fuzzy searches
+  // e.g. "Shell Pointe Apartments" → "Shell Pointe Apartments" (no quotes = fuzzy)
   return [
-    // Direct SOS lookups with full state name
-    `"${entityName}" "${fullState}" secretary of state`,
-    `"${entityName}" "${fullState}" business entity filing`,
-    // Find who owns/operates this entity
-    `"${entityName}" owner OR owned by OR LLC OR corporation OR registered agent`,
-    `"${entityName}" "${fullState}" registered agent OR principal OR managing member OR officer`,
-    // Search for the entity + property management to find the real owner behind it
-    `"${entityName}" property owner entity LLC corporation "${fullState}"`,
+    // Unquoted fuzzy search — allows Brave to match partial/variant names
+    // e.g. "Shell Pointe" can match "Shellbrooke Pointe" on business directory sites
+    `${entityName} ${fullState} LLC OR Ltd OR LP OR corporation OR partnership registered agent`,
+    // Search for management company — often reveals the ownership chain
+    `${entityName} ${fullState} managed by OR management company OR property management`,
+    // Exact match on business registries/directories that aggregate SOS data
+    `"${entityName}" ${fullState} business entity OR corporate filing OR annual report`,
+    // Search for the entity on business directory aggregator sites
+    `${entityName} ${fullState} site:bizapedia.com OR site:opencorporates.com OR site:corporationwiki.com OR site:buzzfile.com`,
+    // Direct ownership search with state context
+    `"${entityName}" owner OR principal OR officer OR member "${fullState}"`,
   ];
 }
 
