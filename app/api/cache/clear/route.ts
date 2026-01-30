@@ -36,32 +36,13 @@ export async function POST(request: Request) {
     const addressHash = createAddressHash(normalizedAddress);
     const adminClient = createAdminClient();
 
-    if (type === 'ai_research') {
-      // Null out AI research columns on matching trace_history rows
-      await adminClient
-        .from('trace_history')
-        .update({
-          ai_research: null,
-          ai_research_status: null,
-          ai_research_charge: null,
-        })
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash);
-    } else if (type === 'trace') {
-      // Delete trace_history rows for this address
-      await adminClient
-        .from('trace_history')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash);
-    } else {
-      // 'all' — delete the rows entirely (clears both trace + AI research)
-      await adminClient
-        .from('trace_history')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash);
-    }
+    // Delete all trace_history rows for this address regardless of type.
+    // This is the most reliable way to clear cached data.
+    await adminClient
+      .from('trace_history')
+      .delete()
+      .eq('user_id', user.id)
+      .eq('address_hash', addressHash);
 
     return NextResponse.json({ success: true });
   } catch (error) {

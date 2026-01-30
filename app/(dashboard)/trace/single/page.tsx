@@ -36,9 +36,7 @@ export default function SingleTracePage() {
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
 
-  // Skip-cache refs: set to true after clearing, consumed on next request.
-  // Using refs (not state) so the value is immediately available without waiting for re-render.
-  const skipResearchCacheRef = useRef(false);
+  // Skip trace cache ref: set to true after clearing, consumed on next Search Property.
   const skipTraceCacheRef = useRef(false);
 
   const abortRef = useRef(false);
@@ -54,9 +52,6 @@ export default function SingleTracePage() {
     setResearchResult(null);
 
     try {
-      const shouldSkipCache = skipResearchCacheRef.current;
-      skipResearchCacheRef.current = false;
-
       const response = await fetch('/api/research/single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -66,7 +61,6 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
-          skip_cache: shouldSkipCache || undefined,
         }),
       });
 
@@ -193,7 +187,6 @@ export default function SingleTracePage() {
   };
 
   const [clearingCache, setClearingCache] = useState(false);
-  const [clearingResearchCache, setClearingResearchCache] = useState(false);
 
   const clearCacheFromDB = async (type: 'ai_research' | 'trace' | 'all') => {
     if (!address || !city || !state || !zip) return;
@@ -218,7 +211,6 @@ export default function SingleTracePage() {
       setClearingCache(true);
       await clearCacheFromDB('all');
       setClearingCache(false);
-      skipResearchCacheRef.current = true;
       skipTraceCacheRef.current = true;
     }
 
@@ -240,18 +232,58 @@ export default function SingleTracePage() {
 
   const handleClearResearch = async () => {
     const confirmed = window.confirm(
-      'This will permanently delete the cached AI research for this address from the database. The next AI Search will run fresh.\n\nContinue?'
+      'This will permanently delete the cached AI research for this address from the database and re-run a fresh search.\n\nYou will be charged $0.15 if an owner is found.\n\nContinue?'
     );
     if (!confirmed) return;
 
-    setClearingResearchCache(true);
-    await clearCacheFromDB('ai_research');
-    setClearingResearchCache(false);
-    skipResearchCacheRef.current = true;
+    // Clear UI immediately
     setResearchResult(null);
     setResearchCharge(0);
     setResearchError(null);
     setOwnerName('');
+    setResearchLoading(true);
+
+    try {
+      // Step 1: Delete cached rows from DB
+      await fetch('/api/cache/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, city, state, zip, type: 'ai_research' }),
+      });
+
+      // Step 2: Immediately re-run search with skip_cache (belt and suspenders)
+      const response = await fetch('/api/research/single', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address,
+          city,
+          state,
+          zip,
+          owner_name: ownerName || undefined,
+          skip_cache: true,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setResearchError(data.error || 'AI research failed');
+        return;
+      }
+
+      setResearchResult(data.research);
+      setResearchCharge(data.charge || 0);
+
+      if (data.research?.owner_name && !ownerName) {
+        const bestName = data.research.individual_behind_business || data.research.owner_name;
+        setOwnerName(bestName);
+      }
+    } catch {
+      setResearchError('Failed to connect to server');
+    } finally {
+      setResearchLoading(false);
+    }
   };
 
   return (
@@ -391,17 +423,11 @@ export default function SingleTracePage() {
                 variant="outline"
                 size="sm"
                 onClick={handleClearResearch}
-                disabled={clearingResearchCache}
+                disabled={researchLoading}
                 className="w-full text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
               >
-                {clearingResearchCache ? (
-                  'Clearing...'
-                ) : (
-                  <>
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Clear AI Research Cache
-                  </>
-                )}
+                <Trash2 className="h-4 w-4 mr-1" />
+                Clear Cache &amp; Re-run AI Search
               </Button>
             </div>
           )}
