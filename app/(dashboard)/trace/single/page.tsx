@@ -9,7 +9,7 @@ import { TraceResultCard } from '@/components/trace/TraceResultCard';
 import { AIResearchCard } from '@/components/trace/AIResearchCard';
 import { US_STATES } from '@/lib/constants';
 import type { TraceResult, AIResearchResult } from '@/types';
-import { Search } from 'lucide-react';
+import { Search, Trash2 } from 'lucide-react';
 
 export default function SingleTracePage() {
   const [loading, setLoading] = useState(false);
@@ -179,7 +179,34 @@ export default function SingleTracePage() {
     }
   };
 
-  const handleClear = () => {
+  const [clearingCache, setClearingCache] = useState(false);
+  const [clearingResearchCache, setClearingResearchCache] = useState(false);
+
+  const clearCacheFromDB = async (type: 'ai_research' | 'trace' | 'all') => {
+    if (!address || !city || !state || !zip) return;
+    try {
+      await fetch('/api/cache/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, city, state, zip, type }),
+      });
+    } catch {
+      // Silent — cache clear is best-effort
+    }
+  };
+
+  const handleClear = async () => {
+    if ((result || researchResult) && address && city && state && zip) {
+      const confirmed = window.confirm(
+        'This will permanently delete the cached results for this address from the database. Future searches will run fresh.\n\nContinue?'
+      );
+      if (!confirmed) return;
+
+      setClearingCache(true);
+      await clearCacheFromDB('all');
+      setClearingCache(false);
+    }
+
     abortRef.current = true;
     setAddress('');
     setCity('');
@@ -194,6 +221,21 @@ export default function SingleTracePage() {
     setResearchCharge(0);
     setResearchError(null);
     setResearchLoading(false);
+  };
+
+  const handleClearResearch = async () => {
+    const confirmed = window.confirm(
+      'This will permanently delete the cached AI research for this address from the database. The next AI Search will run fresh.\n\nContinue?'
+    );
+    if (!confirmed) return;
+
+    setClearingResearchCache(true);
+    await clearCacheFromDB('ai_research');
+    setClearingResearchCache(false);
+    setResearchResult(null);
+    setResearchCharge(0);
+    setResearchError(null);
+    setOwnerName('');
   };
 
   return (
@@ -315,8 +357,8 @@ export default function SingleTracePage() {
                 <Button type="submit" disabled={loading} className="flex-1">
                   {loading ? 'Searching...' : 'Search Property'}
                 </Button>
-                <Button type="button" variant="outline" onClick={handleClear}>
-                  Clear
+                <Button type="button" variant="outline" onClick={handleClear} disabled={clearingCache}>
+                  {clearingCache ? 'Clearing...' : 'Clear'}
                 </Button>
               </div>
             </form>
@@ -327,7 +369,25 @@ export default function SingleTracePage() {
         <div className="space-y-4">
           {/* AI Research Card */}
           {researchResult && (
-            <AIResearchCard research={researchResult} charge={researchCharge} />
+            <div className="space-y-2">
+              <AIResearchCard research={researchResult} charge={researchCharge} />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleClearResearch}
+                disabled={clearingResearchCache}
+                className="w-full text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+              >
+                {clearingResearchCache ? (
+                  'Clearing...'
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    Clear AI Research Cache
+                  </>
+                )}
+              </Button>
+            </div>
           )}
 
           {/* Trace Result Card */}

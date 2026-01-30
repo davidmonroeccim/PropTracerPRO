@@ -13,7 +13,7 @@ interface ResearchInput {
   owner_name?: string;
 }
 
-// Single property research (two-pass: initial search + follow-up entity resolution)
+// Single property research (initial search + recursive entity resolution + deceased/relatives)
 export async function researchProperty(
   address: string,
   city: string,
@@ -36,40 +36,47 @@ export async function researchProperty(
     return `Query: "${query}"\nResults:\n${snippets || '(no results)'}`;
   }).join('\n\n');
 
+  const record: ResearchInput = { address, city, state, zip, owner_name: ownerName };
+
   // First Claude extraction
   const pass1Result = await extractWithClaude(
-    [{ address, city, state, zip, owner_name: ownerName }],
+    [record],
     [combinedContext]
   ).then((results) => results[0]);
 
-  // Pass 2: Follow-up queries if needed
-  const followUpQueries = buildFollowUpQueries(pass1Result, city, state, ownerName);
-
-  if (followUpQueries.length === 0) {
-    return pass1Result;
-  }
-
-  const followUpResults = await Promise.all(
-    followUpQueries.map((q) => searchBrave(q))
+  // Entity Resolution: recursively follow entity chains through SOS records
+  const { result: resolvedResult, context: resolvedContext } = await resolveEntityChain(
+    pass1Result,
+    state,
+    combinedContext,
+    record
   );
 
-  const followUpContext = followUpQueries.map((query, i) => {
-    const results = followUpResults[i];
-    const snippets = results
-      .map((r) => `- ${r.title}: ${r.description} (${r.url})`)
-      .join('\n');
-    return `Query: "${query}"\nResults:\n${snippets || '(no results)'}`;
-  }).join('\n\n');
+  // Deceased/Relatives Pass: if we found a person and no owner_name was provided upfront
+  const discoveredPerson = resolvedResult.individual_behind_business || resolvedResult.owner_name;
+  if (discoveredPerson && !ownerName && !isLikelyBusiness(discoveredPerson)) {
+    const deceasedQueries = buildDeceasedQueries(discoveredPerson, city, state);
+    const deceasedResults = await Promise.all(deceasedQueries.map((q) => searchBrave(q)));
 
-  // Second Claude extraction with combined Pass 1 + Pass 2 context
-  const fullContext = `=== INITIAL SEARCH RESULTS ===\n${combinedContext}\n\n=== FOLLOW-UP SEARCH RESULTS ===\n${followUpContext}`;
+    const deceasedContext = deceasedQueries.map((query, i) => {
+      const results = deceasedResults[i];
+      const snippets = results
+        .map((r) => `- ${r.title}: ${r.description} (${r.url})`)
+        .join('\n');
+      return `Query: "${query}"\nResults:\n${snippets || '(no results)'}`;
+    }).join('\n\n');
 
-  const pass2Result = await extractWithClaude(
-    [{ address, city, state, zip, owner_name: ownerName }],
-    [fullContext]
-  ).then((results) => results[0]);
+    const fullContext = `${resolvedContext}\n\n=== DECEASED & RELATIVES SEARCH ===\n${deceasedContext}`;
 
-  return pass2Result;
+    const finalResult = await extractWithClaude(
+      [record],
+      [fullContext]
+    ).then((results) => results[0]);
+
+    return finalResult;
+  }
+
+  return resolvedResult;
 }
 
 // Batch property research
@@ -118,6 +125,12 @@ export async function researchPropertyBatch(
   return allResults;
 }
 
+// Check if a name looks like a business entity rather than a person
+function isLikelyBusiness(name: string): boolean {
+  const businessIndicators = ['llc', 'inc', 'corp', 'trust', 'ltd', 'lp', 'company', 'group', 'holdings', 'properties', 'investments', 'management', 'enterprises', 'associates', 'partners', 'foundation', 'capital', 'realty', 'development', 'construction', 'apartments'];
+  return businessIndicators.some((ind) => name.toLowerCase().includes(ind));
+}
+
 // Build 5-6 targeted search queries for a property
 function buildSearchQueries(
   address: string,
@@ -155,11 +168,7 @@ function buildSearchQueries(
     );
 
     // Query 6: If business, find the individual behind it
-    const businessIndicators = ['llc', 'inc', 'corp', 'trust', 'ltd', 'lp', 'company', 'group', 'holdings', 'properties', 'investments', 'management', 'enterprises'];
-    const isLikelyBusiness = businessIndicators.some((ind) =>
-      ownerName.toLowerCase().includes(ind)
-    );
-    if (isLikelyBusiness) {
+    if (isLikelyBusiness(ownerName)) {
       queries.push(
         `"${ownerName}" registered agent OR principal OR member OR manager site:sos OR "secretary of state"`
       );
@@ -180,44 +189,83 @@ function buildSearchQueries(
   return queries;
 }
 
-// Build follow-up queries for second-pass entity resolution
-function buildFollowUpQueries(
-  pass1Result: AIResearchResult,
-  city: string,
+// Build SOS/corporate-focused queries to resolve a business entity to a person
+function buildEntityResolutionQueries(entityName: string, state: string): string[] {
+  return [
+    `"${entityName}" "${state}" secretary of state`,
+    `"${entityName}" registered agent annual report filing`,
+    `"${entityName}" "${state}" business entity`,
+    `"${entityName}" president OR principal OR managing member OR officer`,
+  ];
+}
+
+// Build deceased + family queries for a discovered person
+function buildDeceasedQueries(personName: string, city: string, state: string): string[] {
+  return [
+    `"${personName}" "${city}" "${state}" obituary OR deceased`,
+    `"${personName}" "${city}" "${state}" family OR relatives`,
+  ];
+}
+
+// Recursively resolve entity chains through SOS records (up to 3 iterations)
+async function resolveEntityChain(
+  initialResult: AIResearchResult,
   state: string,
-  ownerNameProvided?: string
-): string[] {
-  const queries: string[] = [];
+  allContext: string,
+  record: ResearchInput
+): Promise<{ result: AIResearchResult; context: string }> {
+  let currentResult = initialResult;
+  let currentContext = allContext;
+  const resolvedEntities = new Set<string>();
 
-  // If entity found (business/trust) but no individual behind it, resolve the entity
-  const isEntity = pass1Result.owner_type === 'business' || pass1Result.owner_type === 'trust';
-  const entityName = pass1Result.business_name;
-  const hasIndividual = !!pass1Result.individual_behind_business;
+  for (let iteration = 0; iteration < 3; iteration++) {
+    // Determine what entity to resolve next
+    let entityToResolve: string | null = null;
+    const isEntity = currentResult.owner_type === 'business' || currentResult.owner_type === 'trust';
 
-  if (isEntity && entityName && !hasIndividual) {
-    queries.push(
-      `"${entityName}" registered agent OR principal OR member OR manager`
-    );
-    queries.push(
-      `"${entityName}" "${state}" secretary of state OR annual report OR articles of organization`
-    );
-    queries.push(
-      `"${entityName}" owner OR founder OR president`
-    );
+    if (isEntity) {
+      if (!currentResult.individual_behind_business && currentResult.business_name) {
+        // No individual found yet — resolve the business itself
+        entityToResolve = currentResult.business_name;
+      } else if (
+        currentResult.individual_behind_business &&
+        isLikelyBusiness(currentResult.individual_behind_business)
+      ) {
+        // The "individual" is actually another business entity — resolve it
+        entityToResolve = currentResult.individual_behind_business;
+      }
+    }
+
+    if (!entityToResolve || resolvedEntities.has(entityToResolve.toLowerCase())) {
+      break;
+    }
+
+    resolvedEntities.add(entityToResolve.toLowerCase());
+
+    // Search SOS + business records for this entity
+    const queries = buildEntityResolutionQueries(entityToResolve, state);
+    const searchResults = await Promise.all(queries.map((q) => searchBrave(q)));
+
+    const newContext = queries.map((query, i) => {
+      const results = searchResults[i];
+      const snippets = results
+        .map((r) => `- ${r.title}: ${r.description} (${r.url})`)
+        .join('\n');
+      return `Query: "${query}"\nResults:\n${snippets || '(no results)'}`;
+    }).join('\n\n');
+
+    // Accumulate context and re-extract
+    currentContext += `\n\n=== ENTITY RESOLUTION PASS ${iteration + 1}: "${entityToResolve}" ===\n${newContext}`;
+
+    const reExtracted = await extractWithClaude(
+      [record],
+      [currentContext]
+    ).then((results) => results[0]);
+
+    currentResult = reExtracted;
   }
 
-  // If Pass 1 discovered an owner name that wasn't known upfront, run deceased + family queries
-  const discoveredOwner = pass1Result.owner_name;
-  if (discoveredOwner && !ownerNameProvided) {
-    queries.push(
-      `"${discoveredOwner}" "${city}" "${state}" obituary OR deceased`
-    );
-    queries.push(
-      `"${discoveredOwner}" "${city}" "${state}" family OR relatives`
-    );
-  }
-
-  return queries;
+  return { result: currentResult, context: currentContext };
 }
 
 // Call Claude to extract structured data from search results
@@ -269,6 +317,12 @@ CONFIDENCE SCORING GUIDELINES:
 - 40-59: Owner found in a single non-government source or with some ambiguity
 - 20-39: Possible owner but conflicting information or weak source
 - 0-19: No owner information found or only property management/listing data
+
+ENTITY CHAIN RESOLUTION RULES:
+- When search results show Secretary of State filings, corporate records, or annual reports, extract the registered agent, president, principal, officers, and managing members.
+- If the registered agent or officer is ANOTHER BUSINESS ENTITY (not a person), set individual_behind_business to that entity name so the system can resolve further.
+- When multiple passes of search data are provided (e.g., "ENTITY RESOLUTION PASS 1", "PASS 2"), use ALL context from ALL passes to build the most complete picture.
+- Follow the chain: Property → LLC → Registered Agent Entity → Officer/Person. The goal is to find the actual human decision-maker.
 
 OTHER RULES:
 - Only extract information actually found in the search results. Never fabricate data.

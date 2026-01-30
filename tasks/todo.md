@@ -438,6 +438,79 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+## Clear Cache Buttons
+
+### Todo
+- [x] A. Create `POST /api/cache/clear` endpoint — deletes AI research and/or trace cache from DB for a given address
+- [x] B. Add "Clear AI Research Cache" button on AI research result — clears AI research from DB + resets UI
+- [x] C. Update existing "Clear" button to also clear trace + AI research cache from DB for current address
+- [x] D. Verify TypeScript compiles clean
+
+### Review
+
+**Date:** January 30, 2026
+
+**1 file created, 1 file modified:**
+
+1. **`app/api/cache/clear/route.ts`** (new) — POST endpoint that accepts `{ address, city, state, zip, type }` where type is `ai_research`, `trace`, or `all`. Authenticates user, computes address hash, then:
+   - `ai_research`: nulls out `ai_research`, `ai_research_status`, `ai_research_charge` columns on matching trace_history rows
+   - `trace` or `all`: deletes trace_history rows entirely for that user+address
+
+2. **`app/(dashboard)/trace/single/page.tsx`** — Two changes:
+   - **"Clear" button** (existing): now shows a `window.confirm` warning when results exist ("This will permanently delete the cached results..."), then calls the API to delete all cache for that address before resetting the form. If no results are showing, it just resets the form as before.
+   - **"Clear AI Research Cache" button** (new): appears below the AI research card in red styling. Shows a `window.confirm` warning, then calls the API to clear only the AI research cache, resets AI research UI + owner name field. Next AI Search for that address will run fresh.
+
+**If the user never clicks either clear button, the 90-day cache remains unchanged.**
+
+**TypeScript compiles clean. No database changes.**
+
+---
+
+## Recursive Entity Resolution
+
+### Todo
+- [x] A. Extract `isLikelyBusiness()` into standalone helper
+- [x] B. Replace `buildFollowUpQueries()` with `buildEntityResolutionQueries()` + `buildDeceasedQueries()`
+- [x] C. Add `resolveEntityChain()` recursive function (up to 3 iterations)
+- [x] D. Update `researchProperty()` to use new recursive flow
+- [x] E. Update Claude system prompt for entity chain extraction
+- [x] F. Remove old `buildFollowUpQueries()` function
+- [x] G. Verify TypeScript compiles clean
+
+### Review
+
+**Date:** January 30, 2026
+
+**1 file modified:** `lib/ai-research/client.ts`
+
+**Changes:**
+
+1. **Extracted `isLikelyBusiness()`** — Standalone helper function with expanded business indicators list (added `associates`, `partners`, `foundation`, `capital`, `realty`, `development`, `construction`, `apartments`). Replaces inline check in `buildSearchQueries()`.
+
+2. **Replaced `buildFollowUpQueries()`** with two focused functions:
+   - `buildEntityResolutionQueries(entityName, state)` — 4 SOS/corporate-focused queries (secretary of state, registered agent filings, business entity lookup, officers/principals)
+   - `buildDeceasedQueries(personName, city, state)` — 2 queries for obituary/deceased + family/relatives
+
+3. **Added `resolveEntityChain()`** — Recursive loop (up to 3 iterations) that:
+   - Checks if current result is a business/trust without a person behind it
+   - If `individual_behind_business` itself looks like a business, resolves that entity next
+   - Uses a `Set` to prevent infinite loops on circular references
+   - Each iteration: searches Brave for SOS records, accumulates context, re-extracts with Claude
+
+4. **Updated `researchProperty()` flow** — Now three phases:
+   - Pass 1: Initial property search + Claude extraction (unchanged)
+   - Entity Resolution: `resolveEntityChain()` recursive loop (replaces old Pass 2)
+   - Deceased/Relatives: Only runs if a person was discovered and no `ownerName` was provided upfront
+
+5. **Updated Claude system prompt** — Added "ENTITY CHAIN RESOLUTION RULES" section instructing Claude to:
+   - Extract registered agents, presidents, principals, officers from SOS filings
+   - Set `individual_behind_business` to another entity name if the registered agent is a business (not a person)
+   - Use ALL context from ALL passes when multiple entity resolution passes are provided
+
+**No type changes. No other files affected. Batch research (`researchPropertyBatch`) unchanged (stays single-pass). TypeScript compiles clean.**
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing
