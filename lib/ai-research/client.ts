@@ -127,7 +127,7 @@ export async function researchPropertyBatch(
 
 // Check if a name looks like a business entity rather than a person
 function isLikelyBusiness(name: string): boolean {
-  const businessIndicators = ['llc', 'inc', 'corp', 'trust', 'ltd', 'lp', 'company', 'group', 'holdings', 'properties', 'investments', 'management', 'enterprises', 'associates', 'partners', 'foundation', 'capital', 'realty', 'development', 'construction', 'apartments'];
+  const businessIndicators = ['llc', 'inc', 'corp', 'trust', 'ltd', 'lp', 'company', 'group', 'holdings', 'properties', 'investments', 'management', 'enterprises', 'associates', 'partners', 'foundation', 'capital', 'realty', 'development', 'construction', 'apartments', 'real estate', 'cre', 'rentals', 'housing', 'ventures', 'equity', 'asset', 'land', 'homes', 'estate', 'residences', 'suites', 'plaza', 'commercial', 'retail', 'industrial', 'office', 'hotel', 'hospitality', 'storage', 'units'];
   return businessIndicators.some((ind) => name.toLowerCase().includes(ind));
 }
 
@@ -221,18 +221,26 @@ async function resolveEntityChain(
   for (let iteration = 0; iteration < 3; iteration++) {
     // Determine what entity to resolve next
     let entityToResolve: string | null = null;
-    const isEntity = currentResult.owner_type === 'business' || currentResult.owner_type === 'trust';
+    const isEntityType = currentResult.owner_type === 'business' || currentResult.owner_type === 'trust';
+    const ownerLooksBusiness = currentResult.owner_name && isLikelyBusiness(currentResult.owner_name);
+    const businessNameLooksBusiness = currentResult.business_name && isLikelyBusiness(currentResult.business_name);
 
-    if (isEntity) {
-      if (!currentResult.individual_behind_business && currentResult.business_name) {
-        // No individual found yet — resolve the business itself
-        entityToResolve = currentResult.business_name;
-      } else if (
+    // Trigger entity resolution if:
+    // 1. owner_type is explicitly business/trust, OR
+    // 2. business_name is set and looks like a business entity, OR
+    // 3. owner_name itself looks like a business entity
+    const needsResolution = isEntityType || businessNameLooksBusiness || ownerLooksBusiness;
+
+    if (needsResolution) {
+      if (
         currentResult.individual_behind_business &&
         isLikelyBusiness(currentResult.individual_behind_business)
       ) {
         // The "individual" is actually another business entity — resolve it
         entityToResolve = currentResult.individual_behind_business;
+      } else if (!currentResult.individual_behind_business) {
+        // No individual found yet — resolve the business or owner name
+        entityToResolve = currentResult.business_name || currentResult.owner_name;
       }
     }
 
