@@ -46,12 +46,36 @@ export async function researchProperty(
   ).then((results) => results[0]);
 
   // Entity Resolution: recursively follow entity chains through SOS records
-  const { result: resolvedResult, context: resolvedContext } = await resolveEntityChain(
+  let { result: resolvedResult, context: resolvedContext } = await resolveEntityChain(
     pass1Result,
     state,
     combinedContext,
     record
   );
+
+  // Discovery Pass: if confidence is low and we found a business at the address,
+  // use that business name to search for the property/business owner
+  if (resolvedResult.confidence < 50 && !resolvedResult.owner_name && resolvedResult.business_at_address) {
+    const businessName = resolvedResult.business_at_address;
+    console.log(`[Discovery Pass] Low confidence (${resolvedResult.confidence}%), found business "${businessName}" at address. Running discovery search.`);
+
+    // Synthesize a result that triggers entity resolution on the discovered business
+    const discoveryResult: AIResearchResult = {
+      ...resolvedResult,
+      owner_type: 'business',
+      business_name: businessName,
+    };
+
+    const discoveryResolution = await resolveEntityChain(
+      discoveryResult,
+      state,
+      resolvedContext,
+      record
+    );
+
+    resolvedResult = discoveryResolution.result;
+    resolvedContext = discoveryResolution.context;
+  }
 
   // Deceased/Relatives Pass: if we found a person and no owner_name was provided upfront
   const discoveredPerson = resolvedResult.individual_behind_business || resolvedResult.owner_name;
@@ -388,6 +412,7 @@ For each record, extract:
 - owner_type: "individual", "business", "trust", or "unknown"
 - business_name: If owned by a business/LLC/trust, the entity name
 - individual_behind_business: If owned by a business, the individual principal/member/registered agent/managing member
+- business_at_address: The name of any business, restaurant, store, apartment complex, or commercial tenant operating at this address (even if not the property owner). This is used for further research. Examples: "The Noble South", "Shell Pointe Apartments", "Walmart". Set to null only if no business is identified at the address.
 - is_deceased: true/false/null if deceased status was found in search results
 - deceased_details: Brief note about deceased status if found
 - relatives: Array of names of close relatives or family members found
@@ -515,5 +540,6 @@ function normalizeResult(raw: Partial<AIResearchResult>): AIResearchResult {
     confidence: typeof raw.confidence === 'number' ? Math.min(100, Math.max(0, raw.confidence)) : 0,
     confidence_reasoning: raw.confidence_reasoning || null,
     sources: Array.isArray(raw.sources) ? raw.sources : [],
+    business_at_address: raw.business_at_address || null,
   };
 }
