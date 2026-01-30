@@ -266,6 +266,7 @@ export interface AIResearchResult {
   decision_makers: string[];
   property_type: 'residential' | 'commercial' | 'vacant_land' | 'multi_family' | 'unknown';
   confidence: number;
+  confidence_reasoning: string | null;
   sources: string[];
 }
 

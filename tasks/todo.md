@@ -407,6 +407,37 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+## AI Research Improvement: Better Brave Queries + Two-Pass Entity Resolution
+
+**Date:** January 30, 2026
+
+### Todo
+- [x] A. Rewrite `buildSearchQueries()` — expand from 2-3 to 5-6 targeted queries
+- [x] B. Add `buildFollowUpQueries()` — second-pass entity resolution + deceased/relatives
+- [x] C. Update `researchProperty()` — two-pass flow when entity found without individual
+- [x] D. Improve Claude system prompt — better instructions for distinguishing owners vs. managers
+- [x] E. Verify TypeScript compiles clean
+
+### Review
+
+**3 files modified:**
+
+1. **`lib/ai-research/client.ts`** — Main changes:
+   - `buildSearchQueries()` expanded from 2-3 to 5-6 queries targeting county/gov records, deed/title records, assessor parcels, and tax records instead of generic property owner searches
+   - New `buildFollowUpQueries()` function: fires second-pass queries when Pass 1 finds an entity (LLC/trust) without an individual behind it, or discovers an owner name that wasn't known upfront (to run deceased + family queries)
+   - `researchProperty()` now runs two passes: initial search + Claude extraction, then follow-up queries if needed, then a second Claude extraction with combined context
+   - Claude system prompt rewritten with explicit rules about distinguishing legal owners from property managers/brokers/agents, confidence scoring guidelines based on source quality, and new `confidence_reasoning` field
+   - `emptyResult()` and `normalizeResult()` updated for new `confidence_reasoning` field
+   - `researchPropertyBatch()` unchanged (stays single-pass for performance)
+
+2. **`types/index.ts`** — Added `confidence_reasoning: string | null` to `AIResearchResult` interface
+
+3. **`components/trace/AIResearchCard.tsx`** — Displays `confidence_reasoning` from Claude when available, falls back to generic confidence text
+
+**No database changes needed.** The `ai_research` column stores JSON, so the new field is automatically included.
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing

@@ -204,7 +204,9 @@ export function AIResearchCard({ research, charge }: AIResearchCardProps) {
               <span className="text-sm font-semibold">{research.confidence}%</span>
             </div>
             <p className="text-xs text-gray-400 mt-1">
-              {research.confidence >= 70
+              {research.confidence_reasoning
+                ? research.confidence_reasoning
+                : research.confidence >= 70
                 ? 'High confidence — likely accurate'
                 : research.confidence >= 40
                 ? 'Moderate confidence — verify before use'
