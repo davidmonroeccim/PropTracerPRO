@@ -430,10 +430,17 @@ CRITICAL RULES FOR OWNER IDENTIFICATION:
 - If search results show both a property management company AND a county/tax record owner, prefer the county/tax record.
 - Look for patterns like "Owner: ...", "Assessed to: ...", "Grantor/Grantee: ...", "Parcel owner: ..." in county records.
 
+BEST-AVAILABLE-LEAD RULE (IMPORTANT):
+- This tool is used by commercial real estate professionals who need to identify the decision-maker for a property.
+- If no county/tax/deed records are found, but you identify the OWNER of a business operating at the address (not just an employee or manager — the actual owner/founder/principal), then SET that person as owner_name with owner_type "individual" and note the business in business_name.
+- The reasoning: in commercial real estate, the business owner at a property is very often also the property owner, or at minimum the key decision-maker. It is far more useful to return the business owner as a lead than to return nothing.
+- Only apply this rule when NO government/tax/deed records contradict it. If county records show a different owner, use the county records.
+- When using this rule, set confidence to 40-55 (moderate) and explain in confidence_reasoning that the owner was identified as the business owner at the address, not from property records.
+
 CONFIDENCE SCORING GUIDELINES:
 - 80-100: Owner found in county assessor, tax records, or deed records
 - 60-79: Owner found in multiple consistent non-government sources
-- 40-59: Owner found in a single non-government source or with some ambiguity
+- 40-59: Owner identified as business owner at address, or found in a single non-government source
 - 20-39: Possible owner but conflicting information or weak source
 - 0-19: No owner information found or only property management/listing data
 
