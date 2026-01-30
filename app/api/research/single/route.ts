@@ -55,18 +55,7 @@ export async function POST(request: Request) {
     const normalizedAddress = normalizeAddress(address, city, state, zip);
     const addressHash = createAddressHash(normalizedAddress);
 
-    if (skip_cache) {
-      // Clear any existing AI research data for this address so stale data doesn't persist
-      await adminClient
-        .from('trace_history')
-        .update({
-          ai_research: null,
-          ai_research_status: null,
-          ai_research_charge: null,
-        })
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash);
-    } else {
+    if (!skip_cache) {
       const windowDate = new Date();
       windowDate.setDate(windowDate.getDate() - DEDUPE.WINDOW_DAYS);
 
@@ -89,6 +78,7 @@ export async function POST(request: Request) {
         });
       }
     }
+    // When skip_cache is true, we skip the lookup entirely and run fresh research below
 
     // Run AI research
     const research = await researchProperty(address, city, state, zip, owner_name);

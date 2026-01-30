@@ -36,9 +36,10 @@ export default function SingleTracePage() {
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
 
-  // Skip-cache flags: set to true after clearing, consumed on next request
-  const [skipResearchCache, setSkipResearchCache] = useState(false);
-  const [skipTraceCache, setSkipTraceCache] = useState(false);
+  // Skip-cache refs: set to true after clearing, consumed on next request.
+  // Using refs (not state) so the value is immediately available without waiting for re-render.
+  const skipResearchCacheRef = useRef(false);
+  const skipTraceCacheRef = useRef(false);
 
   const abortRef = useRef(false);
 
@@ -53,6 +54,9 @@ export default function SingleTracePage() {
     setResearchResult(null);
 
     try {
+      const shouldSkipCache = skipResearchCacheRef.current;
+      skipResearchCacheRef.current = false;
+
       const response = await fetch('/api/research/single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -62,10 +66,9 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
-          skip_cache: skipResearchCache || undefined,
+          skip_cache: shouldSkipCache || undefined,
         }),
       });
-      setSkipResearchCache(false);
 
       const data = await response.json();
 
@@ -101,6 +104,9 @@ export default function SingleTracePage() {
 
     try {
       // Submit the trace
+      const shouldSkipCache = skipTraceCacheRef.current;
+      skipTraceCacheRef.current = false;
+
       const response = await fetch('/api/trace/single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -110,10 +116,9 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
-          skip_cache: skipTraceCache || undefined,
+          skip_cache: shouldSkipCache || undefined,
         }),
       });
-      setSkipTraceCache(false);
 
       const data = await response.json();
 
@@ -213,8 +218,8 @@ export default function SingleTracePage() {
       setClearingCache(true);
       await clearCacheFromDB('all');
       setClearingCache(false);
-      setSkipResearchCache(true);
-      setSkipTraceCache(true);
+      skipResearchCacheRef.current = true;
+      skipTraceCacheRef.current = true;
     }
 
     abortRef.current = true;
@@ -242,7 +247,7 @@ export default function SingleTracePage() {
     setClearingResearchCache(true);
     await clearCacheFromDB('ai_research');
     setClearingResearchCache(false);
-    setSkipResearchCache(true);
+    skipResearchCacheRef.current = true;
     setResearchResult(null);
     setResearchCharge(0);
     setResearchError(null);
