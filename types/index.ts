@@ -268,6 +268,7 @@ export interface AIResearchResult {
   confidence: number;
   confidence_reasoning: string | null;
   sources: string[];
+  business_trace_status?: string | null;
 }
 
 // ===================

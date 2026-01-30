@@ -243,6 +243,7 @@ async function resolveEntityChain(
   let currentResult = initialResult;
   let currentContext = allContext;
   const resolvedEntities = new Set<string>();
+  let businessTraceStatus: string | null = null;
 
   for (let iteration = 0; iteration < 3; iteration++) {
     // Determine what entity to resolve next
@@ -321,14 +322,18 @@ Phone numbers: ${phonesStr}
 Email addresses: ${emailsStr}
 Mailing address: ${traceResult.address || '(not found)'}
 --- END BUSINESS TRACE RESULTS ---`;
+          businessTraceStatus = `Found: ${traceResult.owner_name || 'unnamed'} (${traceResult.phones.length} phones, ${traceResult.emails.length} emails)`;
         } else {
           console.log(`[Entity Resolution] Business trace returned no results for "${entityToResolve}"`);
+          businessTraceStatus = `No results for "${entityToResolve}"`;
         }
       } else {
         console.log(`[Entity Resolution] Business trace submit failed: ${traceSubmit.error}`);
+        businessTraceStatus = `Failed: ${traceSubmit.error}`;
       }
     } catch (error) {
       console.error(`[Entity Resolution] Business trace error:`, error);
+      businessTraceStatus = `Error: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
 
     // Step 2: Also run Brave searches as supplementary context
@@ -353,6 +358,10 @@ Mailing address: ${traceResult.address || '(not found)'}
     ).then((results) => results[0]);
 
     currentResult = reExtracted;
+  }
+
+  if (businessTraceStatus) {
+    currentResult.business_trace_status = businessTraceStatus;
   }
 
   return { result: currentResult, context: currentContext };

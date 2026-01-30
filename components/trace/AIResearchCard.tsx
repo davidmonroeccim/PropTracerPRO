@@ -216,6 +216,17 @@ export function AIResearchCard({ research, charge, isCached }: AIResearchCardPro
           </div>
         )}
 
+        {/* Business Trace Status */}
+        {research.business_trace_status && (
+          <div className="bg-gray-50 rounded-lg p-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-1">
+              <Building2 className="h-4 w-4" />
+              Business Skip Trace
+            </div>
+            <p className="text-xs text-gray-600">{research.business_trace_status}</p>
+          </div>
+        )}
+
         {/* No results */}
         {!hasOwner && research.confidence === 0 && (
           <div className="bg-gray-50 rounded-lg p-4 text-center">
