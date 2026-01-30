@@ -22,7 +22,7 @@ export async function POST(request: Request) {
 
     // Parse request body
     const body = await request.json();
-    const { address, city, state, zip, owner_name, ai_research } = body as SingleTraceRequest & { ai_research?: AIResearchResult };
+    const { address, city, state, zip, owner_name, ai_research, skip_cache } = body as SingleTraceRequest & { ai_research?: AIResearchResult; skip_cache?: boolean };
 
     // Validate input
     const validation = validateAddressInput(address, city, state, zip);
@@ -65,39 +65,48 @@ export async function POST(request: Request) {
 
     const adminClient = createAdminClient();
 
-    // Check for duplicate (cached result)
-    const cachedResult = await checkSingleDuplicate(user.id, address, city, state, zip);
-
-    if (cachedResult) {
-      const cached = cachedResult.trace_result as TraceResult | null;
-      const hasData = cached &&
-        ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
-
-      if (hasData) {
-        // Return cached result with actual data - no charge
-        return NextResponse.json({
-          success: true,
-          is_cached: true,
-          trace_id: cachedResult.id,
-          result: cached,
-          charge: 0,
-        });
-      }
-
-      // Cached result has no contact data - delete it and re-trace
+    if (skip_cache) {
+      // User explicitly cleared cache — delete all trace_history rows for this address
       await adminClient
         .from('trace_history')
         .delete()
-        .eq('id', cachedResult.id);
-    }
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash);
+    } else {
+      // Check for duplicate (cached result)
+      const cachedResult = await checkSingleDuplicate(user.id, address, city, state, zip);
 
-    // Delete any existing failed traces for this address (to allow retry)
-    await adminClient
-      .from('trace_history')
-      .delete()
-      .eq('user_id', user.id)
-      .eq('address_hash', addressHash)
-      .eq('is_successful', false);
+      if (cachedResult) {
+        const cached = cachedResult.trace_result as TraceResult | null;
+        const hasData = cached &&
+          ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
+
+        if (hasData) {
+          // Return cached result with actual data - no charge
+          return NextResponse.json({
+            success: true,
+            is_cached: true,
+            trace_id: cachedResult.id,
+            result: cached,
+            charge: 0,
+          });
+        }
+
+        // Cached result has no contact data - delete it and re-trace
+        await adminClient
+          .from('trace_history')
+          .delete()
+          .eq('id', cachedResult.id);
+      }
+
+      // Delete any existing failed traces for this address (to allow retry)
+      await adminClient
+        .from('trace_history')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash)
+        .eq('is_successful', false);
+    }
 
     // Insert pending trace record (include AI research data if provided)
     const insertData: Record<string, unknown> = {

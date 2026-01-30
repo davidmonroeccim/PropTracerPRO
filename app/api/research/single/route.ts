@@ -18,7 +18,7 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const { address, city, state, zip, owner_name } = body;
+    const { address, city, state, zip, owner_name, skip_cache } = body;
 
     const validation = validateAddressInput(address, city, state, zip);
     if (!validation.valid) {
@@ -54,26 +54,40 @@ export async function POST(request: Request) {
     // Check for cached AI research on this address (within 90-day window)
     const normalizedAddress = normalizeAddress(address, city, state, zip);
     const addressHash = createAddressHash(normalizedAddress);
-    const windowDate = new Date();
-    windowDate.setDate(windowDate.getDate() - DEDUPE.WINDOW_DAYS);
 
-    const { data: cached } = await adminClient
-      .from('trace_history')
-      .select('ai_research')
-      .eq('user_id', user.id)
-      .eq('address_hash', addressHash)
-      .not('ai_research', 'is', null)
-      .gte('created_at', windowDate.toISOString())
-      .limit(1)
-      .single();
+    if (skip_cache) {
+      // Clear any existing AI research data for this address so stale data doesn't persist
+      await adminClient
+        .from('trace_history')
+        .update({
+          ai_research: null,
+          ai_research_status: null,
+          ai_research_charge: null,
+        })
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash);
+    } else {
+      const windowDate = new Date();
+      windowDate.setDate(windowDate.getDate() - DEDUPE.WINDOW_DAYS);
 
-    if (cached?.ai_research) {
-      return NextResponse.json({
-        success: true,
-        is_cached: true,
-        research: cached.ai_research,
-        charge: 0,
-      });
+      const { data: cached } = await adminClient
+        .from('trace_history')
+        .select('ai_research')
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash)
+        .not('ai_research', 'is', null)
+        .gte('created_at', windowDate.toISOString())
+        .limit(1)
+        .single();
+
+      if (cached?.ai_research) {
+        return NextResponse.json({
+          success: true,
+          is_cached: true,
+          research: cached.ai_research,
+          charge: 0,
+        });
+      }
     }
 
     // Run AI research

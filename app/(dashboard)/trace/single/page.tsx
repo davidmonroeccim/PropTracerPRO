@@ -36,6 +36,10 @@ export default function SingleTracePage() {
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
 
+  // Skip-cache flags: set to true after clearing, consumed on next request
+  const [skipResearchCache, setSkipResearchCache] = useState(false);
+  const [skipTraceCache, setSkipTraceCache] = useState(false);
+
   const abortRef = useRef(false);
 
   const handleAISearch = async () => {
@@ -58,8 +62,10 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
+          skip_cache: skipResearchCache || undefined,
         }),
       });
+      setSkipResearchCache(false);
 
       const data = await response.json();
 
@@ -104,8 +110,10 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
+          skip_cache: skipTraceCache || undefined,
         }),
       });
+      setSkipTraceCache(false);
 
       const data = await response.json();
 
@@ -205,6 +213,8 @@ export default function SingleTracePage() {
       setClearingCache(true);
       await clearCacheFromDB('all');
       setClearingCache(false);
+      setSkipResearchCache(true);
+      setSkipTraceCache(true);
     }
 
     abortRef.current = true;
@@ -232,6 +242,7 @@ export default function SingleTracePage() {
     setClearingResearchCache(true);
     await clearCacheFromDB('ai_research');
     setClearingResearchCache(false);
+    setSkipResearchCache(true);
     setResearchResult(null);
     setResearchCharge(0);
     setResearchError(null);
