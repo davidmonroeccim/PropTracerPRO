@@ -2,6 +2,8 @@
 // Uses Brave Search + Claude to extract property owner information
 
 import { searchBrave, searchBraveBatch } from '@/lib/brave/client';
+import { submitBusinessTrace, parseBusinessTraceResult } from '@/lib/tracerfy/client';
+import { getJobStatus } from '@/lib/tracerfy/client';
 import { AI_RESEARCH } from '@/lib/constants';
 import type { AIResearchResult } from '@/types';
 
@@ -278,9 +280,60 @@ async function resolveEntityChain(
     resolvedEntities.add(entityToResolve.toLowerCase());
     console.log(`[Entity Resolution] Resolving entity: "${entityToResolve}" (iteration ${iteration})`);
 
-    // Search SOS + business records for this entity
+    // Step 1: Submit to Tracerfy business trace for owner contact info
+    let businessTraceContext = '';
+    try {
+      console.log(`[Entity Resolution] Submitting business trace for: "${entityToResolve}" in ${state}`);
+      const traceSubmit = await submitBusinessTrace({ business_name: entityToResolve, state });
+
+      if (traceSubmit.success && traceSubmit.jobId) {
+        // Poll for results (up to ~30s)
+        let traceResult = null;
+        for (let poll = 0; poll < 10; poll++) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          const status = await getJobStatus(traceSubmit.jobId!);
+
+          if (!status.success) {
+            console.log(`[Entity Resolution] Business trace poll failed: ${status.error}`);
+            break;
+          }
+
+          if (!status.pending && status.results) {
+            // Filter out padding rows
+            const realResults = status.results.filter(
+              (r) => r.first_name !== 'X' || r.last_name !== 'X'
+            );
+            if (realResults.length > 0) {
+              traceResult = parseBusinessTraceResult(realResults[0]);
+            }
+            break;
+          }
+        }
+
+        if (traceResult) {
+          console.log(`[Entity Resolution] Business trace found owner: ${traceResult.owner_name}, phones: ${traceResult.phones.length}, emails: ${traceResult.emails.length}`);
+          const phonesStr = traceResult.phones.map((p) => `${p.number} (${p.type})`).join(', ') || '(none)';
+          const emailsStr = traceResult.emails.join(', ') || '(none)';
+          businessTraceContext = `\n--- TRACERFY BUSINESS SKIP TRACE RESULTS ---
+Business searched: "${entityToResolve}"
+Owner/Contact name: ${traceResult.owner_name || '(not found)'}
+Phone numbers: ${phonesStr}
+Email addresses: ${emailsStr}
+Mailing address: ${traceResult.address || '(not found)'}
+--- END BUSINESS TRACE RESULTS ---`;
+        } else {
+          console.log(`[Entity Resolution] Business trace returned no results for "${entityToResolve}"`);
+        }
+      } else {
+        console.log(`[Entity Resolution] Business trace submit failed: ${traceSubmit.error}`);
+      }
+    } catch (error) {
+      console.error(`[Entity Resolution] Business trace error:`, error);
+    }
+
+    // Step 2: Also run Brave searches as supplementary context
     const queries = buildEntityResolutionQueries(entityToResolve, state);
-    console.log(`[Entity Resolution] Queries:`, queries);
+    console.log(`[Entity Resolution] Brave queries:`, queries);
     const searchResults = await Promise.all(queries.map((q) => searchBrave(q)));
 
     const newContext = queries.map((query, i) => {
@@ -292,7 +345,7 @@ async function resolveEntityChain(
     }).join('\n\n');
 
     // Accumulate context and re-extract
-    currentContext += `\n\n=== ENTITY RESOLUTION PASS ${iteration + 1}: "${entityToResolve}" ===\n${newContext}`;
+    currentContext += `\n\n=== ENTITY RESOLUTION PASS ${iteration + 1}: "${entityToResolve}" ===${businessTraceContext}\n${newContext}`;
 
     const reExtracted = await extractWithClaude(
       [record],
@@ -360,6 +413,12 @@ ENTITY CHAIN RESOLUTION RULES:
 - If the registered agent or officer is ANOTHER BUSINESS ENTITY (not a person), set individual_behind_business to that entity name so the system can resolve further.
 - When multiple passes of search data are provided (e.g., "ENTITY RESOLUTION PASS 1", "PASS 2"), use ALL context from ALL passes to build the most complete picture.
 - Follow the chain: Property → LLC → Registered Agent Entity → Officer/Person. The goal is to find the actual human decision-maker.
+
+TRACERFY BUSINESS SKIP TRACE RESULTS:
+- When "TRACERFY BUSINESS SKIP TRACE RESULTS" are present, this data comes from a professional skip tracing service and is AUTHORITATIVE for contact information.
+- If the business trace returns an owner/contact name, use that as the individual_behind_business (unless it's clearly another business entity).
+- Phone numbers and email addresses from business trace results should be added to decision_makers context.
+- Business trace data takes priority over web search results for contact details.
 
 OTHER RULES:
 - Only extract information actually found in the search results. Never fabricate data.

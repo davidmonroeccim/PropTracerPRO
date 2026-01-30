@@ -511,6 +511,33 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+## Entity Resolution via Tracerfy Business Skip Trace
+
+### Todo
+- [x] A. Add `submitBusinessTrace()` to `lib/tracerfy/client.ts`
+- [x] B. Add `parseBusinessTraceResult()` to `lib/tracerfy/client.ts`
+- [x] C. Update `resolveEntityChain()` in `lib/ai-research/client.ts`
+- [x] D. Update Claude system prompt for business trace data
+- [x] E. Verify TypeScript compiles clean
+
+### Review
+
+**Date:** January 30, 2026
+
+**2 files modified:**
+
+1. **`lib/tracerfy/client.ts`** — Two new functions:
+   - `submitBusinessTrace({ business_name, state })` — POSTs to `business-trace/` endpoint with CSV containing `business_name` and `state` columns. Same padding row trick, same auth pattern as `submitSingleTrace()`. Column mapping uses `business_name_column` and `state_column`.
+   - `parseBusinessTraceResult(result)` — Extracts owner name, phones (primary + mobile 1-5 + landline 1-3), emails (1-5), and mailing address from flat Tracerfy response. Same field parsing logic as `parseTracerfyResult()`.
+
+2. **`lib/ai-research/client.ts`** — Two changes:
+   - `resolveEntityChain()` now runs a Tracerfy business trace **before** Brave queries in each iteration. Submits the entity name + state, polls up to 10 times (3s intervals, ~30s max), filters out padding rows, parses results. Business trace context is injected as a structured block (`TRACERFY BUSINESS SKIP TRACE RESULTS`) into the accumulated Claude context, followed by the existing Brave search results as supplementary data.
+   - Claude system prompt updated with a new "TRACERFY BUSINESS SKIP TRACE RESULTS" section instructing Claude to treat business trace data as authoritative for contact info and to use the returned owner name as `individual_behind_business`.
+
+**No type changes. No UI changes. No new files. Existing residential skip trace (`submitSingleTrace`) unchanged. TypeScript compiles clean.**
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing

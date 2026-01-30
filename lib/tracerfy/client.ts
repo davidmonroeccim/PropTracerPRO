@@ -89,6 +89,109 @@ export async function submitSingleTrace(data: {
 }
 
 /**
+ * Submit a business name for skip tracing via the business-trace endpoint.
+ * Returns contact info for the business owner (phones, emails, addresses).
+ */
+export async function submitBusinessTrace(data: {
+  business_name: string;
+  state: string;
+}): Promise<{ success: boolean; jobId?: string; error?: string }> {
+  if (!API_KEY) {
+    return { success: false, error: 'Tracerfy API key not configured' };
+  }
+
+  try {
+    const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+
+    const csvContent = [
+      'business_name,state',
+      `${esc(data.business_name)},${esc(data.state)}`,
+      `"X Padding Row","${data.state}"`,
+    ].join('\n');
+
+    const formData = new FormData();
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    formData.append('csv_file', blob, 'business-trace.csv');
+
+    formData.append('business_name_column', 'business_name');
+    formData.append('state_column', 'state');
+
+    const response = await fetch(`${BASE_URL}business-trace/`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Tracerfy business trace submit error:', errorText);
+
+      if (response.status === 429) {
+        return { success: false, error: 'Rate limit exceeded. Please wait a moment before trying again.' };
+      }
+
+      return { success: false, error: 'Failed to submit business trace request' };
+    }
+
+    const result: TracerfySubmitResponse = await response.json();
+    return { success: true, jobId: result.queue_id?.toString() || result.job_id };
+  } catch (error) {
+    console.error('Tracerfy business trace submit error:', error);
+    return { success: false, error: 'Tracerfy service unavailable' };
+  }
+}
+
+/**
+ * Parse Tracerfy business trace result into owner contact info.
+ * Business trace returns similar flat fields to residential trace.
+ */
+export function parseBusinessTraceResult(result: TracerfyResult): {
+  owner_name: string | null;
+  phones: Array<{ number: string; type: string }>;
+  emails: string[];
+  address: string | null;
+} {
+  const firstName = result.first_name?.trim() || '';
+  const lastName = result.last_name?.trim() || '';
+  const ownerName = [firstName, lastName].filter(Boolean).join(' ') || null;
+
+  const phones: Array<{ number: string; type: string }> = [];
+
+  if (result.primary_phone) {
+    phones.push({ number: result.primary_phone, type: 'mobile' });
+  }
+
+  const mobileFields = [result.mobile_1, result.mobile_2, result.mobile_3, result.mobile_4, result.mobile_5];
+  for (const num of mobileFields) {
+    if (num && !phones.some((p) => p.number === num)) {
+      phones.push({ number: num, type: 'mobile' });
+    }
+  }
+
+  const landlineFields = [result.landline_1, result.landline_2, result.landline_3];
+  for (const num of landlineFields) {
+    if (num && !phones.some((p) => p.number === num)) {
+      phones.push({ number: num, type: 'landline' });
+    }
+  }
+
+  const emails: string[] = [];
+  const emailFields = [result.email_1, result.email_2, result.email_3, result.email_4, result.email_5];
+  for (const email of emailFields) {
+    if (email) {
+      emails.push(email);
+    }
+  }
+
+  const mailParts = [result.mail_address, result.mail_city, result.mail_state].filter(Boolean);
+  const address = mailParts.length > 0 ? mailParts.join(', ') : null;
+
+  return { owner_name: ownerName, phones, emails, address };
+}
+
+/**
  * Submit a batch of addresses for skip tracing.
  */
 export async function submitBulkTrace(
