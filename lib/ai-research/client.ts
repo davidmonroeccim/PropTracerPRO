@@ -189,13 +189,32 @@ function buildSearchQueries(
   return queries;
 }
 
+// State abbreviation to full name for better search results
+const STATE_NAMES: Record<string, string> = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California',
+  CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+  KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri',
+  MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio',
+  OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+  SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont',
+  VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+};
+
 // Build SOS/corporate-focused queries to resolve a business entity to a person
 function buildEntityResolutionQueries(entityName: string, state: string): string[] {
+  const fullState = STATE_NAMES[state.toUpperCase()] || state;
   return [
-    `"${entityName}" "${state}" secretary of state`,
-    `"${entityName}" registered agent annual report filing`,
-    `"${entityName}" "${state}" business entity`,
-    `"${entityName}" president OR principal OR managing member OR officer`,
+    // Direct SOS lookups with full state name
+    `"${entityName}" "${fullState}" secretary of state`,
+    `"${entityName}" "${fullState}" business entity filing`,
+    // Find who owns/operates this entity
+    `"${entityName}" owner OR owned by OR LLC OR corporation OR registered agent`,
+    `"${entityName}" "${fullState}" registered agent OR principal OR managing member OR officer`,
+    // Search for the entity + property management to find the real owner behind it
+    `"${entityName}" property owner entity LLC corporation "${fullState}"`,
   ];
 }
 
@@ -231,6 +250,8 @@ async function resolveEntityChain(
     // 3. owner_name itself looks like a business entity
     const needsResolution = isEntityType || businessNameLooksBusiness || ownerLooksBusiness;
 
+    console.log(`[Entity Resolution] Iteration ${iteration}: owner_type=${currentResult.owner_type}, owner_name=${currentResult.owner_name}, business_name=${currentResult.business_name}, individual=${currentResult.individual_behind_business}, isEntityType=${isEntityType}, ownerLooksBusiness=${!!ownerLooksBusiness}, businessNameLooksBusiness=${!!businessNameLooksBusiness}, needsResolution=${needsResolution}`);
+
     if (needsResolution) {
       if (
         currentResult.individual_behind_business &&
@@ -245,13 +266,16 @@ async function resolveEntityChain(
     }
 
     if (!entityToResolve || resolvedEntities.has(entityToResolve.toLowerCase())) {
+      console.log(`[Entity Resolution] Breaking: entityToResolve=${entityToResolve}, alreadyResolved=${entityToResolve ? resolvedEntities.has(entityToResolve.toLowerCase()) : 'N/A'}`);
       break;
     }
 
     resolvedEntities.add(entityToResolve.toLowerCase());
+    console.log(`[Entity Resolution] Resolving entity: "${entityToResolve}" (iteration ${iteration})`);
 
     // Search SOS + business records for this entity
     const queries = buildEntityResolutionQueries(entityToResolve, state);
+    console.log(`[Entity Resolution] Queries:`, queries);
     const searchResults = await Promise.all(queries.map((q) => searchBrave(q)));
 
     const newContext = queries.map((query, i) => {
