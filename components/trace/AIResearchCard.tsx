@@ -8,9 +8,10 @@ import type { AIResearchResult } from '@/types';
 interface AIResearchCardProps {
   research: AIResearchResult;
   charge: number;
+  isCached?: boolean;
 }
 
-export function AIResearchCard({ research, charge }: AIResearchCardProps) {
+export function AIResearchCard({ research, charge, isCached }: AIResearchCardProps) {
   const ownerTypeLabel: Record<string, string> = {
     individual: 'Individual',
     business: 'Business / LLC',
@@ -43,7 +44,7 @@ export function AIResearchCard({ research, charge }: AIResearchCardProps) {
           <div className="text-right">
             <p className="text-sm text-gray-500">Research Charge</p>
             <p className="text-sm font-semibold">
-              {charge > 0 ? formatCurrency(charge) : 'Free (cached)'}
+              {charge > 0 ? formatCurrency(charge) : isCached ? 'Free (cached)' : 'Free (no owner found)'}
             </p>
           </div>
         </div>

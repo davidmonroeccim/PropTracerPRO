@@ -27,6 +27,7 @@ export default function SingleTracePage() {
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchResult, setResearchResult] = useState<AIResearchResult | null>(null);
   const [researchCharge, setResearchCharge] = useState(0);
+  const [researchCached, setResearchCached] = useState(false);
   const [researchError, setResearchError] = useState<string | null>(null);
 
   // Form state
@@ -74,6 +75,7 @@ export default function SingleTracePage() {
 
       setResearchResult(data.research);
       setResearchCharge(data.charge || 0);
+      setResearchCached(data.is_cached || false);
 
       // Auto-populate owner name if found and field is empty
       if (data.research?.owner_name && !ownerName) {
@@ -226,6 +228,7 @@ export default function SingleTracePage() {
     setLoading(false);
     setResearchResult(null);
     setResearchCharge(0);
+    setResearchCached(false);
     setResearchError(null);
     setResearchLoading(false);
   };
@@ -274,6 +277,7 @@ export default function SingleTracePage() {
 
       setResearchResult(data.research);
       setResearchCharge(data.charge || 0);
+      setResearchCached(data.is_cached || false);
 
       if (data.research?.owner_name && !ownerName) {
         const bestName = data.research.individual_behind_business || data.research.owner_name;
@@ -418,7 +422,7 @@ export default function SingleTracePage() {
           {/* AI Research Card */}
           {researchResult && (
             <div className="space-y-2">
-              <AIResearchCard research={researchResult} charge={researchCharge} />
+              <AIResearchCard research={researchResult} charge={researchCharge} isCached={researchCached} />
               <Button
                 variant="outline"
                 size="sm"
