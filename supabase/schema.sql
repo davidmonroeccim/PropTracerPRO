@@ -77,6 +77,9 @@ CREATE TABLE IF NOT EXISTS trace_history (
   is_successful BOOLEAN DEFAULT FALSE,
   cost DECIMAL(10,4) DEFAULT 0,
   charge DECIMAL(10,4) DEFAULT 0,
+  ai_research JSONB DEFAULT NULL,
+  ai_research_status VARCHAR(20) DEFAULT NULL,
+  ai_research_charge DECIMAL(10,4) DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
 
   UNIQUE(user_id, address_hash)
@@ -98,6 +101,22 @@ CREATE TABLE IF NOT EXISTS trace_jobs (
   records_matched INTEGER DEFAULT 0,
   status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
   results_url TEXT,
+  error_message TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+-- ===================
+-- Research Jobs Table (AI Research Bulk)
+-- ===================
+
+CREATE TABLE IF NOT EXISTS research_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  total_records INTEGER DEFAULT 0,
+  records_completed INTEGER DEFAULT 0,
+  records_found INTEGER DEFAULT 0,
+  status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
   error_message TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   completed_at TIMESTAMPTZ
@@ -169,6 +188,9 @@ CREATE INDEX IF NOT EXISTS idx_trace_history_status ON trace_history(status);
 CREATE INDEX IF NOT EXISTS idx_trace_jobs_user_id ON trace_jobs(user_id);
 CREATE INDEX IF NOT EXISTS idx_trace_jobs_status ON trace_jobs(status);
 
+CREATE INDEX IF NOT EXISTS idx_research_jobs_user_id ON research_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_research_jobs_status ON research_jobs(status);
+
 CREATE INDEX IF NOT EXISTS idx_usage_records_user_period ON usage_records(user_id, billing_period_start);
 
 CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user ON wallet_transactions(user_id);
@@ -186,6 +208,7 @@ ALTER TABLE trace_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE research_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE api_logs ENABLE ROW LEVEL SECURITY;
 
 -- User Profiles Policies
@@ -225,6 +248,19 @@ CREATE POLICY "Users can insert own jobs"
 
 CREATE POLICY "Users can update own jobs"
   ON trace_jobs FOR UPDATE
+  USING (auth.uid() = user_id);
+
+-- Research Jobs Policies
+CREATE POLICY "Users can view own research jobs"
+  ON research_jobs FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own research jobs"
+  ON research_jobs FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own research jobs"
+  ON research_jobs FOR UPDATE
   USING (auth.uid() = user_id);
 
 -- Usage Records Policies

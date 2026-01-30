@@ -87,6 +87,9 @@ export interface TraceHistory {
   is_successful: boolean;
   cost: number;
   charge: number;
+  ai_research: AIResearchResult | null;
+  ai_research_status: string | null;
+  ai_research_charge: number;
   created_at: string;
 }
 
@@ -246,6 +249,24 @@ export interface TracerfyResult {
   mail_address?: string;
   mail_city?: string;
   mail_state?: string;
+}
+
+// ===================
+// AI Research Types
+// ===================
+
+export interface AIResearchResult {
+  owner_name: string | null;
+  owner_type: 'individual' | 'business' | 'trust' | 'unknown';
+  business_name: string | null;
+  individual_behind_business: string | null;
+  is_deceased: boolean | null;
+  deceased_details: string | null;
+  relatives: string[];
+  decision_makers: string[];
+  property_type: 'residential' | 'commercial' | 'vacant_land' | 'multi_family' | 'unknown';
+  confidence: number;
+  sources: string[];
 }
 
 // ===================

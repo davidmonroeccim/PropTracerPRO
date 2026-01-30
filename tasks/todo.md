@@ -414,6 +414,60 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+### AI Property Research Feature Implementation
+
+**Date:** January 30, 2026
+
+**6 files created, 6 files modified:**
+
+#### New Files:
+1. **`lib/brave/client.ts`** — Brave Search API client
+   - `searchBrave(query)` — single query, returns `{ title, url, description }[]`
+   - `searchBraveBatch(queries)` — fires multiple queries concurrently respecting 20/sec rate limit
+   - Uses `BRAVE_SEARCH_API_KEY` env var
+
+2. **`lib/ai-research/client.ts`** — AI research orchestrator
+   - `researchProperty(address, city, state, zip, ownerName?)` — single record research
+   - `researchPropertyBatch(records[])` — batch research with batched Claude calls (20 records/prompt)
+   - Builds 2-3 Brave search queries per property (owner lookup, entity resolution, deceased check)
+   - Sends search results to Claude Opus 4.5 for structured extraction
+   - Returns `AIResearchResult` with owner name, type, deceased status, relatives, property type, confidence
+
+3. **`app/api/research/single/route.ts`** — Single property research endpoint
+   - POST with address fields, checks wallet balance ($0.15), checks 90-day cache
+   - Charges only when owner is found, stores result on trace_history
+
+4. **`app/api/research/bulk/route.ts`** — Bulk research endpoint
+   - Accepts up to 200 records per request, `maxDuration: 300` for Vercel Pro
+   - Runs batch research, charges per found owner, returns enriched records
+
+5. **`app/api/research/bulk/status/route.ts`** — Bulk research job status endpoint
+
+6. **`components/trace/AIResearchCard.tsx`** — Research results display component
+   - Shows owner name/type, business entity, deceased status, relatives/decision makers, property type
+   - Confidence bar, charge display, matches TraceResultCard styling
+
+7. **`supabase/migrations/20260130_add_ai_research.sql`** — Database migration
+   - Adds `ai_research`, `ai_research_status`, `ai_research_charge` columns to trace_history
+   - Creates `research_jobs` table with RLS policies
+
+#### Modified Files:
+1. **`types/index.ts`** — Added `AIResearchResult` interface, added ai_research fields to `TraceHistory`
+2. **`lib/constants.ts`** — Added `AI_RESEARCH` config block (charge, rate limits, batch sizes, model)
+3. **`app/api/trace/single/route.ts`** — Accepts optional `ai_research` in request body, stores on trace_history row
+4. **`app/(dashboard)/trace/single/page.tsx`** — Added "AI Search" button next to owner name field, AIResearchCard in results area, auto-populates owner name on success
+5. **`app/(dashboard)/trace/bulk/page.tsx`** — Added "AI Research" checkbox toggle when records missing owners, new "researching" phase with progress, two-phase flow (research → trace), cost estimates for both phases
+6. **`app/api/trace/bulk/download/route.ts`** — Adds owner_type, deceased, relatives, property_type columns to CSV when AI research data present
+7. **`supabase/schema.sql`** — Updated with ai_research columns on trace_history, research_jobs table, indexes, RLS policies
+
+#### New Environment Variables:
+- `BRAVE_SEARCH_API_KEY` — Brave Search API key
+- `ANTHROPIC_API_KEY` — Claude API key for AI research
+
+**TypeScript compiles clean. No existing tests broken.**
+
+---
+
 ### Marketing Landing Page Implementation
 
 **Date:** January 29, 2026

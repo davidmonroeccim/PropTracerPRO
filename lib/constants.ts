@@ -73,6 +73,19 @@ export const HIGHLEVEL = {
 } as const;
 
 // ===================
+// AI Research
+// ===================
+
+export const AI_RESEARCH = {
+  CHARGE_PER_RECORD: 0.15,
+  BRAVE_RATE_LIMIT_PER_SEC: 20,
+  BULK_CHUNK_SIZE: 200,
+  CLAUDE_BATCH_SIZE: 20,
+  CLAUDE_MODEL: 'claude-opus-4-5-20251101',
+  MAX_DURATION_SEC: 300,
+} as const;
+
+// ===================
 // Pricing Helper
 // ===================
 

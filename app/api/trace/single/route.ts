@@ -5,7 +5,7 @@ import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
-import type { SingleTraceRequest, TraceResult } from '@/types';
+import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
 
 export async function POST(request: Request) {
   try {
@@ -21,8 +21,8 @@ export async function POST(request: Request) {
     }
 
     // Parse request body
-    const body: SingleTraceRequest = await request.json();
-    const { address, city, state, zip, owner_name } = body;
+    const body = await request.json();
+    const { address, city, state, zip, owner_name, ai_research } = body as SingleTraceRequest & { ai_research?: AIResearchResult };
 
     // Validate input
     const validation = validateAddressInput(address, city, state, zip);
@@ -99,19 +99,26 @@ export async function POST(request: Request) {
       .eq('address_hash', addressHash)
       .eq('is_successful', false);
 
-    // Insert pending trace record
+    // Insert pending trace record (include AI research data if provided)
+    const insertData: Record<string, unknown> = {
+      user_id: user.id,
+      address_hash: addressHash,
+      normalized_address: normalizedAddress,
+      city: city.toUpperCase(),
+      state: state.toUpperCase(),
+      zip: zip.substring(0, 5),
+      input_owner_name: owner_name || null,
+      status: 'processing',
+    };
+
+    if (ai_research) {
+      insertData.ai_research = ai_research;
+      insertData.ai_research_status = ai_research.owner_name ? 'found' : 'not_found';
+    }
+
     const { data: traceRecord, error: insertError } = await adminClient
       .from('trace_history')
-      .insert({
-        user_id: user.id,
-        address_hash: addressHash,
-        normalized_address: normalizedAddress,
-        city: city.toUpperCase(),
-        state: state.toUpperCase(),
-        zip: zip.substring(0, 5),
-        input_owner_name: owner_name || null,
-        status: 'processing',
-      })
+      .insert(insertData)
       .select()
       .single();
 

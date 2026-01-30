@@ -6,8 +6,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TraceResultCard } from '@/components/trace/TraceResultCard';
+import { AIResearchCard } from '@/components/trace/AIResearchCard';
 import { US_STATES } from '@/lib/constants';
-import type { TraceResult } from '@/types';
+import type { TraceResult, AIResearchResult } from '@/types';
+import { Search } from 'lucide-react';
 
 export default function SingleTracePage() {
   const [loading, setLoading] = useState(false);
@@ -21,6 +23,12 @@ export default function SingleTracePage() {
   } | null>(null);
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
 
+  // AI Research state
+  const [researchLoading, setResearchLoading] = useState(false);
+  const [researchResult, setResearchResult] = useState<AIResearchResult | null>(null);
+  const [researchCharge, setResearchCharge] = useState(0);
+  const [researchError, setResearchError] = useState<string | null>(null);
+
   // Form state
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
@@ -29,6 +37,53 @@ export default function SingleTracePage() {
   const [ownerName, setOwnerName] = useState('');
 
   const abortRef = useRef(false);
+
+  const handleAISearch = async () => {
+    if (!address || !city || !state || !zip) {
+      setResearchError('Please fill in the address fields first');
+      return;
+    }
+
+    setResearchLoading(true);
+    setResearchError(null);
+    setResearchResult(null);
+
+    try {
+      const response = await fetch('/api/research/single', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address,
+          city,
+          state,
+          zip,
+          owner_name: ownerName || undefined,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setResearchError(data.error || 'AI research failed');
+        setResearchLoading(false);
+        return;
+      }
+
+      setResearchResult(data.research);
+      setResearchCharge(data.charge || 0);
+
+      // Auto-populate owner name if found and field is empty
+      if (data.research?.owner_name && !ownerName) {
+        // Use the individual behind business if available, otherwise owner name
+        const bestName = data.research.individual_behind_business || data.research.owner_name;
+        setOwnerName(bestName);
+      }
+    } catch {
+      setResearchError('Failed to connect to server');
+    } finally {
+      setResearchLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,6 +190,10 @@ export default function SingleTracePage() {
     setError(null);
     setDebugInfo(null);
     setLoading(false);
+    setResearchResult(null);
+    setResearchCharge(0);
+    setResearchError(null);
+    setResearchLoading(false);
   };
 
   return (
@@ -210,16 +269,43 @@ export default function SingleTracePage() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="owner">Owner Name *</Label>
-                  <Input
-                    id="owner"
-                    placeholder="John Smith"
-                    value={ownerName}
-                    onChange={(e) => setOwnerName(e.target.value)}
-                    required
-                  />
-                  <p className="text-xs text-gray-500">Required for skip trace lookup</p>
+                  <div className="flex gap-2">
+                    <Input
+                      id="owner"
+                      placeholder="John Smith"
+                      value={ownerName}
+                      onChange={(e) => setOwnerName(e.target.value)}
+                      required
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleAISearch}
+                      disabled={researchLoading || !address || !city || !state || !zip}
+                      className="shrink-0 h-10 px-3"
+                      title="AI Search - Find owner name ($0.15)"
+                    >
+                      {researchLoading ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600" />
+                      ) : (
+                        <>
+                          <Search className="h-4 w-4 mr-1" />
+                          AI Search
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Required for skip trace. Use AI Search ($0.15) to find the owner, or type manually.
+                  </p>
                 </div>
               </div>
+
+              {researchError && (
+                <p className="text-sm text-red-600">{researchError}</p>
+              )}
 
               {error && (
                 <p className="text-sm text-red-600">{error}</p>
@@ -238,7 +324,13 @@ export default function SingleTracePage() {
         </Card>
 
         {/* Results */}
-        <div>
+        <div className="space-y-4">
+          {/* AI Research Card */}
+          {researchResult && (
+            <AIResearchCard research={researchResult} charge={researchCharge} />
+          )}
+
+          {/* Trace Result Card */}
           {result ? (
             <TraceResultCard
               result={result.result}
@@ -248,22 +340,22 @@ export default function SingleTracePage() {
               traceId={result.trace_id}
             />
           ) : loading ? (
-            <Card className="h-full flex items-center justify-center">
+            <Card className="flex items-center justify-center">
               <CardContent className="text-center py-12">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto mb-4" />
                 <p className="text-gray-700 font-medium">Searching...</p>
                 <p className="text-gray-500 text-sm mt-1">This may take 10-30 seconds</p>
               </CardContent>
             </Card>
-          ) : (
-            <Card className="h-full flex items-center justify-center">
+          ) : !researchResult ? (
+            <Card className="flex items-center justify-center">
               <CardContent className="text-center py-12">
                 <p className="text-gray-500">
                   Enter a property address to see owner contact information
                 </p>
               </CardContent>
             </Card>
-          )}
+          ) : null}
         </div>
       </div>
 

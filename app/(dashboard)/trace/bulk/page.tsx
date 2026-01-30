@@ -5,9 +5,10 @@ import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
+import { Search } from 'lucide-react';
 
 // ─── Column Mapping ─────────────────────────────────────────────────────────
 
@@ -47,8 +48,7 @@ function detectMapping(headers: string[]): Record<string, OurField> {
     }
   }
 
-  // Fallback: if property address fields missing but mail fields found,
-  // use mail fields as property fields (e.g. Bexar County records only have mailing address)
+  // Fallback: if property address fields missing but mail fields found
   const fallbacks: [OurField, OurField][] = [
     ['address', 'mail_address'],
     ['city', 'mail_city'],
@@ -57,7 +57,6 @@ function detectMapping(headers: string[]): Record<string, OurField> {
 
   for (const [required, fallback] of fallbacks) {
     if (!usedFields.has(required) && usedFields.has(fallback)) {
-      // Find the header that was mapped to the fallback field and remap it
       const header = Object.entries(mapping).find(([, f]) => f === fallback)?.[0];
       if (header) {
         mapping[header] = required;
@@ -91,7 +90,6 @@ function mapRows(
       mapped[field] = (row[header] || '').trim();
     }
 
-    // Build owner name from parts if needed
     let ownerName = mapped.owner_name || '';
     if (!ownerName && (mapped.first_name || mapped.last_name)) {
       ownerName = [mapped.first_name, mapped.last_name].filter(Boolean).join(' ');
@@ -131,7 +129,7 @@ function downloadTemplate() {
 
 // ─── Page Component ─────────────────────────────────────────────────────────
 
-type Phase = 'upload' | 'processing' | 'complete';
+type Phase = 'upload' | 'researching' | 'processing' | 'complete';
 
 interface JobStats {
   job_id: string | null;
@@ -162,6 +160,10 @@ export default function BulkUploadPage() {
   const [allRecords, setAllRecords] = useState<MappedRecord[]>([]);
   const [totalRows, setTotalRows] = useState(0);
   const [mappingErrors, setMappingErrors] = useState<string[]>([]);
+
+  // AI Research toggle
+  const [enableResearch, setEnableResearch] = useState(false);
+  const [researchProgress, setResearchProgress] = useState<string | null>(null);
 
   // Processing phase
   const [jobStats, setJobStats] = useState<JobStats | null>(null);
@@ -196,6 +198,9 @@ export default function BulkUploadPage() {
   // Drag state
   const [dragActive, setDragActive] = useState(false);
 
+  // Count records missing owner names
+  const recordsMissingOwner = allRecords.filter((r) => !r.owner_name).length;
+
   // ─── File Parsing ───────────────────────────────────────────────────
 
   const processFileData = useCallback((headers: string[], rows: Record<string, string>[], name: string) => {
@@ -207,7 +212,6 @@ export default function BulkUploadPage() {
     const detected = detectMapping(headers);
     setMapping(detected);
 
-    // Validate required columns
     const mappedFields = new Set(Object.values(detected));
     const errors: string[] = [];
     if (!mappedFields.has('address')) errors.push('Could not detect an "address" column');
@@ -272,7 +276,6 @@ export default function BulkUploadPage() {
           }
 
           const fileHeaders = Object.keys(json[0]);
-          // Convert all values to strings
           const rows = json.map((row) => {
             const cleaned: Record<string, string> = {};
             for (const [k, v] of Object.entries(row)) {
@@ -313,12 +316,70 @@ export default function BulkUploadPage() {
     setError(null);
     abortRef.current = false;
 
+    let recordsToSubmit = [...allRecords];
+
+    // Phase 1: AI Research (if enabled and records need it)
+    if (enableResearch && recordsMissingOwner > 0) {
+      setPhase('researching');
+
+      const recordsNeedingResearch = recordsToSubmit.filter((r) => !r.owner_name);
+      const chunkSize = AI_RESEARCH.BULK_CHUNK_SIZE;
+      let researchedCount = 0;
+
+      try {
+        for (let i = 0; i < recordsNeedingResearch.length; i += chunkSize) {
+          if (abortRef.current) break;
+
+          const chunk = recordsNeedingResearch.slice(i, i + chunkSize);
+          setResearchProgress(`Researching ${researchedCount} of ${recordsNeedingResearch.length} records...`);
+
+          const response = await fetch('/api/research/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ records: chunk }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            setError(data.error || 'AI research failed');
+            setLoading(false);
+            setPhase('upload');
+            return;
+          }
+
+          // Merge enriched records back
+          const enrichedChunk = data.records as MappedRecord[];
+          for (let j = 0; j < enrichedChunk.length; j++) {
+            const originalIdx = recordsToSubmit.findIndex(
+              (r) => r.address === chunk[j].address && r.city === chunk[j].city && !r.owner_name
+            );
+            if (originalIdx !== -1 && enrichedChunk[j].owner_name) {
+              recordsToSubmit[originalIdx] = {
+                ...recordsToSubmit[originalIdx],
+                owner_name: enrichedChunk[j].owner_name,
+              };
+            }
+          }
+
+          researchedCount += chunk.length;
+          setResearchProgress(`Researched ${researchedCount} of ${recordsNeedingResearch.length} records. ${data.records_found} owners found in this batch.`);
+        }
+      } catch {
+        setError('AI research failed. Proceeding with available data.');
+      }
+    }
+
+    // Phase 2: Submit for tracing
+    setPhase('processing');
+    setResearchProgress(null);
+
     try {
       const response = await fetch('/api/trace/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          records: allRecords,
+          records: recordsToSubmit,
           fileName: fileName || 'upload.csv',
         }),
       });
@@ -346,11 +407,10 @@ export default function BulkUploadPage() {
       }
 
       setJobId(data.job_id);
-      setPhase('processing');
 
       // Poll for results
       let attempts = 0;
-      const maxAttempts = 120; // 10 minutes at 5s intervals
+      const maxAttempts = 120;
 
       while (attempts < maxAttempts && !abortRef.current) {
         await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -374,7 +434,6 @@ export default function BulkUploadPage() {
           continue;
         }
 
-        // Completed or failed
         if (statusData.status === 'completed') {
           setCompleteStats({
             records_submitted: statusData.records_submitted,
@@ -393,7 +452,6 @@ export default function BulkUploadPage() {
         }
       }
 
-      // Timed out
       setError('Processing is taking longer than expected. Check back later.');
       setLoading(false);
     } catch {
@@ -416,6 +474,8 @@ export default function BulkUploadPage() {
     setAllRecords([]);
     setTotalRows(0);
     setMappingErrors([]);
+    setEnableResearch(false);
+    setResearchProgress(null);
     setJobStats(null);
     setPollProgress(null);
     setCompleteStats(null);
@@ -565,17 +625,49 @@ export default function BulkUploadPage() {
                 </CardContent>
               </Card>
 
-              {/* Submit */}
+              {/* AI Research Toggle + Submit */}
               {mappingErrors.length === 0 && allRecords.length > 0 && (
                 <Card>
-                  <CardContent className="pt-6">
+                  <CardContent className="pt-6 space-y-4">
+                    {/* AI Research option */}
+                    {recordsMissingOwner > 0 && (
+                      <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            id="enable-research"
+                            checked={enableResearch}
+                            onChange={(e) => setEnableResearch(e.target.checked)}
+                            className="mt-1"
+                          />
+                          <label htmlFor="enable-research" className="cursor-pointer">
+                            <div className="flex items-center gap-2">
+                              <Search className="h-4 w-4 text-blue-600" />
+                              <span className="font-medium text-gray-900">
+                                AI Research ({recordsMissingOwner} records missing owner names)
+                              </span>
+                            </div>
+                            <p className="text-sm text-gray-600 mt-1">
+                              Use AI to find owner names before tracing. ${AI_RESEARCH.CHARGE_PER_RECORD.toFixed(2)}/record, only charged when an owner is found.
+                            </p>
+                            <p className="text-sm text-gray-500 mt-1">
+                              Estimated max research cost: ${(recordsMissingOwner * AI_RESEARCH.CHARGE_PER_RECORD).toFixed(2)}
+                            </p>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium text-gray-900">
                           {allRecords.length} valid records ready to submit
                         </p>
                         <p className="text-sm text-gray-500">
-                          Estimated max cost: ${(allRecords.length * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
+                          Estimated max trace cost: ${(allRecords.length * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
+                          {enableResearch && recordsMissingOwner > 0 && (
+                            <> + up to ${(recordsMissingOwner * AI_RESEARCH.CHARGE_PER_RECORD).toFixed(2)} for AI research</>
+                          )}
                         </p>
                       </div>
                       <div className="flex gap-3">
@@ -593,6 +685,23 @@ export default function BulkUploadPage() {
             </>
           )}
         </div>
+      )}
+
+      {/* Researching Phase */}
+      {phase === 'researching' && (
+        <Card>
+          <CardContent className="py-12 text-center space-y-4">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto" />
+            <p className="text-gray-700 font-medium">Running AI Research...</p>
+            {researchProgress && (
+              <p className="text-gray-500 text-sm">{researchProgress}</p>
+            )}
+            <p className="text-gray-400 text-xs">Finding owner names for records missing them. Tracing will begin automatically after.</p>
+            {error && (
+              <p className="text-sm text-red-600 mt-4">{error}</p>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Processing Phase */}
