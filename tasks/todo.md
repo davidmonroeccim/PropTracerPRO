@@ -567,6 +567,31 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+## Fix iframe embedding for AcquisitionPRO (HighLevel)
+
+**Problem:** `proptracerpro.com refused to connect` when loaded in iframe on `app.acquisitionpro.io`.
+
+**Root Cause:** The `frame-ancestors` CSP in `next.config.ts` lists `goacquisitionpro.com` but NOT `acquisitionpro.io` — the actual parent domain shown in the screenshot. Also `X-Frame-Options: ALLOWALL` is not a valid HTTP value.
+
+### Todo
+- [x] A. Update `next.config.ts`: Add `https://acquisitionpro.io` and `https://*.acquisitionpro.io` to `frame-ancestors`
+- [x] B. Update `next.config.ts`: Remove invalid `X-Frame-Options: ALLOWALL` header (CSP frame-ancestors is the modern replacement)
+- [x] C. Update `lib/supabase/middleware.ts`: Set CSP `frame-ancestors` header on all middleware responses (redirects don't get next.config headers)
+
+### Review
+
+**Date:** February 2, 2026
+
+**2 files modified:**
+
+1. **`next.config.ts`** — Added `https://acquisitionpro.io https://*.acquisitionpro.io` to `frame-ancestors` CSP. Removed invalid `X-Frame-Options: ALLOWALL` header entirely.
+
+2. **`lib/supabase/middleware.ts`** — Added CSP header to all 4 response paths: initial `NextResponse.next()`, cookie `setAll` reassignment, login redirect, and dashboard redirect. This ensures the `frame-ancestors` directive is present even on redirect responses that bypass `next.config.ts` headers.
+
+**TypeScript compiles clean. No new files. No database changes.**
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing

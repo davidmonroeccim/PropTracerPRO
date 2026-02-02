@@ -8,11 +8,7 @@ const nextConfig: NextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' https://*.gohighlevel.com https://*.highlevel.com https://*.leadconnectorhq.com https://goacquisitionpro.com https://*.goacquisitionpro.com",
-          },
-          {
-            key: 'X-Frame-Options',
-            value: 'ALLOWALL',
+            value: "frame-ancestors 'self' https://*.gohighlevel.com https://*.highlevel.com https://*.leadconnectorhq.com https://goacquisitionpro.com https://*.goacquisitionpro.com https://acquisitionpro.io https://*.acquisitionpro.io",
           },
         ],
       },

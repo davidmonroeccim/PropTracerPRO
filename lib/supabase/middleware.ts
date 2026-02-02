@@ -1,10 +1,13 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
+const CSP_HEADER = "frame-ancestors 'self' https://*.gohighlevel.com https://*.highlevel.com https://*.leadconnectorhq.com https://goacquisitionpro.com https://*.goacquisitionpro.com https://acquisitionpro.io https://*.acquisitionpro.io";
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   });
+  supabaseResponse.headers.set('Content-Security-Policy', CSP_HEADER);
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,6 +24,7 @@ export async function updateSession(request: NextRequest) {
           supabaseResponse = NextResponse.next({
             request,
           });
+          supabaseResponse.headers.set('Content-Security-Policy', CSP_HEADER);
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, {
               ...options,
@@ -50,14 +54,18 @@ export async function updateSession(request: NextRequest) {
   if (!user && !isPublicRoute && !request.nextUrl.pathname.startsWith('/api/')) {
     const url = request.nextUrl.clone();
     url.pathname = '/login';
-    return NextResponse.redirect(url);
+    const response = NextResponse.redirect(url);
+    response.headers.set('Content-Security-Policy', CSP_HEADER);
+    return response;
   }
 
   // Redirect authenticated users away from auth pages
   if (user && isPublicRoute && request.nextUrl.pathname !== '/auth/callback') {
     const url = request.nextUrl.clone();
     url.pathname = '/dashboard';
-    return NextResponse.redirect(url);
+    const response = NextResponse.redirect(url);
+    response.headers.set('Content-Security-Policy', CSP_HEADER);
+    return response;
   }
 
   return supabaseResponse;
