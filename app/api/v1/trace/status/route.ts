@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
@@ -18,16 +18,12 @@ export async function GET(request: Request) {
       );
     }
 
-    // Check authentication
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'Unauthorized' },
-        { status: 401 }
-      );
+    // Authenticate via API key
+    const authResult = await validateApiKey(request);
+    if (isAuthError(authResult)) {
+      return authResult.response;
     }
+    const { profile } = authResult;
 
     const adminClient = createAdminClient();
 
@@ -36,7 +32,7 @@ export async function GET(request: Request) {
       .from('trace_history')
       .select('*')
       .eq('id', traceId)
-      .eq('user_id', user.id)
+      .eq('user_id', profile.id)
       .single();
 
     if (!trace) {
@@ -53,6 +49,7 @@ export async function GET(request: Request) {
         status: trace.status,
         trace_id: trace.id,
         result: trace.trace_result as TraceResult | null,
+        research: trace.ai_research || null,
         charge: trace.charge || 0,
         is_cached: false,
       });
@@ -69,7 +66,7 @@ export async function GET(request: Request) {
 
     const statusResult = await getJobStatus(trace.tracerfy_job_id);
 
-    console.log('Trace status check:', trace.id, '| job:', trace.tracerfy_job_id,
+    console.log('API v1 trace status check:', trace.id, '| job:', trace.tracerfy_job_id,
       '| success:', statusResult.success, '| pending:', statusResult.pending,
       '| results:', statusResult.results?.length || 0);
 
@@ -79,12 +76,6 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         trace_id: trace.id,
-        _debug: {
-          tracerfy_job_id: trace.tracerfy_job_id,
-          tracerfy_success: statusResult.success,
-          tracerfy_pending: statusResult.pending,
-          tracerfy_raw: statusResult.rawData,
-        },
       });
     }
 
@@ -93,7 +84,6 @@ export async function GET(request: Request) {
 
     // Empty results array means Tracerfy hasn't finished processing
     if (!statusResult.results || statusResult.results.length === 0) {
-      console.log('Empty results array - still processing');
       return NextResponse.json({
         success: true,
         status: 'processing',
@@ -107,12 +97,8 @@ export async function GET(request: Request) {
         (r) => r.address !== '0 Padding Row'
       );
 
-      console.log('Results:', statusResult.results.length, 'total,',
-        nonPaddingResults.length, 'non-padding');
-
       // If we only got padding rows back, the real record is still processing
       if (nonPaddingResults.length === 0) {
-        console.log('Only padding rows returned - still processing');
         return NextResponse.json({
           success: true,
           status: 'processing',
@@ -125,10 +111,6 @@ export async function GET(request: Request) {
         (r) => r.primary_phone || r.mobile_1 || r.email_1
       ) || nonPaddingResults[0];
 
-      console.log('Target result:', targetResult?.address,
-        '| phone:', targetResult?.primary_phone,
-        '| email:', targetResult?.email_1);
-
       if (targetResult) {
         result = parseTracerfyResult(targetResult);
       }
@@ -138,19 +120,7 @@ export async function GET(request: Request) {
     const isSuccessful = result !== null &&
       ((result.phones?.length || 0) > 0 || (result.emails?.length || 0) > 0);
 
-    console.log('Parse result:', '| phones:', result?.phones?.length || 0,
-      '| emails:', result?.emails?.length || 0, '| successful:', isSuccessful);
-
-    // Fetch profile for tier-aware pricing
-    const { data: profile } = await adminClient
-      .from('user_profiles')
-      .select('subscription_tier, wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled, is_acquisition_pro_member')
-      .eq('id', user.id)
-      .single();
-
-    const chargePerTrace = profile
-      ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
-      : PRICING.CHARGE_PER_SUCCESS_WALLET;
+    const chargePerTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
     const charge = isSuccessful ? chargePerTrace : 0;
 
     // Update trace record
@@ -167,10 +137,10 @@ export async function GET(request: Request) {
       })
       .eq('id', trace.id);
 
-    // Charge user if successful — all tiers use wallet deduction
+    // Charge user if successful
     if (isSuccessful && charge > 0) {
       await adminClient.rpc('deduct_wallet_balance', {
-        p_user_id: user.id,
+        p_user_id: profile.id,
         p_amount: charge,
         p_trace_history_id: trace.id,
         p_description: 'Skip trace - successful match',
@@ -181,11 +151,11 @@ export async function GET(request: Request) {
     const { data: integrationProfile } = await adminClient
       .from('user_profiles')
       .select('webhook_url, highlevel_api_key, highlevel_location_id')
-      .eq('id', user.id)
+      .eq('id', profile.id)
       .single();
 
     if (integrationProfile) {
-      // Webhook dispatch — send for all completed traces
+      // Webhook dispatch with research data included
       if (integrationProfile.webhook_url) {
         fetch(integrationProfile.webhook_url, {
           method: 'POST',
@@ -225,21 +195,12 @@ export async function GET(request: Request) {
       status: isSuccessful ? 'success' : 'no_match',
       trace_id: trace.id,
       result,
+      research: trace.ai_research || null,
       charge,
       is_cached: false,
-      _debug: {
-        tracerfy_job_id: trace.tracerfy_job_id,
-        results_count: statusResult.results?.length || 0,
-        is_successful: isSuccessful,
-        raw_first_result: statusResult.results?.[0] ? {
-          address: statusResult.results[0].address,
-          primary_phone: statusResult.results[0].primary_phone,
-          email_1: statusResult.results[0].email_1,
-        } : null,
-      },
     });
   } catch (error) {
-    console.error('Trace status error:', error);
+    console.error('API v1 trace status error:', error);
     return NextResponse.json(
       { success: false, error: 'Internal server error' },
       { status: 500 }

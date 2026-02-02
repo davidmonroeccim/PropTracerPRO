@@ -4,7 +4,8 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { researchProperty } from '@/lib/ai-research/client';
+import { PRICING, AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 export async function POST(request: Request) {
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
 
     // Parse request body
     const body = await request.json();
-    const { address, city, state, zip, ownerName } = body;
+    const { address, city, state, zip, ownerName, aiResearch } = body;
 
     // Validate input
     const validation = validateAddressInput(address, city, state, zip);
@@ -29,8 +30,9 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check wallet balance for all users
-    const minBalance = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    // Check wallet balance for all users (include research fee if applicable)
+    const minBalance = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+      + (aiResearch && !ownerName ? AI_RESEARCH.CHARGE_PER_RECORD : 0);
     if (profile.wallet_balance < minBalance) {
       return NextResponse.json(
         { success: false, error: 'Insufficient wallet balance' },
@@ -100,13 +102,59 @@ export async function POST(request: Request) {
       );
     }
 
+    // AI Research: if aiResearch is true and no ownerName provided, discover the owner
+    let resolvedOwnerName = ownerName || null;
+    let researchResult = null;
+    let researchCharge = 0;
+
+    if (aiResearch && !ownerName) {
+      const research = await researchProperty(address, city, state, zip);
+      researchResult = research;
+
+      if (research.owner_name) {
+        // Use individual_behind_business if available, otherwise owner_name
+        resolvedOwnerName = research.individual_behind_business || research.owner_name;
+
+        // Charge for research
+        const { data: deducted } = await adminClient.rpc('deduct_wallet_balance', {
+          p_user_id: profile.id,
+          p_amount: AI_RESEARCH.CHARGE_PER_RECORD,
+          p_description: 'AI property research (API auto-research)',
+        });
+
+        if (!deducted) {
+          // Clean up the trace record
+          await adminClient
+            .from('trace_history')
+            .delete()
+            .eq('id', traceRecord.id);
+
+          return NextResponse.json(
+            { success: false, error: 'Failed to deduct wallet balance for AI research' },
+            { status: 402 }
+          );
+        }
+        researchCharge = AI_RESEARCH.CHARGE_PER_RECORD;
+      }
+
+      // Store research on the trace record
+      await adminClient
+        .from('trace_history')
+        .update({
+          ai_research: research,
+          ai_research_status: research.owner_name ? 'found' : 'not_found',
+          ai_research_charge: researchCharge,
+        })
+        .eq('id', traceRecord.id);
+    }
+
     // Submit to Tracerfy
     const submitResult = await submitSingleTrace({
       address,
       city,
       state,
       zip,
-      owner_name: ownerName,
+      owner_name: resolvedOwnerName || undefined,
     });
 
     if (!submitResult.success || !submitResult.jobId) {
@@ -132,7 +180,9 @@ export async function POST(request: Request) {
       status: 'processing',
       traceId: traceRecord.id,
       tracerfyJobId: submitResult.jobId,
-      message: 'Trace submitted. Poll /api/trace/status?trace_id=' + traceRecord.id + ' for results.',
+      research: researchResult || undefined,
+      researchCharge: researchCharge || undefined,
+      message: 'Trace submitted. Poll /api/v1/trace/status?trace_id=' + traceRecord.id + ' for results.',
     });
   } catch (error) {
     console.error('API v1 single trace error:', error);

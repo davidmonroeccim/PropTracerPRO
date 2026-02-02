@@ -89,7 +89,7 @@ export default function ApiDocsPage() {
       <Card>
         <CardHeader>
           <CardTitle>API Endpoints</CardTitle>
-          <CardDescription>Available endpoints for skip tracing</CardDescription>
+          <CardDescription>Available endpoints for skip tracing and AI research</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           {/* Single Trace */}
@@ -98,7 +98,7 @@ export default function ApiDocsPage() {
               <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
               <code className="text-sm font-semibold">/trace/single</code>
             </div>
-            <p className="text-gray-600 text-sm">Trace a single property address</p>
+            <p className="text-gray-600 text-sm">Trace a single property address. Optionally run AI research to discover the owner automatically.</p>
 
             <h5 className="font-medium text-sm">Request Body:</h5>
             <CodeBlock
@@ -107,23 +107,59 @@ export default function ApiDocsPage() {
   "city": "Austin",
   "state": "TX",
   "zip": "78701",
-  "ownerName": "John Smith"  // optional, improves accuracy
+  "ownerName": "John Smith",  // optional, improves accuracy
+  "aiResearch": true           // optional, discovers owner if ownerName is omitted
 }`}
               section="single-request"
             />
 
-            <h5 className="font-medium text-sm">Response:</h5>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p className="text-blue-800 text-sm">
+                <strong>AI Research:</strong> When <code className="bg-blue-100 px-1 rounded">aiResearch: true</code> and no <code className="bg-blue-100 px-1 rounded">ownerName</code> is provided, PropTracerPRO will run AI-powered property research to discover the owner before skip tracing. This adds $0.15 to the cost (only charged if an owner is found). If <code className="bg-blue-100 px-1 rounded">ownerName</code> is provided, research is skipped.
+              </p>
+            </div>
+
+            <h5 className="font-medium text-sm">Response (processing):</h5>
             <CodeBlock
               code={`{
   "success": true,
-  "cached": false,
-  "charge": 0.07,
+  "status": "processing",
+  "traceId": "uuid",
+  "tracerfyJobId": "job_abc123",
+  "research": {                        // included when aiResearch was used
+    "owner_name": "John Smith",
+    "owner_type": "individual",
+    "confidence": 75,
+    "business_name": null,
+    "individual_behind_business": null
+  },
+  "researchCharge": 0.15,
+  "message": "Trace submitted. Poll /api/v1/trace/status?trace_id=uuid for results."
+}`}
+              section="single-response"
+            />
+          </div>
+
+          <hr />
+
+          {/* Trace Status */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
+              <code className="text-sm font-semibold">/trace/status?trace_id=uuid</code>
+            </div>
+            <p className="text-gray-600 text-sm">Poll for trace results. Returns the full result when ready, including AI research data if it was used.</p>
+
+            <h5 className="font-medium text-sm">Response (completed):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "status": "success",
+  "trace_id": "uuid",
   "result": {
     "owner_name": "John Smith",
-    "owner_name_2": null,
     "phones": [
-      { "number": "5125551234", "type": "mobile" },
-      { "number": "5125555678", "type": "landline" }
+      { "number": "5125551234", "type": "mobile" }
     ],
     "emails": ["john.smith@email.com"],
     "mailing_address": "456 Oak Ave",
@@ -131,10 +167,83 @@ export default function ApiDocsPage() {
     "mailing_state": "TX",
     "mailing_zip": "78702",
     "match_confidence": 95
-  }
+  },
+  "research": {
+    "owner_name": "John Smith",
+    "owner_type": "individual",
+    "is_deceased": false,
+    "relatives": ["Jane Smith"],
+    "decision_makers": ["Jane Smith"],
+    "confidence": 75,
+    "business_name": null,
+    "individual_behind_business": null
+  },
+  "charge": 0.07,
+  "is_cached": false
 }`}
-              section="single-response"
+              section="status-response"
             />
+
+            <h5 className="font-medium text-sm">Response (still processing):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "status": "processing",
+  "trace_id": "uuid"
+}`}
+              section="status-processing"
+            />
+          </div>
+
+          <hr />
+
+          {/* AI Research */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
+              <code className="text-sm font-semibold">/research/single</code>
+            </div>
+            <p className="text-gray-600 text-sm">Run AI research only (no skip trace). Discovers property owner using public records and AI analysis.</p>
+
+            <h5 className="font-medium text-sm">Request Body:</h5>
+            <CodeBlock
+              code={`{
+  "address": "123 Main Street",
+  "city": "Austin",
+  "state": "TX",
+  "zip": "78701",
+  "ownerName": "Smith LLC",  // optional, helps with entity resolution
+  "skipCache": false          // optional, set true to bypass 90-day cache
+}`}
+              section="research-request"
+            />
+
+            <h5 className="font-medium text-sm">Response:</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "isCached": false,
+  "research": {
+    "owner_name": "Smith LLC",
+    "owner_type": "business",
+    "is_deceased": false,
+    "deceased_details": null,
+    "relatives": [],
+    "decision_makers": ["John Smith"],
+    "confidence": 80,
+    "business_name": "Smith LLC",
+    "individual_behind_business": "John Smith"
+  },
+  "charge": 0.15
+}`}
+              section="research-response"
+            />
+
+            <div className="bg-gray-50 border rounded-lg p-4">
+              <p className="text-gray-700 text-sm">
+                <strong>Pricing:</strong> $0.15 per lookup, only charged if an owner is found. Cached results (within 90 days) are free.
+              </p>
+            </div>
           </div>
 
           <hr />
@@ -219,11 +328,11 @@ export default function ApiDocsPage() {
           <CardDescription>Copy-paste examples for popular platforms</CardDescription>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="highlevel" className="w-full">
+          <Tabs defaultValue="n8n" className="w-full">
             <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="highlevel">HighLevel</TabsTrigger>
-              <TabsTrigger value="make">Make</TabsTrigger>
               <TabsTrigger value="n8n">n8n</TabsTrigger>
+              <TabsTrigger value="make">Make</TabsTrigger>
+              <TabsTrigger value="highlevel">HighLevel</TabsTrigger>
               <TabsTrigger value="curl">cURL</TabsTrigger>
             </TabsList>
 
@@ -272,13 +381,13 @@ Body (JSON):
             </TabsContent>
 
             <TabsContent value="make" className="space-y-4 mt-4">
-              <h4 className="font-semibold">Make (Integromat) Integration</h4>
+              <h4 className="font-semibold">Make (Integromat) — Automated Workflow</h4>
               <p className="text-gray-600 text-sm">
-                Create a scenario with the HTTP module to trace properties.
+                Create a scenario with HTTP modules for the full automated pipeline.
               </p>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">HTTP Module Configuration</p>
+                <p className="font-medium text-sm">Module 1: Submit Trace with AI Research</p>
                 <CodeBlock
                   code={`Module: HTTP - Make a request
 
@@ -297,82 +406,142 @@ Request content:
   "address": "{{1.address}}",
   "city": "{{1.city}}",
   "state": "{{1.state}}",
-  "zip": "{{1.zip}}"
+  "zip": "{{1.zip}}",
+  "aiResearch": true
 }
 
 Parse response: Yes`}
-                  section="make"
+                  section="make-step1"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Module 2: Poll for Results</p>
+                <CodeBlock
+                  code={`Module: HTTP - Make a request (inside a Repeater)
+
+URL: https://proptracerpro.vercel.app/api/v1/trace/status?trace_id={{2.traceId}}
+Method: GET
+
+Headers:
+  Authorization: Bearer ptp_your_api_key
+
+Parse response: Yes
+
+// Add a Sleep module (10s) and Router:
+//   Route 1: status == "processing" → loop back
+//   Route 2: status != "processing" → continue`}
+                  section="make-step2"
                 />
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Use a Router after the HTTP module to handle success/error responses separately.
+                  <strong>Tip:</strong> Use a Router after the poll module to handle success/no_match/error separately. CRM push to HighLevel happens automatically on the server.
                 </p>
               </div>
             </TabsContent>
 
             <TabsContent value="n8n" className="space-y-4 mt-4">
-              <h4 className="font-semibold">n8n Integration</h4>
+              <h4 className="font-semibold">n8n — Full Automated Workflow</h4>
               <p className="text-gray-600 text-sm">
-                Use the HTTP Request node to integrate with PropTracerPRO.
+                Complete automated pipeline: county records in, owner + contact data out. No owner name needed.
               </p>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">HTTP Request Node Configuration</p>
+                <p className="font-medium text-sm">Step 1: Submit Trace with AI Research</p>
                 <CodeBlock
-                  code={`{
-  "nodes": [
-    {
-      "name": "PropTracerPRO Trace",
-      "type": "n8n-nodes-base.httpRequest",
-      "parameters": {
-        "method": "POST",
-        "url": "https://proptracerpro.vercel.app/api/v1/trace/single",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer ptp_your_api_key"
-            }
-          ]
-        },
-        "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            { "name": "address", "value": "={{ $json.address }}" },
-            { "name": "city", "value": "={{ $json.city }}" },
-            { "name": "state", "value": "={{ $json.state }}" },
-            { "name": "zip", "value": "={{ $json.zip }}" }
-          ]
-        },
-        "options": {}
-      }
-    }
-  ]
-}`}
-                  section="n8n"
+                  code={`// HTTP Request Node — POST
+URL: https://proptracerpro.vercel.app/api/v1/trace/single
+Headers: Authorization: Bearer ptp_your_api_key
+
+Body (JSON):
+{
+  "address": "={{ $json.address }}",
+  "city": "={{ $json.city }}",
+  "state": "={{ $json.state }}",
+  "zip": "={{ $json.zip }}",
+  "aiResearch": true
+}
+
+// No ownerName needed — AI discovers the owner automatically`}
+                  section="n8n-step1"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Step 2: Wait + Poll for Results</p>
+                <CodeBlock
+                  code={`// Wait Node: 10 seconds
+
+// HTTP Request Node — GET
+URL: https://proptracerpro.vercel.app/api/v1/trace/status?trace_id={{ $json.traceId }}
+Headers: Authorization: Bearer ptp_your_api_key
+
+// IF Node: Check if still processing
+// Condition: {{ $json.status }} == "processing"
+//   True → loop back to Wait
+//   False → continue to next step`}
+                  section="n8n-step2"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Step 3: Use Results</p>
+                <CodeBlock
+                  code={`// Results available in the response:
+{{ $json.result.phones[0].number }}  → Owner phone
+{{ $json.result.emails[0] }}         → Owner email
+{{ $json.result.owner_name }}        → Owner name
+{{ $json.research.owner_type }}      → "individual" or "business"
+{{ $json.research.confidence }}      → AI confidence score
+
+// CRM push happens automatically server-side (HighLevel)
+// Webhook fires automatically when trace completes`}
+                  section="n8n-step3"
                 />
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security.
+                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security. You can also skip polling and use webhooks instead — configure your webhook URL in Settings.
                 </p>
               </div>
             </TabsContent>
 
             <TabsContent value="curl" className="space-y-4 mt-4">
-              <h4 className="font-semibold">cURL Example</h4>
-              <p className="text-gray-600 text-sm">
-                Test the API directly from your terminal.
-              </p>
+              <h4 className="font-semibold">cURL Examples</h4>
 
-              <CodeBlock
-                code={`curl -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Trace with AI Research (no owner name needed):</p>
+                <CodeBlock
+                  code={`curl -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
+  -H "Authorization: Bearer ptp_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "address": "123 Main Street",
+    "city": "Austin",
+    "state": "TX",
+    "zip": "78701",
+    "aiResearch": true
+  }'`}
+                  section="curl-trace"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Poll for results:</p>
+                <CodeBlock
+                  code={`curl "https://proptracerpro.vercel.app/api/v1/trace/status?trace_id=YOUR_TRACE_ID" \\
+  -H "Authorization: Bearer ptp_your_api_key"`}
+                  section="curl-status"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">AI Research only (no skip trace):</p>
+                <CodeBlock
+                  code={`curl -X POST https://proptracerpro.vercel.app/api/v1/research/single \\
   -H "Authorization: Bearer ptp_your_api_key" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -381,8 +550,9 @@ Parse response: Yes`}
     "state": "TX",
     "zip": "78701"
   }'`}
-                section="curl"
-              />
+                  section="curl-research"
+                />
+              </div>
             </TabsContent>
           </Tabs>
         </CardContent>
@@ -400,7 +570,7 @@ Parse response: Yes`}
             PropTracerPRO will POST to your URL when traces complete.
           </p>
 
-          <h5 className="font-medium text-sm">Single Trace Completion:</h5>
+          <h5 className="font-medium text-sm">trace.completed (Single Trace):</h5>
           <CodeBlock
             code={`{
   "event": "trace.completed",
@@ -420,10 +590,47 @@ Parse response: Yes`}
     "mailing_zip": "75202",
     "match_confidence": 95
   },
+  "research": {
+    "owner_name": "John Smith",
+    "owner_type": "individual",
+    "is_deceased": false,
+    "relatives": ["Jane Smith"],
+    "decision_makers": ["Jane Smith"],
+    "confidence": 75,
+    "business_name": null,
+    "individual_behind_business": null
+  },
   "charge": 0.07,
   "timestamp": "2026-01-27T15:30:00Z"
 }`}
             section="webhook-single"
+          />
+          <div className="bg-gray-50 border rounded-lg p-3 mt-2">
+            <p className="text-gray-600 text-sm">
+              The <code className="bg-gray-200 px-1 rounded">research</code> field is included when AI research was used. It will be <code className="bg-gray-200 px-1 rounded">null</code> if research was not requested.
+            </p>
+          </div>
+
+          <h5 className="font-medium text-sm mt-4">research.completed (AI Research Only):</h5>
+          <CodeBlock
+            code={`{
+  "event": "research.completed",
+  "address": "123 MAIN ST",
+  "city": "DALLAS",
+  "state": "TX",
+  "zip": "75201",
+  "research": {
+    "owner_name": "Smith LLC",
+    "owner_type": "business",
+    "is_deceased": false,
+    "confidence": 80,
+    "business_name": "Smith LLC",
+    "individual_behind_business": "John Smith"
+  },
+  "charge": 0.15,
+  "timestamp": "2026-01-27T15:30:00Z"
+}`}
+            section="webhook-research"
           />
 
           <h5 className="font-medium text-sm">Bulk Job Completion:</h5>

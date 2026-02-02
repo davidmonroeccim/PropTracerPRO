@@ -538,6 +538,35 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 
 ---
 
+## Full Automated AI Research + Trace Pipeline
+
+### Todo
+- [x] Task 1: Create `/api/v1/research/single` — standalone AI research with API key auth
+- [x] Task 2: Add `aiResearch` opt-in flag to `/api/v1/trace/single`
+- [x] Task 3: Create `/api/v1/trace/status` — API-key-auth status polling
+- [x] Task 4: Add research data to webhook payloads (both v1 status and session-auth status)
+- [x] Task 5: Update API docs page with new endpoints + examples
+
+### Review
+
+**Date:** February 2, 2026
+
+**2 files created, 3 files modified:**
+
+1. **`app/api/v1/research/single/route.ts`** (new) — Standalone AI research endpoint with API key auth. Validates input, checks wallet balance ($0.15), checks 90-day cache, runs `researchProperty()`, charges only if owner found, fires `research.completed` webhook.
+
+2. **`app/api/v1/trace/status/route.ts`** (new) — API-key-auth version of trace status polling. Same Tracerfy polling logic as session-auth version. Includes billing, CRM push (HighLevel), and webhook dispatch. Returns `research` field from `trace_history.ai_research` in both completed responses and webhook payloads.
+
+3. **`app/api/v1/trace/single/route.ts`** (modified) — Added `aiResearch` flag. When `aiResearch: true` and no `ownerName`: runs `researchProperty()` first, uses discovered owner (`individual_behind_business || owner_name`) as the Tracerfy input, stores research on trace record, charges $0.15 research fee. When `ownerName` is already provided, research is skipped. Wallet balance check includes research fee when applicable. Response includes `research` and `researchCharge` fields.
+
+4. **`app/api/trace/status/route.ts`** (modified) — Added `research: trace.ai_research || null` to the `trace.completed` webhook payload. One-line change.
+
+5. **`app/(dashboard)/settings/api-keys/docs/page.tsx`** (modified) — Added: AI Research endpoint (`POST /v1/research/single`), Trace Status endpoint (`GET /v1/trace/status`), `aiResearch` flag documentation on single trace, `research.completed` webhook event, enhanced `trace.completed` webhook with research fields. Updated n8n/Make/cURL examples to show full automated workflow (submit with `aiResearch: true` → poll status → use results).
+
+**TypeScript compiles clean. No database changes needed.**
+
+---
+
 ## Notes
 - All changes should be minimal and simple per CLAUDE.md rules
 - Never create fallback/fake data - allow application to fail if data is missing
