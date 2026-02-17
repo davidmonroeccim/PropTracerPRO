@@ -80,15 +80,16 @@ export async function validateApiKey(
   }
 
   // Log the API request (fire-and-forget)
-  adminClient
-    .from('api_logs')
-    .insert({
-      user_id: profile.id,
-      method: request.method,
-      path: new URL(request.url).pathname,
-      status_code: 200,
-    })
-    .then(() => {}).catch((err) => console.error('Audit log failed:', err));
+  Promise.resolve(
+    adminClient
+      .from('api_logs')
+      .insert({
+        user_id: profile.id,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status_code: 200,
+      })
+  ).catch((err) => console.error('Audit log failed:', err));
 
   return { profile };
 }
