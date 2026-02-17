@@ -60,12 +60,12 @@ export default function OnboardingPage() {
         return;
       }
 
+      // Membership flags (is_acquisition_pro_member, acquisition_pro_verified_at)
+      // are set server-side by /api/verify-member to prevent client-side bypass
       const updateData: Record<string, unknown> = {
         company_name: companyName || null,
         primary_use_case: primaryUseCase || null,
         onboarding_completed: true,
-        is_acquisition_pro_member: verificationStatus === 'verified',
-        acquisition_pro_verified_at: verificationStatus === 'verified' ? new Date().toISOString() : null,
       };
 
       const { error: updateError } = await supabase

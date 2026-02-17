@@ -793,18 +793,24 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 - [x] Audit all library/utility files for vulnerabilities
 - [x] Audit all frontend components for vulnerabilities
 - [x] Consolidate and categorize findings by severity
-- [ ] C3: Remove `_debug` fields from `trace/status/route.ts` + debug UI from `trace/single/page.tsx`
-- [ ] C4: Replace `error.message` with generic messages in 6 API route catch blocks
-- [ ] C1: Create `lib/utils/validate-url.ts` with `isValidWebhookUrl()` helper; use in 6 webhook dispatch sites + v1 bulk webhook save
-- [ ] H3: Validate `next` param in `app/auth/callback/route.ts` (must start with `/`, no `//`)
-- [ ] H5: Move `is_acquisition_pro_member` write from client to `verify-member` API route
-- [ ] H8: Replace `select('*')` with explicit column lists in `api/auth.ts`, `trace/single/route.ts`, `research/single/route.ts`, `trace/bulk/route.ts`
-- [ ] H4: Remove blanket `/api/` exemption from middleware; add `/api/stripe/webhook` and `/api/auth/` as explicit public API routes
-- [ ] H2: Hash API keys — store SHA-256 hash + prefix; update generate + validate
-- [ ] H6: Add Origin header validation to all session-auth POST endpoints via shared helper
-- [ ] C2: Add pre-deduction hold via `reserve_wallet_balance` RPC at submission time (or verify existing `deduct_wallet_balance` rejects negative)
-- [ ] H1: Add simple in-memory rate limiter for v1 API endpoints
-- [ ] M2: Fix bulk research wallet check to use `maxCost` (one-line fix)
+#### Pass 1 — Safe fixes (no breakage risk)
+- [x] C3: Remove `_debug` fields from `trace/status/route.ts` + debug UI from `trace/single/page.tsx`
+- [x] C4: Replace `error.message` with generic messages in 6 API route catch blocks
+- [x] M2: Fix bulk research wallet check to use `maxCost` (one-line fix)
+- [x] H3: Validate `next` param in `app/auth/callback/route.ts` (must start with `/`, no `//`)
+- [x] C1: Create `lib/utils/validate-url.ts` with `isValidWebhookUrl()` helper (allow HTTP+HTTPS, block private IPs); use in webhook dispatch sites + v1 bulk webhook save
+- [x] H5: Move `is_acquisition_pro_member` write from client to `verify-member` API route; client onboarding keeps writing only `company_name`, `primary_use_case`, `onboarding_completed`
+- [x] H8: Replace `select('*')` with explicit column lists in `api/auth.ts`, `trace/single/route.ts`, `research/single/route.ts`, `trace/bulk/route.ts` (trace every field used downstream)
+- [x] Bonus: M5 — Removed PII (phone/email) from console.log in `trace/status/route.ts`
+- [x] Bonus: L2 — Fixed fire-and-forget audit logging in `api/auth.ts` (added `.catch()` for error visibility)
+
+#### Pass 2 — Requires migration/careful handling (NOT YET — needs separate approval)
+- [ ] H2: Hash API keys — add hashed column alongside plaintext, support both during transition
+- [ ] H4: Add shared `requireSessionAuth()` helper for API routes (don't change middleware redirect logic)
+- [ ] H6: Add Origin header validation with allowlist including app domain + HighLevel/AcquisitionPRO iframe domains
+- [ ] C2: Read/verify DB `deduct_wallet_balance` function before adding any hold logic
+- [ ] H1: Add in-memory rate limiter for v1 API endpoints with generous defaults
+- [ ] H7: Encrypt HighLevel API keys at rest (needs encryption key setup)
 
 ---
 
@@ -988,3 +994,33 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 15. M5 — Remove PII from console logs
 16. M6 — Validate AI research source URL schemes
 17. All remaining MEDIUM and LOW items
+
+---
+
+### Review — Pass 1 Changes
+
+**Summary:** 9 security fixes applied across 15 files. All changes are minimal, targeted, and non-breaking.
+
+**Files modified:**
+| File | Changes |
+|------|---------|
+| `app/api/trace/status/route.ts` | Removed 2 `_debug` response blocks, replaced PII console.log with trace ID only |
+| `app/(dashboard)/trace/single/page.tsx` | Removed `debugInfo` state, debug consumer, and debug UI rendering |
+| `app/api/trace/single/route.ts` | Generic error message, scoped `select()` to 3 columns |
+| `app/api/trace/bulk/route.ts` | Generic error message, scoped `select()` to 3 columns |
+| `app/api/research/single/route.ts` | Generic error message, scoped `select()` to `wallet_balance` |
+| `app/api/research/bulk/route.ts` | Generic error message, fixed wallet check to use `maxCost` |
+| `app/api/v1/research/single/route.ts` | Generic error message, webhook URL validation |
+| `app/api/cache/clear/route.ts` | Generic error message |
+| `app/auth/callback/route.ts` | Validated `next` redirect param |
+| `app/api/verify-member/route.ts` | Now writes `is_acquisition_pro_member` server-side on verification |
+| `app/(auth)/onboarding/page.tsx` | Removed client-side write of membership fields |
+| `lib/api/auth.ts` | Scoped `select()` to 4 columns, new `ApiProfile` type, fixed audit log `.catch()` |
+| `app/api/v1/trace/status/route.ts` | Webhook URL validation |
+| `app/api/v1/trace/bulk/route.ts` | Webhook URL validation + reject invalid URLs with 400 |
+| `app/api/trace/bulk/status/route.ts` | Webhook URL validation |
+
+**New file:**
+| File | Purpose |
+|------|---------|
+| `lib/utils/validate-url.ts` | `isValidWebhookUrl()` — blocks private IPs, localhost, and non-HTTP(S) schemes |

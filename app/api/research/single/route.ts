@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     // Get user profile for wallet check
     const { data: profile } = await supabase
       .from('user_profiles')
-      .select('*')
+      .select('wallet_balance')
       .eq('id', user.id)
       .single();
 
@@ -120,9 +120,8 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('AI research error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: `AI research failed: ${message}` },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

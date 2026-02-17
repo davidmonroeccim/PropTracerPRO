@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { isValidWebhookUrl } from '@/lib/utils/validate-url';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
     // Look up the trace record
     const { data: trace } = await adminClient
       .from('trace_history')
-      .select('*')
+      .select('id, status, trace_result, charge, tracerfy_job_id, normalized_address, city, state, zip, ai_research')
       .eq('id', traceId)
       .eq('user_id', user.id)
       .single();
@@ -79,12 +80,6 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         trace_id: trace.id,
-        _debug: {
-          tracerfy_job_id: trace.tracerfy_job_id,
-          tracerfy_success: statusResult.success,
-          tracerfy_pending: statusResult.pending,
-          tracerfy_raw: statusResult.rawData,
-        },
       });
     }
 
@@ -125,9 +120,7 @@ export async function GET(request: Request) {
         (r) => r.primary_phone || r.mobile_1 || r.email_1
       ) || nonPaddingResults[0];
 
-      console.log('Target result:', targetResult?.address,
-        '| phone:', targetResult?.primary_phone,
-        '| email:', targetResult?.email_1);
+      console.log('Target result found for trace:', trace.id);
 
       if (targetResult) {
         result = parseTracerfyResult(targetResult);
@@ -186,7 +179,7 @@ export async function GET(request: Request) {
 
     if (integrationProfile) {
       // Webhook dispatch — send for all completed traces
-      if (integrationProfile.webhook_url) {
+      if (integrationProfile.webhook_url && isValidWebhookUrl(integrationProfile.webhook_url)) {
         fetch(integrationProfile.webhook_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -227,16 +220,6 @@ export async function GET(request: Request) {
       result,
       charge,
       is_cached: false,
-      _debug: {
-        tracerfy_job_id: trace.tracerfy_job_id,
-        results_count: statusResult.results?.length || 0,
-        is_successful: isSuccessful,
-        raw_first_result: statusResult.results?.[0] ? {
-          address: statusResult.results[0].address,
-          primary_phone: statusResult.results[0].primary_phone,
-          email_1: statusResult.results[0].email_1,
-        } : null,
-      },
     });
   } catch (error) {
     console.error('Trace status error:', error);

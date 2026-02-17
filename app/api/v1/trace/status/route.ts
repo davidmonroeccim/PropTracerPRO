@@ -4,6 +4,7 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { isValidWebhookUrl } from '@/lib/utils/validate-url';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -156,7 +157,7 @@ export async function GET(request: Request) {
 
     if (integrationProfile) {
       // Webhook dispatch with research data included
-      if (integrationProfile.webhook_url) {
+      if (integrationProfile.webhook_url && isValidWebhookUrl(integrationProfile.webhook_url)) {
         fetch(integrationProfile.webhook_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

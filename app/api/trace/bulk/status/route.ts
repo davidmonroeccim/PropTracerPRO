@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { isValidWebhookUrl } from '@/lib/utils/validate-url';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -220,7 +221,7 @@ export async function GET(request: Request) {
     // Fire-and-forget: webhook dispatch + HighLevel push
     if (profile) {
       // Webhook dispatch — send bulk job summary
-      if (profile.webhook_url) {
+      if (profile.webhook_url && isValidWebhookUrl(profile.webhook_url)) {
         fetch(profile.webhook_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

@@ -5,6 +5,7 @@ import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normali
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { isValidWebhookUrl } from '@/lib/utils/validate-url';
 import type { AddressInput } from '@/types';
 
 const MAX_RECORDS = 10000;
@@ -75,6 +76,12 @@ export async function POST(request: Request) {
 
     // Save webhook URL if provided (overrides profile setting for this job)
     if (webhookUrl) {
+      if (!isValidWebhookUrl(webhookUrl)) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid webhook URL. Must be a valid HTTP/HTTPS URL and not point to a private network.' },
+          { status: 400 }
+        );
+      }
       await adminClient
         .from('user_profiles')
         .update({ webhook_url: webhookUrl })

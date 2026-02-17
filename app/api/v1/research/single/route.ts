@@ -4,6 +4,7 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { researchProperty } from '@/lib/ai-research/client';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { AI_RESEARCH, DEDUPE } from '@/lib/constants';
+import { isValidWebhookUrl } from '@/lib/utils/validate-url';
 
 export async function POST(request: Request) {
   try {
@@ -104,7 +105,7 @@ export async function POST(request: Request) {
       .eq('id', profile.id)
       .single();
 
-    if (integrationProfile?.webhook_url) {
+    if (integrationProfile?.webhook_url && isValidWebhookUrl(integrationProfile.webhook_url)) {
       fetch(integrationProfile.webhook_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -129,9 +130,8 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('API v1 research error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: `AI research failed: ${message}` },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

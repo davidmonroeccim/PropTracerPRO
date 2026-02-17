@@ -1,9 +1,16 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { UserProfile } from '@/types';
+import type { SubscriptionTier } from '@/types';
+
+export interface ApiProfile {
+  id: string;
+  subscription_tier: SubscriptionTier;
+  is_acquisition_pro_member: boolean;
+  wallet_balance: number;
+}
 
 interface AuthResult {
-  profile: UserProfile;
+  profile: ApiProfile;
 }
 
 interface AuthError {
@@ -44,10 +51,10 @@ export async function validateApiKey(
 
   const adminClient = createAdminClient();
 
-  // Look up user by API key
+  // Look up user by API key — only select fields needed by v1 API handlers
   const { data: profile, error } = await adminClient
     .from('user_profiles')
-    .select('*')
+    .select('id, subscription_tier, is_acquisition_pro_member, wallet_balance')
     .eq('api_key', apiKey)
     .single();
 
@@ -81,7 +88,7 @@ export async function validateApiKey(
       path: new URL(request.url).pathname,
       status_code: 200,
     })
-    .then(() => {});
+    .then(() => {}).catch((err) => console.error('Audit log failed:', err));
 
   return { profile };
 }

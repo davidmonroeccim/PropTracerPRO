@@ -59,7 +59,7 @@ export async function POST(request: Request) {
     }
 
     const maxCost = records.length * AI_RESEARCH.CHARGE_PER_RECORD;
-    if (profile.wallet_balance < AI_RESEARCH.CHARGE_PER_RECORD) {
+    if (profile.wallet_balance < maxCost) {
       return NextResponse.json(
         { success: false, error: 'Insufficient wallet balance for AI research.' },
         { status: 402 }
@@ -138,9 +138,8 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('Bulk research error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: `Bulk research failed: ${message}` },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

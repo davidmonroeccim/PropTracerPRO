@@ -47,9 +47,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Cache clear error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: `Failed to clear cache: ${message}` },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

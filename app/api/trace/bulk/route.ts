@@ -43,7 +43,7 @@ export async function POST(request: Request) {
     // Get user profile for billing
     const { data: profile } = await supabase
       .from('user_profiles')
-      .select('*')
+      .select('subscription_tier, is_acquisition_pro_member, wallet_balance')
       .eq('id', user.id)
       .single();
 
@@ -207,9 +207,8 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('Bulk trace error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: `Internal server error: ${message}` },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

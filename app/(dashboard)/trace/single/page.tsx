@@ -21,8 +21,6 @@ export default function SingleTracePage() {
     result: TraceResult | null;
     charge: number;
   } | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string | null>(null);
-
   // AI Research state
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchResult, setResearchResult] = useState<AIResearchResult | null>(null);
@@ -95,7 +93,6 @@ export default function SingleTracePage() {
     setLoading(true);
     setError(null);
     setResult(null);
-    setDebugInfo(null);
     abortRef.current = false;
 
     try {
@@ -159,9 +156,6 @@ export default function SingleTracePage() {
           }
 
           // Results ready (success or no_match)
-          if (statusData._debug) {
-            setDebugInfo(JSON.stringify(statusData._debug, null, 2));
-          }
           setResult({
             success: true,
             is_cached: statusData.is_cached || false,
@@ -224,7 +218,6 @@ export default function SingleTracePage() {
     setOwnerName('');
     setResult(null);
     setError(null);
-    setDebugInfo(null);
     setLoading(false);
     setResearchResult(null);
     setResearchCharge(0);
@@ -465,12 +458,6 @@ export default function SingleTracePage() {
         </div>
       </div>
 
-      {debugInfo && (
-        <details className="mt-4">
-          <summary className="text-xs text-gray-400 cursor-pointer">Debug Info</summary>
-          <pre className="mt-2 p-3 bg-gray-100 rounded text-xs overflow-auto max-h-48">{debugInfo}</pre>
-        </details>
-      )}
     </div>
   );
 }
