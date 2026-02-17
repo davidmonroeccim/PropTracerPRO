@@ -793,7 +793,18 @@ WALLET_MIN_REBILL_AMOUNT=25.00
 - [x] Audit all library/utility files for vulnerabilities
 - [x] Audit all frontend components for vulnerabilities
 - [x] Consolidate and categorize findings by severity
-- [ ] Fix approved vulnerabilities
+- [ ] C3: Remove `_debug` fields from `trace/status/route.ts` + debug UI from `trace/single/page.tsx`
+- [ ] C4: Replace `error.message` with generic messages in 6 API route catch blocks
+- [ ] C1: Create `lib/utils/validate-url.ts` with `isValidWebhookUrl()` helper; use in 6 webhook dispatch sites + v1 bulk webhook save
+- [ ] H3: Validate `next` param in `app/auth/callback/route.ts` (must start with `/`, no `//`)
+- [ ] H5: Move `is_acquisition_pro_member` write from client to `verify-member` API route
+- [ ] H8: Replace `select('*')` with explicit column lists in `api/auth.ts`, `trace/single/route.ts`, `research/single/route.ts`, `trace/bulk/route.ts`
+- [ ] H4: Remove blanket `/api/` exemption from middleware; add `/api/stripe/webhook` and `/api/auth/` as explicit public API routes
+- [ ] H2: Hash API keys — store SHA-256 hash + prefix; update generate + validate
+- [ ] H6: Add Origin header validation to all session-auth POST endpoints via shared helper
+- [ ] C2: Add pre-deduction hold via `reserve_wallet_balance` RPC at submission time (or verify existing `deduct_wallet_balance` rejects negative)
+- [ ] H1: Add simple in-memory rate limiter for v1 API endpoints
+- [ ] M2: Fix bulk research wallet check to use `maxCost` (one-line fix)
 
 ---
 
