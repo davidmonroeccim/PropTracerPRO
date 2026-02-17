@@ -779,3 +779,201 @@ WALLET_MIN_REBILL_AMOUNT=25.00
    - Removed `API_LIMITS` constant (`REQUESTS_PER_MINUTE`, `RECORDS_PER_DAY`)
 
 **No database changes.** All tables (`user_profiles`, `trace_history`, `trace_jobs`, `api_logs`) already existed.
+
+---
+
+## Security Audit
+
+**Date:** February 17, 2026
+
+### Plan
+
+- [x] Explore full codebase structure (79 TypeScript files, 23 API routes)
+- [x] Audit all API route handlers for vulnerabilities
+- [x] Audit all library/utility files for vulnerabilities
+- [x] Audit all frontend components for vulnerabilities
+- [x] Consolidate and categorize findings by severity
+- [ ] Fix approved vulnerabilities
+
+---
+
+### Findings — CRITICAL
+
+#### C1. SSRF via Unvalidated Webhook URLs
+**Files:** `app/api/trace/status/route.ts:189-206`, `app/api/trace/bulk/status/route.ts:223-241`, `app/api/v1/trace/status/route.ts:159-176`, `app/api/v1/research/single/route.ts:107-121`, `app/api/v1/trace/bulk/route.ts:77-82`
+**Risk:** The `webhook_url` stored on user profiles is fetched and used in `fetch()` calls with zero URL validation. A user can set their webhook URL to internal network addresses (e.g., `http://169.254.169.254/latest/meta-data/` on AWS, `http://localhost:5432`). The server will POST sensitive trace data to those addresses, enabling internal network probing and data exfiltration. The v1 bulk endpoint also allows overwriting the stored webhook URL via the `webhookUrl` request body parameter without any validation.
+**Fix:** Validate webhook URLs against an allowlist — require HTTPS, block private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x, 127.x, ::1), and optionally resolve DNS before fetching to prevent DNS rebinding.
+
+#### C2. Race Condition on Wallet Balance (TOCTOU)
+**Files:** `app/api/trace/single/route.ts:50-60`, `app/api/trace/status/route.ts:171-178`, `app/api/trace/bulk/route.ts:80-91`, `app/api/trace/bulk/status/route.ts:186-193`, `app/api/research/single/route.ts:45-50`
+**Risk:** Wallet balance is checked at submission time but deducted later when results arrive (in the status polling endpoint). A user can submit many traces concurrently — all pass the balance check, but deductions happen later, allowing significant wallet overdraft. This is a Time-of-Check-to-Time-of-Use (TOCTOU) vulnerability.
+**Fix:** Use a single atomic database function that checks AND deducts in one transaction (or use a `SELECT ... FOR UPDATE` lock). The existing `deduct_wallet_balance` RPC may already guard against negative balances at the DB level — needs verification.
+
+#### C3. Debug Data Exposed in Production API Responses
+**File:** `app/api/trace/status/route.ts:82-88, 230-239`
+**Risk:** The `_debug` field in API responses exposes raw Tracerfy API data (`tracerfy_raw: statusResult.rawData`), internal job IDs, result counts, and raw PII (phone numbers, emails). This leaks vendor implementation details to end users and is also rendered in the frontend UI (`app/(dashboard)/trace/single/page.tsx:162-163, 468-472`).
+**Fix:** Remove `_debug` fields from all production responses. If debugging is needed, gate it behind an environment variable (e.g., `NODE_ENV === 'development'`).
+
+#### C4. Internal Error Messages Forwarded to Clients
+**Files:** `app/api/trace/single/route.ts:184-188`, `app/api/trace/bulk/route.ts:210-214`, `app/api/research/single/route.ts:122-127`, `app/api/research/bulk/route.ts:140-145`, `app/api/v1/research/single/route.ts:131-136`, `app/api/cache/clear/route.ts:50-53`, `lib/brave/client.ts:41-43`, `lib/ai-research/client.ts:488-491`
+**Risk:** Raw `error.message` strings are returned to clients in 500 responses. These can contain database connection strings, SQL errors, file paths, third-party API error details, or other internal information depending on the error source.
+**Fix:** Return generic error messages (e.g., "An internal error occurred") in production. Log the detailed error server-side.
+
+---
+
+### Findings — HIGH
+
+#### H1. No Rate Limiting on Any Endpoint
+**Files:** All 23 API routes, `lib/api/auth.ts:17` (comment: "No rate limiting")
+**Risk:** Enables brute-force attacks on API key authentication, wallet draining via rapid trace submissions, abuse of expensive AI research endpoints, and denial-of-service via concurrent 10,000-record bulk uploads.
+**Fix:** Add rate limiting middleware — at minimum on the v1 API key-authenticated endpoints and login. Consider using an in-memory store (for single-server) or Redis (for distributed) with per-user/per-IP limits.
+
+#### H2. API Keys Stored in Plaintext
+**Files:** `app/api/user/generate-api-key/route.ts:32-45`, `lib/api/auth.ts:47-52`
+**Risk:** API keys are stored and compared as plaintext in the database. A database compromise exposes all keys immediately. The database equality lookup also enables timing side-channel attacks (non-constant-time comparison).
+**Fix:** Store a SHA-256 hash of the API key. Show the full key to the user only once at generation time. Look up by a stored prefix (first 8 chars) then compare the full hash with a constant-time function.
+
+#### H3. Open Redirect in Auth Callback
+**File:** `app/auth/callback/route.ts:7,30`
+**Risk:** The `next` query parameter is used directly in a redirect (`NextResponse.redirect(\`${origin}${next}\`)`) without validation. Crafted values could redirect users to malicious pages after login.
+**Fix:** Validate that `next` starts with `/` and does not contain `//` or protocol-relative patterns. Use an allowlist of valid redirect paths.
+
+#### H4. All API Routes Bypass Middleware Authentication
+**File:** `lib/supabase/middleware.ts:54`
+**Risk:** The middleware explicitly skips auth checks for all `/api/` routes (`!request.nextUrl.pathname.startsWith('/api/')`). Any API route that forgets to implement its own auth check is completely unprotected. This is a dangerous default.
+**Fix:** Remove the `/api/` exemption from middleware. Instead, explicitly list public API routes (like the Stripe webhook) that should skip auth. Alternatively, add a shared auth wrapper that all API routes must use.
+
+#### H5. Client Can Set `is_acquisition_pro_member` Directly
+**File:** `app/(auth)/onboarding/page.tsx:63-74`
+**Risk:** The onboarding page writes `is_acquisition_pro_member: true` and `acquisition_pro_verified_at` directly to the database from the client using the browser Supabase client. The verification status is held in React state, so a user can set it to `'verified'` via browser DevTools and call `handleComplete()` to grant themselves AcquisitionPRO membership — bypassing the actual HighLevel verification.
+**Fix:** Move the membership verification write to a server-side API route that performs the HighLevel verification itself and sets the flag. The client should only trigger the verification, not write the result.
+
+#### H6. SameSite=None on Auth Cookies (Weakened CSRF Protection)
+**Files:** `lib/supabase/client.ts:8-11`, `lib/supabase/server.ts:19-21`, `lib/supabase/middleware.ts:29-32`
+**Risk:** Auth cookies are set with `SameSite=None` (for HighLevel iframe embedding). This means cookies are sent on all cross-site requests, weakening CSRF protection. Combined with no CSRF tokens on any POST endpoint, malicious sites could trigger state changes (traces, billing, credential overwrites) for logged-in users.
+**Fix:** Since `SameSite=None` is required for iframe embedding, add explicit CSRF tokens to all state-mutating POST endpoints. Alternatively, verify the `Origin` or `Referer` header on POST requests.
+
+#### H7. HighLevel API Keys Stored Unencrypted
+**File:** `app/api/integrations/highlevel/save/route.ts:29-35`
+**Risk:** Users' third-party HighLevel API keys are stored in plaintext in the database. A database compromise exposes all users' CRM accounts.
+**Fix:** Encrypt third-party credentials at rest using an application-level encryption key (e.g., AES-256-GCM). Decrypt only when needed for API calls.
+
+#### H8. Full User Profile Fetched to Client via `select('*')`
+**Files:** `app/(dashboard)/settings/api-keys/page.tsx:38-40`, `app/(dashboard)/settings/integrations/page.tsx:73-76`, `app/(dashboard)/settings/profile/page.tsx:31-35`, `lib/api/auth.ts:48-52`, `app/api/trace/single/route.ts:39`
+**Risk:** Multiple locations use `.select('*')` which returns all profile columns (including `api_key`, `highlevel_api_key`, `stripe_customer_id`, `wallet_balance`) to client-side code or API handlers. This increases the attack surface for accidental secret leakage.
+**Fix:** Replace `select('*')` with explicit column lists that include only the fields actually needed.
+
+---
+
+### Findings — MEDIUM
+
+#### M1. Incomplete Content Security Policy
+**Files:** `next.config.ts:4-14`, `lib/supabase/middleware.ts:4`
+**Risk:** CSP only sets `frame-ancestors`. Missing: `default-src`, `script-src`, `style-src`, `connect-src`, `img-src`, `object-src`, `form-action`, `base-uri`. No XSS mitigation beyond React's default escaping.
+**Fix:** Add a comprehensive CSP with at minimum `default-src 'self'`, `script-src 'self'`, and `connect-src` scoped to known API domains.
+
+#### M2. Bulk Research Wallet Check Only Validates One Record's Cost
+**File:** `app/api/research/bulk/route.ts:61-67`
+**Risk:** The code computes `maxCost = records.length * AI_RESEARCH.CHARGE_PER_RECORD` but then only checks `profile.wallet_balance < AI_RESEARCH.CHARGE_PER_RECORD` (single record). A user with $0.15 can submit 200 records ($30 worth). This is a financial loss bug.
+**Fix:** Change the balance check to use `maxCost` instead of single-record cost.
+
+#### M3. No Maximum Validation on Wallet Top-Up Amount
+**File:** `app/api/stripe/wallet-topup/route.ts:16-23`
+**Risk:** Minimum is checked ($25) but no maximum is enforced. No type validation — `amount` could be a string, negative, NaN, or Infinity.
+**Fix:** Add maximum check (`PRICING.WALLET_MAX_REBILL_AMOUNT`), validate type is number, validate is positive and finite.
+
+#### M4. Query Parameter Injection in HighLevel Test Endpoint
+**File:** `app/api/integrations/highlevel/test/route.ts:28-36`
+**Risk:** `highlevel_location_id` is interpolated directly into a URL without encoding. A malicious value could inject additional query parameters.
+**Fix:** Use `encodeURIComponent()` on `highlevel_location_id` or use a URL builder.
+
+#### M5. PII Logged to Console in Production
+**Files:** `app/api/trace/status/route.ts:128-131`, `app/api/v1/trace/status/route.ts:69-71`
+**Risk:** Phone numbers, email addresses, and physical addresses are logged via `console.log`. These often end up in log aggregation services, violating data privacy regulations (GDPR, CCPA).
+**Fix:** Remove PII from log statements or use a structured logger with PII redaction.
+
+#### M6. Unvalidated AI Research Source URLs Rendered as Links
+**File:** `components/trace/AIResearchCard.tsx:164-183`
+**Risk:** URLs from AI-generated research results are rendered as clickable `<a>` tags. If the AI returns a `javascript:` URL, it could be an XSS vector. React 19 may block `javascript:` hrefs, but this depends on version behavior.
+**Fix:** Validate URL scheme (allow only `http:` and `https:`) before rendering as a link.
+
+#### M7. Localhost Fallback for Stripe Redirect URLs
+**Files:** `app/api/stripe/create-checkout/route.ts:51`, `app/api/stripe/create-portal/route.ts:26`, `app/api/stripe/wallet-topup/route.ts:48`
+**Risk:** `process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'` — if the env var is unset in production, Stripe redirects go to localhost.
+**Fix:** Throw an error if `NEXT_PUBLIC_APP_URL` is not set instead of falling back to localhost.
+
+#### M8. CSV Injection in Tracerfy Padding Row
+**File:** `lib/tracerfy/client.ts:47`
+**Risk:** The padding row interpolates `data.city` and `data.state` without using the `esc()` function, unlike all other fields. A malicious city/state value could break CSV structure.
+**Fix:** Use the `esc()` function on the padding row values as well.
+
+#### M9. Client-Side Direct Writes to Financial Fields
+**File:** `app/(dashboard)/settings/billing/page.tsx:115-123`
+**Risk:** Auto-refill settings (`wallet_auto_rebill_enabled`, `wallet_low_balance_threshold`, `wallet_auto_rebill_amount`) are written directly from the client to Supabase without server-side validation. A user could set arbitrary values via DevTools.
+**Fix:** Move financial field updates to a server-side API route with proper validation (min/max bounds, type checks).
+
+#### M10. SSRF via Unvalidated Download URL in Business Trace
+**File:** `lib/tracerfy/client.ts:193-203`
+**Risk:** `downloadBusinessTraceResults(downloadUrl)` fetches a URL from the FastAppend API response without validating its origin. If the API response is compromised or manipulated, the server could be directed to fetch arbitrary internal URLs.
+**Fix:** Validate the download URL against expected domains (e.g., `*.fastappend.com`).
+
+#### M11. Business Cost Info Exposed in Client Bundle
+**File:** `lib/constants.ts:16`
+**Risk:** Internal cost basis (`COST_PER_RECORD: 0.009`) is exported alongside customer pricing. If this file is imported in any client component (likely, since it contains `US_STATES` and other UI constants), internal margins are exposed in the JavaScript bundle.
+**Fix:** Separate internal cost constants into a server-only module (e.g., `lib/constants.server.ts`).
+
+---
+
+### Findings — LOW
+
+#### L1. Overly Broad `/auth/` Public Route Prefix
+**File:** `lib/supabase/middleware.ts:50`
+**Risk:** `request.nextUrl.pathname.startsWith('/auth/')` makes ALL `/auth/*` routes public. If a new protected route is added under `/auth/`, it would be public by default.
+**Fix:** Use an explicit allowlist instead of a prefix match.
+
+#### L2. Fire-and-Forget Audit Logging
+**File:** `lib/api/auth.ts:76-84`
+**Risk:** API request logging uses `.then(() => {})` which silently swallows all errors. Also hardcodes `status_code: 200` before the request is processed. Failed log inserts leave no audit trail.
+**Fix:** At minimum, add `.catch(err => console.error('Audit log failed:', err))`. Consider logging the actual response status.
+
+#### L3. API Key Regeneration Without Confirmation/Cooldown
+**File:** `app/api/user/generate-api-key/route.ts`
+**Risk:** Calling this endpoint unconditionally replaces the existing API key with no confirmation, notification, or cooldown. A CSRF attack could silently break a user's integrations.
+**Fix:** Require confirmation (e.g., password re-entry) before regenerating, and/or add a cooldown period.
+
+#### L4. Webhook Error Processing Silently Swallowed
+**File:** `app/api/stripe/webhook/route.ts:153-161`
+**Risk:** The webhook handler returns 200 even when event processing fails internally (the catch block catches the error but still returns `{ received: true }`). Stripe will not retry failed events.
+**Fix:** Return a 500 status on processing failures so Stripe retries the event.
+
+#### L5. Raw Supabase Error Messages Displayed in UI
+**Files:** `app/(auth)/login/page.tsx:131`, `app/(auth)/register/page.tsx:128`, `app/(auth)/onboarding/page.tsx:165`, `app/(dashboard)/settings/integrations/page.tsx:294`
+**Risk:** Supabase error messages (which may contain database column names, constraint names, or internal error codes) are displayed directly to users.
+**Fix:** Map common Supabase errors to user-friendly messages.
+
+---
+
+### Prioritized Remediation Recommendations
+
+**Immediate (do first):**
+1. C3 — Remove `_debug` fields from production API responses
+2. C4 — Sanitize error messages (return generic, log specific)
+3. M2 — Fix bulk research wallet balance check (use `maxCost`)
+4. C1 — Add webhook URL validation (HTTPS only, block private IPs)
+5. H5 — Move membership verification write to server-side
+
+**Soon:**
+6. H2 — Hash API keys before storage
+7. H4 — Remove blanket `/api/` exemption from middleware auth
+8. H1 — Add rate limiting (at minimum on v1 API and login)
+9. C2 — Verify/fix atomic wallet deduction
+10. H6 — Add CSRF protection (Origin header check or tokens)
+11. H8 — Replace `select('*')` with explicit columns
+
+**Later:**
+12. H7 — Encrypt HighLevel API keys at rest
+13. M1 — Expand CSP beyond just `frame-ancestors`
+14. M3/M9 — Add server-side validation for financial fields
+15. M5 — Remove PII from console logs
+16. M6 — Validate AI research source URL schemes
+17. All remaining MEDIUM and LOW items
