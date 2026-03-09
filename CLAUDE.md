@@ -7,3 +7,4 @@
 6. Make every task and code change you do as simple as possible. We want to avoid making any massive or complex changes. Every change should impact as little code as possible. Everything is about simplicity.
 7. NEVER create fallback/fake/made up data or results. Allow the application to fail if it's missing what the tool is looking for.
 8. Finally, add a review section to the [todo.md](http://todo.md/) file with a summary of the changes you made and any other relevant information.
+9. After every completed task, update History.md with a brief summary of what was done (date, task name, bullet points of changes) before moving on to the next task.
