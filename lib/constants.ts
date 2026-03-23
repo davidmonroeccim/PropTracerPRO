@@ -54,6 +54,17 @@ export const DEDUPE = {
 } as const;
 
 // ===================
+// Stale Processing
+// ===================
+
+export const STALE_PROCESSING = {
+  // Minutes before a processing record is considered stale (for retries/dedup bypass)
+  STALE_MINUTES: 10,
+  // Minutes before the cron job marks a processing record as error
+  CRON_TIMEOUT_MINUTES: 60,
+} as const;
+
+// ===================
 // Tracerfy
 // ===================
 

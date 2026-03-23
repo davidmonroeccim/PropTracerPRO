@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
 
 export async function POST(request: Request) {
@@ -106,6 +106,17 @@ export async function POST(request: Request) {
         .eq('user_id', user.id)
         .eq('address_hash', addressHash)
         .eq('is_successful', false);
+
+      // Delete stale processing traces (stuck for longer than threshold)
+      const staleCutoff = new Date();
+      staleCutoff.setMinutes(staleCutoff.getMinutes() - STALE_PROCESSING.STALE_MINUTES);
+      await adminClient
+        .from('trace_history')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash)
+        .eq('status', 'processing')
+        .lt('created_at', staleCutoff.toISOString());
     }
 
     // Insert pending trace record (include AI research data if provided)

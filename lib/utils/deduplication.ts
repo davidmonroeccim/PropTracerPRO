@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
 import { normalizeAddress, createAddressHash } from './address-normalizer';
-import { DEDUPE } from '@/lib/constants';
+import { DEDUPE, STALE_PROCESSING } from '@/lib/constants';
 import type { AddressInput, DedupeResult, TraceHistory } from '@/types';
 
 /**
@@ -45,8 +45,19 @@ export async function checkDuplicates(
     throw new Error(`Failed to check duplicates: ${error.message}`);
   }
 
+  // Exclude stale processing records — they should not block new submissions
+  const staleCutoff = new Date();
+  staleCutoff.setMinutes(staleCutoff.getMinutes() - STALE_PROCESSING.STALE_MINUTES);
+
+  const validTraces = (existingTraces || []).filter((t: TraceHistory) => {
+    if (t.status === 'processing' && new Date(t.created_at) < staleCutoff) {
+      return false; // Stale processing — don't count as duplicate
+    }
+    return true;
+  });
+
   const existingHashes = new Set(
-    existingTraces?.map((t: TraceHistory) => t.address_hash) || []
+    validTraces.map((t: TraceHistory) => t.address_hash)
   );
 
   // Separate new records from duplicates
