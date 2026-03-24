@@ -4,6 +4,16 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-03-24
+
+### Add forgot password flow to login page
+- Added "Forgot password?" link to the password tab on the login page
+- Created `/forgot-password` page that sends a Supabase password reset email
+- Created `/reset-password` page where users set a new password after clicking the email link
+- Added both routes to middleware public routes list
+
+---
+
 ## 2026-03-23
 
 ### Fix stuck "Processing" traces and add background sweep
