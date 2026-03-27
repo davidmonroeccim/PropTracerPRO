@@ -101,24 +101,15 @@ export async function GET(request: Request) {
       });
     }
 
-    // Tracerfy returns one result per input row. If we got back fewer
-    // results than we submitted, Tracerfy is still processing (partial results).
-    if (statusResult.results.length < traceJob.records_submitted) {
-      console.log(
-        'Bulk status: partial results',
-        statusResult.results.length,
-        'of',
-        traceJob.records_submitted,
-        '- still processing'
-      );
-      return NextResponse.json({
-        success: true,
-        status: 'processing',
-        job_id: traceJob.id,
-        records_submitted: traceJob.records_submitted,
-        results_so_far: statusResult.results.length,
-      });
-    }
+    // Tracerfy returned an array (not pending) — this is the complete result set.
+    // Note: Tracerfy may return fewer results than submitted (duplicates, bad addresses, etc.)
+    console.log(
+      'Bulk status: Tracerfy returned',
+      statusResult.results.length,
+      'results for',
+      traceJob.records_submitted,
+      'submitted records — processing now'
+    );
 
     // All results ready — process each one
     const results = statusResult.results;
