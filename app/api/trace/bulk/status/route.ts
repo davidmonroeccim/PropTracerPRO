@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
@@ -216,6 +217,11 @@ export async function GET(request: Request) {
         completed_at: new Date().toISOString(),
       })
       .eq('id', traceJob.id);
+
+    // Fire-and-forget: auto-rebill if balance dropped below threshold
+    if (totalCharge > 0) {
+      triggerAutoRebillIfNeeded(user.id).catch(() => {});
+    }
 
     // Fire-and-forget: webhook dispatch + HighLevel push
     if (profile) {

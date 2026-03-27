@@ -157,6 +157,7 @@ export default function BulkUploadPage() {
   const [headers, setHeaders] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Record<string, OurField>>({});
   const [previewRows, setPreviewRows] = useState<Record<string, string>[]>([]);
+  const [allRawRows, setAllRawRows] = useState<Record<string, string>[]>([]);
   const [allRecords, setAllRecords] = useState<MappedRecord[]>([]);
   const [totalRows, setTotalRows] = useState(0);
   const [mappingErrors, setMappingErrors] = useState<string[]>([]);
@@ -195,6 +196,42 @@ export default function BulkUploadPage() {
     loadRate();
   }, []);
 
+  // Re-validate and re-map when mapping changes
+  useEffect(() => {
+    if (headers.length === 0 || allRawRows.length === 0) return;
+    const mappedFieldSet = new Set(Object.values(mapping));
+    const errors: string[] = [];
+    if (!mappedFieldSet.has('address')) errors.push('Could not detect an "address" column');
+    if (!mappedFieldSet.has('city')) errors.push('Could not detect a "city" column');
+    if (!mappedFieldSet.has('state')) errors.push('Could not detect a "state" column');
+    setMappingErrors(errors);
+
+    if (errors.length === 0) {
+      setAllRecords(mapRows(allRawRows, mapping));
+    } else {
+      setAllRecords([]);
+    }
+  }, [mapping, headers, allRawRows]);
+
+  // Handle manual column mapping change
+  const handleMappingChange = useCallback((header: string, value: string) => {
+    setMapping(prev => {
+      const next = { ...prev };
+      if (value === '') {
+        delete next[header];
+      } else {
+        // Remove any other header mapped to this field (each field maps once)
+        for (const [h, f] of Object.entries(next)) {
+          if (f === value && h !== header) {
+            delete next[h];
+          }
+        }
+        next[header] = value as OurField;
+      }
+      return next;
+    });
+  }, []);
+
   // Drag state
   const [dragActive, setDragActive] = useState(false);
 
@@ -207,24 +244,12 @@ export default function BulkUploadPage() {
     setFileName(name);
     setHeaders(headers);
     setPreviewRows(rows.slice(0, 5));
+    setAllRawRows(rows);
     setTotalRows(rows.length);
 
+    // Auto-detect mapping; useEffect handles validation and row mapping
     const detected = detectMapping(headers);
     setMapping(detected);
-
-    const mappedFields = new Set(Object.values(detected));
-    const errors: string[] = [];
-    if (!mappedFields.has('address')) errors.push('Could not detect an "address" column');
-    if (!mappedFields.has('city')) errors.push('Could not detect a "city" column');
-    if (!mappedFields.has('state')) errors.push('Could not detect a "state" column');
-    setMappingErrors(errors);
-
-    if (errors.length === 0) {
-      const mapped = mapRows(rows, detected);
-      setAllRecords(mapped);
-    } else {
-      setAllRecords([]);
-    }
   }, []);
 
   const handleFile = useCallback((file: File) => {
@@ -471,6 +496,7 @@ export default function BulkUploadPage() {
     setHeaders([]);
     setMapping({});
     setPreviewRows([]);
+    setAllRawRows([]);
     setAllRecords([]);
     setTotalRows(0);
     setMappingErrors([]);
@@ -548,9 +574,9 @@ export default function BulkUploadPage() {
               {/* Detected Mapping */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Detected Column Mapping</CardTitle>
+                  <CardTitle>Column Mapping</CardTitle>
                   <CardDescription>
-                    {Object.keys(mapping).length} of {headers.length} columns mapped
+                    {Object.keys(mapping).length} of {headers.length} columns mapped. Use the dropdowns to adjust mappings.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -565,18 +591,27 @@ export default function BulkUploadPage() {
                     </div>
                   )}
 
-                  <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                     {headers.map((header) => (
                       <div key={header} className="flex items-center gap-2 py-1">
                         <span className="text-gray-500 truncate flex-1">{header}</span>
-                        {mapping[header] ? (
-                          <>
-                            <span className="text-gray-400">&rarr;</span>
-                            <span className="font-medium text-green-700">{mapping[header]}</span>
-                          </>
-                        ) : (
-                          <span className="text-gray-300 italic">ignored</span>
-                        )}
+                        <span className="text-gray-400">&rarr;</span>
+                        <select
+                          value={mapping[header] || ''}
+                          onChange={(e) => handleMappingChange(header, e.target.value)}
+                          className="text-sm border border-gray-300 rounded px-2 py-1 bg-white min-w-[140px]"
+                        >
+                          <option value="">ignored</option>
+                          {(Object.keys(COLUMN_ALIASES) as OurField[]).map((field) => (
+                            <option
+                              key={field}
+                              value={field}
+                              disabled={Object.values(mapping).includes(field) && mapping[header] !== field}
+                            >
+                              {field}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     ))}
                   </div>

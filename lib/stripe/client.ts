@@ -95,6 +95,9 @@ export async function createWalletTopUpSession(params: {
         quantity: 1,
       },
     ],
+    payment_intent_data: {
+      setup_future_usage: 'off_session', // Save payment method for auto-rebill
+    },
     success_url: params.successUrl,
     cancel_url: params.cancelUrl,
     metadata: {

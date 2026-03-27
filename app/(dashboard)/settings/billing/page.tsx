@@ -63,11 +63,17 @@ export default function BillingPage() {
 
       const data = await response.json();
 
+      if (!response.ok) {
+        alert(data.error || 'Failed to create checkout');
+        return;
+      }
+
       if (data.url) {
         window.location.href = data.url;
       }
     } catch (error) {
       console.error('Checkout error:', error);
+      alert('Failed to connect to payment server');
     } finally {
       setCheckoutLoading(null);
     }
@@ -91,11 +97,17 @@ export default function BillingPage() {
 
       const data = await response.json();
 
+      if (!response.ok) {
+        alert(data.error || 'Failed to create checkout');
+        return;
+      }
+
       if (data.url) {
         window.location.href = data.url;
       }
     } catch (error) {
       console.error('Top-up error:', error);
+      alert('Failed to connect to payment server');
     } finally {
       setCheckoutLoading(null);
     }

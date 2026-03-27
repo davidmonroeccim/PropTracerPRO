@@ -88,6 +88,21 @@ export async function POST(request: Request) {
               p_stripe_payment_intent_id: session.payment_intent as string,
               p_description: `Wallet top-up: $${amount.toFixed(2)}`,
             });
+
+            // Save payment method for auto-rebill
+            if (session.payment_intent) {
+              try {
+                const pi = await stripe.paymentIntents.retrieve(session.payment_intent as string);
+                if (pi.payment_method && typeof pi.payment_method === 'string') {
+                  await adminClient
+                    .from('user_profiles')
+                    .update({ wallet_payment_method_id: pi.payment_method })
+                    .eq('stripe_customer_id', customerId);
+                }
+              } catch (pmError) {
+                console.error('Failed to save payment method:', pmError);
+              }
+            }
           }
         }
 

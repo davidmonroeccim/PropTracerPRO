@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult, TracerfyResult } from '@/types';
 
@@ -123,6 +124,9 @@ export async function GET(request: Request) {
             p_trace_history_id: trace.id,
             p_description: 'Skip trace - successful match (cron recovery)',
           });
+
+          // Fire-and-forget: auto-rebill if balance dropped below threshold
+          triggerAutoRebillIfNeeded(trace.user_id).catch(() => {});
         }
 
         // Fire-and-forget: webhook + HighLevel
@@ -289,6 +293,9 @@ export async function GET(request: Request) {
           .from('trace_jobs')
           .update({ status: 'completed', records_matched: recordsMatched, completed_at: new Date().toISOString() })
           .eq('id', job.id);
+
+        // Fire-and-forget: auto-rebill if balance dropped below threshold
+        triggerAutoRebillIfNeeded(job.user_id).catch(() => {});
 
         // Webhook for bulk completion
         if (profile?.webhook_url) {

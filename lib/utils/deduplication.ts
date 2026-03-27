@@ -34,15 +34,25 @@ export async function checkDuplicates(
   const allHashes = recordsWithHashes.map((r) => r.hash);
 
   // Query existing traces within the deduplication window
-  const { data: existingTraces, error } = await supabase
-    .from('trace_history')
-    .select('*')
-    .eq('user_id', userId)
-    .in('address_hash', allHashes)
-    .gte('created_at', cutoffDate.toISOString());
+  // Batch the .in() query to avoid exceeding PostgREST URL length limits
+  const HASH_BATCH_SIZE = 100;
+  let existingTraces: TraceHistory[] = [];
 
-  if (error) {
-    throw new Error(`Failed to check duplicates: ${error.message}`);
+  for (let i = 0; i < allHashes.length; i += HASH_BATCH_SIZE) {
+    const batch = allHashes.slice(i, i + HASH_BATCH_SIZE);
+    const { data, error } = await supabase
+      .from('trace_history')
+      .select('*')
+      .eq('user_id', userId)
+      .in('address_hash', batch)
+      .gte('created_at', cutoffDate.toISOString());
+
+    if (error) {
+      throw new Error(`Failed to check duplicates: ${error.message}`);
+    }
+    if (data) {
+      existingTraces = existingTraces.concat(data as TraceHistory[]);
+    }
   }
 
   // Exclude stale processing records — they should not block new submissions
@@ -75,7 +85,7 @@ export async function checkDuplicates(
   return {
     newRecords,
     duplicates,
-    cachedResults: (existingTraces as TraceHistory[]) || [],
+    cachedResults: existingTraces,
   };
 }
 

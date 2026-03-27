@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
@@ -145,6 +146,9 @@ export async function GET(request: Request) {
         p_trace_history_id: trace.id,
         p_description: 'Skip trace - successful match',
       });
+
+      // Fire-and-forget: auto-rebill if balance dropped below threshold
+      triggerAutoRebillIfNeeded(profile.id).catch(() => {});
     }
 
     // Fire-and-forget: webhook dispatch + HighLevel push

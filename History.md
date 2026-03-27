@@ -4,6 +4,20 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-03-27
+
+### Fix bulk upload, Stripe wallet top-up, and auto-rebill
+- Fixed "Failed to check duplicates: Bad Request" error by batching `.in()` queries into chunks of 100 hashes (was exceeding PostgREST URL length limit with 600+ records)
+- Added manual column mapping dropdowns to bulk upload page — users can now override auto-detected column mappings via `<select>` dropdowns
+- Surfaced actual Stripe error messages in wallet-topup and create-checkout API routes (was returning generic "Failed to create checkout")
+- Added error display to billing page UI so users see meaningful messages when Stripe checkout fails
+- Added `setup_future_usage: 'off_session'` to wallet top-up checkout sessions so Stripe saves the payment method for future off-session charges
+- Webhook now saves `wallet_payment_method_id` to user profile after successful wallet top-up
+- Created `lib/utils/auto-rebill.ts` utility that checks `check_wallet_needs_rebill` and calls `chargePaymentMethod` when wallet balance drops below threshold
+- Wired auto-rebill trigger (fire-and-forget) into all trace status endpoints and the cron sweep job
+
+---
+
 ## 2026-03-24
 
 ### Add forgot password flow to login page
