@@ -188,7 +188,7 @@ export async function POST(request: Request) {
       recordsToProcess: newRecords.length,
       estimatedCost,
       status: 'processing',
-      message: 'Poll /api/trace/bulk/status?job_id=' + job.id + ' for results.',
+      message: 'Poll /api/v1/trace/bulk/status?job_id=' + job.id + ' for results.',
     });
   } catch (error) {
     console.error('API v1 bulk trace error:', error);

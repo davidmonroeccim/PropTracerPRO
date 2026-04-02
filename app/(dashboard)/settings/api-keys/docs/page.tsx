@@ -254,7 +254,7 @@ export default function ApiDocsPage() {
               <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
               <code className="text-sm font-semibold">/trace/bulk</code>
             </div>
-            <p className="text-gray-600 text-sm">Submit multiple addresses for batch processing</p>
+            <p className="text-gray-600 text-sm">Submit multiple addresses for batch skip tracing. Maximum 10,000 records per request.</p>
 
             <h5 className="font-medium text-sm">Request Body:</h5>
             <CodeBlock
@@ -264,7 +264,9 @@ export default function ApiDocsPage() {
       "address": "123 Main Street",
       "city": "Austin",
       "state": "TX",
-      "zip": "78701"
+      "zip": "78701",
+      "owner_name": "John Smith",       // optional, improves match accuracy
+      "mailing_address": "456 Oak Ave"   // optional, falls back to property address
     },
     {
       "address": "456 Oak Avenue",
@@ -273,21 +275,34 @@ export default function ApiDocsPage() {
       "zip": "77001"
     }
   ],
-  "webhookUrl": "https://your-app.com/webhook"  // optional
+  "webhookUrl": "https://your-app.com/webhook"  // optional, overrides profile setting
 }`}
               section="bulk-request"
             />
+
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p className="text-blue-800 text-sm">
+                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">owner_name</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>.
+              </p>
+            </div>
+
+            <div className="bg-gray-50 border rounded-lg p-4">
+              <p className="text-gray-700 text-sm">
+                <strong>Deduplication:</strong> Records are automatically deduplicated within the batch and against your 90-day trace history. Duplicate records are removed before processing and not charged. The response shows how many duplicates were removed.
+              </p>
+            </div>
 
             <h5 className="font-medium text-sm">Response:</h5>
             <CodeBlock
               code={`{
   "success": true,
-  "jobId": "job_abc123",
+  "jobId": "uuid",
   "totalRecords": 100,
   "duplicatesRemoved": 5,
   "recordsToProcess": 95,
   "estimatedCost": 6.65,
-  "status": "processing"
+  "status": "processing",
+  "message": "Poll /api/v1/trace/bulk/status?job_id=uuid for results."
 }`}
               section="bulk-response"
             />
@@ -299,24 +314,38 @@ export default function ApiDocsPage() {
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
-              <code className="text-sm font-semibold">/trace/jobs/:jobId</code>
+              <code className="text-sm font-semibold">/trace/bulk/status?job_id=uuid</code>
             </div>
-            <p className="text-gray-600 text-sm">Check the status of a bulk trace job</p>
+            <p className="text-gray-600 text-sm">Poll for bulk trace job results. Returns the full result summary when all records have been processed.</p>
 
-            <h5 className="font-medium text-sm">Response:</h5>
+            <h5 className="font-medium text-sm">Response (completed):</h5>
             <CodeBlock
               code={`{
-  "jobId": "job_abc123",
+  "success": true,
   "status": "completed",
-  "totalRecords": 95,
-  "recordsMatched": 82,
-  "recordsNoMatch": 13,
-  "totalCharge": 5.74,
-  "resultsUrl": "/api/v1/trace/jobs/job_abc123/results",
-  "completedAt": "2024-12-23T14:30:00Z"
+  "job_id": "uuid",
+  "records_submitted": 95,
+  "records_matched": 82,
+  "total_charge": 5.74
 }`}
               section="job-status"
             />
+
+            <h5 className="font-medium text-sm">Response (still processing):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "status": "processing",
+  "job_id": "uuid"
+}`}
+              section="job-status-processing"
+            />
+
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p className="text-blue-800 text-sm">
+                <strong>Polling:</strong> Poll every 5-10 seconds. Jobs typically complete within a few minutes. You are only charged for successful matches (records where phone or email data was found). If you have a webhook URL configured, you&apos;ll also receive a <code className="bg-blue-100 px-1 rounded">bulk_job.completed</code> event when done.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -551,6 +580,31 @@ Headers: Authorization: Bearer ptp_your_api_key
     "zip": "78701"
   }'`}
                   section="curl-research"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Bulk trace (submit batch):</p>
+                <CodeBlock
+                  code={`curl -X POST https://proptracerpro.vercel.app/api/v1/trace/bulk \\
+  -H "Authorization: Bearer ptp_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "records": [
+      { "address": "123 Main St", "city": "Austin", "state": "TX", "zip": "78701", "owner_name": "John Smith" },
+      { "address": "456 Oak Ave", "city": "Houston", "state": "TX", "zip": "77001" }
+    ]
+  }'`}
+                  section="curl-bulk"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Poll bulk job status:</p>
+                <CodeBlock
+                  code={`curl "https://proptracerpro.vercel.app/api/v1/trace/bulk/status?job_id=YOUR_JOB_ID" \\
+  -H "Authorization: Bearer ptp_your_api_key"`}
+                  section="curl-bulk-status"
                 />
               </div>
             </TabsContent>

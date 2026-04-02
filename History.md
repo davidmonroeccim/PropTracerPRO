@@ -4,6 +4,19 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-04-02
+
+### Update API documentation for bulk import changes
+- Updated bulk trace endpoint docs (`/trace/bulk`) with accurate request/response formats including `owner_name`, `mailing_address` optional fields
+- Fixed bulk status endpoint path: was `/trace/jobs/:jobId` (non-existent), now `/trace/bulk/status?job_id=uuid`
+- Created new v1 bulk status endpoint at `app/api/v1/trace/bulk/status/route.ts` (API key auth wrapper matching internal route logic)
+- Added deduplication info (90-day window, batch dedup) and max 10,000 records limit to docs
+- Added processing/completed response examples for bulk status polling
+- Added bulk trace cURL examples to the integration examples tab
+- Fixed v1 bulk route response message to reference correct `/api/v1/trace/bulk/status` path
+
+---
+
 ## 2026-03-27
 
 ### Fix bulk upload, Stripe wallet top-up, and auto-rebill
