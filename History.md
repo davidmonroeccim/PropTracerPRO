@@ -4,6 +4,15 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-04-03
+
+### Fix single trace stuck in Processing when Tracerfy returns no data
+- **Bug:** When Tracerfy finished processing but returned empty results or only padding rows, both status routes (`/api/trace/status` and `/api/v1/trace/status`) kept returning `processing` instead of finalizing as `no_match`
+- **Fix:** Removed early-return `processing` responses for empty/padding-only results; now falls through to existing finalization logic that correctly marks as `no_match`
+- **Impact:** Traces that previously spun for up to 60 min (until cron marked them as `error`) now finalize immediately on the next status poll
+
+---
+
 ## 2026-04-02
 
 ### Update API documentation for bulk import changes
