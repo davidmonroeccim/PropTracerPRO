@@ -1,13 +1,19 @@
-# Fix API 401 — Bulk Trace Auth Returning Invalid API Key
+# Fix: Single Trace 500 When Owner Name Changes
 
 ## Problem
-API key returning 401 "Invalid API key" even though the key is correct. The auth code in `lib/api/auth.ts` swallows all Supabase query errors (connection failures, bad service role key, etc.) and returns a generic "Invalid API key" message, making the real cause invisible.
+`UNIQUE(user_id, address_hash)` constraint on `trace_history` means only one trace per address per user can exist. When the AI Agent does a 2-step flow (trace with LLC name, then re-trace same address with resolved person name), the second INSERT hits a unique constraint violation → 500 error.
+
+The v1 single route only cleans up successful-no-data and failed traces before inserting. It does NOT clean up active processing records. The internal route handles stale processing (10+ min), but a trace from seconds ago isn't stale.
 
 ## Root Cause
-At `lib/api/auth.ts:54`, `if (error || !profile)` treats Supabase query errors identically to "key not found." If the service role key is misconfigured, the DB is unreachable, or any query-level error occurs, the user gets "Invalid API key" (401) instead of a meaningful error.
+`app/api/v1/trace/single/route.ts` is missing cleanup of existing processing records before inserting a new trace with a different owner name.
+
+## Fix
+When the new request has a different `owner_name` than the existing record, delete the old record and allow the new trace. This applies to both the v1 and internal routes.
 
 ## Tasks
-- [x] Investigate auth flow (`lib/api/auth.ts`)
-- [x] Identify root cause: Supabase errors swallowed as "Invalid API key"
-- [x] Fix: Log Supabase errors server-side, return 500 for query failures vs 401 for actual bad keys
+- [x] Investigate dedup/constraint logic
+- [x] Identify root cause: UNIQUE constraint + missing processing record cleanup
+- [x] Fix v1 single route: add owner_name-aware cleanup before insert
+- [x] Fix internal single route: same change for consistency
 - [x] Update History.md

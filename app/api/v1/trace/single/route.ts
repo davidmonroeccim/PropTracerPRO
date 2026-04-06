@@ -78,6 +78,17 @@ export async function POST(request: Request) {
       .eq('address_hash', addressHash)
       .eq('is_successful', false);
 
+    // If a different owner name is provided, delete any existing trace for this address.
+    // This allows re-tracing when AI research resolves a person name from an LLC.
+    if (ownerName) {
+      await adminClient
+        .from('trace_history')
+        .delete()
+        .eq('user_id', profile.id)
+        .eq('address_hash', addressHash)
+        .neq('input_owner_name', ownerName);
+    }
+
     // Insert pending trace record
     const { data: traceRecord, error: insertError } = await adminClient
       .from('trace_history')

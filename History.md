@@ -6,6 +6,11 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-04-06
 
+### Fix single trace 500 when re-tracing same address with different owner name
+- **Bug:** `trace_history` has `UNIQUE(user_id, address_hash)` but the hash is address-only (no owner_name). When AI Agent resolves a person from an LLC and re-traces the same address with the person's name, the INSERT hits a unique constraint violation → 500
+- **Fix:** Before inserting, if `ownerName` is provided, delete any existing trace for that address with a *different* `input_owner_name`. This allows the 2-step research→trace flow to work correctly.
+- **Files changed:** `app/api/v1/trace/single/route.ts`, `app/api/trace/single/route.ts`
+
 ### Fix API auth returning 401 for server-side errors
 - **Bug:** `validateApiKey` in `lib/api/auth.ts` treated all Supabase query errors (connection failures, bad service role key, etc.) as "Invalid API key" (401), masking server-side issues and telling callers their key is wrong when it isn't
 - **Fix:** Differentiate PGRST116 (key not found → 401) from other Supabase errors (→ 500 "Internal server error") with server-side `console.error` logging of the actual error code/message. Also wrapped `createAdminClient()` in try/catch for missing env vars.
