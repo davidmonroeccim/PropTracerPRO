@@ -42,7 +42,18 @@ export async function validateApiKey(
     };
   }
 
-  const adminClient = createAdminClient();
+  let adminClient;
+  try {
+    adminClient = createAdminClient();
+  } catch (err) {
+    console.error('[API Auth] Failed to create admin client:', err);
+    return {
+      response: NextResponse.json(
+        { success: false, error: 'Internal server error' },
+        { status: 500 }
+      ),
+    };
+  }
 
   // Look up user by API key
   const { data: profile, error } = await adminClient
@@ -51,7 +62,27 @@ export async function validateApiKey(
     .eq('api_key', apiKey)
     .single();
 
-  if (error || !profile) {
+  if (error) {
+    // PGRST116 = "JSON object requested, multiple (or no) rows returned" — means key not found
+    if (error.code === 'PGRST116') {
+      return {
+        response: NextResponse.json(
+          { success: false, error: 'Invalid API key' },
+          { status: 401 }
+        ),
+      };
+    }
+    // Any other error is a server-side issue, not the caller's fault
+    console.error('[API Auth] Supabase query error:', error.code, error.message);
+    return {
+      response: NextResponse.json(
+        { success: false, error: 'Internal server error' },
+        { status: 500 }
+      ),
+    };
+  }
+
+  if (!profile) {
     return {
       response: NextResponse.json(
         { success: false, error: 'Invalid API key' },

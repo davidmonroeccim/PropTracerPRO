@@ -4,6 +4,15 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-04-06
+
+### Fix API auth returning 401 for server-side errors
+- **Bug:** `validateApiKey` in `lib/api/auth.ts` treated all Supabase query errors (connection failures, bad service role key, etc.) as "Invalid API key" (401), masking server-side issues and telling callers their key is wrong when it isn't
+- **Fix:** Differentiate PGRST116 (key not found → 401) from other Supabase errors (→ 500 "Internal server error") with server-side `console.error` logging of the actual error code/message. Also wrapped `createAdminClient()` in try/catch for missing env vars.
+- **File changed:** `lib/api/auth.ts`
+
+---
+
 ## 2026-04-03
 
 ### Fix single trace stuck in Processing when Tracerfy returns no data
