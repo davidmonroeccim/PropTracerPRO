@@ -3,6 +3,7 @@
 
 import { searchBrave, searchBraveBatch } from '@/lib/brave/client';
 import { submitBusinessTrace, getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/tracerfy/client';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { AI_RESEARCH } from '@/lib/constants';
 import type { AIResearchResult } from '@/types';
 
@@ -14,13 +15,26 @@ interface ResearchInput {
   owner_name?: string;
 }
 
+// Context for async FastAppend recovery.
+// When provided, a pending business trace that times out the inline poll is
+// persisted to business_trace_jobs so the cron sweeper can finalize it later.
+export interface AsyncRecoveryContext {
+  userId: string;
+  addressHash: string;
+  normalizedAddress: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
 // Single property research (initial search + recursive entity resolution + deceased/relatives)
 export async function researchProperty(
   address: string,
   city: string,
   state: string,
   zip: string,
-  ownerName?: string
+  ownerName?: string,
+  asyncRecovery?: AsyncRecoveryContext
 ): Promise<AIResearchResult> {
   // Pass 1: Build and run initial search queries
   const queries = buildSearchQueries(address, city, state, zip, ownerName);
@@ -50,7 +64,8 @@ export async function researchProperty(
     pass1Result,
     state,
     combinedContext,
-    record
+    record,
+    asyncRecovery
   );
 
   // Discovery Pass: if confidence is low and we found a business at the address,
@@ -70,7 +85,8 @@ export async function researchProperty(
       discoveryResult,
       state,
       resolvedContext,
-      record
+      record,
+      asyncRecovery
     );
 
     resolvedResult = discoveryResolution.result;
@@ -261,12 +277,16 @@ async function resolveEntityChain(
   initialResult: AIResearchResult,
   state: string,
   allContext: string,
-  record: ResearchInput
+  record: ResearchInput,
+  asyncRecovery?: AsyncRecoveryContext
 ): Promise<{ result: AIResearchResult; context: string }> {
   let currentResult = initialResult;
   let currentContext = allContext;
   const resolvedEntities = new Set<string>();
   let businessTraceStatus: string | null = null;
+  // Track the most recently queued-but-unfinished FastAppend job so we can
+  // surface it for async recovery after this function returns.
+  let pendingBusinessTrace: { queueId: string; businessName: string; state: string } | null = null;
 
   for (let iteration = 0; iteration < 3; iteration++) {
     // Determine what entity to resolve next
@@ -311,14 +331,16 @@ async function resolveEntityChain(
       const traceSubmit = await submitBusinessTrace({ business_name: entityToResolve, state });
 
       if (traceSubmit.success && traceSubmit.jobId) {
-        // Poll for results (up to ~45s)
+        // Poll for results (up to ~45s) — fast path
         let traceResult = null;
+        let timedOut = true; // true if we exhausted the poll loop without a definitive answer
         for (let poll = 0; poll < 15; poll++) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
           const status = await getBusinessTraceStatus(traceSubmit.jobId!);
 
           if (!status.success) {
             console.log(`[Entity Resolution] Business trace poll failed: ${status.error}`);
+            timedOut = false;
             break;
           }
 
@@ -326,8 +348,20 @@ async function resolveEntityChain(
             if (status.downloadUrl) {
               traceResult = await downloadBusinessTraceResults(status.downloadUrl);
             }
+            timedOut = false;
             break;
           }
+        }
+
+        // If the inline poll exhausted and FastAppend is still working,
+        // stash the queue_id so the cron sweeper can finalize it later.
+        if (timedOut && !traceResult) {
+          pendingBusinessTrace = {
+            queueId: traceSubmit.jobId,
+            businessName: entityToResolve,
+            state,
+          };
+          console.log(`[Entity Resolution] Business trace ${traceSubmit.jobId} still pending after 45s — queued for async recovery`);
         }
 
         if (traceResult) {
@@ -381,6 +415,40 @@ Mailing address: ${traceResult.address || '(not found)'}
 
   if (businessTraceStatus) {
     currentResult.business_trace_status = businessTraceStatus;
+  }
+
+  // Async recovery: if a business trace job is still pending and we have the
+  // user context, persist it to business_trace_jobs so the cron sweeper can
+  // finalize it later. The v1 route reads pending_business_trace from the
+  // returned result and surfaces the job id to the caller.
+  if (pendingBusinessTrace && asyncRecovery) {
+    try {
+      const adminClient = createAdminClient();
+      await adminClient.from('business_trace_jobs').insert({
+        user_id: asyncRecovery.userId,
+        fastappend_queue_id: pendingBusinessTrace.queueId,
+        business_name: pendingBusinessTrace.businessName,
+        state: pendingBusinessTrace.state,
+        address_hash: asyncRecovery.addressHash,
+        normalized_address: asyncRecovery.normalizedAddress,
+        city: asyncRecovery.city,
+        property_state: asyncRecovery.state,
+        zip: asyncRecovery.zip,
+        status: 'pending',
+      });
+
+      currentResult.pending_business_trace = {
+        queue_id: pendingBusinessTrace.queueId,
+        business_name: pendingBusinessTrace.businessName,
+        state: pendingBusinessTrace.state,
+      };
+
+      if (!businessTraceStatus || businessTraceStatus.startsWith('No results')) {
+        currentResult.business_trace_status = `Pending async recovery (queue ${pendingBusinessTrace.queueId})`;
+      }
+    } catch (err) {
+      console.error('[Entity Resolution] Failed to persist pending business trace:', err);
+    }
   }
 
   return { result: currentResult, context: currentContext };

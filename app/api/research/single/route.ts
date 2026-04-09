@@ -80,8 +80,16 @@ export async function POST(request: Request) {
     }
     // When skip_cache is true, we skip the lookup entirely and run fresh research below
 
-    // Run AI research
-    const research = await researchProperty(address, city, state, zip, owner_name);
+    // Run AI research with async recovery context — the dashboard doesn't surface
+    // the pending job id back to the UI, but the cron sweeper still finalizes it.
+    const research = await researchProperty(address, city, state, zip, owner_name, {
+      userId: user.id,
+      addressHash,
+      normalizedAddress,
+      city: city.toUpperCase(),
+      state: state.toUpperCase(),
+      zip: zip.substring(0, 5),
+    });
 
     // Only charge if we found an owner name
     let charge = 0;
@@ -101,11 +109,12 @@ export async function POST(request: Request) {
       charge = AI_RESEARCH.CHARGE_PER_RECORD;
     }
 
-    // Store research result on trace_history if a row exists for this address
+    // Strip internal async-recovery plumbing from the persisted payload
+    const { pending_business_trace: _pending, ...researchForStorage } = research;
     await adminClient
       .from('trace_history')
       .update({
-        ai_research: research,
+        ai_research: researchForStorage,
         ai_research_status: research.owner_name ? 'found' : 'not_found',
         ai_research_charge: charge,
       })
@@ -115,7 +124,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       is_cached: false,
-      research,
+      research: researchForStorage,
       charge,
     });
   } catch (error) {

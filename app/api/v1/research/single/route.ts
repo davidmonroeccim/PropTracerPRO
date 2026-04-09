@@ -65,8 +65,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // Run AI research
-    const research = await researchProperty(address, city, state, zip, ownerName);
+    // Run AI research — pass async recovery context so a business trace that
+    // doesn't finish within the inline 45s poll gets persisted for the cron sweeper.
+    const research = await researchProperty(address, city, state, zip, ownerName, {
+      userId: profile.id,
+      addressHash,
+      normalizedAddress,
+      city: city.toUpperCase(),
+      state: state.toUpperCase(),
+      zip: zip.substring(0, 5),
+    });
 
     // Only charge if we found an owner name
     let charge = 0;
@@ -86,16 +94,39 @@ export async function POST(request: Request) {
       charge = AI_RESEARCH.CHARGE_PER_RECORD;
     }
 
-    // Store research result on trace_history if a row exists for this address
+    // Store research result on trace_history if a row exists for this address.
+    // Strip internal pending_business_trace plumbing from the persisted payload
+    // (it's exposed separately on the API response).
+    const { pending_business_trace, ...researchForStorage } = research;
     await adminClient
       .from('trace_history')
       .update({
-        ai_research: research,
+        ai_research: researchForStorage,
         ai_research_status: research.owner_name ? 'found' : 'not_found',
         ai_research_charge: charge,
       })
       .eq('user_id', profile.id)
       .eq('address_hash', addressHash);
+
+    // If a business trace was queued for async recovery, look up the job row
+    // we just inserted so we can return its id to the caller.
+    let businessTracePending = false;
+    let businessTraceJobId: string | null = null;
+    if (pending_business_trace) {
+      const { data: pendingJob } = await adminClient
+        .from('business_trace_jobs')
+        .select('id')
+        .eq('user_id', profile.id)
+        .eq('fastappend_queue_id', pending_business_trace.queue_id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (pendingJob) {
+        businessTracePending = true;
+        businessTraceJobId = pendingJob.id;
+      }
+    }
 
     // Fire-and-forget: webhook dispatch for research.completed
     const { data: integrationProfile } = await adminClient
@@ -114,8 +145,10 @@ export async function POST(request: Request) {
           city: city.toUpperCase(),
           state: state.toUpperCase(),
           zip: zip.substring(0, 5),
-          research,
+          research: researchForStorage,
           charge,
+          business_trace_pending: businessTracePending,
+          business_trace_job_id: businessTraceJobId,
           timestamp: new Date().toISOString(),
         }),
       }).catch((err) => console.error('Webhook dispatch error:', err));
@@ -124,8 +157,10 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       isCached: false,
-      research,
+      research: researchForStorage,
       charge,
+      business_trace_pending: businessTracePending,
+      business_trace_job_id: businessTraceJobId,
     });
   } catch (error) {
     console.error('API v1 research error:', error);

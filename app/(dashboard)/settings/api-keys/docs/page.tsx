@@ -234,7 +234,9 @@ export default function ApiDocsPage() {
     "business_name": "Smith LLC",
     "individual_behind_business": "John Smith"
   },
-  "charge": 0.15
+  "charge": 0.15,
+  "business_trace_pending": true,            // present when async recovery is queued
+  "business_trace_job_id": "3f9c...9af2"     // poll /research/status?job_id=...
 }`}
               section="research-response"
             />
@@ -242,6 +244,83 @@ export default function ApiDocsPage() {
             <div className="bg-gray-50 border rounded-lg p-4">
               <p className="text-gray-700 text-sm">
                 <strong>Pricing:</strong> $0.15 per lookup, only charged if an owner is found. Cached results (within 90 days) are free.
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
+              <p className="text-amber-900 text-sm font-semibold">
+                Async business trace recovery
+              </p>
+              <p className="text-amber-800 text-sm">
+                When the property is owned by a business, LLC, or trust, PropTracerPRO runs a background FastAppend business-trace lookup to find the owner&apos;s contacts. If that lookup doesn&apos;t complete within 45 seconds, the response still returns immediately with <code className="bg-amber-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-amber-100 px-1 rounded">business_trace_job_id</code>.
+              </p>
+              <p className="text-amber-800 text-sm">
+                You have two ways to retrieve the delayed contacts:
+              </p>
+              <ul className="text-amber-800 text-sm list-disc list-inside ml-2 space-y-1">
+                <li>Poll <code className="bg-amber-100 px-1 rounded">GET /api/v1/research/status?job_id=&#123;id&#125;</code> every 30–60 seconds</li>
+                <li>Listen for a <code className="bg-amber-100 px-1 rounded">business_trace.completed</code> webhook at your configured webhook URL</li>
+              </ul>
+              <p className="text-amber-800 text-sm">
+                Delayed results typically arrive within 1–60 minutes. Jobs older than 24 hours without results are marked as errored.
+              </p>
+            </div>
+          </div>
+
+          <hr />
+
+          {/* Research Status */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
+              <code className="text-sm font-semibold">/research/status?job_id=&#123;id&#125;</code>
+            </div>
+            <p className="text-gray-600 text-sm">
+              Poll the status of an async FastAppend business-trace job that was queued during <code className="bg-gray-100 px-1 rounded">/research/single</code>. Use the <code className="bg-gray-100 px-1 rounded">business_trace_job_id</code> returned in the research response.
+            </p>
+
+            <h5 className="font-medium text-sm">Response (still processing):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "job_id": "3f9c...9af2",
+  "status": "pending",
+  "business_name": "Extra Space Storage",
+  "contacts": null,
+  "research": null
+}`}
+              section="research-status-pending"
+            />
+
+            <h5 className="font-medium text-sm">Response (completed):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "job_id": "3f9c...9af2",
+  "status": "completed",
+  "business_name": "Extra Space Storage",
+  "address": "160 MINE LAKE CT STE 200",
+  "city": "RALEIGH",
+  "state": "NC",
+  "zip": "27615",
+  "contacts": {
+    "owner_name": "Joseph Margolis",
+    "phones": [
+      { "number": "9196249818", "type": "mobile" },
+      { "number": "9198448365", "type": "landline" }
+    ],
+    "emails": ["rozar1@gateway.net", "krozar@nc.rr.com"],
+    "address": "2605 Scribe Ct, Raleigh, NC"
+  },
+  "research": { /* merged AI research with business trace contacts */ },
+  "completed_at": "2026-04-09T18:42:00.000Z"
+}`}
+              section="research-status-done"
+            />
+
+            <div className="bg-gray-50 border rounded-lg p-4">
+              <p className="text-gray-700 text-sm">
+                <strong>Status values:</strong> <code className="bg-gray-100 px-1 rounded">pending</code>, <code className="bg-gray-100 px-1 rounded">completed</code>, <code className="bg-gray-100 px-1 rounded">no_match</code>, <code className="bg-gray-100 px-1 rounded">error</code>. Polling this endpoint is free.
               </p>
             </div>
           </div>
@@ -682,9 +761,40 @@ Headers: Authorization: Bearer ptp_your_api_key
     "individual_behind_business": "John Smith"
   },
   "charge": 0.15,
+  "business_trace_pending": true,
+  "business_trace_job_id": "3f9c...9af2",
   "timestamp": "2026-01-27T15:30:00Z"
 }`}
             section="webhook-research"
+          />
+
+          <h5 className="font-medium text-sm">Business Trace Completion (async):</h5>
+          <p className="text-gray-600 text-xs">
+            Fired when a delayed FastAppend business-trace job finishes — minutes to hours after the initial <code className="bg-gray-100 px-1 rounded">research.completed</code> event for business/LLC-owned properties.
+          </p>
+          <CodeBlock
+            code={`{
+  "event": "business_trace.completed",
+  "business_trace_job_id": "3f9c...9af2",
+  "status": "completed",
+  "business_name": "Extra Space Storage",
+  "address": "160 MINE LAKE CT STE 200",
+  "city": "RALEIGH",
+  "state": "NC",
+  "zip": "27615",
+  "contacts": {
+    "owner_name": "Joseph Margolis",
+    "phones": [
+      { "number": "9196249818", "type": "mobile" },
+      { "number": "9198448365", "type": "landline" }
+    ],
+    "emails": ["rozar1@gateway.net", "krozar@nc.rr.com"],
+    "address": "2605 Scribe Ct, Raleigh, NC"
+  },
+  "research": { /* merged AI research with contacts attached */ },
+  "timestamp": "2026-04-09T18:42:00.000Z"
+}`}
+            section="webhook-business-trace"
           />
 
           <h5 className="font-medium text-sm">Bulk Job Completion:</h5>

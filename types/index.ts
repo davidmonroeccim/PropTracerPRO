@@ -270,6 +270,42 @@ export interface AIResearchResult {
   sources: string[];
   business_at_address?: string | null;
   business_trace_status?: string | null;
+  // Set when the inline business trace poll timed out and an async job was queued.
+  // The v1 research route strips this before returning to clients and exposes
+  // business_trace_pending + business_trace_job_id at the top level instead.
+  pending_business_trace?: {
+    queue_id: string;
+    business_name: string;
+    state: string;
+  } | null;
+}
+
+// ===================
+// Business Trace Job (async FastAppend recovery)
+// ===================
+
+export interface BusinessTraceJob {
+  id: string;
+  user_id: string;
+  fastappend_queue_id: string;
+  business_name: string | null;
+  state: string | null;
+  address_hash: string | null;
+  normalized_address: string | null;
+  city: string | null;
+  property_state: string | null;
+  zip: string | null;
+  status: 'pending' | 'completed' | 'no_match' | 'error';
+  result: {
+    owner_name: string | null;
+    phones: Array<{ number: string; type: string }>;
+    emails: string[];
+    address: string | null;
+  } | null;
+  error_message: string | null;
+  webhook_dispatched: boolean;
+  created_at: string;
+  completed_at: string | null;
 }
 
 // ===================

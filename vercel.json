@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/sweep-stale-traces",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-business-traces",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
