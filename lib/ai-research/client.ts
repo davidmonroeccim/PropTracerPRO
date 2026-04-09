@@ -114,6 +114,26 @@ export async function researchProperty(
       [fullContext]
     ).then((results) => results[0]);
 
+    // Preserve sidecar fields that Claude's re-extraction would otherwise drop
+    // (business trace contacts, pending job ref, status string).
+    if (resolvedResult.business_trace_contacts) {
+      finalResult.business_trace_contacts = resolvedResult.business_trace_contacts;
+      // Also re-apply owner promotion in case Claude dropped it on re-extract
+      if (!finalResult.owner_name && resolvedResult.business_trace_contacts.owner_name) {
+        finalResult.owner_name = resolvedResult.business_trace_contacts.owner_name;
+        finalResult.owner_type = 'individual';
+        if (!finalResult.individual_behind_business) {
+          finalResult.individual_behind_business = resolvedResult.business_trace_contacts.owner_name;
+        }
+      }
+    }
+    if (resolvedResult.business_trace_status) {
+      finalResult.business_trace_status = resolvedResult.business_trace_status;
+    }
+    if (resolvedResult.pending_business_trace) {
+      finalResult.pending_business_trace = resolvedResult.pending_business_trace;
+    }
+
     return finalResult;
   }
 
@@ -287,6 +307,15 @@ async function resolveEntityChain(
   // Track the most recently queued-but-unfinished FastAppend job so we can
   // surface it for async recovery after this function returns.
   let pendingBusinessTrace: { queueId: string; businessName: string; state: string } | null = null;
+  // Track the most recent successful inline FastAppend payload so we can
+  // attach it to the result as structured contacts (fast path merge).
+  let latestBusinessTraceContacts: {
+    owner_name: string | null;
+    phones: Array<{ number: string; type: string }>;
+    emails: string[];
+    address: string | null;
+  } | null = null;
+  let latestBusinessTraceEntity: string | null = null;
 
   for (let iteration = 0; iteration < 3; iteration++) {
     // Determine what entity to resolve next
@@ -376,6 +405,11 @@ Email addresses: ${emailsStr}
 Mailing address: ${traceResult.address || '(not found)'}
 --- END BUSINESS TRACE RESULTS ---`;
           businessTraceStatus = `Found: ${traceResult.owner_name || 'unnamed'} (${traceResult.phones.length} phones, ${traceResult.emails.length} emails)`;
+          // Stash the structured payload so we can attach it after the loop.
+          // Last-writer-wins: if multiple entity-resolution iterations each hit
+          // FastAppend, the most recent successful payload is the one merged.
+          latestBusinessTraceContacts = traceResult;
+          latestBusinessTraceEntity = entityToResolve;
         } else {
           console.log(`[Entity Resolution] Business trace returned no results for "${entityToResolve}"`);
           businessTraceStatus = `No results for "${entityToResolve}"`;
@@ -415,6 +449,44 @@ Mailing address: ${traceResult.address || '(not found)'}
 
   if (businessTraceStatus) {
     currentResult.business_trace_status = businessTraceStatus;
+  }
+
+  // Fast-path merge: if the inline FastAppend poll succeeded, attach the raw
+  // contact payload to the result so the API response carries structured
+  // phones/emails/mailing_address. Claude's output schema has no fields for
+  // these, so without this sidecar the structured data would be dropped and
+  // only the summary string would reach the caller.
+  if (latestBusinessTraceContacts) {
+    currentResult.business_trace_contacts = latestBusinessTraceContacts;
+
+    // If Claude didn't identify an owner but FastAppend did, promote it.
+    // Mirrors the cron sweeper's behavior for the slow path.
+    if (!currentResult.owner_name && latestBusinessTraceContacts.owner_name) {
+      currentResult.owner_name = latestBusinessTraceContacts.owner_name;
+      currentResult.owner_type = 'individual';
+      if (!currentResult.individual_behind_business) {
+        currentResult.individual_behind_business = latestBusinessTraceContacts.owner_name;
+      }
+      if (!currentResult.business_name && latestBusinessTraceEntity) {
+        currentResult.business_name = latestBusinessTraceEntity;
+      }
+      // Add the discovered owner to decision_makers if not already there
+      if (!currentResult.decision_makers.includes(latestBusinessTraceContacts.owner_name)) {
+        currentResult.decision_makers = [
+          ...currentResult.decision_makers,
+          latestBusinessTraceContacts.owner_name,
+        ];
+      }
+    } else if (
+      latestBusinessTraceContacts.owner_name &&
+      !currentResult.decision_makers.includes(latestBusinessTraceContacts.owner_name)
+    ) {
+      // Already had an owner — still surface the FastAppend contact as a decision maker
+      currentResult.decision_makers = [
+        ...currentResult.decision_makers,
+        latestBusinessTraceContacts.owner_name,
+      ];
+    }
   }
 
   // Async recovery: if a business trace job is still pending and we have the

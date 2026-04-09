@@ -135,6 +135,10 @@ export async function POST(request: Request) {
       .eq('id', profile.id)
       .single();
 
+    // Surface FastAppend contacts at the top level for agent convenience.
+    // Also present inside research.business_trace_contacts.
+    const contacts = researchForStorage.business_trace_contacts || null;
+
     if (integrationProfile?.webhook_url) {
       fetch(integrationProfile.webhook_url, {
         method: 'POST',
@@ -146,6 +150,7 @@ export async function POST(request: Request) {
           state: state.toUpperCase(),
           zip: zip.substring(0, 5),
           research: researchForStorage,
+          contacts,
           charge,
           business_trace_pending: businessTracePending,
           business_trace_job_id: businessTraceJobId,
@@ -158,6 +163,7 @@ export async function POST(request: Request) {
       success: true,
       isCached: false,
       research: researchForStorage,
+      contacts,
       charge,
       business_trace_pending: businessTracePending,
       business_trace_job_id: businessTraceJobId,

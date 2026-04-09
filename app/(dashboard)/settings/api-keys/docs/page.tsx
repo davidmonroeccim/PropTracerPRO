@@ -218,7 +218,43 @@ export default function ApiDocsPage() {
               section="research-request"
             />
 
-            <h5 className="font-medium text-sm">Response:</h5>
+            <h5 className="font-medium text-sm">Response (fast path — FastAppend finished inline):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "isCached": false,
+  "research": {
+    "owner_name": "John Smith",
+    "owner_type": "individual",
+    "business_name": "Smith LLC",
+    "individual_behind_business": "John Smith",
+    "decision_makers": ["John Smith"],
+    "confidence": 80,
+    "business_trace_status": "Found: John Smith (2 phones, 1 emails)",
+    "business_trace_contacts": {
+      "owner_name": "John Smith",
+      "phones": [
+        { "number": "5125551234", "type": "mobile" },
+        { "number": "5125555678", "type": "landline" }
+      ],
+      "emails": ["john@smithllc.com"],
+      "address": "456 Oak Ave, Austin, TX"
+    }
+  },
+  "contacts": {
+    "owner_name": "John Smith",
+    "phones": [...],
+    "emails": [...],
+    "address": "456 Oak Ave, Austin, TX"
+  },
+  "charge": 0.15,
+  "business_trace_pending": false,
+  "business_trace_job_id": null
+}`}
+              section="research-response-fast"
+            />
+
+            <h5 className="font-medium text-sm">Response (slow path — FastAppend queued for async recovery):</h5>
             <CodeBlock
               code={`{
   "success": true,
@@ -226,19 +262,18 @@ export default function ApiDocsPage() {
   "research": {
     "owner_name": "Smith LLC",
     "owner_type": "business",
-    "is_deceased": false,
-    "deceased_details": null,
-    "relatives": [],
-    "decision_makers": ["John Smith"],
-    "confidence": 80,
     "business_name": "Smith LLC",
-    "individual_behind_business": "John Smith"
+    "individual_behind_business": null,
+    "decision_makers": [],
+    "confidence": 45,
+    "business_trace_status": "Pending async recovery (queue 48291)"
   },
+  "contacts": null,
   "charge": 0.15,
-  "business_trace_pending": true,            // present when async recovery is queued
+  "business_trace_pending": true,
   "business_trace_job_id": "3f9c...9af2"     // poll /research/status?job_id=...
 }`}
-              section="research-response"
+              section="research-response-slow"
             />
 
             <div className="bg-gray-50 border rounded-lg p-4">

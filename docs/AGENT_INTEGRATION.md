@@ -37,17 +37,46 @@ curl -X POST https://proptracerpro.vercel.app/api/v1/research/single \
 
 **Response when FastAppend finished inline (fast path — no action needed):**
 
+The FastAppend payload is surfaced in two places for convenience:
+1. `contacts` at the top level (mirrors the `/research/status` response shape).
+2. `research.business_trace_contacts` inside the research object.
+
+Both contain identical data — pick whichever is more convenient for your agent.
+
 ```json
 {
   "success": true,
   "isCached": false,
   "research": {
-    "owner_name": "Joseph Margolis",
+    "owner_name": "Gwyn McNeal",
     "owner_type": "individual",
-    "individual_behind_business": "Joseph Margolis",
-    "business_name": "Extra Space Storage",
-    "decision_makers": ["Joseph Margolis"],
-    "confidence": 85
+    "individual_behind_business": "Gwyn McNeal",
+    "business_name": "Extra Space Properties Two LLC",
+    "decision_makers": ["Gwyn McNeal"],
+    "confidence": 55,
+    "business_trace_status": "Found: Gwyn McNeal (5 phones, 3 emails)",
+    "business_trace_contacts": {
+      "owner_name": "Gwyn McNeal",
+      "phones": [
+        { "number": "9196249818", "type": "mobile" },
+        { "number": "9196249822", "type": "mobile" },
+        { "number": "9198448365", "type": "landline" },
+        { "number": "9198448360", "type": "landline" },
+        { "number": "8508774979", "type": "landline" }
+      ],
+      "emails": [
+        "rozar1@gateway.net",
+        "k.rozar@nccorporate.com",
+        "krozar@nc.rr.com"
+      ],
+      "address": "2605 Scribe Ct, Raleigh, NC"
+    }
+  },
+  "contacts": {
+    "owner_name": "Gwyn McNeal",
+    "phones": [ /* same as above */ ],
+    "emails": [ /* same as above */ ],
+    "address": "2605 Scribe Ct, Raleigh, NC"
   },
   "charge": 0.15,
   "business_trace_pending": false,
@@ -84,14 +113,16 @@ response = requests.post(
     json={"address": addr, "city": city, "state": state, "zip": zip}
 ).json()
 
-contacts = None
 if response.get("business_trace_pending"):
     # Slow path — delayed results, fetch separately
     job_id = response["business_trace_job_id"]
     contacts = wait_for_business_trace(job_id)  # see step 2
 else:
-    # Fast path — research already contains everything
-    contacts = response["research"]
+    # Fast path — contacts are inline at response["contacts"]
+    # (same payload also available at response["research"]["business_trace_contacts"])
+    contacts = response.get("contacts")
+
+# contacts is either None, or { owner_name, phones[], emails[], address }
 ```
 
 ### 2. Retrieve delayed results — `GET /api/v1/research/status?job_id=<id>`
@@ -225,7 +256,8 @@ When researching many properties (e.g., "find all self storage owners in Mecklen
 
 ## Common mistakes to avoid
 
-- **Ignoring `business_trace_pending`.** If you only read `research.owner_name` and stop there, you'll miss the contacts for every business-owned property.
+- **Ignoring `business_trace_pending`.** If you only read `research.owner_name` and stop there, you'll miss the contacts for business-owned properties that take longer than 45 s to trace.
+- **Looking for `phones[]` / `emails[]` at the top level of `research`.** They live under `research.business_trace_contacts` (or at the top-level `contacts` field). The core `research` schema only carries ownership, not contact data.
 - **Polling too fast.** Polls under 10 seconds apart add load without speeding up results — FastAppend processes in its own queue and won't finish faster because you ask more often.
 - **Treating `status: "no_match"` as an error.** It just means FastAppend didn't find contacts for that specific business. The AI research is still valid.
 - **Forgetting cached responses.** When `isCached: true`, there's no pending job — the cached payload is the complete result from a prior lookup within the last 90 days.

@@ -270,6 +270,16 @@ export interface AIResearchResult {
   sources: string[];
   business_at_address?: string | null;
   business_trace_status?: string | null;
+  // Structured FastAppend business-trace payload. Populated inline when the
+  // 45s poll in resolveEntityChain() succeeds (fast path), or by the cron
+  // sweeper when the async job resolves (slow path). Agents read this to get
+  // phones/emails/mailing_address for the LLC owner contact.
+  business_trace_contacts?: {
+    owner_name: string | null;
+    phones: Array<{ number: string; type: string }>;
+    emails: string[];
+    address: string | null;
+  } | null;
   // Set when the inline business trace poll timed out and an async job was queued.
   // The v1 research route strips this before returning to clients and exposes
   // business_trace_pending + business_trace_job_id at the top level instead.

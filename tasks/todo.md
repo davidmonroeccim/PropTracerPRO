@@ -78,3 +78,22 @@ When `/api/v1/research/single` encounters a business-owned property (LLC, Trust,
 - Inline polling is preserved → fast cases stay fast.
 - `business_trace.completed` is a new webhook event (distinct from `research.completed`) so agents can filter.
 - Billing unaffected — `ai_research_charge` is deducted on the initial request; delayed merge only enriches contact data.
+
+---
+
+# Fast-path FastAppend merge bug (2026-04-09 follow-up)
+
+## Problem
+After deploying the async recovery, live agent tests revealed that when the 45 s inline poll DOES succeed (fast path), the structured FastAppend payload (phones, emails, mailing address) is never attached to the returned `AIResearchResult`. It's only fed to Claude as a text context block, but Claude's output schema has no phones/emails/mailing_address fields, so the contact data is silently dropped. Agents see `business_trace_status: "Found: Drew Adams (2 phones, 2 emails)"` but zero structured contacts, and get charged $0.15 per call.
+
+The cron sweeper (slow path) already does the right thing: it attaches a `business_trace_contacts` sidecar and promotes `owner_name` if AI didn't find one. The fast path needs to mirror this.
+
+## Tasks
+- [x] **1.** Add `business_trace_contacts?` field to `AIResearchResult` in `types/index.ts` (first-class, not a cast hack)
+- [x] **2.** In `resolveEntityChain()`, when `traceResult` is present, attach it to `currentResult.business_trace_contacts` after the Claude re-extraction loop
+- [x] **3.** Promote `owner_name` / `individual_behind_business` from FastAppend if Claude didn't find one
+- [x] **4.** Verify `/api/v1/research/single` returns `business_trace_contacts` (falls out naturally — already spreads `researchForStorage`)
+- [x] **5.** Test compile with `tsc --noEmit`
+- [x] **6.** Commit + push for Vercel auto-deploy
+- [x] **7.** Update `docs/AGENT_INTEGRATION.md` fast-path example to show where contacts land
+- [x] **8.** Update `History.md`
