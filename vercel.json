@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/sweep-business-traces",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-bulk-research",
+      "schedule": "* * * * *"
     }
   ]
 }

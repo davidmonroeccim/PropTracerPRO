@@ -187,7 +187,7 @@ export async function researchPropertyBatch(
 }
 
 // Check if a name looks like a business entity rather than a person
-function isLikelyBusiness(name: string): boolean {
+export function isLikelyBusiness(name: string): boolean {
   const businessIndicators = ['llc', 'inc', 'corp', 'trust', 'ltd', 'lp', 'company', 'group', 'holdings', 'properties', 'investments', 'management', 'enterprises', 'associates', 'partners', 'foundation', 'capital', 'realty', 'development', 'construction', 'apartments', 'real estate', 'cre', 'rentals', 'housing', 'ventures', 'equity', 'asset', 'land', 'homes', 'estate', 'residences', 'suites', 'plaza', 'commercial', 'retail', 'industrial', 'office', 'hotel', 'hospitality', 'storage', 'units'];
   return businessIndicators.some((ind) => name.toLowerCase().includes(ind));
 }

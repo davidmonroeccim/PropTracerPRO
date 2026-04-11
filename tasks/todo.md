@@ -1,99 +1,174 @@
-# Async FastAppend Business Trace Recovery
+# Bulk Trace: AI Research + FastAppend Parity with Single Trace
 
 ## Problem
-When `/api/v1/research/single` encounters a business-owned property (LLC, Trust, storage company), `resolveEntityChain()` in `lib/ai-research/client.ts:316` calls FastAppend's business-trace API and polls for ~45s (15 × 3s). FastAppend routinely takes longer than that, so the poll times out, the API returns with just `business_trace_status: "No results for..."`, and FastAppend later emails the completed CSV to the user — those results never re-enter PTP. The agent that called the API has no way to retrieve them.
 
-## Design (keeps inline polling as fast-path, adds async recovery)
+The v1 bulk endpoints (`POST /api/v1/trace/bulk` + `GET /api/v1/trace/bulk/status`) have
+none of the AI research / FastAppend business-trace plumbing that the single-trace
+endpoints got yesterday (commit `1a4997c`). Every entity-owned property in a bulk
+upload silently loses its decision-maker contacts:
 
-**Hot path (unchanged):** If FastAppend responds within 45 s, `resolveEntityChain()` picks up the contacts inline, feeds them to Claude, and the research returns fully-populated. No change for agents.
+- `/v1/trace/bulk` blindly splits whatever `owner_name` is on the record (even an
+  LLC like "Extra Space Storage") into first/last name and ships it to Tracerfy's
+  person skip trace, guaranteeing a miss.
+- No call to `researchProperty()`, no entity detection, no FastAppend business
+  trace, no `business_trace_jobs` async recovery, no `ai_research` persisted to
+  `trace_history`.
+- The `bulk_job.completed` webhook delivers only Tracerfy person-trace output.
+  There is no `research`, `contacts`, `business_trace_pending`, or
+  `business_trace_job_id` per record.
+- This contradicts `docs/AGENT_INTEGRATION.md`, which promises agents the same
+  structured FastAppend payload the single-trace flow now delivers.
 
-**Slow path (new):** If the 45 s poll exhausts without results, `resolveEntityChain()` saves the FastAppend `queue_id` to a new `business_trace_jobs` table via admin client, and the research still returns immediately. The v1 route surfaces `business_trace_pending: true` + `business_trace_job_id` in the response. A cron sweeper picks up pending jobs every 5 min, polls FastAppend, merges contacts into `trace_history.ai_research`, and fires a `business_trace.completed` webhook. Agents can also poll `/api/v1/research/status?job_id=...`.
+## Design
+
+Bulk has a hard constraint: an HTTP POST cannot block for `records × 45s` of
+inline AI research. So the work moves to a background cron worker, modeled on
+the existing `sweep-business-traces` cron.
+
+**Inbound `POST /api/v1/trace/bulk`:**
+
+1. Dedupe, wallet-check (now includes research cost estimate for records needing
+   it).
+2. Create `trace_jobs` row.
+3. Split records:
+   - **personRecords** — `owner_name` is set AND `isLikelyBusiness(owner_name)` is
+     false. These go straight to Tracerfy as before.
+   - **entityRecords** — `owner_name` empty OR looks like a business. These need
+     AI research before any Tracerfy call.
+4. Insert all `trace_history` rows linked to the new `trace_jobs.id` via a new
+   `trace_job_id` column. personRecords get `status='processing'`; entityRecords
+   get `status='processing'` + `ai_research_status='queued'`.
+5. If any personRecords exist, submit them as a single Tracerfy bulk CSV (old
+   fast path, preserved).
+6. Return `job_id` immediately. Response declares how many records are queued
+   for research.
+
+**New cron `/api/cron/sweep-bulk-research`** (runs every minute):
+
+1. Pulls up to N trace_history rows with `ai_research_status='queued'`.
+2. For each row, calls `researchProperty()` with an `asyncRecovery` context so a
+   timed-out FastAppend business trace gets queued into `business_trace_jobs`
+   (already handled by `resolveEntityChain()`).
+3. Persists `ai_research` + `ai_research_status='found'|'not_found'` onto the
+   trace_history row; deducts the $0.15 research charge if an owner was found.
+4. If research resolved a person name (`individual_behind_business` or
+   `owner_name`), submits a single Tracerfy person-skip-trace for that row via
+   `submitSingleTrace()` and records the returned `tracerfy_job_id` on the row.
+5. If research found no person name, marks the row `status='no_match'`
+   immediately.
+
+**Outbound `GET /api/v1/trace/bulk/status`:**
+
+1. Aggregates state across all `trace_history` rows linked to the job via
+   `trace_job_id`:
+   - Any rows still queued/processing for research → overall `status='processing'`.
+   - Any rows whose Tracerfy job hasn't resolved → poll each unique
+     `tracerfy_job_id` via `getJobStatus()`, match results back, persist
+     trace_result + deduct charges (mirrors current single-trace status logic).
+2. When everything is finalized, updates `trace_jobs.status='completed'` and
+   fires a single `bulk_job.completed` webhook. The webhook's `results` array
+   now includes per-record `research`, `contacts`, `business_trace_pending`,
+   and `business_trace_job_id`, matching `docs/AGENT_INTEGRATION.md`.
+3. The existing `sweep-business-traces` cron continues to fire per-record
+   `business_trace.completed` webhooks as the slow-path FastAppend jobs resolve
+   — no change needed, since it already merges into any `trace_history` row
+   with a matching `address_hash`.
+
+## Key design choices
+
+- **New `trace_job_id` column on `trace_history`** — needed to aggregate
+  per-record state back to the parent bulk job once entity rows have individual
+  Tracerfy job IDs (diverging from the shared bulk `tracerfy_job_id`).
+- **Per-record single-trace submission for entity rows** — simpler than
+  re-packaging resolved rows into a second Tracerfy bulk CSV, and mirrors the
+  single-trace API exactly.
+- **Cron-driven research, not inline** — Vercel serverless maxDuration (300 s)
+  cannot accommodate 10k × 45 s research calls. Cron runs every 1 min, processes
+  small batches, matches the proven `sweep-business-traces` pattern.
+- **Scope: v1 API only** — the user's ask is specifically about the agent-facing
+  API (per `docs/AGENT_INTEGRATION.md`). The dashboard UI bulk flow
+  (`app/api/trace/bulk/*`, `/trace/bulk` page) is untouched.
 
 ## Tasks
 
 - [x] **1.** Write plan
-- [x] **2.** Migration `supabase/migrations/20260409_business_trace_jobs.sql`
-- [x] **3.** `types/index.ts` — `pending_business_trace?` + `BusinessTraceJob`
-- [x] **4.** `lib/ai-research/client.ts` — async recovery path in `resolveEntityChain()`
-- [x] **5.** `app/api/v1/research/single/route.ts` — surface pending job id
-- [x] **6.** `app/api/research/single/route.ts` — session route parity
-- [x] **7.** `app/api/cron/sweep-business-traces/route.ts` — new cron sweeper
-- [x] **8.** `vercel.json` — cron registered
-- [x] **9.** `app/api/v1/research/status/route.ts` — new status endpoint
-- [x] **10.** API docs page updated
-- [x] **11.** `docs/AGENT_INTEGRATION.md` created
-- [x] **12.** `History.md` + review section
+- [x] **2.** Migration `supabase/migrations/20260411_bulk_trace_research.sql` —
+      add `trace_job_id` column + index to `trace_history`
+- [x] **3.** Export `isLikelyBusiness` from `lib/ai-research/client.ts`
+- [x] **4.** Rewrite `app/api/v1/trace/bulk/route.ts` with entity detection,
+      split submit, and research queueing
+- [x] **5.** Create `app/api/cron/sweep-bulk-research/route.ts` worker
+- [x] **6.** Register the new cron in `vercel.json`
+- [x] **7.** Rewrite `app/api/v1/trace/bulk/status/route.ts` to aggregate by
+      `trace_job_id` and include per-record research + contacts in the
+      response and webhook
+- [x] **8.** Update `History.md` and this file's review section
 
 ## Review
 
 ### What shipped
 
-**Fast path (unchanged):** FastAppend business traces that complete within 45 s still populate contacts inline during AI research. Zero behavior change for quick cases.
+Bulk trace via the v1 agent API now runs the same AI research + FastAppend
+business-trace flow that single trace got yesterday, delivered via a background
+cron worker to avoid HTTP timeout constraints.
 
-**Slow path (new):** When the 45 s poll exhausts with FastAppend still pending:
+**Files changed:**
+- `supabase/migrations/20260411_bulk_trace_research.sql` (new) — `trace_job_id`
+  FK on `trace_history` + two partial indexes (queued-research lookup and
+  aggregate-by-bulk-job lookup)
+- `lib/ai-research/client.ts` — `isLikelyBusiness` exported
+- `app/api/v1/trace/bulk/route.ts` — full rewrite; splits records into person
+  vs. entity buckets, inserts `trace_history` rows up front with
+  `trace_job_id`, queues entity rows as `ai_research_status='queued'`, submits
+  person rows via the existing Tracerfy bulk CSV path
+- `app/api/cron/sweep-bulk-research/route.ts` (new) — processes 5 queued rows
+  per run, atomic claim, calls `researchProperty()` with asyncRecovery,
+  persists research, deducts $0.15 per owner found, submits single Tracerfy
+  trace for resolved person names
+- `vercel.json` — registers the new cron on `* * * * *`
+- `app/api/v1/trace/bulk/status/route.ts` — full rewrite; aggregates by
+  `trace_job_id`, polls all unresolved Tracerfy jobs (shared bulk + per-entity
+  single submits), fires enriched `bulk_job.completed` webhook with per-record
+  `research`, `contacts`, `business_trace_pending`, `business_trace_job_id`
+- `History.md` — 2026-04-11 entry
 
-1. `resolveEntityChain()` inserts a row into `business_trace_jobs` via admin client (requires the new `AsyncRecoveryContext` param from the calling route) and stamps `pending_business_trace` on the returned `AIResearchResult`.
-2. `/api/v1/research/single` reads `pending_business_trace`, looks up the inserted row by `fastappend_queue_id`, and returns `business_trace_pending: true` + `business_trace_job_id` in the response body (and in the `research.completed` webhook).
-3. Every 5 minutes, `/api/cron/sweep-business-traces` picks up pending jobs, polls FastAppend, downloads results, updates the job row, merges contacts into `trace_history.ai_research` (appends to `decision_makers`, promotes `owner_name` if the AI didn't find one, adds a `business_trace_contacts` sidecar payload), and fires a `business_trace.completed` webhook.
-4. Agents can also poll `GET /api/v1/research/status?job_id=<uuid>` to retrieve the merged result on demand.
-5. Pending jobs older than 24 hours are automatically marked as errored.
+### Flow contract vs. `docs/AGENT_INTEGRATION.md`
 
-### Files changed
+Inbound response now includes `recordsDirectTrace` and
+`recordsPendingResearch` so the agent knows how many records will be delayed.
+Outbound bulk webhook + status response per-record shape:
 
-- `supabase/migrations/20260409_business_trace_jobs.sql` (new)
-- `types/index.ts`
-- `lib/ai-research/client.ts`
-- `app/api/v1/research/single/route.ts`
-- `app/api/research/single/route.ts`
-- `app/api/cron/sweep-business-traces/route.ts` (new)
-- `app/api/v1/research/status/route.ts` (new)
-- `vercel.json`
-- `app/(dashboard)/settings/api-keys/docs/page.tsx`
-- `docs/AGENT_INTEGRATION.md` (new)
-- `History.md`
+```
+{
+  address, city, state, zip, status, input_owner_name,
+  result,      // Tracerfy person-trace result
+  research,    // full AIResearchResult with business_trace_contacts sidecar
+  contacts,    // top-level alias for research.business_trace_contacts
+  business_trace_pending,     // true while FastAppend async job unresolved
+  business_trace_job_id,      // correlates with business_trace.completed webhook
+  charge, ai_research_charge
+}
+```
 
-### Not changed
+Rows whose FastAppend business trace exceeded the 45 s inline poll are tracked
+in `business_trace_jobs` and finalized by the existing `sweep-business-traces`
+cron, which fires a separate `business_trace.completed` webhook per row.
+Agents correlate via `business_trace_job_id` just like the single-trace flow.
 
-- Billing stays on the initial request (`ai_research_charge` deducted when the AI finds an owner). Delayed merges only enrich contact data.
-- The session-authed `/api/research/single` endpoint still records pending jobs silently — the dashboard UI doesn't yet render a "pending business trace" indicator. Future enhancement.
-- `researchPropertyBatch()` (used by `/api/research/bulk`) does **not** trigger async recovery. It doesn't call `resolveEntityChain()` — it's a Claude-only batch path. If bulk-with-entity-resolution is ever added, it would need to accept the same `AsyncRecoveryContext`.
+### Non-goals / deferred
 
-### To deploy
+- UI dashboard bulk (`app/api/trace/bulk/*` + `/trace/bulk` page) is untouched.
+  The user asked about the agent-facing v1 API specifically.
+- No retry counter on the cron worker. Persistent research failures loop every
+  minute; acceptable for now since cron is throttled to 5 rows per run and the
+  error path is visible in logs.
+- Bulk dedup (`checkDuplicates`) still relies on the stale-processing window
+  to allow re-submission of stuck records. Not changed.
 
-1. Run the new migration: `supabase/migrations/20260409_business_trace_jobs.sql`.
-2. Deploy to Vercel — the new cron `/api/cron/sweep-business-traces` will auto-register from `vercel.json`.
-3. Confirm `CRON_SECRET` env var is set (same one used by `sweep-stale-traces`).
-4. Confirm `FASTAPPEND_API_KEY` env var is set.
+### Verification
 
-### Agent usage summary (for the Cowork agent's instructions)
-
-1. Call `POST /api/v1/research/single` with property address.
-2. If response has `business_trace_pending: true`, capture `business_trace_job_id`.
-3. Either listen for the `business_trace.completed` webhook at your configured webhook URL, **or** poll `GET /api/v1/research/status?job_id=<id>` every 30–60 seconds.
-4. When `status` becomes `completed`, use the `contacts` field (owner_name, phones, emails, address) and/or the merged `research` object.
-5. Full instructions in `docs/AGENT_INTEGRATION.md`.
-
-## Notes
-- Only the v1 API-key endpoint returns `business_trace_pending` in the response (agents use that endpoint). The session-authed `/api/research/single` just records the pending job silently — the dashboard UI does not need the pending-state plumbing.
-- Inline polling is preserved → fast cases stay fast.
-- `business_trace.completed` is a new webhook event (distinct from `research.completed`) so agents can filter.
-- Billing unaffected — `ai_research_charge` is deducted on the initial request; delayed merge only enriches contact data.
-
----
-
-# Fast-path FastAppend merge bug (2026-04-09 follow-up)
-
-## Problem
-After deploying the async recovery, live agent tests revealed that when the 45 s inline poll DOES succeed (fast path), the structured FastAppend payload (phones, emails, mailing address) is never attached to the returned `AIResearchResult`. It's only fed to Claude as a text context block, but Claude's output schema has no phones/emails/mailing_address fields, so the contact data is silently dropped. Agents see `business_trace_status: "Found: Drew Adams (2 phones, 2 emails)"` but zero structured contacts, and get charged $0.15 per call.
-
-The cron sweeper (slow path) already does the right thing: it attaches a `business_trace_contacts` sidecar and promotes `owner_name` if AI didn't find one. The fast path needs to mirror this.
-
-## Tasks
-- [x] **1.** Add `business_trace_contacts?` field to `AIResearchResult` in `types/index.ts` (first-class, not a cast hack)
-- [x] **2.** In `resolveEntityChain()`, when `traceResult` is present, attach it to `currentResult.business_trace_contacts` after the Claude re-extraction loop
-- [x] **3.** Promote `owner_name` / `individual_behind_business` from FastAppend if Claude didn't find one
-- [x] **4.** Verify `/api/v1/research/single` returns `business_trace_contacts` (falls out naturally — already spreads `researchForStorage`)
-- [x] **5.** Test compile with `tsc --noEmit`
-- [x] **6.** Commit + push for Vercel auto-deploy
-- [x] **7.** Update `docs/AGENT_INTEGRATION.md` fast-path example to show where contacts land
-- [x] **8.** Update `History.md`
+- `npx tsc --noEmit` — clean
+- `npm run lint` on the three modified/new route files — clean (pre-existing
+  warning in `lib/ai-research/client.ts:645` about unused `parseError` is not
+  from this change and was left alone per the "don't touch code you didn't
+  modify" guideline)
