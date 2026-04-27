@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
-import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normalizer';
+import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
 import { isLikelyBusiness } from '@/lib/ai-research/client';
 import { AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
 import type { AddressInput } from '@/types';
+
+export const maxDuration = 60;
 
 const MAX_RECORDS = 10000;
 
@@ -33,6 +35,33 @@ export async function POST(request: Request) {
     if (records.length > MAX_RECORDS) {
       return NextResponse.json(
         { success: false, error: `Maximum ${MAX_RECORDS} records per request` },
+        { status: 400 }
+      );
+    }
+
+    // Per-record validation. Without this, a record missing address/city/state/zip
+    // throws inside normalizeAddress and the whole batch returns an opaque 500.
+    // Surface a structured 400 instead so callers know exactly which records failed.
+    const invalidRecords: { index: number; error: string }[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      const v = validateAddressInput(
+        r?.address as string,
+        r?.city as string,
+        r?.state as string,
+        r?.zip as string
+      );
+      if (!v.valid) {
+        invalidRecords.push({ index: i, error: v.error || 'invalid record' });
+      }
+    }
+    if (invalidRecords.length > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `${invalidRecords.length} of ${records.length} records failed validation`,
+          invalidRecords,
+        },
         { status: 400 }
       );
     }
@@ -254,8 +283,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error('API v1 bulk trace error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: `Bulk trace failed: ${message}` },
       { status: 500 }
     );
   }

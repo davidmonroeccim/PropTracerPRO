@@ -8,6 +8,13 @@ import { researchProperty } from '@/lib/ai-research/client';
 import { PRICING, AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
+export const maxDuration = 60;
+
+// Cap inline FastAppend poll so the route returns within the function timeout.
+// Entity research that needs more time should use /api/v1/research/single, which
+// has full async recovery support via business_trace_jobs.
+const SYNC_POLL_BUDGET_MS = 15000;
+
 export async function POST(request: Request) {
   try {
     // Authenticate via API key
@@ -119,7 +126,15 @@ export async function POST(request: Request) {
     let researchCharge = 0;
 
     if (aiResearch && !ownerName) {
-      const research = await researchProperty(address, city, state, zip);
+      const research = await researchProperty(
+        address,
+        city,
+        state,
+        zip,
+        undefined,
+        undefined,
+        SYNC_POLL_BUDGET_MS
+      );
       researchResult = research;
 
       if (research.owner_name) {

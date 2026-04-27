@@ -28,13 +28,16 @@ export interface AsyncRecoveryContext {
 }
 
 // Single property research (initial search + recursive entity resolution + deceased/relatives)
+// pollBudgetMs caps the inline FastAppend poll so sync API routes don't blow past
+// their function timeout. Defaults to 45s (cron-friendly); sync routes pass 15000.
 export async function researchProperty(
   address: string,
   city: string,
   state: string,
   zip: string,
   ownerName?: string,
-  asyncRecovery?: AsyncRecoveryContext
+  asyncRecovery?: AsyncRecoveryContext,
+  pollBudgetMs?: number
 ): Promise<AIResearchResult> {
   // Pass 1: Build and run initial search queries
   const queries = buildSearchQueries(address, city, state, zip, ownerName);
@@ -65,7 +68,8 @@ export async function researchProperty(
     state,
     combinedContext,
     record,
-    asyncRecovery
+    asyncRecovery,
+    pollBudgetMs
   );
 
   // Discovery Pass: if confidence is low and we found a business at the address,
@@ -86,7 +90,8 @@ export async function researchProperty(
       state,
       resolvedContext,
       record,
-      asyncRecovery
+      asyncRecovery,
+      pollBudgetMs
     );
 
     resolvedResult = discoveryResolution.result;
@@ -292,14 +297,23 @@ function buildDeceasedQueries(personName: string, city: string, state: string): 
   ];
 }
 
-// Recursively resolve entity chains through SOS records (up to 3 iterations)
+// Recursively resolve entity chains through SOS records (up to 3 iterations).
+// pollBudgetMs caps each entity's FastAppend inline poll. Default 45s matches
+// the original cron-friendly behavior; sync API routes pass 15000 to stay
+// under their function timeout and let async recovery finalize the rest.
 async function resolveEntityChain(
   initialResult: AIResearchResult,
   state: string,
   allContext: string,
   record: ResearchInput,
-  asyncRecovery?: AsyncRecoveryContext
+  asyncRecovery?: AsyncRecoveryContext,
+  pollBudgetMs?: number
 ): Promise<{ result: AIResearchResult; context: string }> {
+  const POLL_INTERVAL_MS = 3000;
+  const maxPollIterations = Math.max(
+    1,
+    Math.floor((pollBudgetMs ?? 45000) / POLL_INTERVAL_MS)
+  );
   let currentResult = initialResult;
   let currentContext = allContext;
   const resolvedEntities = new Set<string>();
@@ -360,11 +374,11 @@ async function resolveEntityChain(
       const traceSubmit = await submitBusinessTrace({ business_name: entityToResolve, state });
 
       if (traceSubmit.success && traceSubmit.jobId) {
-        // Poll for results (up to ~45s) — fast path
+        // Poll for results — fast path. Budget capped by maxPollIterations.
         let traceResult = null;
         let timedOut = true; // true if we exhausted the poll loop without a definitive answer
-        for (let poll = 0; poll < 15; poll++) {
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+        for (let poll = 0; poll < maxPollIterations; poll++) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
           const status = await getBusinessTraceStatus(traceSubmit.jobId!);
 
           if (!status.success) {
@@ -390,7 +404,7 @@ async function resolveEntityChain(
             businessName: entityToResolve,
             state,
           };
-          console.log(`[Entity Resolution] Business trace ${traceSubmit.jobId} still pending after 45s — queued for async recovery`);
+          console.log(`[Entity Resolution] Business trace ${traceSubmit.jobId} still pending after ${maxPollIterations * POLL_INTERVAL_MS}ms — queued for async recovery`);
         }
 
         if (traceResult) {

@@ -1,3 +1,82 @@
+# Fix v1 API failures surfaced by Lead-Gen Agent test (2026-04-27)
+
+## Problem
+
+End-to-end test of the user's Lead Generation AI Agent against the PropTracerPRO
+v1 API hit three blocking failures on the same 50-lead run:
+
+1. `POST /api/v1/trace/bulk` returned an opaque HTTP 500 with no actionable body.
+2. `POST /api/v1/research/single` timed out for entity-owned (LLC/LP/Trust)
+   properties — 48 of 50 records affected.
+3. `POST /api/v1/trace/single` with `aiResearch=true` timed out on the same
+   entity cases.
+
+Net result: 0 CRM-ready leads. Agent had to move all 50 to `leads_unresolved.json`.
+
+## Root Causes
+
+- **Bulk 500**: `app/api/v1/trace/bulk/route.ts` only validated that `records`
+  was a non-empty array. Per-record fields were unchecked, so any record missing
+  `address` / `city` / `state` / `zip` threw inside `normalizeAddress()` and the
+  whole batch was caught by the generic try/catch and returned as 500. Agent's
+  test data had a mix of leads with and without zip — first one without crashed
+  the request.
+- **Entity research timeout**: `lib/ai-research/client.ts` polled FastAppend up
+  to 15 × 3s = 45s per entity, recursing up to 3 levels. With Claude calls
+  layered on top, total runtime could exceed Vercel's default function timeout.
+  Neither sync route declared a `maxDuration`, so they got killed before async
+  recovery could persist a `business_trace_jobs` row.
+
+## Changes
+
+- `lib/ai-research/client.ts`: added optional `pollBudgetMs` parameter on
+  `researchProperty()` and `resolveEntityChain()`. Default 45000ms preserves the
+  cron sweeper's existing behavior; sync routes pass 15000ms so the request
+  returns inside the function timeout. Anything slower falls through to the
+  existing async recovery path.
+- `app/api/v1/trace/bulk/route.ts`:
+  - Added per-record validation using existing `validateAddressInput()`. Bad
+    records now return a structured 400 with `invalidRecords: [{ index, error }]`
+    instead of a 500.
+  - Outer catch now includes the actual error message in the response, matching
+    the `/research/single` pattern.
+  - Added `export const maxDuration = 60` for consistency.
+- `app/api/v1/research/single/route.ts`: added `maxDuration = 60` and passes
+  `SYNC_POLL_BUDGET_MS = 15000` to `researchProperty()`.
+- `app/api/v1/trace/single/route.ts`: same as above.
+
+## Files Modified
+
+- `app/api/v1/trace/bulk/route.ts`
+- `app/api/v1/research/single/route.ts`
+- `app/api/v1/trace/single/route.ts`
+- `lib/ai-research/client.ts`
+
+No DB migrations, no API contract changes, no new dependencies.
+
+## Verification
+
+- `npx tsc --noEmit` — clean
+- `npx eslint` on the four modified files — clean (only pre-existing warnings,
+  unrelated to this change)
+- Repro of agent's failure modes that should now succeed:
+  - Bulk with a record missing `zip` → expect 400 with `invalidRecords` list
+    (was: 500 "Internal server error")
+  - `/research/single` for an LLC-owned address → expect response within ~50s
+    with either inline contacts or `business_trace_pending: true` and a job id
+    (was: timeout)
+  - `/trace/single?aiResearch=true` on the same → expect equivalent (was: timeout)
+
+## Notes
+
+- Auth-header confusion the agent reported (`X-Api-Key` vs `Authorization: Bearer`)
+  is documented in `lib/api/auth.ts:23-34` — Bearer is the only supported scheme.
+  Out of scope; that's a docs issue, not a bug.
+- Pre-existing lint warnings in `client.ts` and `single/route.ts` were not
+  touched (per "don't touch code you didn't modify").
+
+---
+
 # Bulk Trace: AI Research + FastAppend Parity with Single Trace
 
 ## Problem

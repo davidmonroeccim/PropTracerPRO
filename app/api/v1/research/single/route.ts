@@ -5,6 +5,13 @@ import { researchProperty } from '@/lib/ai-research/client';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { AI_RESEARCH, DEDUPE } from '@/lib/constants';
 
+export const maxDuration = 60;
+
+// Cap inline FastAppend poll on sync routes so the request returns within the
+// function timeout. Anything slower falls through to async recovery via the
+// business_trace_jobs table and the sweep-bulk-research cron.
+const SYNC_POLL_BUDGET_MS = 15000;
+
 export async function POST(request: Request) {
   try {
     // Authenticate via API key
@@ -66,15 +73,23 @@ export async function POST(request: Request) {
     }
 
     // Run AI research — pass async recovery context so a business trace that
-    // doesn't finish within the inline 45s poll gets persisted for the cron sweeper.
-    const research = await researchProperty(address, city, state, zip, ownerName, {
-      userId: profile.id,
-      addressHash,
-      normalizedAddress,
-      city: city.toUpperCase(),
-      state: state.toUpperCase(),
-      zip: zip.substring(0, 5),
-    });
+    // doesn't finish within the inline poll budget gets persisted for the cron sweeper.
+    const research = await researchProperty(
+      address,
+      city,
+      state,
+      zip,
+      ownerName,
+      {
+        userId: profile.id,
+        addressHash,
+        normalizedAddress,
+        city: city.toUpperCase(),
+        state: state.toUpperCase(),
+        zip: zip.substring(0, 5),
+      },
+      SYNC_POLL_BUDGET_MS
+    );
 
     // Only charge if we found an owner name
     let charge = 0;

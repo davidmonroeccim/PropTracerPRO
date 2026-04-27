@@ -4,6 +4,20 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-04-27
+
+### Fix v1 API failures surfaced by Lead-Gen Agent test
+- **Problem:** End-to-end test of the user's Lead Generation AI Agent against the v1 API hit three blocking failures on the same 50-lead run: `POST /api/v1/trace/bulk` returned an opaque HTTP 500, and both `POST /api/v1/research/single` and `POST /api/v1/trace/single?aiResearch=true` timed out for entity-owned (LLC/LP/Trust) properties (48 of 50 records). Net result: 0 CRM-ready leads.
+- **Root causes:**
+  - **Bulk 500:** `app/api/v1/trace/bulk/route.ts` only validated that `records` was a non-empty array. Per-record fields were unchecked, so any record missing `address` / `city` / `state` / `zip` threw inside `normalizeAddress()` and the whole batch was caught by the generic try/catch and returned as 500. Agent's test data had a mix of leads with and without zip — first one without crashed the request.
+  - **Entity research timeout:** `lib/ai-research/client.ts` polled FastAppend up to 15 × 3 s = 45 s per entity, recursing up to 3 levels. With Claude calls layered on top, total runtime could exceed Vercel's default function timeout. Neither sync route declared a `maxDuration`, so they got killed before async recovery could persist a `business_trace_jobs` row.
+- **Changes:**
+  - `lib/ai-research/client.ts` — added optional `pollBudgetMs` parameter on `researchProperty()` and `resolveEntityChain()`. Default 45 000 ms preserves the cron sweeper's existing behavior; sync routes now pass 15 000 ms so the request returns inside the function timeout. Anything slower falls through to the existing async-recovery path that persists to `business_trace_jobs`.
+  - `app/api/v1/trace/bulk/route.ts` — added per-record validation using existing `validateAddressInput()`. Bad records now return a structured 400 with `invalidRecords: [{ index, error }]` instead of an opaque 500. Outer catch now includes the actual error message in the response (matching the `/research/single` pattern). Added `export const maxDuration = 60` for consistency.
+  - `app/api/v1/research/single/route.ts` — added `maxDuration = 60` and passes `SYNC_POLL_BUDGET_MS = 15000` to `researchProperty()`.
+  - `app/api/v1/trace/single/route.ts` — same treatment.
+- **Impact:** A bulk submission with malformed records now returns an actionable 400 telling the caller exactly which records failed and why, instead of a silent 500. Entity research on the sync routes now returns within ~50 s with either inline contacts (if FastAppend resolved within 15 s) or a `business_trace_pending: true` + `business_trace_job_id` for the caller to poll, instead of hanging until the function is killed. No DB migrations, no API contract changes, no new dependencies.
+
 ## 2026-04-11
 
 ### Bulk trace: AI research + FastAppend parity with single trace
