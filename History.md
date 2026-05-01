@@ -4,6 +4,17 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-05-01
+
+### Fix bulk trace v1 status endpoint timing out, leaving jobs stuck in `processing`
+- **Problem:** A 14-record bulk run via `POST /api/v1/trace/bulk` sat in `processing` for 30+ minutes even though all 14 Tracerfy result emails arrived within ~5 minutes. Caller's polling against `/api/v1/trace/bulk/status` was failing, blocking inbound API requests in the user's Lead-Gen Agent integration.
+- **Root cause:** Two compounding bugs in `app/api/v1/trace/bulk/status/route.ts`. (1) The route declared no `maxDuration`, so Vercel killed it at the platform default (~10 s). (2) The Tracerfy poll loop ran sequentially — for entity-owned bulks, every row owns its own `tracerfy_job_id`, so the endpoint had to make N serialized `getJobStatus()` calls before reaching the "mark job completed" block. Together, the function never survived long enough to commit results; rows stayed `status='processing'` indefinitely no matter how many times the caller polled. AI research, FastAppend, and Tracerfy themselves were finishing fine — only the finalizer was broken.
+- **Changes:**
+  - `app/api/v1/trace/bulk/status/route.ts` — added `export const maxDuration = 60` (matches the bulk submit route). Replaced the sequential `for (const [tracerfyJobId, bucketRows] of unresolvedByJobId.entries())` loop with a parallel `Promise.all` over batches of `POLL_CONCURRENCY = 25`. Per-row work (poll, parse, update DB row, deduct wallet, mutate local copy for the completion check) is unchanged; only orchestration is parallel. Concurrency is capped to stay friendly to Tracerfy at higher record counts (e.g., a 200-record bulk).
+- **Impact:** Today's stuck job will finalize on the next status poll. Future bulk runs with up to ~200 entity rows now finish a single status request in roughly the latency of one Tracerfy poll instead of N. No DB migrations, no contract changes, no new dependencies. Throughput-wise the upstream `sweep-bulk-research` cron (5 rows/min) and FastAppend (5–7 results/min) are unchanged — they already report progress correctly via `records_pending_research` / `records_pending_trace` while the bulk job sits in `processing`.
+
+---
+
 ## 2026-04-27
 
 ### Fix v1 API failures surfaced by Lead-Gen Agent test

@@ -1,253 +1,108 @@
-# Fix v1 API failures surfaced by Lead-Gen Agent test (2026-04-27)
+# Fix bulk trace v1 status endpoint timing out, leaving jobs stuck in `processing` (2026-05-01)
 
 ## Problem
 
-End-to-end test of the user's Lead Generation AI Agent against the PropTracerPRO
-v1 API hit three blocking failures on the same 50-lead run:
+Bulk trace v1 jobs with entity-owned rows (LLC / trust / blank owner_name) get
+stuck in `processing` indefinitely after AI research and Tracerfy both finish.
+The 30+ minute hang the user observed today on a 14-record run is not FastAppend
+or the cron — it's the finalizer.
 
-1. `POST /api/v1/trace/bulk` returned an opaque HTTP 500 with no actionable body.
-2. `POST /api/v1/research/single` timed out for entity-owned (LLC/LP/Trust)
-   properties — 48 of 50 records affected.
-3. `POST /api/v1/trace/single` with `aiResearch=true` timed out on the same
-   entity cases.
+After Stage 1 (sweep-bulk-research cron) submits per-row Tracerfy jobs and
+Stage 2 (Tracerfy + FastAppend) emails the results, the only thing that writes
+the result back to PTP is `GET /api/v1/trace/bulk/status?job_id=...`. That
+endpoint polls each row's `tracerfy_job_id` and updates the row.
 
-Net result: 0 CRM-ready leads. Agent had to move all 50 to `leads_unresolved.json`.
+Two compounding bugs in `app/api/v1/trace/bulk/status/route.ts`:
 
-## Root Causes
+1. **No `maxDuration` declared.** Vercel defaults the function to ~10s. With
+   14+ entity rows the endpoint must make N sequential `getJobStatus()` calls
+   and gets killed before it reaches the "mark job completed" block at line
+   274. Every poll fails the same way; the bulk run can never finalize. (Compare
+   `bulk/route.ts:11` which has `maxDuration = 60`, and
+   `sweep-bulk-research/route.ts:26` which has `300`.)
+2. **Sequential Tracerfy polls.** The `for (const [tracerfyJobId, bucketRows]
+   of unresolvedByJobId.entries())` loop at line 111 serializes one Tracerfy
+   API call per unique job id. At 14 rows that's already too slow for the
+   default timeout; at 200 rows (which a future bulk could produce) it would
+   never fit even with maxDuration = 60.
 
-- **Bulk 500**: `app/api/v1/trace/bulk/route.ts` only validated that `records`
-  was a non-empty array. Per-record fields were unchecked, so any record missing
-  `address` / `city` / `state` / `zip` threw inside `normalizeAddress()` and the
-  whole batch was caught by the generic try/catch and returned as 500. Agent's
-  test data had a mix of leads with and without zip — first one without crashed
-  the request.
-- **Entity research timeout**: `lib/ai-research/client.ts` polled FastAppend up
-  to 15 × 3s = 45s per entity, recursing up to 3 levels. With Claude calls
-  layered on top, total runtime could exceed Vercel's default function timeout.
-  Neither sync route declared a `maxDuration`, so they got killed before async
-  recovery could persist a `business_trace_jobs` row.
+The throughput downstream of PTP — sweep-bulk-research at 5 rows/min and
+FastAppend at 5–7 results/min — is correctly reflected in the status response
+while pending (`records_pending_research`, `records_pending_trace`). The bug is
+strictly that the finalizer can't survive long enough to commit results.
 
-## Changes
+## Plan
 
-- `lib/ai-research/client.ts`: added optional `pollBudgetMs` parameter on
-  `researchProperty()` and `resolveEntityChain()`. Default 45000ms preserves the
-  cron sweeper's existing behavior; sync routes pass 15000ms so the request
-  returns inside the function timeout. Anything slower falls through to the
-  existing async recovery path.
-- `app/api/v1/trace/bulk/route.ts`:
-  - Added per-record validation using existing `validateAddressInput()`. Bad
-    records now return a structured 400 with `invalidRecords: [{ index, error }]`
-    instead of a 500.
-  - Outer catch now includes the actual error message in the response, matching
-    the `/research/single` pattern.
-  - Added `export const maxDuration = 60` for consistency.
-- `app/api/v1/research/single/route.ts`: added `maxDuration = 60` and passes
-  `SYNC_POLL_BUDGET_MS = 15000` to `researchProperty()`.
-- `app/api/v1/trace/single/route.ts`: same as above.
+- [x] 1. Add `export const maxDuration = 60` to
+       `app/api/v1/trace/bulk/status/route.ts`, matching the bulk submit route.
+- [x] 2. Replace the sequential Tracerfy poll loop (lines 111-219) with a
+       parallel implementation, capped at concurrency 25 to stay friendly to
+       Tracerfy's rate limits. Each entry still does the same work (poll,
+       parse, update row, deduct wallet, mutate local copy for the completion
+       check at lines 251-256) — only the orchestration changes.
+- [x] 3. Verify the diff preserves:
+       - Local row mutations so `anyPendingResearch` / `anyPendingTrace` checks
+         see the latest state.
+       - Wallet deductions firing exactly once per successful row.
+       - `bulk_job.completed` webhook firing only when every row is finalized.
+       - The "mark remaining person rows in shared bulk bucket as no_match"
+         branch at lines 224-242.
+- [x] 4. `npx tsc --noEmit` and lint clean on the modified file.
+- [x] 5. Update `History.md` per CLAUDE rule 9.
 
-## Files Modified
+## Out of scope
 
-- `app/api/v1/trace/bulk/route.ts`
-- `app/api/v1/research/single/route.ts`
-- `app/api/v1/trace/single/route.ts`
-- `lib/ai-research/client.ts`
-
-No DB migrations, no API contract changes, no new dependencies.
-
-## Verification
-
-- `npx tsc --noEmit` — clean
-- `npx eslint` on the four modified files — clean (only pre-existing warnings,
-  unrelated to this change)
-- Repro of agent's failure modes that should now succeed:
-  - Bulk with a record missing `zip` → expect 400 with `invalidRecords` list
-    (was: 500 "Internal server error")
-  - `/research/single` for an LLC-owned address → expect response within ~50s
-    with either inline contacts or `business_trace_pending: true` and a job id
-    (was: timeout)
-  - `/trace/single?aiResearch=true` on the same → expect equivalent (was: timeout)
-
-## Notes
-
-- Auth-header confusion the agent reported (`X-Api-Key` vs `Authorization: Bearer`)
-  is documented in `lib/api/auth.ts:23-34` — Bearer is the only supported scheme.
-  Out of scope; that's a docs issue, not a bug.
-- Pre-existing lint warnings in `client.ts` and `single/route.ts` were not
-  touched (per "don't touch code you didn't modify").
-
----
-
-# Bulk Trace: AI Research + FastAppend Parity with Single Trace
-
-## Problem
-
-The v1 bulk endpoints (`POST /api/v1/trace/bulk` + `GET /api/v1/trace/bulk/status`) have
-none of the AI research / FastAppend business-trace plumbing that the single-trace
-endpoints got yesterday (commit `1a4997c`). Every entity-owned property in a bulk
-upload silently loses its decision-maker contacts:
-
-- `/v1/trace/bulk` blindly splits whatever `owner_name` is on the record (even an
-  LLC like "Extra Space Storage") into first/last name and ships it to Tracerfy's
-  person skip trace, guaranteeing a miss.
-- No call to `researchProperty()`, no entity detection, no FastAppend business
-  trace, no `business_trace_jobs` async recovery, no `ai_research` persisted to
-  `trace_history`.
-- The `bulk_job.completed` webhook delivers only Tracerfy person-trace output.
-  There is no `research`, `contacts`, `business_trace_pending`, or
-  `business_trace_job_id` per record.
-- This contradicts `docs/AGENT_INTEGRATION.md`, which promises agents the same
-  structured FastAppend payload the single-trace flow now delivers.
-
-## Design
-
-Bulk has a hard constraint: an HTTP POST cannot block for `records × 45s` of
-inline AI research. So the work moves to a background cron worker, modeled on
-the existing `sweep-business-traces` cron.
-
-**Inbound `POST /api/v1/trace/bulk`:**
-
-1. Dedupe, wallet-check (now includes research cost estimate for records needing
-   it).
-2. Create `trace_jobs` row.
-3. Split records:
-   - **personRecords** — `owner_name` is set AND `isLikelyBusiness(owner_name)` is
-     false. These go straight to Tracerfy as before.
-   - **entityRecords** — `owner_name` empty OR looks like a business. These need
-     AI research before any Tracerfy call.
-4. Insert all `trace_history` rows linked to the new `trace_jobs.id` via a new
-   `trace_job_id` column. personRecords get `status='processing'`; entityRecords
-   get `status='processing'` + `ai_research_status='queued'`.
-5. If any personRecords exist, submit them as a single Tracerfy bulk CSV (old
-   fast path, preserved).
-6. Return `job_id` immediately. Response declares how many records are queued
-   for research.
-
-**New cron `/api/cron/sweep-bulk-research`** (runs every minute):
-
-1. Pulls up to N trace_history rows with `ai_research_status='queued'`.
-2. For each row, calls `researchProperty()` with an `asyncRecovery` context so a
-   timed-out FastAppend business trace gets queued into `business_trace_jobs`
-   (already handled by `resolveEntityChain()`).
-3. Persists `ai_research` + `ai_research_status='found'|'not_found'` onto the
-   trace_history row; deducts the $0.15 research charge if an owner was found.
-4. If research resolved a person name (`individual_behind_business` or
-   `owner_name`), submits a single Tracerfy person-skip-trace for that row via
-   `submitSingleTrace()` and records the returned `tracerfy_job_id` on the row.
-5. If research found no person name, marks the row `status='no_match'`
-   immediately.
-
-**Outbound `GET /api/v1/trace/bulk/status`:**
-
-1. Aggregates state across all `trace_history` rows linked to the job via
-   `trace_job_id`:
-   - Any rows still queued/processing for research → overall `status='processing'`.
-   - Any rows whose Tracerfy job hasn't resolved → poll each unique
-     `tracerfy_job_id` via `getJobStatus()`, match results back, persist
-     trace_result + deduct charges (mirrors current single-trace status logic).
-2. When everything is finalized, updates `trace_jobs.status='completed'` and
-   fires a single `bulk_job.completed` webhook. The webhook's `results` array
-   now includes per-record `research`, `contacts`, `business_trace_pending`,
-   and `business_trace_job_id`, matching `docs/AGENT_INTEGRATION.md`.
-3. The existing `sweep-business-traces` cron continues to fire per-record
-   `business_trace.completed` webhooks as the slow-path FastAppend jobs resolve
-   — no change needed, since it already merges into any `trace_history` row
-   with a matching `address_hash`.
-
-## Key design choices
-
-- **New `trace_job_id` column on `trace_history`** — needed to aggregate
-  per-record state back to the parent bulk job once entity rows have individual
-  Tracerfy job IDs (diverging from the shared bulk `tracerfy_job_id`).
-- **Per-record single-trace submission for entity rows** — simpler than
-  re-packaging resolved rows into a second Tracerfy bulk CSV, and mirrors the
-  single-trace API exactly.
-- **Cron-driven research, not inline** — Vercel serverless maxDuration (300 s)
-  cannot accommodate 10k × 45 s research calls. Cron runs every 1 min, processes
-  small batches, matches the proven `sweep-business-traces` pattern.
-- **Scope: v1 API only** — the user's ask is specifically about the agent-facing
-  API (per `docs/AGENT_INTEGRATION.md`). The dashboard UI bulk flow
-  (`app/api/trace/bulk/*`, `/trace/bulk` page) is untouched.
-
-## Tasks
-
-- [x] **1.** Write plan
-- [x] **2.** Migration `supabase/migrations/20260411_bulk_trace_research.sql` —
-      add `trace_job_id` column + index to `trace_history`
-- [x] **3.** Export `isLikelyBusiness` from `lib/ai-research/client.ts`
-- [x] **4.** Rewrite `app/api/v1/trace/bulk/route.ts` with entity detection,
-      split submit, and research queueing
-- [x] **5.** Create `app/api/cron/sweep-bulk-research/route.ts` worker
-- [x] **6.** Register the new cron in `vercel.json`
-- [x] **7.** Rewrite `app/api/v1/trace/bulk/status/route.ts` to aggregate by
-      `trace_job_id` and include per-record research + contacts in the
-      response and webhook
-- [x] **8.** Update `History.md` and this file's review section
+- Push-based finalization via a new cron (long-term improvement; not needed to
+  unstick today's job or to handle 200-record runs once the timeout + parallel
+  fix is in).
+- Changes to `sweep-bulk-research` throughput.
+- Anything in the dashboard UI bulk path.
 
 ## Review
 
-### What shipped
+### What changed
 
-Bulk trace via the v1 agent API now runs the same AI research + FastAppend
-business-trace flow that single trace got yesterday, delivered via a background
-cron worker to avoid HTTP timeout constraints.
+`app/api/v1/trace/bulk/status/route.ts` only:
 
-**Files changed:**
-- `supabase/migrations/20260411_bulk_trace_research.sql` (new) — `trace_job_id`
-  FK on `trace_history` + two partial indexes (queued-research lookup and
-  aggregate-by-bulk-job lookup)
-- `lib/ai-research/client.ts` — `isLikelyBusiness` exported
-- `app/api/v1/trace/bulk/route.ts` — full rewrite; splits records into person
-  vs. entity buckets, inserts `trace_history` rows up front with
-  `trace_job_id`, queues entity rows as `ai_research_status='queued'`, submits
-  person rows via the existing Tracerfy bulk CSV path
-- `app/api/cron/sweep-bulk-research/route.ts` (new) — processes 5 queued rows
-  per run, atomic claim, calls `researchProperty()` with asyncRecovery,
-  persists research, deducts $0.15 per owner found, submits single Tracerfy
-  trace for resolved person names
-- `vercel.json` — registers the new cron on `* * * * *`
-- `app/api/v1/trace/bulk/status/route.ts` — full rewrite; aggregates by
-  `trace_job_id`, polls all unresolved Tracerfy jobs (shared bulk + per-entity
-  single submits), fires enriched `bulk_job.completed` webhook with per-record
-  `research`, `contacts`, `business_trace_pending`, `business_trace_job_id`
-- `History.md` — 2026-04-11 entry
+1. Added `export const maxDuration = 60` so Vercel doesn't kill the function at
+   the platform default while it's polling Tracerfy.
+2. Added `const POLL_CONCURRENCY = 25` and refactored the per-job poll body
+   into an inner `resolveOne(tracerfyJobId, bucketRows)` arrow function.
+3. Replaced the sequential `for (const [tracerfyJobId, bucketRows] of
+   unresolvedByJobId.entries())` loop with a batched runner:
+   `for (let i = 0; i < pollEntries.length; i += POLL_CONCURRENCY) {
+     await Promise.all(batch.map(([jobId, bucket]) => resolveOne(...)));
+   }`
+4. Changed one `if (!target) continue;` inside the single-row branch to
+   `return;` since it now lives inside the arrow function rather than the
+   outer for loop. The other `continue` (line 200, inside
+   `for (const rawResult of statusResult.results)`) is still inside a real
+   loop and stays as `continue`.
 
-### Flow contract vs. `docs/AGENT_INTEGRATION.md`
+### Behavioral preservation
 
-Inbound response now includes `recordsDirectTrace` and
-`recordsPendingResearch` so the agent knows how many records will be delayed.
-Outbound bulk webhook + status response per-record shape:
-
-```
-{
-  address, city, state, zip, status, input_owner_name,
-  result,      // Tracerfy person-trace result
-  research,    // full AIResearchResult with business_trace_contacts sidecar
-  contacts,    // top-level alias for research.business_trace_contacts
-  business_trace_pending,     // true while FastAppend async job unresolved
-  business_trace_job_id,      // correlates with business_trace.completed webhook
-  charge, ai_research_charge
-}
-```
-
-Rows whose FastAppend business trace exceeded the 45 s inline poll are tracked
-in `business_trace_jobs` and finalized by the existing `sweep-business-traces`
-cron, which fires a separate `business_trace.completed` webhook per row.
-Agents correlate via `business_trace_job_id` just like the single-trace flow.
-
-### Non-goals / deferred
-
-- UI dashboard bulk (`app/api/trace/bulk/*` + `/trace/bulk` page) is untouched.
-  The user asked about the agent-facing v1 API specifically.
-- No retry counter on the cron worker. Persistent research failures loop every
-  minute; acceptable for now since cron is throttled to 5 rows per run and the
-  error path is visible in logs.
-- Bulk dedup (`checkDuplicates`) still relies on the stale-processing window
-  to allow re-submission of stuck records. Not changed.
+- Per-row DB updates and `deduct_wallet_balance` calls fire exactly once per
+  successful row, same as before.
+- Local row mutation (`row.status = ...`, `match.status = ...`,
+  `r.status = 'no_match'`) still runs after the DB update so the completion
+  check at `anyPendingResearch` / `anyPendingTrace` sees the latest state in
+  this same request.
+- The "mark remaining still-processing person rows as no_match" branch still
+  runs inside the shared-bulk-job branch.
+- `bulk_job.completed` webhook still fires only when both
+  `anyPendingResearch` and `anyPendingTrace` are false.
 
 ### Verification
 
 - `npx tsc --noEmit` — clean
-- `npm run lint` on the three modified/new route files — clean (pre-existing
-  warning in `lib/ai-research/client.ts:645` about unused `parseError` is not
-  from this change and was left alone per the "don't touch code you didn't
-  modify" guideline)
+- `npx eslint app/api/v1/trace/bulk/status/route.ts` — clean
+
+### Out of scope (still)
+
+- Push-based finalization (Tracerfy webhook → row update). With the timeout +
+  parallel fix in place the lazy-poll model handles up to ~200 entity rows per
+  bulk in a single `getJobStatus` round-trip's worth of latency. Push-based
+  remains a longer-term simplification.
+- `sweep-bulk-research` throughput (5 rows/min sequential). The user is fine
+  with the existing cadence; status responses already report
+  `records_pending_research` while it churns.

@@ -7,6 +7,15 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, AIResearchResult } from '@/types';
 
+// Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
+// an explicit maxDuration the function dies on the platform default (~10 s) before
+// it can mark the bulk job completed, leaving the run stuck in 'processing'.
+export const maxDuration = 60;
+
+// Cap parallel Tracerfy getJobStatus() calls so a 200-row bulk doesn't fan out
+// 200 simultaneous requests against Tracerfy.
+const POLL_CONCURRENCY = 25;
+
 type TraceHistoryRow = {
   id: string;
   user_id: string;
@@ -108,15 +117,23 @@ export async function GET(request: Request) {
       unresolvedByJobId.set(row.tracerfy_job_id, bucket);
     }
 
-    for (const [tracerfyJobId, bucketRows] of unresolvedByJobId.entries()) {
+    // Run getJobStatus() in parallel batches so a bulk run with N entity rows
+    // (each holding its own tracerfy_job_id) doesn't serialize N round trips
+    // inside a single HTTP request and bust maxDuration. Per-job work below is
+    // unchanged; only the orchestration is parallel.
+    const pollEntries = Array.from(unresolvedByJobId.entries());
+    const resolveOne = async (
+      tracerfyJobId: string,
+      bucketRows: TraceHistoryRow[]
+    ): Promise<void> => {
       const statusResult = await getJobStatus(tracerfyJobId);
 
       if (!statusResult.success || statusResult.pending === true) {
-        continue; // still processing — leave rows as-is
+        return; // still processing — leave rows as-is
       }
 
       if (!statusResult.results || statusResult.results.length === 0) {
-        continue; // treat empty results as still processing per existing behavior
+        return; // treat empty results as still processing per existing behavior
       }
 
       // Finalize the rows backed by this Tracerfy job.
@@ -130,7 +147,7 @@ export async function GET(request: Request) {
         const target =
           nonPadding.find((r) => r.primary_phone || r.mobile_1 || r.email_1) ||
           nonPadding[0];
-        if (!target) continue;
+        if (!target) return;
 
         const parsed = parseTracerfyResult(target);
         const isSuccessful =
@@ -242,6 +259,11 @@ export async function GET(request: Request) {
           }
         }
       }
+    };
+
+    for (let i = 0; i < pollEntries.length; i += POLL_CONCURRENCY) {
+      const batch = pollEntries.slice(i, i + POLL_CONCURRENCY);
+      await Promise.all(batch.map(([jobId, bucket]) => resolveOne(jobId, bucket)));
     }
 
     // --- Decide overall bulk job state ------------------------------------
