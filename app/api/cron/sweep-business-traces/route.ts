@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/tracerfy/client';
+import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
+import { PRICING } from '@/lib/constants';
 import type { AIResearchResult, BusinessTraceJob } from '@/types';
 
 /**
@@ -97,7 +99,7 @@ export async function GET(request: Request) {
       if (job.address_hash) {
         const { data: historyRow } = await adminClient
           .from('trace_history')
-          .select('id, ai_research')
+          .select('id, ai_research, status, is_successful, charge, ai_research_charge, trace_job_id')
           .eq('user_id', job.user_id)
           .eq('address_hash', job.address_hash)
           .limit(1)
@@ -134,13 +136,81 @@ export async function GET(request: Request) {
             mergedResearch.individual_behind_business = parsed.owner_name;
           }
 
-          await adminClient
-            .from('trace_history')
-            .update({
-              ai_research: mergedResearch,
-              ai_research_status: mergedResearch.owner_name ? 'found' : (existing.ai_research_status as string || 'not_found'),
-            })
-            .eq('id', historyRow.id);
+          // Re-evaluate billing for this row now that FastAppend has landed.
+          // If the row was previously finalised as no_match (with a $0.15
+          // research charge already booked) and FastAppend now provides
+          // phones/emails, refund the research charge and apply the bundled
+          // $0.25 credit so the user is billed once for a successful row.
+          // Rows already credited as success are left alone.
+          const fastAppendCredit = traceCreditFromFastAppend(mergedResearch);
+          const wasNotSuccess = !historyRow.is_successful;
+          const shouldUpgradeBilling = !!fastAppendCredit && wasNotSuccess;
+
+          if (shouldUpgradeBilling && fastAppendCredit) {
+            const priorResearchCharge = historyRow.ai_research_charge || 0;
+            if (priorResearchCharge > 0) {
+              await adminClient.rpc('credit_wallet_balance', {
+                p_user_id: job.user_id,
+                p_amount: priorResearchCharge,
+                p_description:
+                  'Refund: AI research bundled into FastAppend success ($0.25)',
+              });
+            }
+            await adminClient.rpc('deduct_wallet_balance', {
+              p_user_id: job.user_id,
+              p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+              p_trace_history_id: historyRow.id,
+              p_description:
+                'FastAppend business-trace contacts (bundled research + trace, async)',
+            });
+
+            await adminClient
+              .from('trace_history')
+              .update({
+                ai_research: mergedResearch,
+                ai_research_status: 'found',
+                ai_research_charge: 0,
+                status: 'success',
+                trace_result: fastAppendCredit.trace_result,
+                phone_count: fastAppendCredit.phone_count,
+                email_count: fastAppendCredit.email_count,
+                is_successful: true,
+                cost: PRICING.COST_PER_RECORD,
+                charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+              })
+              .eq('id', historyRow.id);
+
+            // Bump the parent bulk job's records_matched so the totals
+            // surfaced to the agent stay correct after async credit.
+            if (historyRow.trace_job_id) {
+              const { data: parentJob } = await adminClient
+                .from('trace_jobs')
+                .select('records_matched')
+                .eq('id', historyRow.trace_job_id)
+                .single();
+              if (parentJob) {
+                await adminClient
+                  .from('trace_jobs')
+                  .update({
+                    records_matched: (parentJob.records_matched || 0) + 1,
+                  })
+                  .eq('id', historyRow.trace_job_id);
+              }
+            }
+          } else {
+            // No billing change -- just persist the merged research data
+            // (FastAppend either didn't find contacts, or the row was
+            // already credited as success).
+            await adminClient
+              .from('trace_history')
+              .update({
+                ai_research: mergedResearch,
+                ai_research_status: mergedResearch.owner_name
+                  ? 'found'
+                  : ((existing.ai_research_status as string) || 'not_found'),
+              })
+              .eq('id', historyRow.id);
+          }
         }
       }
 

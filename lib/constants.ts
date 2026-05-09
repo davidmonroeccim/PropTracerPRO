@@ -12,6 +12,13 @@ export const PRICING = {
   CHARGE_PER_SUCCESS: 0.07,
   CHARGE_PER_SUCCESS_WALLET: 0.11,
 
+  // FastAppend business-trace success: flat bundled price covering both the
+  // $0.15 AI research lookup AND the trace credit. Applied when an LLC/entity
+  // row's contacts are sourced from FastAppend (instead of Tracerfy person
+  // skip-trace). Replaces the would-be ai_research_charge ($0.15) + trace
+  // charge ($0.07/$0.11) split with a single $0.25 ledger entry.
+  CHARGE_PER_FASTAPPEND_SUCCESS: 0.25,
+
   // Our cost from Tracerfy
   COST_PER_RECORD: 0.009,
 

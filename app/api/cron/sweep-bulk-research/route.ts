@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { researchProperty } from '@/lib/ai-research/client';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
-import { AI_RESEARCH, PRICING, getChargePerTrace } from '@/lib/constants';
+import { AI_RESEARCH, PRICING } from '@/lib/constants';
 import type { AIResearchResult } from '@/types';
 
 /**
@@ -47,26 +47,6 @@ export async function GET(request: Request) {
   let fastAppendCredited = 0;
   let errored = 0;
   let staleReverted = 0;
-
-  // Per-run cache of (user_id -> chargePerTrace) so we don't re-query the
-  // user_profiles table for every row that needs FastAppend credit. The cron
-  // typically processes 5 rows from the same bulk job (and so the same user).
-  const chargePerTraceByUser = new Map<string, number>();
-  const getUserChargePerTrace = async (userId: string): Promise<number> => {
-    const cached = chargePerTraceByUser.get(userId);
-    if (cached !== undefined) return cached;
-    const { data: profile } = await adminClient
-      .from('user_profiles')
-      .select('subscription_tier, is_acquisition_pro_member')
-      .eq('id', userId)
-      .single();
-    const charge = getChargePerTrace(
-      profile?.subscription_tier || 'wallet',
-      profile?.is_acquisition_pro_member || false
-    );
-    chargePerTraceByUser.set(userId, charge);
-    return charge;
-  };
 
   try {
     // Stale-claim recovery: revert rows whose previous claim never finished
@@ -166,11 +146,46 @@ export async function GET(request: Request) {
         }
 
         const ownerFound = !!researchForStorage.owner_name;
-        const researchCharge = ownerFound ? AI_RESEARCH.CHARGE_PER_RECORD : 0;
 
-        // Persist research result + status, regardless of whether we found
-        // a person to trace. Clearing ai_research_claimed_at marks the claim
-        // as completed so the stale-claim sweep doesn't retry it.
+        // FastAppend bundled path: when the inline business-trace poll
+        // succeeded and produced phones/emails, the row has already
+        // delivered everything the user needs. Charge the bundled
+        // $0.25 (research + trace combined) as a single ledger entry
+        // and skip the per-row Tracerfy submit entirely -- FastAppend's
+        // commercial-DB contacts are what the user paid for.
+        const fastAppendCredit = traceCreditFromFastAppend(researchForStorage);
+        if (fastAppendCredit) {
+          await adminClient
+            .from('trace_history')
+            .update({
+              ai_research: researchForStorage,
+              ai_research_status: 'found',
+              ai_research_charge: 0, // Bundled into the $0.25 trace charge
+              ai_research_claimed_at: null,
+              status: 'success',
+              trace_result: fastAppendCredit.trace_result,
+              phone_count: fastAppendCredit.phone_count,
+              email_count: fastAppendCredit.email_count,
+              is_successful: true,
+              cost: PRICING.COST_PER_RECORD,
+              charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+            })
+            .eq('id', row.id);
+
+          await adminClient.rpc('deduct_wallet_balance', {
+            p_user_id: row.user_id,
+            p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+            p_trace_history_id: row.id,
+            p_description:
+              'FastAppend business-trace contacts (bundled research + trace)',
+          });
+          fastAppendCredited++;
+          continue;
+        }
+
+        // No FastAppend contacts at this point -- proceed with the research
+        // charge + Tracerfy submit fallback, same as before.
+        const researchCharge = ownerFound ? AI_RESEARCH.CHARGE_PER_RECORD : 0;
         await adminClient
           .from('trace_history')
           .update({
@@ -191,39 +206,10 @@ export async function GET(request: Request) {
         }
 
         if (!resolvedPerson) {
-          // No person to skip-trace via Tracerfy -- but FastAppend may have
-          // already produced phones/emails for the entity itself
-          // (business_trace_contacts). Credit those as a successful trace
-          // so the user is charged for the contacts they actually got.
-          const credit = traceCreditFromFastAppend(researchForStorage);
-          if (credit) {
-            const chargePerTrace = await getUserChargePerTrace(row.user_id);
-            await adminClient
-              .from('trace_history')
-              .update({
-                status: 'success',
-                trace_result: credit.trace_result,
-                phone_count: credit.phone_count,
-                email_count: credit.email_count,
-                is_successful: true,
-                cost: PRICING.COST_PER_RECORD,
-                charge: chargePerTrace,
-              })
-              .eq('id', row.id);
-
-            await adminClient.rpc('deduct_wallet_balance', {
-              p_user_id: row.user_id,
-              p_amount: chargePerTrace,
-              p_trace_history_id: row.id,
-              p_description:
-                'Bulk skip trace - FastAppend contacts (no person resolved)',
-            });
-            fastAppendCredited++;
-            continue;
-          }
-
-          // Truly no contacts anywhere -- mark no_match so the status
-          // endpoint can finalize the bulk job.
+          // No FastAppend contacts and no person to skip-trace -- mark
+          // no_match so the bulk job can finalize. (If FastAppend lands
+          // async later via sweep-business-traces, that cron will refund
+          // the research charge and apply the bundled $0.25 credit.)
           await adminClient
             .from('trace_history')
             .update({
@@ -249,38 +235,8 @@ export async function GET(request: Request) {
           console.error(
             `[sweep-bulk-research] Tracerfy submit failed for row ${row.id}: ${submitResult.error}`
           );
-          // Tracerfy submit failed -- but FastAppend may have already given
-          // us phones/emails. Credit them so the user gets billed for the
-          // contacts they actually received.
-          const credit = traceCreditFromFastAppend(researchForStorage);
-          if (credit) {
-            const chargePerTrace = await getUserChargePerTrace(row.user_id);
-            await adminClient
-              .from('trace_history')
-              .update({
-                status: 'success',
-                trace_result: credit.trace_result,
-                phone_count: credit.phone_count,
-                email_count: credit.email_count,
-                is_successful: true,
-                cost: PRICING.COST_PER_RECORD,
-                charge: chargePerTrace,
-              })
-              .eq('id', row.id);
-
-            await adminClient.rpc('deduct_wallet_balance', {
-              p_user_id: row.user_id,
-              p_amount: chargePerTrace,
-              p_trace_history_id: row.id,
-              p_description:
-                'Bulk skip trace - FastAppend contacts (Tracerfy submit failed)',
-            });
-            fastAppendCredited++;
-            continue;
-          }
-
-          // No FastAppend contacts either -- mark no_match so the bulk
-          // job can finalize.
+          // No FastAppend contacts (already established above) and the
+          // Tracerfy submit also failed -- mark no_match.
           await adminClient
             .from('trace_history')
             .update({

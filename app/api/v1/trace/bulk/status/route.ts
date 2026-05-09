@@ -154,57 +154,114 @@ export async function GET(request: Request) {
         const tracerfyHasContacts =
           (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
 
-        // FastAppend fallback: when Tracerfy returns nothing for an entity row
-        // but the AI research path already produced phones/emails via FastAppend
-        // (business_trace_contacts), the row HAS delivered contacts to the
-        // user. Credit it as a successful trace using the FastAppend payload.
+        // FastAppend bundled fallback: if Tracerfy returned nothing for this
+        // entity row, check whether FastAppend lent its async business-trace
+        // results between cron and now (sweep-business-traces merges contacts
+        // into ai_research). When it has, refund the $0.15 research charge
+        // the cron already booked and apply the single bundled $0.25 -- the
+        // user paid for one credited row, not research-plus-trace separately.
         const fastAppendCredit = tracerfyHasContacts
           ? null
           : traceCreditFromFastAppend(row.ai_research);
 
-        const isSuccessful = tracerfyHasContacts || fastAppendCredit !== null;
-        const traceResult: TraceResult | null = tracerfyHasContacts
-          ? parsed
-          : fastAppendCredit?.trace_result || parsed;
-        const phoneCount = tracerfyHasContacts
-          ? parsed.phones?.length || 0
-          : fastAppendCredit?.phone_count || 0;
-        const emailCount = tracerfyHasContacts
-          ? parsed.emails?.length || 0
-          : fastAppendCredit?.email_count || 0;
-        const charge = isSuccessful ? chargePerTrace : 0;
+        if (tracerfyHasContacts) {
+          // Tracerfy delivered contacts -- charge tier-aware trace fee on top
+          // of the AI research charge already booked by the cron.
+          const charge = chargePerTrace;
+          await adminClient
+            .from('trace_history')
+            .update({
+              status: 'success',
+              trace_result: parsed,
+              phone_count: parsed.phones?.length || 0,
+              email_count: parsed.emails?.length || 0,
+              is_successful: true,
+              cost: PRICING.COST_PER_RECORD,
+              charge,
+            })
+            .eq('id', row.id);
 
-        await adminClient
-          .from('trace_history')
-          .update({
-            status: isSuccessful ? 'success' : 'no_match',
-            trace_result: traceResult,
-            phone_count: phoneCount,
-            email_count: emailCount,
-            is_successful: isSuccessful,
-            cost: PRICING.COST_PER_RECORD,
-            charge,
-          })
-          .eq('id', row.id);
-
-        if (isSuccessful && charge > 0) {
           await adminClient.rpc('deduct_wallet_balance', {
             p_user_id: profile.id,
             p_amount: charge,
             p_trace_history_id: row.id,
-            p_description: fastAppendCredit
-              ? 'Bulk skip trace - FastAppend contacts (entity row)'
-              : 'Bulk skip trace - entity row (post-research)',
+            p_description: 'Bulk skip trace - entity row (post-research)',
           });
-        }
 
-        // Reflect in local copy so buildPerRecordResult below sees the latest.
-        row.status = isSuccessful ? 'success' : 'no_match';
-        row.trace_result = traceResult;
-        row.phone_count = phoneCount;
-        row.email_count = emailCount;
-        row.is_successful = isSuccessful;
-        row.charge = charge;
+          row.status = 'success';
+          row.trace_result = parsed;
+          row.phone_count = parsed.phones?.length || 0;
+          row.email_count = parsed.emails?.length || 0;
+          row.is_successful = true;
+          row.charge = charge;
+        } else if (fastAppendCredit) {
+          // Tracerfy whiffed but FastAppend has contacts now. Refund the
+          // $0.15 research charge the cron booked (so the wallet ledger and
+          // row both reflect the bundled $0.25 model) and apply the bundled
+          // FastAppend success charge.
+          const priorResearchCharge = row.ai_research_charge || 0;
+          if (priorResearchCharge > 0) {
+            await adminClient.rpc('credit_wallet_balance', {
+              p_user_id: profile.id,
+              p_amount: priorResearchCharge,
+              p_description:
+                'Refund: AI research bundled into FastAppend success ($0.25)',
+            });
+          }
+          await adminClient.rpc('deduct_wallet_balance', {
+            p_user_id: profile.id,
+            p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+            p_trace_history_id: row.id,
+            p_description:
+              'FastAppend business-trace contacts (bundled research + trace)',
+          });
+
+          await adminClient
+            .from('trace_history')
+            .update({
+              status: 'success',
+              trace_result: fastAppendCredit.trace_result,
+              phone_count: fastAppendCredit.phone_count,
+              email_count: fastAppendCredit.email_count,
+              is_successful: true,
+              cost: PRICING.COST_PER_RECORD,
+              charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+              ai_research_charge: 0,
+            })
+            .eq('id', row.id);
+
+          row.status = 'success';
+          row.trace_result = fastAppendCredit.trace_result;
+          row.phone_count = fastAppendCredit.phone_count;
+          row.email_count = fastAppendCredit.email_count;
+          row.is_successful = true;
+          row.charge = PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
+          row.ai_research_charge = 0;
+        } else {
+          // No contacts from either provider -- no_match. The $0.15
+          // research charge already booked stays put. If FastAppend lands
+          // later via sweep-business-traces, that cron will refund the
+          // $0.15 and apply the bundled credit.
+          await adminClient
+            .from('trace_history')
+            .update({
+              status: 'no_match',
+              trace_result: parsed,
+              phone_count: 0,
+              email_count: 0,
+              is_successful: false,
+              cost: PRICING.COST_PER_RECORD,
+              charge: 0,
+            })
+            .eq('id', row.id);
+
+          row.status = 'no_match';
+          row.trace_result = parsed;
+          row.phone_count = 0;
+          row.email_count = 0;
+          row.is_successful = false;
+          row.charge = 0;
+        }
       } else {
         // Shared bulk Tracerfy job — match results back to person rows by
         // city/state, mirroring the existing bulk status matcher.
