@@ -430,7 +430,7 @@ export default function ApiDocsPage() {
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
               <code className="text-sm font-semibold">/trace/bulk/status?job_id=uuid</code>
             </div>
-            <p className="text-gray-600 text-sm">Poll for bulk trace job results. Returns the full result summary when all records have been processed.</p>
+            <p className="text-gray-600 text-sm">Poll for bulk trace job results. Returns per-record results when all records have been processed.</p>
 
             <h5 className="font-medium text-sm">Response (completed):</h5>
             <CodeBlock
@@ -440,7 +440,32 @@ export default function ApiDocsPage() {
   "job_id": "uuid",
   "records_submitted": 95,
   "records_matched": 82,
-  "total_charge": 5.74
+  "total_charge": 5.74,
+  "results": [
+    {
+      "address": "160 MINE LAKE CT|RALEIGH|NC|27615",
+      "city": "RALEIGH",
+      "state": "NC",
+      "zip": "27615",
+      "status": "success",
+      "input_owner_name": "Extra Space Storage LLC",
+      "result": {
+        "phones": [{ "number": "9196249818", "type": "mobile" }],
+        "emails": ["owner@example.com"]
+      },
+      "research": { /* full AI research result */ },
+      "contacts": {
+        "owner_name": "Joseph Margolis",
+        "phones": [ /* ... */ ],
+        "emails": [ /* ... */ ]
+      },
+      "charge": 0.07,
+      "ai_research_charge": 0.15,
+      "business_trace_pending": false,
+      "business_trace_job_id": null
+    }
+    // ... one entry per submitted record
+  ]
 }`}
               section="job-status"
             />
@@ -450,14 +475,27 @@ export default function ApiDocsPage() {
               code={`{
   "success": true,
   "status": "processing",
-  "job_id": "uuid"
+  "job_id": "uuid",
+  "records_submitted": 95,
+  "records_pending_research": 12,
+  "records_pending_trace": 41
 }`}
               section="job-status-processing"
             />
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Polling:</strong> Poll every 5-10 seconds. Jobs typically complete within a few minutes. You are only charged for successful matches (records where phone or email data was found). If you have a webhook URL configured, you&apos;ll also receive a <code className="bg-blue-100 px-1 rounded">bulk_job.completed</code> event when done.
+                <strong>Polling:</strong> Poll every 5-10 seconds. Jobs typically complete within a few minutes; large entity-heavy bulks can take up to ~20 minutes since per-row AI research is throttled to 5 rows/minute. You are only charged for successful matches (records where phone or email data was found). If you have a webhook URL configured, you&apos;ll also receive a <code className="bg-blue-100 px-1 rounded">bulk_job.completed</code> event when done.
+              </p>
+              <p className="text-blue-800 text-sm mt-2">
+                <strong>Stuck-job auto-recovery:</strong> If a research worker is killed mid-run (server timeout, OOM, deploy restart), its row is automatically reverted to <code className="bg-blue-100 px-1 rounded">queued</code> within 5 minutes and retried on the next cron tick — so the job will finalise on a subsequent poll. There is no need for callers to implement their own &quot;assume failure after N minutes&quot; fallback.
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-amber-900 text-sm font-semibold mb-1">Pending business-trace contacts on completed bulks</p>
+              <p className="text-amber-800 text-sm">
+                A bulk job can finalise as <code className="bg-amber-100 px-1 rounded">completed</code> while individual records still have an in-flight FastAppend business-trace lookup. Those records carry <code className="bg-amber-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-amber-100 px-1 rounded">business_trace_job_id</code>. Retrieve the delayed contacts via <code className="bg-amber-100 px-1 rounded">GET /api/v1/research/status?job_id=&#123;business_trace_job_id&#125;</code> (see the section above) or by listening for a <code className="bg-amber-100 px-1 rounded">business_trace.completed</code> webhook.
               </p>
             </div>
           </div>

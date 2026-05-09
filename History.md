@@ -4,6 +4,19 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-05-09
+
+### Fix bulk trace jobs stuck in `processing` after row work completes (research-side stale claims)
+- **Problem:** A bulk trace job sat in `processing` for 23 minutes even though all underlying Tracerfy + FastAppend work finished within ~6 minutes. The Lead-Gen Agent's external timeout fired and triggered its "system failed" workaround. Same symptom as the 2026-05-01 fix, but with a different root cause — the previous fix addressed the status-endpoint side; this one addresses the research-side.
+- **Root cause:** `app/api/cron/sweep-bulk-research/route.ts` claimed rows by flipping `ai_research_status: 'queued' → 'processing'` but had no recovery path for claims that never finished. If a cron invocation was killed externally — Vercel `maxDuration` timeout, OOM, deploy restart — the in-process `try/catch` that reverts a failed claim never ran, leaving the row stranded in `'processing'` forever. The next cron run only looked at `'queued'` rows, so the stranded row was never re-claimed and never finished. The status endpoint at `app/api/v1/trace/bulk/status/route.ts` treats any row with `ai_research_status IN ('queued', 'processing')` as "job not done", so a single stranded row kept the entire bulk wrapper in `'processing'` indefinitely. Risk grew after dd17741 / f4bfaef added the async FastAppend recovery path, which extended per-row research time and pushed cron runs closer to their `maxDuration` cap.
+- **Changes:**
+  - `supabase/migrations/20260509_add_ai_research_claimed_at.sql` — new migration adding `trace_history.ai_research_claimed_at TIMESTAMPTZ` plus a partial index on `(ai_research_claimed_at) WHERE ai_research_status = 'processing'` for cheap stale-claim lookups.
+  - `app/api/cron/sweep-bulk-research/route.ts` — at the top of every cron run, revert any `ai_research_status='processing'` rows whose `ai_research_claimed_at` is older than 5 minutes back to `'queued'` (clearing the timestamp). The claim UPDATE now sets `ai_research_claimed_at: now`. The result-persisting and catch-block-revert UPDATEs both clear `ai_research_claimed_at` so the row's lifecycle ends cleanly. Response payload gains a `staleReverted` counter for observability.
+  - `app/(dashboard)/settings/api-keys/docs/page.tsx` — public API docs at `https://proptracerpro.com/settings/api-keys/docs` now reflect what `/trace/bulk/status` actually returns: completed responses include the `results` array with per-record `status`, `result`, `research`, `contacts`, `business_trace_pending`, and `business_trace_job_id`; processing responses include `records_submitted`, `records_pending_research`, `records_pending_trace`. Polling callout adds an SLA note that stuck jobs auto-recover within 5 minutes, and a new amber callout explains how to retrieve delayed FastAppend contacts via `/research/status`.
+- **Impact:** Bulk jobs now reliably finalise within minutes of their last row completing. Stranded claims from killed cron runs are picked up automatically on the next minute's cron tick — no manual intervention needed. Existing in-flight bulk jobs benefit immediately once the migration runs and the cron deploys (the next sweep will revert any pre-existing stale claims). Verified with `npx tsc --noEmit` (no errors) and `npx eslint` on changed files (no new errors — the docs page's pre-existing `react-hooks/static-components` warnings are unchanged).
+
+---
+
 ## 2026-05-01
 
 ### Fix bulk trace v1 status endpoint timing out, leaving jobs stuck in `processing`

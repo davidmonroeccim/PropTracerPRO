@@ -27,6 +27,12 @@ export const maxDuration = 300;
 
 const MAX_ROWS_PER_RUN = 5;
 
+// A claim older than this is, by construction, from a cron run that was
+// killed externally before it could finish (maxDuration is 300s; a healthy
+// run finishes in well under that). Reverting these to 'queued' is the only
+// way the row gets retried -- the next claim query only looks at 'queued'.
+const STALE_CLAIM_MINUTES = 5;
+
 export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -38,8 +44,28 @@ export async function GET(request: Request) {
   let resolvedToPerson = 0;
   let noMatch = 0;
   let errored = 0;
+  let staleReverted = 0;
 
   try {
+    // Stale-claim recovery: revert rows whose previous claim never finished
+    // (cron killed mid-run by Vercel timeout, OOM, deploy restart, etc.) so
+    // they're eligible to be re-claimed below.
+    const staleCutoff = new Date(
+      Date.now() - STALE_CLAIM_MINUTES * 60 * 1000
+    ).toISOString();
+    const { data: revertedRows } = await adminClient
+      .from('trace_history')
+      .update({ ai_research_status: 'queued', ai_research_claimed_at: null })
+      .eq('ai_research_status', 'processing')
+      .lt('ai_research_claimed_at', staleCutoff)
+      .select('id');
+    staleReverted = revertedRows?.length || 0;
+    if (staleReverted > 0) {
+      console.log(
+        `[sweep-bulk-research] reverted ${staleReverted} stale claim(s) older than ${STALE_CLAIM_MINUTES}m`
+      );
+    }
+
     // Claim up to N queued rows by flipping them to 'processing' first so
     // concurrent cron invocations don't double-process the same row.
     const { data: queuedRows } = await adminClient
@@ -50,15 +76,20 @@ export async function GET(request: Request) {
       .limit(MAX_ROWS_PER_RUN);
 
     if (!queuedRows || queuedRows.length === 0) {
-      return NextResponse.json({ success: true, processed: 0 });
+      return NextResponse.json({ success: true, processed: 0, staleReverted });
     }
 
     for (const row of queuedRows) {
       // Atomic claim: only proceed if we successfully flip the row out of
       // 'queued'. Another cron instance may have grabbed it already.
+      // ai_research_claimed_at is the lifeline for stale-claim recovery
+      // above -- always set it together with the status flip.
       const { data: claimed } = await adminClient
         .from('trace_history')
-        .update({ ai_research_status: 'processing' })
+        .update({
+          ai_research_status: 'processing',
+          ai_research_claimed_at: new Date().toISOString(),
+        })
         .eq('id', row.id)
         .eq('ai_research_status', 'queued')
         .select('id')
@@ -116,13 +147,15 @@ export async function GET(request: Request) {
         const researchCharge = ownerFound ? AI_RESEARCH.CHARGE_PER_RECORD : 0;
 
         // Persist research result + status, regardless of whether we found
-        // a person to trace.
+        // a person to trace. Clearing ai_research_claimed_at marks the claim
+        // as completed so the stale-claim sweep doesn't retry it.
         await adminClient
           .from('trace_history')
           .update({
             ai_research: researchForStorage,
             ai_research_status: ownerFound ? 'found' : 'not_found',
             ai_research_charge: researchCharge,
+            ai_research_claimed_at: null,
           })
           .eq('id', row.id);
 
@@ -194,7 +227,10 @@ export async function GET(request: Request) {
         // lifetime and can be manually cleared.
         await adminClient
           .from('trace_history')
-          .update({ ai_research_status: 'queued' })
+          .update({
+            ai_research_status: 'queued',
+            ai_research_claimed_at: null,
+          })
           .eq('id', row.id);
       }
     }
@@ -205,6 +241,7 @@ export async function GET(request: Request) {
       resolvedToPerson,
       noMatch,
       errored,
+      staleReverted,
     });
   } catch (error) {
     console.error('[sweep-bulk-research] fatal error:', error);
