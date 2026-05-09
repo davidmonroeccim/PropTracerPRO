@@ -4,6 +4,7 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
+import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, AIResearchResult } from '@/types';
 
@@ -150,17 +151,36 @@ export async function GET(request: Request) {
         if (!target) return;
 
         const parsed = parseTracerfyResult(target);
-        const isSuccessful =
+        const tracerfyHasContacts =
           (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
+
+        // FastAppend fallback: when Tracerfy returns nothing for an entity row
+        // but the AI research path already produced phones/emails via FastAppend
+        // (business_trace_contacts), the row HAS delivered contacts to the
+        // user. Credit it as a successful trace using the FastAppend payload.
+        const fastAppendCredit = tracerfyHasContacts
+          ? null
+          : traceCreditFromFastAppend(row.ai_research);
+
+        const isSuccessful = tracerfyHasContacts || fastAppendCredit !== null;
+        const traceResult: TraceResult | null = tracerfyHasContacts
+          ? parsed
+          : fastAppendCredit?.trace_result || parsed;
+        const phoneCount = tracerfyHasContacts
+          ? parsed.phones?.length || 0
+          : fastAppendCredit?.phone_count || 0;
+        const emailCount = tracerfyHasContacts
+          ? parsed.emails?.length || 0
+          : fastAppendCredit?.email_count || 0;
         const charge = isSuccessful ? chargePerTrace : 0;
 
         await adminClient
           .from('trace_history')
           .update({
             status: isSuccessful ? 'success' : 'no_match',
-            trace_result: parsed,
-            phone_count: parsed.phones?.length || 0,
-            email_count: parsed.emails?.length || 0,
+            trace_result: traceResult,
+            phone_count: phoneCount,
+            email_count: emailCount,
             is_successful: isSuccessful,
             cost: PRICING.COST_PER_RECORD,
             charge,
@@ -172,15 +192,17 @@ export async function GET(request: Request) {
             p_user_id: profile.id,
             p_amount: charge,
             p_trace_history_id: row.id,
-            p_description: 'Bulk skip trace - entity row (post-research)',
+            p_description: fastAppendCredit
+              ? 'Bulk skip trace - FastAppend contacts (entity row)'
+              : 'Bulk skip trace - entity row (post-research)',
           });
         }
 
         // Reflect in local copy so buildPerRecordResult below sees the latest.
         row.status = isSuccessful ? 'success' : 'no_match';
-        row.trace_result = parsed;
-        row.phone_count = parsed.phones?.length || 0;
-        row.email_count = parsed.emails?.length || 0;
+        row.trace_result = traceResult;
+        row.phone_count = phoneCount;
+        row.email_count = emailCount;
         row.is_successful = isSuccessful;
         row.charge = charge;
       } else {
