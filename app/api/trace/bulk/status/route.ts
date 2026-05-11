@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -83,12 +83,53 @@ export async function GET(request: Request) {
 
     const statusResult = await getJobStatus(traceJob.tracerfy_job_id);
 
+    // Stall detection: when Tracerfy is unhealthy (rate-limited / 503 /
+    // malformed) and the bulk job is older than the threshold, finalize the
+    // job as failed with a real error_message rather than feeding the caller
+    // 'processing' forever.
+    const jobAgeMinutes =
+      (Date.now() - new Date(traceJob.created_at).getTime()) / 60000;
+
+    if (
+      statusResult.errorReason &&
+      jobAgeMinutes >= STALE_PROCESSING.TRACERFY_STALL_MINUTES
+    ) {
+      const errorMessage = `Tracerfy upstream unhealthy: ${statusResult.errorReason} for ${jobAgeMinutes.toFixed(0)}m`;
+      console.error(
+        `[trace/bulk/status] stall: job=${traceJob.id} reason=${statusResult.errorReason} age=${jobAgeMinutes.toFixed(1)}m`
+      );
+      await adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'failed',
+          error_message: errorMessage,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', traceJob.id);
+      await adminClient
+        .from('trace_history')
+        .update({ status: 'error' })
+        .eq('user_id', user.id)
+        .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
+        .eq('status', 'processing');
+      return NextResponse.json({
+        success: false,
+        status: 'failed',
+        job_id: traceJob.id,
+        error_message: errorMessage,
+        tracerfy_state: statusResult.errorReason,
+        age_minutes: Math.round(jobAgeMinutes),
+      });
+    }
+
     // Tracerfy still processing
     if (!statusResult.success || statusResult.pending === true) {
       return NextResponse.json({
         success: true,
         status: 'processing',
         job_id: traceJob.id,
+        tracerfy_state: statusResult.errorReason || 'pending',
+        age_minutes: Math.round(jobAgeMinutes),
       });
     }
 
@@ -98,6 +139,8 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         job_id: traceJob.id,
+        tracerfy_state: 'pending',
+        age_minutes: Math.round(jobAgeMinutes),
       });
     }
 

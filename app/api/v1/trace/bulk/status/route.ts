@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
-import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
+import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceJob, TraceResult, AIResearchResult } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -123,6 +123,13 @@ export async function GET(request: Request) {
     // inside a single HTTP request and bust maxDuration. Per-job work below is
     // unchanged; only the orchestration is parallel.
     const pollEntries = Array.from(unresolvedByJobId.entries());
+
+    // Collect Tracerfy job IDs whose polls came back unhealthy this round.
+    // After the batch finishes we use this + the parent job's age to decide
+    // whether to stall-promote those rows to 'error' so callers stop polling
+    // 'processing' forever when Tracerfy itself is broken.
+    const stalledByErrorReason = new Map<string, TracerfyErrorReason>();
+
     const resolveOne = async (
       tracerfyJobId: string,
       bucketRows: TraceHistoryRow[]
@@ -130,6 +137,9 @@ export async function GET(request: Request) {
       const statusResult = await getJobStatus(tracerfyJobId);
 
       if (!statusResult.success || statusResult.pending === true) {
+        if (statusResult.errorReason) {
+          stalledByErrorReason.set(tracerfyJobId, statusResult.errorReason);
+        }
         return; // still processing — leave rows as-is
       }
 
@@ -345,6 +355,42 @@ export async function GET(request: Request) {
       await Promise.all(batch.map(([jobId, bucket]) => resolveOne(jobId, bucket)));
     }
 
+    // --- Stall promotion --------------------------------------------------
+
+    // If Tracerfy has been unhealthy (rate-limited / 503 / malformed) for any
+    // of this job's rows AND the parent job is older than the stall threshold,
+    // promote those rows to status='error' so the caller gets a definitive
+    // answer instead of polling 'processing' indefinitely. The Lead-Gen Agent
+    // retries at 20m otherwise, masking real Tracerfy outages as PTP failures.
+    const jobAgeMinutes =
+      (Date.now() - new Date(traceJob.created_at).getTime()) / 60000;
+    const stallThresholdHit =
+      jobAgeMinutes >= STALE_PROCESSING.TRACERFY_STALL_MINUTES;
+    const stalledRowIds: string[] = [];
+    let primaryStallReason: TracerfyErrorReason | null = null;
+
+    if (stallThresholdHit && stalledByErrorReason.size > 0) {
+      for (const [tracerfyJobId, reason] of stalledByErrorReason) {
+        const bucket = unresolvedByJobId.get(tracerfyJobId) || [];
+        for (const row of bucket) {
+          if (row.status === 'processing') {
+            stalledRowIds.push(row.id);
+            row.status = 'error';
+          }
+        }
+        if (!primaryStallReason) primaryStallReason = reason;
+      }
+      if (stalledRowIds.length > 0) {
+        console.error(
+          `[v1/trace/bulk/status] stall: job=${traceJob.id} rows=${stalledRowIds.length} reason=${primaryStallReason} age=${jobAgeMinutes.toFixed(1)}m`
+        );
+        await adminClient
+          .from('trace_history')
+          .update({ status: 'error' })
+          .in('id', stalledRowIds);
+      }
+    }
+
     // --- Decide overall bulk job state ------------------------------------
 
     // A bulk job is not finished while any row is still awaiting research or
@@ -364,6 +410,37 @@ export async function GET(request: Request) {
           (r) => r.ai_research_status === 'queued' || r.ai_research_status === 'processing'
         ).length,
         records_pending_trace: rows.filter((r) => r.status === 'processing').length,
+        // Surface stall diagnostics so callers know Tracerfy is the bottleneck
+        // even if some rows are still legitimately in flight.
+        tracerfy_state: stalledByErrorReason.size > 0
+          ? Array.from(stalledByErrorReason.values())[0]
+          : 'pending',
+        age_minutes: Math.round(jobAgeMinutes),
+      });
+    }
+
+    // If we stalled rows above and no rows are still in flight, the bulk job
+    // failed -- finalize it as such with a real error_message rather than
+    // claiming 'completed' on a partial result.
+    if (stalledRowIds.length > 0) {
+      const errorMessage = `Tracerfy upstream unhealthy: ${primaryStallReason} -- ${stalledRowIds.length} row(s) stalled for ${jobAgeMinutes.toFixed(0)}m`;
+      await adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'failed',
+          error_message: errorMessage,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', traceJob.id);
+      return NextResponse.json({
+        success: false,
+        status: 'failed',
+        job_id: traceJob.id,
+        records_submitted: traceJob.records_submitted,
+        error: errorMessage,
+        tracerfy_state: primaryStallReason,
+        age_minutes: Math.round(jobAgeMinutes),
+        results: rows.map(buildPerRecordResult),
       });
     }
 

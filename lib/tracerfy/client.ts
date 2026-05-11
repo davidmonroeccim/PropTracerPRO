@@ -4,6 +4,19 @@ import type { TracerfyResult } from '@/types';
 const API_KEY = process.env.TRACERFY_API_KEY;
 const BASE_URL = process.env.TRACERFY_API_URL || TRACERFY.BASE_URL;
 
+// Why this exists: getJobStatus() used to coerce every non-success Tracerfy
+// response (503, 429, malformed JSON) into `{ success: true, pending: true }`.
+// That masked real upstream failures as "still patiently waiting" and left
+// callers (Lead-Gen Agent, dashboard) polling 'processing' indefinitely.
+// errorReason lets callers tell "Tracerfy is genuinely working" apart from
+// "Tracerfy is broken" without changing the polling contract.
+export type TracerfyErrorReason =
+  | 'rate_limited'
+  | 'upstream_unavailable'
+  | 'malformed_response'
+  | 'network_error'
+  | 'auth_error';
+
 interface TracerfySubmitResponse {
   message: string;
   queue_id: number;
@@ -355,7 +368,18 @@ export async function submitBulkTrace(
  */
 export async function getJobStatus(
   jobId: string
-): Promise<{ success: boolean; pending?: boolean; results?: TracerfyResult[]; rawData?: unknown; error?: string }> {
+): Promise<{
+  success: boolean;
+  pending?: boolean;
+  results?: TracerfyResult[];
+  rawData?: unknown;
+  error?: string;
+  // Set when the underlying response was unhealthy. Callers can use this to
+  // distinguish "Tracerfy is genuinely still working" (no errorReason) from
+  // "we kept polling through 503s / rate limits / garbage responses"
+  // (errorReason set). See TracerfyErrorReason at top of file.
+  errorReason?: TracerfyErrorReason;
+}> {
   if (!API_KEY) {
     return { success: false, error: 'Tracerfy API key not configured' };
   }
@@ -369,9 +393,20 @@ export async function getJobStatus(
     });
 
     if (!response.ok) {
-      if (response.status === 503 || response.status === 429) {
-        // Rate limited - treat as still pending
-        return { success: true, pending: true };
+      if (response.status === 429) {
+        // Rate limited - still pending, but tag the reason so the caller can
+        // stall-detect after the row has been in this state too long.
+        return { success: true, pending: true, errorReason: 'rate_limited' };
+      }
+      if (response.status === 503) {
+        return { success: true, pending: true, errorReason: 'upstream_unavailable' };
+      }
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          error: `Tracerfy auth failed (${response.status})`,
+          errorReason: 'auth_error',
+        };
       }
       return { success: false, error: 'Failed to get job results' };
     }
@@ -388,12 +423,17 @@ export async function getJobStatus(
       return { success: true, pending: true, rawData: data };
     }
 
-    // Unknown response format - log it and treat as pending rather than empty
+    // Unknown response format - tag it so callers can stall-detect instead of
+    // polling forever on garbage responses.
     console.error('Unexpected Tracerfy response format:', JSON.stringify(data));
-    return { success: true, pending: true, rawData: data };
+    return { success: true, pending: true, rawData: data, errorReason: 'malformed_response' };
   } catch (error) {
     console.error('Tracerfy job status error:', error);
-    return { success: false, error: 'Tracerfy service unavailable' };
+    return {
+      success: false,
+      error: 'Tracerfy service unavailable',
+      errorReason: 'network_error',
+    };
   }
 }
 

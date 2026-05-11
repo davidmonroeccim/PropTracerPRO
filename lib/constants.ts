@@ -67,6 +67,11 @@ export const DEDUPE = {
 export const STALE_PROCESSING = {
   // Minutes before a processing record is considered stale (for retries/dedup bypass)
   STALE_MINUTES: 10,
+  // Age at which the status endpoints promote a row to status='error' if
+  // Tracerfy has been actively unhealthy (rate-limited, 503ing, or returning
+  // malformed responses) for this row. Long enough to absorb normal queue
+  // depth, short enough that the Lead-Gen Agent's 20-min retry doesn't trip.
+  TRACERFY_STALL_MINUTES: 15,
   // Minutes before the cron job marks a processing record as error
   CRON_TIMEOUT_MINUTES: 60,
 } as const;
