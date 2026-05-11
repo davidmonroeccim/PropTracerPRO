@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -72,7 +72,35 @@ export async function GET(request: Request) {
 
     console.log('Trace status check:', trace.id, '| job:', trace.tracerfy_job_id,
       '| success:', statusResult.success, '| pending:', statusResult.pending,
-      '| results:', statusResult.results?.length || 0);
+      '| results:', statusResult.results?.length || 0,
+      '| errorReason:', statusResult.errorReason || 'none');
+
+    // Stall detection: if Tracerfy has been unhealthy past the threshold,
+    // promote to status='error' so the UI stops spinning. Gated on
+    // errorReason -- a genuine `pending: true` from Tracerfy keeps polling.
+    const ageMinutes =
+      (Date.now() - new Date(trace.created_at).getTime()) / 60000;
+
+    if (
+      statusResult.errorReason &&
+      ageMinutes >= STALE_PROCESSING.TRACERFY_STALL_MINUTES
+    ) {
+      console.error(
+        `[trace/status] stall: trace=${trace.id} reason=${statusResult.errorReason} age=${ageMinutes.toFixed(1)}m`
+      );
+      await adminClient
+        .from('trace_history')
+        .update({ status: 'error' })
+        .eq('id', trace.id);
+      return NextResponse.json({
+        success: false,
+        status: 'error',
+        trace_id: trace.id,
+        error: `Tracerfy upstream unhealthy: ${statusResult.errorReason} for ${ageMinutes.toFixed(0)}m`,
+        tracerfy_state: statusResult.errorReason,
+        age_minutes: Math.round(ageMinutes),
+      });
+    }
 
     // Tracerfy still processing
     if (!statusResult.success || statusResult.pending === true) {
@@ -80,10 +108,13 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         trace_id: trace.id,
+        tracerfy_state: statusResult.errorReason || 'pending',
+        age_minutes: Math.round(ageMinutes),
         _debug: {
           tracerfy_job_id: trace.tracerfy_job_id,
           tracerfy_success: statusResult.success,
           tracerfy_pending: statusResult.pending,
+          tracerfy_error_reason: statusResult.errorReason,
           tracerfy_raw: statusResult.rawData,
         },
       });

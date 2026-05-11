@@ -4,7 +4,7 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -69,7 +69,37 @@ export async function GET(request: Request) {
 
     console.log('API v1 trace status check:', trace.id, '| job:', trace.tracerfy_job_id,
       '| success:', statusResult.success, '| pending:', statusResult.pending,
-      '| results:', statusResult.results?.length || 0);
+      '| results:', statusResult.results?.length || 0,
+      '| errorReason:', statusResult.errorReason || 'none');
+
+    // Stall detection: if Tracerfy has been unhealthy for this row past the
+    // threshold, promote to status='error' so callers get a definitive answer
+    // instead of polling 'processing' forever. Gated on errorReason being set
+    // -- a genuine `pending: true` from Tracerfy (no errorReason) keeps the
+    // row in 'processing' regardless of age.
+    const ageMinutes =
+      (Date.now() - new Date(trace.created_at).getTime()) / 60000;
+
+    if (
+      statusResult.errorReason &&
+      ageMinutes >= STALE_PROCESSING.TRACERFY_STALL_MINUTES
+    ) {
+      console.error(
+        `[v1/trace/status] stall: trace=${trace.id} reason=${statusResult.errorReason} age=${ageMinutes.toFixed(1)}m`
+      );
+      await adminClient
+        .from('trace_history')
+        .update({ status: 'error' })
+        .eq('id', trace.id);
+      return NextResponse.json({
+        success: false,
+        status: 'error',
+        trace_id: trace.id,
+        error: `Tracerfy upstream unhealthy: ${statusResult.errorReason} for ${ageMinutes.toFixed(0)}m`,
+        tracerfy_state: statusResult.errorReason,
+        age_minutes: Math.round(ageMinutes),
+      });
+    }
 
     // Tracerfy still processing
     if (!statusResult.success || statusResult.pending === true) {
@@ -77,6 +107,11 @@ export async function GET(request: Request) {
         success: true,
         status: 'processing',
         trace_id: trace.id,
+        // Surface diagnostics so callers aren't flying blind. errorReason is
+        // set if Tracerfy is unhealthy but the row isn't old enough yet to
+        // promote to 'error'.
+        tracerfy_state: statusResult.errorReason || 'pending',
+        age_minutes: Math.round(ageMinutes),
       });
     }
 
