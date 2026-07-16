@@ -60,12 +60,16 @@ export default function OnboardingPage() {
         return;
       }
 
+      // Profile preferences only. AcquisitionPRO membership is deliberately NOT written here:
+      // it is entitlement (it gates /api/v1 and selects the $0.07 vs $0.11 per-trace rate), so
+      // it is persisted server-side by /api/verify-member at verification time, from
+      // HighLevel's answer rather than from this component's state. Migration 20260716 revokes
+      // UPDATE on those columns from `authenticated`, so re-adding them here would not just be
+      // wrong, it would fail.
       const updateData: Record<string, unknown> = {
         company_name: companyName || null,
         primary_use_case: primaryUseCase || null,
         onboarding_completed: true,
-        is_acquisition_pro_member: verificationStatus === 'verified',
-        acquisition_pro_verified_at: verificationStatus === 'verified' ? new Date().toISOString() : null,
       };
 
       const { error: updateError } = await supabase
