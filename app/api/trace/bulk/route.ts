@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
 
 const MAX_RECORDS = 10000;
@@ -78,7 +79,7 @@ export async function POST(request: Request) {
     }
 
     // Check wallet balance for all users
-    const perTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    const perTrace = chargePerTrace(profile);
     const estimatedCost = newRecords.length * perTrace;
     if (profile.wallet_balance < estimatedCost) {
       return NextResponse.json(

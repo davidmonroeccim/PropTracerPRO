@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -54,11 +55,11 @@ export async function GET(request: Request) {
       // Fetch profile for tier-aware pricing
       const { data: doneProfile } = await adminClient
         .from('user_profiles')
-        .select('subscription_tier, is_acquisition_pro_member')
+        .select('subscription_tier, is_acquisition_pro_member, gateway_products')
         .eq('id', user.id)
         .single();
       const doneCharge = doneProfile
-        ? getChargePerTrace(doneProfile.subscription_tier, doneProfile.is_acquisition_pro_member)
+        ? chargePerTrace(doneProfile)
         : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
       return NextResponse.json({
@@ -162,12 +163,12 @@ export async function GET(request: Request) {
     // Get user profile for billing
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id')
+      .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
       .eq('id', user.id)
       .single();
 
-    const chargePerTrace = profile
-      ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+    const perTraceCharge = profile
+      ? chargePerTrace(profile)
       : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
     // Collect successful results for HighLevel push
@@ -177,7 +178,7 @@ export async function GET(request: Request) {
       const parsed = parseTracerfyResult(rawResult);
       const isSuccessful =
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-      const charge = isSuccessful ? chargePerTrace : 0;
+      const charge = isSuccessful ? perTraceCharge : 0;
 
       if (isSuccessful) {
         recordsMatched++;

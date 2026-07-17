@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { Search, FileUp, ArrowRight, Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
+import { PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceHistory, TraceJob } from '@/types';
 
 async function getUsageStats(userId: string) {
@@ -99,12 +100,12 @@ export default async function DashboardPage() {
   const [stats, recentJobs, profileResult] = await Promise.all([
     getUsageStats(user.id),
     getRecentJobs(user.id),
-    supabase.from('user_profiles').select('subscription_tier, is_acquisition_pro_member').eq('id', user.id).single(),
+    supabase.from('user_profiles').select('subscription_tier, is_acquisition_pro_member, gateway_products').eq('id', user.id).single(),
   ]);
 
   const userProfile = profileResult.data;
   const perTrace = userProfile
-    ? getChargePerTrace(userProfile.subscription_tier, userProfile.is_acquisition_pro_member)
+    ? chargePerTrace(userProfile)
     : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
   const bulkTracerfyJobIds = recentJobs

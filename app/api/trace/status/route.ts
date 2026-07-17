@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -157,14 +158,14 @@ export async function GET(request: Request) {
     // Fetch profile for tier-aware pricing
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('subscription_tier, wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled, is_acquisition_pro_member')
+      .select('subscription_tier, wallet_balance, wallet_low_balance_threshold, wallet_auto_rebill_enabled, is_acquisition_pro_member, gateway_products')
       .eq('id', user.id)
       .single();
 
-    const chargePerTrace = profile
-      ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+    const perTraceCharge = profile
+      ? chargePerTrace(profile)
       : PRICING.CHARGE_PER_SUCCESS_WALLET;
-    const charge = isSuccessful ? chargePerTrace : 0;
+    const charge = isSuccessful ? perTraceCharge : 0;
 
     // Update trace record
     await adminClient
