@@ -22,6 +22,7 @@ export type SuiteErrorCode =
   | "failed";
 
 function codeForLinkError(e: SuiteLinkError): SuiteErrorCode {
+  if (e.kind === "failed") return "failed"; // transient DB/link error -> retry-friendly copy
   if (e.message === EMAIL_NOT_VERIFIED_REASON) return "unverified_email";
   if (e.message === ALREADY_LINKED_ELSEWHERE) return "already_linked";
   return "refused";

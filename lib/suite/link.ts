@@ -51,7 +51,12 @@ export function decideLink(
 }
 
 export class SuiteLinkError extends Error {
-  constructor(reason: string) {
+  constructor(
+    reason: string,
+    // Distinguishes a policy refusal ("the rule said no", permanent) from an operational failure
+    // (transient DB/link error). The callback maps `failed` to retry-friendly copy, not `refused`.
+    public readonly kind: "refused" | "failed" = "refused",
+  ) {
     super(reason);
     this.name = "SuiteLinkError";
   }
@@ -60,7 +65,7 @@ export class SuiteLinkError extends Error {
 function deny(kind: "refused" | "failed", reason: string, context: Record<string, string>): never {
   console.error(`[suite-signin] ${kind}:`, reason, context);
   alertSuite(kind, reason, context);
-  throw new SuiteLinkError(reason);
+  throw new SuiteLinkError(reason, kind);
 }
 function refuse(reason: string, context: Record<string, string>): never {
   deny("refused", reason, context);
@@ -158,6 +163,9 @@ export async function resolveSuiteUser(claims: SuiteClaims): Promise<SuiteIdenti
       // Zero rows means the trigger silently failed; heal it rather than strand a confirmed
       // auth.users row (the retry would find the email taken and lock the user out forever).
       if (!pinned?.length) {
+        // Heal a missed handle_new_user trigger. Only id/email/gateway_sub are set; the row
+        // otherwise relies on column DEFAULTs (subscription_tier='wallet', wallet_balance=0,
+        // onboarding_completed=false), all of which fail safe (empty wallet 402s; onboarding redirect).
         const { error: healErr } = await (admin.from("user_profiles") as any).upsert(
           { id: created!.user!.id, email: claims.email, gateway_sub: claims.sub },
           { onConflict: "id" },
