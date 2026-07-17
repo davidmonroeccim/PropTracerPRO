@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { effectiveIsPro } from '@/lib/suite/entitlements';
 
 export async function POST() {
   try {
@@ -14,12 +15,12 @@ export async function POST() {
     // Get user profile
     const { data: profile } = await supabase
       .from('user_profiles')
-      .select('subscription_tier, is_acquisition_pro_member')
+      .select('subscription_tier, is_acquisition_pro_member, gateway_products')
       .eq('id', user.id)
       .single();
 
-    // Check if user has API access
-    const hasApiAccess = profile?.subscription_tier === 'pro' || profile?.is_acquisition_pro_member;
+    // Check if user has API access (native pro OR AcquisitionPRO OR a gateway grant)
+    const hasApiAccess = effectiveIsPro(profile ?? {});
 
     if (!hasApiAccess) {
       return NextResponse.json(

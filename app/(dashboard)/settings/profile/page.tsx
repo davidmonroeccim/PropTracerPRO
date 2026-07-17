@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -102,7 +103,7 @@ export default function ProfilePage() {
                   AcquisitionPRO Member
                 </Badge>
               )}
-              {profile.subscription_tier !== 'pro' && !profile.is_acquisition_pro_member && (
+              {!effectiveIsPro(profile) && (
                 <Link href="/settings/billing">
                   <Button variant="link" size="sm" className="h-auto p-0 text-blue-600">
                     Upgrade
