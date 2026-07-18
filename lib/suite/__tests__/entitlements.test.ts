@@ -1,7 +1,18 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { effectiveIsPro, hasSuiteAccess, isSnapshotStale } from "@/lib/suite/entitlements";
 
+// The flag is a kill-switch: a gateway grant confers pro ONLY while Suite sign-in is enabled.
+const FLAG = "NEXT_PUBLIC_SUITE_SIGNIN_ENABLED";
+const original = process.env[FLAG];
+afterEach(() => {
+  if (original === undefined) delete process.env[FLAG];
+  else process.env[FLAG] = original;
+});
+
 describe("effectiveIsPro (binary, additive OR — never downgrades)", () => {
+  beforeEach(() => {
+    process.env[FLAG] = "true"; // Suite enabled: grants are honored.
+  });
   const base = {
     subscription_tier: "wallet",
     is_acquisition_pro_member: false,
@@ -29,8 +40,32 @@ describe("effectiveIsPro (binary, additive OR — never downgrades)", () => {
   });
 });
 
+describe("kill-switch: flipping the flag off makes a gateway grant inert", () => {
+  beforeEach(() => {
+    delete process.env[FLAG]; // Suite disabled: behave as if the feature never existed.
+  });
+  test("gateway grant for PTP, Suite disabled -> false (reverts to native plan)", () => {
+    expect(
+      effectiveIsPro({
+        subscription_tier: "wallet",
+        is_acquisition_pro_member: false,
+        gateway_products: ["prop-tracer-pro"],
+      }),
+    ).toBe(false);
+  });
+  test("hasSuiteAccess is false when Suite is disabled, even with the slug present", () => {
+    expect(hasSuiteAccess({ gateway_products: ["prop-tracer-pro"] })).toBe(false);
+  });
+  test("a native pro is unaffected by the flag (no lockout of paying users)", () => {
+    expect(
+      effectiveIsPro({ subscription_tier: "pro", is_acquisition_pro_member: false, gateway_products: [] }),
+    ).toBe(true);
+  });
+});
+
 describe("hasSuiteAccess / isSnapshotStale", () => {
-  test("hasSuiteAccess matches only the PTP slug", () => {
+  test("hasSuiteAccess matches only the PTP slug (Suite enabled)", () => {
+    process.env[FLAG] = "true";
     expect(hasSuiteAccess({ gateway_products: ["prop-tracer-pro"] })).toBe(true);
     expect(hasSuiteAccess({ gateway_products: ["waldo"] })).toBe(false);
     expect(hasSuiteAccess({ gateway_products: null })).toBe(false);

@@ -1,4 +1,4 @@
-import { SUITE_PRODUCT, suiteConfig } from "./config";
+import { isSuiteSignInEnabled, SUITE_PRODUCT, suiteConfig } from "./config";
 
 const TTL_MS = 30 * 60 * 1000;
 
@@ -10,9 +10,11 @@ export interface EntitlementProfile {
   gateway_products_checked_at?: string | null;
 }
 
-/** Does the gateway grant this user PTP? Additive: the caller ORs it with local pro. */
+/** Does the gateway currently confer PTP on this user? False whenever Suite sign-in is disabled: the
+ *  flag is a kill-switch, so flipping it off makes every grant-derived decision (pro access AND the
+ *  $0.07 trace rate) revert to the user's native plan. Additive: the caller ORs it with local pro. */
 export function hasSuiteAccess(p: EntitlementProfile): boolean {
-  return (p.gateway_products ?? []).includes(SUITE_PRODUCT);
+  return isSuiteSignInEnabled() && (p.gateway_products ?? []).includes(SUITE_PRODUCT);
 }
 
 export function isSnapshotStale(checkedAt: string | null | undefined, now: Date = new Date()): boolean {

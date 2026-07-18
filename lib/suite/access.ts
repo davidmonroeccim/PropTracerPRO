@@ -1,5 +1,6 @@
 import { after } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isSuiteSignInEnabled } from "./config";
 import { type EntitlementProfile, fetchEntitlements, isSnapshotStale } from "./entitlements";
 
 interface RefreshRow extends EntitlementProfile { id: string }
@@ -7,6 +8,7 @@ interface RefreshRow extends EntitlementProfile { id: string }
 /** Schedule the TTL refresh AFTER the response flushes. after() throws outside a request scope,
  *  so degrade to fire-and-forget there. refreshSuiteSnapshot never rejects. */
 export function scheduleSuiteRefresh(profile: RefreshRow): void {
+  if (!isSuiteSignInEnabled()) return; // Kill-switch: no snapshot refresh or gateway pings when disabled.
   if (!profile.gateway_sub) return;
   try { after(() => refreshSuiteSnapshot(profile)); }
   catch { void refreshSuiteSnapshot(profile); }
