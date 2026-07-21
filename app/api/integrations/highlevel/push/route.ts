@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import type { TraceResult } from '@/types';
 
@@ -24,11 +25,11 @@ export async function POST(request: NextRequest) {
     const adminClient = createAdminClient();
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('highlevel_api_key, highlevel_location_id, subscription_tier, is_acquisition_pro_member')
+      .select('highlevel_api_key, highlevel_location_id, subscription_tier, is_acquisition_pro_member, gateway_products')
       .eq('id', user.id)
       .single();
 
-    if (!profile || (profile.subscription_tier !== 'pro' && !profile.is_acquisition_pro_member)) {
+    if (!profile || !effectiveIsPro(profile)) {
       return NextResponse.json(
         { error: 'CRM push requires a Pro subscription. Upgrade at Settings → Billing.' },
         { status: 403 }

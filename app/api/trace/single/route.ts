@@ -4,7 +4,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
 
 export async function POST(request: Request) {
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
     }
 
     // Check wallet balance for all users
-    const minBalance = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    const minBalance = chargePerTrace(profile);
     if (profile.wallet_balance < minBalance) {
       return NextResponse.json(
         {

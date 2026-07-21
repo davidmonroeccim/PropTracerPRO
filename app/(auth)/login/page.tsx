@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
@@ -9,6 +9,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { isSuiteSignInEnabled } from '@/lib/suite/config';
+import { suiteErrorMessage } from '@/lib/suite/login-errors';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -19,6 +21,12 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [magicLinkSent, setMagicLinkSent] = useState(false);
+
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get('suite_error');
+    const msg = suiteErrorMessage(code);
+    if (msg) setError(msg);
+  }, []);
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,6 +106,14 @@ export default function LoginPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {isSuiteSignInEnabled() && (
+          <a
+            href="/api/auth/suite/start"
+            className="block w-full text-center rounded-md border px-4 py-2 mb-4"
+          >
+            Sign in with Suite
+          </a>
+        )}
         <Tabs defaultValue="password" className="w-full">
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="password">Password</TabsTrigger>

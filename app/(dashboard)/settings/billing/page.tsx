@@ -8,7 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { SUBSCRIPTION_TIERS, PRICING, getChargePerTrace } from '@/lib/constants';
+import { SUBSCRIPTION_TIERS, PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { UserProfile } from '@/types';
 
 export default function BillingPage() {
@@ -180,7 +181,7 @@ export default function BillingPage() {
   }
 
   const currentTier = SUBSCRIPTION_TIERS[profile.subscription_tier as keyof typeof SUBSCRIPTION_TIERS];
-  const userPerTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+  const userPerTrace = chargePerTrace(profile);
 
   return (
     <div className="space-y-6">

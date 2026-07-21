@@ -3,7 +3,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult, TracerfyResult } from '@/types';
 
 /**
@@ -93,14 +94,14 @@ export async function GET(request: Request) {
         // Get user profile for tier-aware pricing
         const { data: profile } = await adminClient
           .from('user_profiles')
-          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id')
+          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
           .eq('id', trace.user_id)
           .single();
 
-        const chargePerTrace = profile
-          ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+        const perTraceCharge = profile
+          ? chargePerTrace(profile)
           : PRICING.CHARGE_PER_SUCCESS_WALLET;
-        const charge = isSuccessful ? chargePerTrace : 0;
+        const charge = isSuccessful ? perTraceCharge : 0;
 
         // Update trace record
         await adminClient
@@ -225,19 +226,19 @@ export async function GET(request: Request) {
 
         const { data: profile } = await adminClient
           .from('user_profiles')
-          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id')
+          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
           .eq('id', job.user_id)
           .single();
 
-        const chargePerTrace = profile
-          ? getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)
+        const perTraceCharge = profile
+          ? chargePerTrace(profile)
           : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
         for (const rawResult of results) {
           const parsed = parseTracerfyResult(rawResult);
           const isSuccessful =
             (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-          const charge = isSuccessful ? chargePerTrace : 0;
+          const charge = isSuccessful ? perTraceCharge : 0;
 
           if (isSuccessful) recordsMatched++;
 

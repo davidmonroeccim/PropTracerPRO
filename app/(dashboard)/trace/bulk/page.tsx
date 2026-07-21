@@ -5,7 +5,8 @@ import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
-import { PRICING, AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
+import { PRICING, AI_RESEARCH } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { Search } from 'lucide-react';
@@ -185,11 +186,11 @@ export default function BulkUploadPage() {
       if (user) {
         const { data } = await supabase
           .from('user_profiles')
-          .select('subscription_tier, is_acquisition_pro_member')
+          .select('subscription_tier, is_acquisition_pro_member, gateway_products')
           .eq('id', user.id)
           .single();
         if (data) {
-          setPerTraceRate(getChargePerTrace(data.subscription_tier, data.is_acquisition_pro_member));
+          setPerTraceRate(chargePerTrace(data));
         }
       }
     };

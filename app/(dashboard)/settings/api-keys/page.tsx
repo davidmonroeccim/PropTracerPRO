@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -43,7 +44,7 @@ export default function ApiKeysPage() {
     setLoading(false);
   };
 
-  const hasApiAccess = profile?.subscription_tier === 'pro' || profile?.is_acquisition_pro_member;
+  const hasApiAccess = profile ? effectiveIsPro(profile) : false;
 
   const generateApiKey = async () => {
     if (!profile) return;
