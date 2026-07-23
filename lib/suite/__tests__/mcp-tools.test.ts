@@ -5,10 +5,12 @@ import {
   listTraces,
   skipTraceQuote,
   worstCaseCost,
+  isEntityRecord,
   MAX_RECORDS,
   skipTraceBulk,
   bulkStatus,
 } from "@/lib/suite/mcp-tools";
+import { PRICING } from "@/lib/constants";
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
@@ -136,8 +138,30 @@ describe("listTraces", () => {
   });
 });
 
+describe("isEntityRecord (single source of truth for the person/entity split)", () => {
+  // The gate (worstCaseCost) and the submit split (skipTraceBulk) both classify through this one
+  // helper, so they can never disagree. Entity == empty/absent/whitespace owner OR a business name.
+  it("treats an empty owner_name as an ENTITY (routes to FastAppend / $0.25)", () => {
+    expect(isEntityRecord("")).toBe(true);
+  });
+  it("treats an absent owner_name as an ENTITY", () => {
+    expect(isEntityRecord(undefined)).toBe(true);
+  });
+  it("treats a whitespace-only owner_name as an ENTITY", () => {
+    expect(isEntityRecord("   ")).toBe(true);
+  });
+  it("treats a plain person name as NOT an entity", () => {
+    expect(isEntityRecord("John Smith")).toBe(false);
+  });
+  it("treats a business name as an ENTITY", () => {
+    expect(isEntityRecord("Acme LLC")).toBe(true);
+  });
+});
+
 describe("worstCaseCost", () => {
   const proProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"] } as never;
+  const walletProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: [] } as never;
+
   it("prices persons at the grant rate and entities at the $0.25 ceiling", () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     const out = worstCaseCost(
@@ -151,6 +175,55 @@ describe("worstCaseCost", () => {
     expect(out.entities).toBeCloseTo(0.25);
     expect(out.total).toBeCloseTo(0.32);
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+  });
+
+  // MONEY-GATE CORRECTNESS: an address-only record with NO owner_name must price as an ENTITY
+  // ($0.25 FastAppend ceiling), never a person -- because skipTraceBulk routes that same record to
+  // entityRecords, where it can settle at $0.25. Pricing it as a person ($0.11) under-reserves the
+  // wallet gate by up to $0.14/record. This is the exact bug this fix closes; mutation-fenced below.
+  it("prices an address-only record with NO owner_name as an ENTITY ($0.25), not a person", () => {
+    const out = worstCaseCost(
+      [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
+      walletProfile,
+    );
+    expect(out.entities).toBeCloseTo(PRICING.CHARGE_PER_FASTAPPEND_SUCCESS); // 0.25
+    expect(out.persons).toBe(0);
+    expect(out.total).toBeCloseTo(0.25);
+  });
+
+  it("prices a business-name record as an ENTITY ($0.25)", () => {
+    const out = worstCaseCost(
+      [{ owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }],
+      walletProfile,
+    );
+    expect(out.entities).toBeCloseTo(0.25);
+    expect(out.persons).toBe(0);
+  });
+
+  it("prices a plain-person-name record at the person rate (not the entity ceiling)", () => {
+    const out = worstCaseCost(
+      [{ owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }],
+      walletProfile,
+    );
+    expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET); // 0.11
+    expect(out.entities).toBe(0);
+  });
+
+  // CONSISTENCY: the set worstCaseCost prices as entities is EXACTLY the set skipTraceBulk routes to
+  // entityRecords, because both classify through isEntityRecord. Assert it across the mixed batch.
+  it("prices exactly the isEntityRecord set as entities (gate == submit split)", () => {
+    const records = [
+      { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
+      { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
+      { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
+      { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // entity (no owner)
+      { owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }, // entity (whitespace)
+    ];
+    const expectedEntities = records.filter((r) => isEntityRecord(r.owner_name)).length;
+    const out = worstCaseCost(records, walletProfile);
+    const pricedAsEntities = Math.round(out.entities / PRICING.CHARGE_PER_FASTAPPEND_SUCCESS);
+    expect(pricedAsEntities).toBe(expectedEntities); // 4
+    expect(pricedAsEntities).toBe(4);
   });
 });
 
@@ -199,15 +272,16 @@ describe("skip_trace_quote", () => {
     const out = expectQuote(
       await skipTraceQuote(admin, "sub-1", {
         records: [
-          { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" },
-          { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" },
-          { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" },
-          { address: "4 D St", city: "X", state: "TX", zip: "75001" },
+          { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
+          { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
+          { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
+          { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // entity: no owner_name -> FastAppend
         ],
       }),
     );
-    expect(out.persons).toBe(2);
-    expect(out.entities).toBe(2);
+    // The address-only record is an ENTITY (routes to FastAppend), consistent with the money gate.
+    expect(out.persons).toBe(1);
+    expect(out.entities).toBe(3);
     expect(out.after_dedup).toBe(4);
   });
 });
@@ -332,6 +406,20 @@ describe("skip_trace_bulk", () => {
     for (const r of allRows) expect(r).toMatchObject({ source: "mcp" });
     expect(submitBulkTrace).toHaveBeenCalledTimes(1);
     expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 1, entities: 0 });
+  });
+
+  it("routes an address-only record (NO owner_name) to entityRecords, matching the worst-case gate", async () => {
+    // Submit-split side of the money-gate consistency: the same no-owner record worstCaseCost
+    // prices at $0.25 (entity) is routed here to entityRecords -> FastAppend, never the person
+    // Tracerfy path. Proves the gate and the split classify identically.
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 0, entities: 1 });
+    // No person CSV submitted -- the record went entirely to the entity (FastAppend) queue.
+    expect(submitBulkTrace).not.toHaveBeenCalled();
   });
 });
 

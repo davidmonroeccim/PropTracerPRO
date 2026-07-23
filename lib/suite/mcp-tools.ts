@@ -74,15 +74,27 @@ export type TraceRecord = z.infer<typeof recordSchema>;
 
 export const quoteSchema = z.object({ records: z.array(recordSchema).min(1) });
 
-/** A record is an "entity" iff it carries an owner_name AND the classifier calls it a business;
- *  everything else prices as a person. Entities cost the flat $0.25 FastAppend ceiling; persons
- *  price at the grant-aware per-trace rate ($0.07 for a grant-holder, $0.11 otherwise). */
+/** SINGLE SOURCE OF TRUTH for the person/entity split (closes ledger M7). A record is an ENTITY
+ *  when it has no usable owner_name (empty/whitespace/absent) OR the classifier calls that name a
+ *  business. This is the EXACT negation of skipTraceBulk's person condition
+ *  (`owner && !isLikelyBusiness(owner)`, where `owner = (owner_name || "").trim()`), so the
+ *  worst-case wallet gate and the submit split can NEVER disagree on how a record is priced vs
+ *  routed. Entities settle via FastAppend at the flat $0.25 ceiling; persons settle at the
+ *  grant-aware per-trace rate ($0.07 for a grant-holder, $0.11 otherwise). An address-only record
+ *  with no owner_name is an ENTITY (it routes to FastAppend), so the gate reserves $0.25 for it. */
+export function isEntityRecord(owner_name?: string): boolean {
+  const owner = (owner_name || "").trim();
+  return !owner || isLikelyBusiness(owner);
+}
+
+/** Worst-case pre-flight cost. Prices each record via the shared isEntityRecord classifier so the
+ *  gate reserves exactly what the submit split will queue. */
 export function worstCaseCost(records: TraceRecord[], profile: PtpProfile) {
   const personRate = chargePerTrace(profile);
   let persons = 0;
   let entities = 0;
   for (const r of records) {
-    if (r.owner_name && isLikelyBusiness(r.owner_name)) entities += PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
+    if (isEntityRecord(r.owner_name)) entities += PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
     else persons += personRate;
   }
   return { persons, entities, total: persons + entities };
@@ -99,7 +111,7 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   if (!profile) return UNLINKED_MESSAGE;
   const { unique, internalDuplicates } = removeBatchDuplicates(records);
   const cost = worstCaseCost(unique, profile);
-  const entities = unique.filter((r) => r.owner_name && isLikelyBusiness(r.owner_name)).length;
+  const entities = unique.filter((r) => isEntityRecord(r.owner_name)).length;
   return {
     submitted: records.length,
     after_dedup: unique.length,
@@ -170,14 +182,16 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     };
   }
 
-  // Split person vs entity: a non-empty owner_name that the classifier calls a
-  // business queues for AI research; everything else goes straight to Tracerfy.
+  // Split person vs entity through the SHARED isEntityRecord classifier -- the same
+  // single source of truth worstCaseCost prices with, so the gate can never
+  // under-reserve. A person (non-empty owner_name the classifier does NOT call a
+  // business) goes straight to Tracerfy; everything else (empty/absent owner OR a
+  // business name) queues for AI research / FastAppend.
   const personRecords: AddressInput[] = [];
   const entityRecords: AddressInput[] = [];
   for (const record of newRecords) {
-    const owner = (record.owner_name || "").trim();
-    if (owner && !isLikelyBusiness(owner)) personRecords.push(record);
-    else entityRecords.push(record);
+    if (isEntityRecord(record.owner_name)) entityRecords.push(record);
+    else personRecords.push(record);
   }
 
   // Guard 3 (money fence): worst-case pre-flight. Stricter than the v1 route --
