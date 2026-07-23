@@ -42,17 +42,21 @@ export type PtpProfile = {
 };
 
 /** Map a verified gateway `sub` to the LOCAL PTP user_profiles row (the spend key + wallet). Returns
- *  null when the gateway user has never completed Suite sign-in on PTP (no local row carries the sub).
+ *  null ONLY on a genuine no-row result (error null, data null) — the gateway user has never
+ *  completed Suite sign-in on PTP, so no local row carries the sub. A real DB/network error is
+ *  thrown, not swallowed into null: every money tool goes through this choke point, and returning
+ *  null on a real error would misreport a genuinely-linked user as unlinked and hide the failure.
  *  A pure read (no side effects), unlike lib/suite/link.ts resolveSuiteUser which may create/link. */
 export async function resolvePtpProfile(
   admin: SupabaseClient,
   gatewaySub: string,
 ): Promise<PtpProfile | null> {
-  const { data } = await admin
+  const { data, error } = await admin
     .from("user_profiles")
     .select("id, subscription_tier, is_acquisition_pro_member, gateway_products, wallet_balance")
     .eq("gateway_sub", gatewaySub)
     .maybeSingle();
+  if (error) throw new Error(`profile lookup failed: ${error.message}`);
   return (data as PtpProfile | null) ?? null;
 }
 
