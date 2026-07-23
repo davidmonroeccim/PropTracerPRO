@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
-import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
+import { type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
-import type { TraceJob, TraceResult, AIResearchResult } from '@/types';
+import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
+import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
 // an explicit maxDuration the function dies on the platform default (~10 s) before
@@ -16,28 +16,6 @@ export const maxDuration = 60;
 // Cap parallel Tracerfy getJobStatus() calls so a 200-row bulk doesn't fan out
 // 200 simultaneous requests against Tracerfy.
 const POLL_CONCURRENCY = 25;
-
-type TraceHistoryRow = {
-  id: string;
-  user_id: string;
-  trace_job_id: string | null;
-  address_hash: string;
-  normalized_address: string;
-  city: string | null;
-  state: string | null;
-  zip: string | null;
-  input_owner_name: string | null;
-  tracerfy_job_id: string | null;
-  status: string;
-  trace_result: TraceResult | null;
-  ai_research: AIResearchResult | null;
-  ai_research_status: string | null;
-  ai_research_charge: number | null;
-  phone_count: number;
-  email_count: number;
-  is_successful: boolean | null;
-  charge: number | null;
-};
 
 export async function GET(request: Request) {
   try {
@@ -130,229 +108,29 @@ export async function GET(request: Request) {
     // 'processing' forever when Tracerfy itself is broken.
     const stalledByErrorReason = new Map<string, TracerfyErrorReason>();
 
-    const resolveOne = async (
-      tracerfyJobId: string,
-      bucketRows: TraceHistoryRow[]
-    ): Promise<void> => {
-      const statusResult = await getJobStatus(tracerfyJobId);
-
-      if (!statusResult.success || statusResult.pending === true) {
-        if (statusResult.errorReason) {
-          stalledByErrorReason.set(tracerfyJobId, statusResult.errorReason);
-        }
-        return; // still processing — leave rows as-is
-      }
-
-      if (!statusResult.results || statusResult.results.length === 0) {
-        return; // treat empty results as still processing per existing behavior
-      }
-
-      // Finalize the rows backed by this Tracerfy job.
-      if (bucketRows.length === 1) {
-        // Single-trace submission (entity row post-research). Find the best
-        // result and apply it directly to this one row.
-        const row = bucketRows[0];
-        const nonPadding = statusResult.results.filter(
-          (r) => r.address !== '0 Padding Row'
-        );
-        const target =
-          nonPadding.find((r) => r.primary_phone || r.mobile_1 || r.email_1) ||
-          nonPadding[0];
-        if (!target) return;
-
-        const parsed = parseTracerfyResult(target);
-        const tracerfyHasContacts =
-          (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-
-        // FastAppend bundled fallback: if Tracerfy returned nothing for this
-        // entity row, check whether FastAppend lent its async business-trace
-        // results between cron and now (sweep-business-traces merges contacts
-        // into ai_research). When it has, refund the $0.15 research charge
-        // the cron already booked and apply the single bundled $0.25 -- the
-        // user paid for one credited row, not research-plus-trace separately.
-        const fastAppendCredit = tracerfyHasContacts
-          ? null
-          : traceCreditFromFastAppend(row.ai_research);
-
-        if (tracerfyHasContacts) {
-          // Tracerfy delivered contacts -- charge tier-aware trace fee on top
-          // of the AI research charge already booked by the cron.
-          const charge = chargePerTrace;
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: 'success',
-              trace_result: parsed,
-              phone_count: parsed.phones?.length || 0,
-              email_count: parsed.emails?.length || 0,
-              is_successful: true,
-              cost: PRICING.COST_PER_RECORD,
-              charge,
-            })
-            .eq('id', row.id);
-
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: profile.id,
-            p_amount: charge,
-            p_trace_history_id: row.id,
-            p_description: 'Bulk skip trace - entity row (post-research)',
-          });
-
-          row.status = 'success';
-          row.trace_result = parsed;
-          row.phone_count = parsed.phones?.length || 0;
-          row.email_count = parsed.emails?.length || 0;
-          row.is_successful = true;
-          row.charge = charge;
-        } else if (fastAppendCredit) {
-          // Tracerfy whiffed but FastAppend has contacts now. Refund the
-          // $0.15 research charge the cron booked (so the wallet ledger and
-          // row both reflect the bundled $0.25 model) and apply the bundled
-          // FastAppend success charge.
-          const priorResearchCharge = row.ai_research_charge || 0;
-          if (priorResearchCharge > 0) {
-            await adminClient.rpc('credit_wallet_balance', {
-              p_user_id: profile.id,
-              p_amount: priorResearchCharge,
-              p_description:
-                'Refund: AI research bundled into FastAppend success ($0.25)',
-            });
-          }
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: profile.id,
-            p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
-            p_trace_history_id: row.id,
-            p_description:
-              'FastAppend business-trace contacts (bundled research + trace)',
-          });
-
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: 'success',
-              trace_result: fastAppendCredit.trace_result,
-              phone_count: fastAppendCredit.phone_count,
-              email_count: fastAppendCredit.email_count,
-              is_successful: true,
-              cost: PRICING.COST_PER_RECORD,
-              charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
-              ai_research_charge: 0,
-            })
-            .eq('id', row.id);
-
-          row.status = 'success';
-          row.trace_result = fastAppendCredit.trace_result;
-          row.phone_count = fastAppendCredit.phone_count;
-          row.email_count = fastAppendCredit.email_count;
-          row.is_successful = true;
-          row.charge = PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
-          row.ai_research_charge = 0;
-        } else {
-          // No contacts from either provider -- no_match. The $0.15
-          // research charge already booked stays put. If FastAppend lands
-          // later via sweep-business-traces, that cron will refund the
-          // $0.15 and apply the bundled credit.
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: 'no_match',
-              trace_result: parsed,
-              phone_count: 0,
-              email_count: 0,
-              is_successful: false,
-              cost: PRICING.COST_PER_RECORD,
-              charge: 0,
-            })
-            .eq('id', row.id);
-
-          row.status = 'no_match';
-          row.trace_result = parsed;
-          row.phone_count = 0;
-          row.email_count = 0;
-          row.is_successful = false;
-          row.charge = 0;
-        }
-      } else {
-        // Shared bulk Tracerfy job — match results back to person rows by
-        // city/state, mirroring the existing bulk status matcher.
-        for (const rawResult of statusResult.results) {
-          const inputCity = (rawResult.city || '').toUpperCase().trim();
-          const inputState = (rawResult.state || '').toUpperCase().trim();
-
-          // Find the first still-processing row in this bucket that matches.
-          const match = bucketRows.find(
-            (r) =>
-              r.status === 'processing' &&
-              (r.city || '').toUpperCase() === inputCity &&
-              (r.state || '').toUpperCase() === inputState
-          );
-          if (!match) continue;
-
-          const parsed = parseTracerfyResult(rawResult);
-          const isSuccessful =
-            (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-          const charge = isSuccessful ? chargePerTrace : 0;
-
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: isSuccessful ? 'success' : 'no_match',
-              trace_result: parsed,
-              phone_count: parsed.phones?.length || 0,
-              email_count: parsed.emails?.length || 0,
-              is_successful: isSuccessful,
-              cost: PRICING.COST_PER_RECORD,
-              charge,
-            })
-            .eq('id', match.id);
-
-          if (isSuccessful && charge > 0) {
-            await adminClient.rpc('deduct_wallet_balance', {
-              p_user_id: profile.id,
-              p_amount: charge,
-              p_trace_history_id: match.id,
-              p_description: 'Bulk skip trace - successful match',
-            });
-          }
-
-          // Reflect in local copy so the completion check below is accurate.
-          match.status = isSuccessful ? 'success' : 'no_match';
-          match.trace_result = parsed;
-          match.phone_count = parsed.phones?.length || 0;
-          match.email_count = parsed.emails?.length || 0;
-          match.is_successful = isSuccessful;
-          match.charge = charge;
-        }
-
-        // Mark any remaining still-processing person rows in this shared
-        // bucket as no_match — Tracerfy returned its final set and these rows
-        // got no result.
-        const stillProcessing = bucketRows.filter((r) => r.status === 'processing');
-        if (stillProcessing.length > 0) {
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: 'no_match',
-              is_successful: false,
-              cost: PRICING.COST_PER_RECORD,
-              charge: 0,
-            })
-            .in(
-              'id',
-              stillProcessing.map((r) => r.id)
-            );
-          for (const r of stillProcessing) {
-            r.status = 'no_match';
-            r.is_successful = false;
-            r.charge = 0;
-          }
-        }
-      }
-    };
-
+    // Per-row settlement now lives in the shared lib/trace/settleBulkJob.ts so
+    // this v1 REST route and the Suite MCP tool can never diverge on money. We
+    // pass this surface's CURRENT person rate (getChargePerTrace tier-aware);
+    // the MCP passes its grant-aware rate. settleBulkJob mutates bucket rows in
+    // place (same as the old closure) and returns any unhealthy Tracerfy
+    // errorReason so we can still stall-detect below.
     for (let i = 0; i < pollEntries.length; i += POLL_CONCURRENCY) {
       const batch = pollEntries.slice(i, i + POLL_CONCURRENCY);
-      await Promise.all(batch.map(([jobId, bucket]) => resolveOne(jobId, bucket)));
+      const settlements = await Promise.all(
+        batch.map(([entryJobId, bucket]) =>
+          settleBulkJob(adminClient, {
+            tracerfyJobId: entryJobId,
+            bucketRows: bucket,
+            userId: profile.id,
+            personRate: chargePerTrace,
+          })
+        )
+      );
+      settlements.forEach((settlement, idx) => {
+        if (settlement.stalledErrorReason) {
+          stalledByErrorReason.set(batch[idx][0], settlement.stalledErrorReason);
+        }
+      });
     }
 
     // --- Stall promotion --------------------------------------------------
