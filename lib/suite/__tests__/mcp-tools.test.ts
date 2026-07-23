@@ -1,6 +1,46 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePtpProfile } from "@/lib/suite/mcp-shared";
-import { walletBalance, listTraces, skipTraceQuote, worstCaseCost, MAX_RECORDS } from "@/lib/suite/mcp-tools";
+import {
+  walletBalance,
+  listTraces,
+  skipTraceQuote,
+  worstCaseCost,
+  MAX_RECORDS,
+  skipTraceBulk,
+  bulkStatus,
+} from "@/lib/suite/mcp-tools";
+import { checkDuplicates } from "@/lib/utils/deduplication";
+import { submitBulkTrace } from "@/lib/tracerfy/client";
+import { settleBulkJob } from "@/lib/trace/settleBulkJob";
+
+// Mock ONLY the boundary primitives that reach the network (submitBulkTrace,
+// settleBulkJob) or the cookie-scoped server client (checkDuplicates). The pure
+// helpers that actually enforce the guards -- removeBatchDuplicates,
+// isLikelyBusiness, validateAddressInput, worstCaseCost -- stay REAL so the
+// money fences are exercised for real, not stubbed away.
+vi.mock("@/lib/utils/deduplication", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/utils/deduplication")>();
+  return { ...actual, checkDuplicates: vi.fn() };
+});
+vi.mock("@/lib/tracerfy/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tracerfy/client")>();
+  return { ...actual, submitBulkTrace: vi.fn() };
+});
+vi.mock("@/lib/trace/settleBulkJob", () => ({ settleBulkJob: vi.fn() }));
+
+beforeEach(() => {
+  // Default: history dedup passes everything through as new.
+  vi.mocked(checkDuplicates).mockReset();
+  vi.mocked(checkDuplicates).mockImplementation(
+    async (_userId, records) => ({ newRecords: records, duplicates: [], cachedResults: [] }),
+  );
+  // Default: Tracerfy bulk submit succeeds.
+  vi.mocked(submitBulkTrace).mockReset();
+  vi.mocked(submitBulkTrace).mockResolvedValue({ success: true, jobId: "tf-1" });
+  // Default: settlement is a no-op (leaves rows untouched).
+  vi.mocked(settleBulkJob).mockReset();
+  vi.mocked(settleBulkJob).mockResolvedValue({ stalledErrorReason: null });
+});
 
 /** Admin stub whose from().select().eq().maybeSingle() resolves to `profile` (or `profileError` when
  *  set), whose from().select().eq().order().limit() resolves to `traces`, and whose
@@ -169,5 +209,230 @@ describe("skip_trace_quote", () => {
     expect(out.persons).toBe(2);
     expect(out.entities).toBe(2);
     expect(out.after_dedup).toBe(4);
+  });
+});
+
+// ---- Task 6: skip_trace_bulk (guarded submit) --------------------------------
+
+/** Richer admin stub for the submit path: routes by table, captures the
+ *  trace_jobs insert payload and the trace_history upsert batches, and returns a
+ *  created job id from `.insert().select().single()`. `.then` makes the builder
+ *  awaitable for the fire-and-forget trace_jobs updates. */
+function submitAdminStub(opts: {
+  profile: unknown;
+  jobId?: string;
+  jobInsertError?: { message: string } | null;
+}) {
+  const { profile, jobId = "job-1", jobInsertError = null } = opts;
+  const captured = {
+    traceJobsInsert: undefined as Record<string, unknown> | undefined,
+    traceJobsUpdates: [] as unknown[],
+    traceHistoryUpserts: [] as Array<{ batch: Array<Record<string, unknown>>; opts: unknown }>,
+  };
+  const chainFor = (table: string) => {
+    let op: "insert" | "update" | null = null;
+    const chain: Record<string, unknown> = {
+      select: () => chain,
+      eq: () => chain,
+      in: () => chain,
+      insert: (payload: Record<string, unknown>) => {
+        op = "insert";
+        if (table === "trace_jobs") captured.traceJobsInsert = payload;
+        return chain;
+      },
+      update: (payload: unknown) => {
+        op = "update";
+        if (table === "trace_jobs") captured.traceJobsUpdates.push(payload);
+        return chain;
+      },
+      upsert: async (batch: Array<Record<string, unknown>>, upsertOpts: unknown) => {
+        if (table === "trace_history") captured.traceHistoryUpserts.push({ batch, opts: upsertOpts });
+        return { error: null };
+      },
+      single: async () =>
+        table === "trace_jobs" && op === "insert"
+          ? jobInsertError
+            ? { data: null, error: jobInsertError }
+            : { data: { id: jobId }, error: null }
+          : { data: null, error: null },
+      maybeSingle: async () =>
+        table === "user_profiles" ? { data: profile, error: null } : { data: null, error: null },
+      then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: null }),
+    };
+    return chain;
+  };
+  return { admin: { from: (t: string) => chainFor(t) } as never, captured };
+}
+
+describe("skip_trace_bulk", () => {
+  const linked = {
+    id: "p1",
+    subscription_tier: "wallet",
+    is_acquisition_pro_member: false,
+    gateway_products: ["prop-tracer-pro"],
+    wallet_balance: 100,
+  };
+
+  it("returns the setup message for an unlinked user, before any spend", async () => {
+    const { admin } = submitAdminStub({ profile: null });
+    const out = await skipTraceBulk(admin, "sub-x", {
+      records: [{ owner_name: "A", address: "1", city: "X", state: "TX", zip: "1" }],
+      confirm: true,
+    });
+    expect(JSON.stringify(out)).toMatch(/Sign into PropTracerPRO/i);
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing confirm (no submit, no spend)", async () => {
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ owner_name: "A", address: "1", city: "X", state: "TX", zip: "1" }],
+    });
+    expect(JSON.stringify(out)).toMatch(/confirm/i);
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  it("rejects a list over the 500 cap (no submit)", async () => {
+    const { admin } = submitAdminStub({ profile: linked });
+    const records = Array.from({ length: MAX_RECORDS + 1 }, (_, i) => ({
+      owner_name: `X ${i}`,
+      address: `${i} A`,
+      city: "X",
+      state: "TX",
+      zip: "1",
+    }));
+    const out = await skipTraceBulk(admin, "sub-1", { records, confirm: true });
+    expect(JSON.stringify(out)).toMatch(/500/);
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  it("402s when the worst-case exceeds the wallet (no submit, no spend)", async () => {
+    const { admin } = submitAdminStub({ profile: { ...linked, wallet_balance: 0 } });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ owner_name: "A", address: "1", city: "X", state: "TX", zip: "1" }],
+      confirm: true,
+    });
+    expect(JSON.stringify(out)).toMatch(/balance|402|insufficient/i);
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  it("writes source:'mcp' on the trace_jobs insert AND the trace_history rows, then submits", async () => {
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    });
+    // Fence #5: source:'mcp' on the job row.
+    expect(captured.traceJobsInsert).toMatchObject({ source: "mcp", status: "processing", user_id: "p1" });
+    // ...and on every trace_history row.
+    const allRows = captured.traceHistoryUpserts.flatMap((u) => u.batch);
+    expect(allRows.length).toBeGreaterThan(0);
+    for (const r of allRows) expect(r).toMatchObject({ source: "mcp" });
+    expect(submitBulkTrace).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 1, entities: 0 });
+  });
+});
+
+// ---- Task 6: bulk_status (shared settlement + ownership fence) ----------------
+
+/** Admin stub for the poll/settle path: profile + job come back from
+ *  `.maybeSingle()` keyed by table; the trace_history rows come back from the
+ *  awaited (`.then`) builder. */
+function statusAdminStub(opts: { profile: unknown; job: unknown; rows?: unknown[] }) {
+  const { profile, job, rows = [] } = opts;
+  const captured = { traceJobsUpdates: [] as unknown[] };
+  const chainFor = (table: string) => {
+    const chain: Record<string, unknown> = {
+      select: () => chain,
+      eq: () => chain,
+      in: () => chain,
+      update: (payload: unknown) => {
+        if (table === "trace_jobs") captured.traceJobsUpdates.push(payload);
+        return chain;
+      },
+      maybeSingle: async () =>
+        table === "user_profiles"
+          ? { data: profile, error: null }
+          : table === "trace_jobs"
+            ? { data: job, error: null }
+            : { data: null, error: null },
+      then: (resolve: (v: unknown) => unknown) =>
+        resolve({ data: table === "trace_history" ? rows : null, error: null }),
+    };
+    return chain;
+  };
+  return { admin: { from: (t: string) => chainFor(t) } as never, captured };
+}
+
+describe("bulk_status", () => {
+  const profile = {
+    id: "p1",
+    subscription_tier: "wallet",
+    is_acquisition_pro_member: false,
+    gateway_products: ["prop-tracer-pro"],
+    wallet_balance: 50,
+  };
+
+  it("returns the setup message for an unlinked user", async () => {
+    const { admin } = statusAdminStub({ profile: null, job: null });
+    const out = await bulkStatus(admin, "sub-x", { job_id: "job-1" });
+    expect(JSON.stringify(out)).toMatch(/Sign into PropTracerPRO/i);
+    expect(settleBulkJob).not.toHaveBeenCalled();
+  });
+
+  it("returns not_found when the job does not exist", async () => {
+    const { admin } = statusAdminStub({ profile, job: null });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "missing" });
+    expect(out).toMatchObject({ error: "not_found" });
+    expect(settleBulkJob).not.toHaveBeenCalled();
+  });
+
+  it("OWNERSHIP FENCE: a job owned by another user returns forbidden and settles nothing", async () => {
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "someone-else", status: "processing", records_submitted: 1 },
+      rows: [
+        {
+          id: "r1",
+          status: "processing",
+          tracerfy_job_id: "tf-1",
+          is_successful: null,
+          charge: 0,
+          ai_research_status: null,
+        },
+      ],
+    });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(out).toMatchObject({ error: "forbidden" });
+    // The money fence: no settlement / wallet RPC for a non-owner.
+    expect(settleBulkJob).not.toHaveBeenCalled();
+  });
+
+  it("settles unresolved buckets through the shared path with the grant-aware person rate", async () => {
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 1 },
+      rows: [
+        {
+          id: "r1",
+          status: "processing",
+          tracerfy_job_id: "tf-1",
+          is_successful: null,
+          charge: 0,
+          ai_research_status: null,
+        },
+      ],
+    });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(settleBulkJob).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(settleBulkJob).mock.calls[0][1]).toMatchObject({
+      tracerfyJobId: "tf-1",
+      userId: "p1",
+      personRate: 0.11,
+    });
+    // The no-op settle left the row 'processing', so the job is still in flight.
+    expect(out).toMatchObject({ status: "processing", job_id: "job-1" });
   });
 });
