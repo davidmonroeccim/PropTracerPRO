@@ -63,4 +63,38 @@ describe("verifyToken", () => {
     const info = await verifyToken(new Request("https://x"), "tok");
     expect(info?.scopes).toEqual([]);
   });
+
+  it("caches entitlements: two calls within the 60s TTL fetch only once", async () => {
+    vi.resetModules();
+    stubEnv();
+    getUser.mockResolvedValue({ data: { user: { id: "u3", email: "c@d.com" } }, error: null });
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+    const { verifyToken } = await import("@/lib/suite/mcp-auth");
+
+    const first = await verifyToken(new Request("https://x"), "tok");
+    const second = await verifyToken(new Request("https://x"), "tok");
+
+    expect(fetchEntitlements).toHaveBeenCalledTimes(1);
+    expect(first?.scopes).toEqual(["prop-tracer-pro"]);
+    expect(second?.scopes).toEqual(["prop-tracer-pro"]);
+  });
+
+  it("re-fetches entitlements once the 60s TTL has elapsed", async () => {
+    vi.resetModules();
+    stubEnv();
+    getUser.mockResolvedValue({ data: { user: { id: "u4", email: "e@f.com" } }, error: null });
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+    const { verifyToken } = await import("@/lib/suite/mcp-auth");
+
+    vi.useFakeTimers();
+    try {
+      await verifyToken(new Request("https://x"), "tok");
+      vi.advanceTimersByTime(60_001);
+      await verifyToken(new Request("https://x"), "tok");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(fetchEntitlements).toHaveBeenCalledTimes(2);
+  });
 });
