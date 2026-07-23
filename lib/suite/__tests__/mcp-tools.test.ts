@@ -435,4 +435,31 @@ describe("bulk_status", () => {
     // The no-op settle left the row 'processing', so the job is still in flight.
     expect(out).toMatchObject({ status: "processing", job_id: "job-1" });
   });
+
+  it("RE-POLL IDEMPOTENCY: only still-processing rows enter the settlement bucket, never already-settled rows", async () => {
+    // A second poll must never re-charge rows already settled on an earlier poll.
+    // This fences the MCP-level bucketing filter (`row.status !== "processing"
+    // continue`) specifically. settleBulkJob ALSO has its own internal
+    // `status === "processing"` guard as a second defense layer; this test does
+    // not rely on that -- it proves the MCP tool never even hands settled rows to
+    // settleBulkJob in the first place.
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 3 },
+      rows: [
+        // already settled on a prior poll -- must be excluded from the bucket
+        { id: "r1", status: "success", tracerfy_job_id: "tf-1", is_successful: true, charge: 0.11, ai_research_status: null },
+        { id: "r2", status: "no_match", tracerfy_job_id: "tf-1", is_successful: false, charge: 0, ai_research_status: null },
+        // still in flight -- the only row that should be settled this round
+        { id: "r3", status: "processing", tracerfy_job_id: "tf-1", is_successful: null, charge: 0, ai_research_status: null },
+      ],
+    });
+    await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(settleBulkJob).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(settleBulkJob).mock.calls[0][1] as {
+      bucketRows: Array<{ id: string; status: string }>;
+    };
+    expect(arg.bucketRows.map((r) => r.id)).toEqual(["r3"]);
+    for (const r of arg.bucketRows) expect(r.status).toBe("processing");
+  });
 });
