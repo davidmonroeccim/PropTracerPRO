@@ -35,6 +35,7 @@ describe("ok/err", () => {
   it("err marks isError and does not leak stack", () => {
     const out = err(new Error("boom"));
     expect(out.isError).toBe(true);
-    expect(out.content[0].text).toContain("boom");
+    expect(out.content[0].text).toBe("boom");
+    expect(out.content[0].text).not.toMatch(/\n\s+at /);
   });
 });
