@@ -14,10 +14,12 @@ export async function createClient() {
         },
         setAll(cookiesToSet) {
           try {
+            // SameSite=Lax, not None -- see the note in lib/supabase/middleware.ts. The iframe
+            // embed that required None is gone.
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, {
                 ...options,
-                sameSite: 'none',
+                sameSite: 'lax',
                 secure: true,
               })
             );

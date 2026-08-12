@@ -21,8 +21,13 @@ export default function ForgotPasswordPage() {
     setLoading(true);
     setError(null);
 
+    // Land on /auth/confirm, not /reset-password. The emailed link carries a one-time token_hash
+    // that only a server route can exchange for a session; /reset-password is a client page and
+    // never did, which is why the reset form used to fail with "Auth session missing!".
+    // The `?next=` is required -- the Recovery email template appends `&token_hash=...&type=...`
+    // to this URL.
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/reset-password`,
+      redirectTo: `${window.location.origin}/auth/confirm?next=%2Freset-password`,
     });
 
     if (error) {

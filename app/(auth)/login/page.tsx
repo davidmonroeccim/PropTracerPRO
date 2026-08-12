@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { isSuiteSignInEnabled } from '@/lib/suite/config';
-import { suiteErrorMessage } from '@/lib/suite/login-errors';
+import { loginErrorFromSearch } from '@/lib/auth/login-errors';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -23,8 +23,9 @@ export default function LoginPage() {
   const [magicLinkSent, setMagicLinkSent] = useState(false);
 
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get('suite_error');
-    const msg = suiteErrorMessage(code);
+    // Reads both `suite_error` and `error` -- see loginErrorFromSearch, which is where that
+    // decision is fenced by tests.
+    const msg = loginErrorFromSearch(window.location.search);
     if (msg) setError(msg);
   }, []);
 
@@ -53,10 +54,12 @@ export default function LoginPage() {
     setLoading(true);
     setError(null);
 
+    // See the note in forgot-password: the Magic Link template appends `&token_hash=...&type=...`
+    // to this URL, so the `?next=` must be present and the target must be the server route.
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
+        emailRedirectTo: `${window.location.origin}/auth/confirm?next=%2Fdashboard`,
       },
     });
 

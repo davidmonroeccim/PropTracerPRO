@@ -25,10 +25,14 @@ export async function updateSession(request: NextRequest) {
             request,
           });
           supabaseResponse.headers.set('Content-Security-Policy', CSP_HEADER);
+          // SameSite=Lax, not None. None existed only so the session cookie survived inside the
+          // AcquisitionPRO/GoHighLevel iframe embed; those links were removed, so None is now dead
+          // config that needlessly ships the session cookie on cross-site requests. Lax still
+          // covers the top-level navigation an emailed link performs.
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, {
               ...options,
-              sameSite: 'none',
+              sameSite: 'lax',
               secure: true,
             })
           );
@@ -50,6 +54,18 @@ export async function updateSession(request: NextRequest) {
       request.nextUrl.pathname.startsWith('/auth/')
   );
 
+  // Public routes an AUTHENTICATED user must still be able to reach.
+  //
+  // /reset-password is the load-bearing one: the emailed recovery link establishes a session at
+  // /auth/confirm BEFORE the form renders, so the user arrives here already signed in. Bouncing
+  // them to /dashboard (the rule below) left the password form permanently unreachable -- fixing
+  // the token exchange without this is not a fix. /auth/* is here because those routes exist to
+  // complete a sign-in and must run to their own redirect.
+  const authedAllowedRoutes = ['/reset-password'];
+  const isAuthedAllowed =
+    authedAllowedRoutes.includes(request.nextUrl.pathname) ||
+    request.nextUrl.pathname.startsWith('/auth/');
+
   // Redirect unauthenticated users to login
   if (!user && !isPublicRoute && !request.nextUrl.pathname.startsWith('/api/') && !request.nextUrl.pathname.startsWith('/.well-known/')) {
     const url = request.nextUrl.clone();
@@ -60,7 +76,7 @@ export async function updateSession(request: NextRequest) {
   }
 
   // Redirect authenticated users away from auth pages
-  if (user && isPublicRoute && request.nextUrl.pathname !== '/auth/callback') {
+  if (user && isPublicRoute && !isAuthedAllowed) {
     const url = request.nextUrl.clone();
     url.pathname = '/dashboard';
     const response = NextResponse.redirect(url);
