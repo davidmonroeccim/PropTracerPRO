@@ -1,132 +1,151 @@
-# Dennis Bamford lockout — diagnosis + fix plan (2026-08-12)
+# Resolved owner contact (person) never reaches the consumer — diagnosis + fix plan (2026-08-17)
 
-Report: `ventexproperty@gmail.com` cannot log in with password, magic link, or the Suite
-button, and forgot-password does not work.
+Report (David): "When the gateway calls PTP to get the owner contact name, phone, and/or email,
+PTP is only returning the company name and phone and email, not the owner contact (Person). So the
+Owner Contact Name field never gets updated in the spreadsheet."
 
 ## What the evidence shows
 
-Account state (both sides) is healthy — this is not an account problem.
+**PTP is finding the person. The person's name just has no self-describing field in the payload.**
+
+Evidence sheet: `Maturr/app/docs/Claude Exports/Dallas_MSA_MF_Loans_DSCR_below_1.25_maturing_thru_2028.csv`
+(the run where PTP actually executed — 77 MCP trace rows, 2026-08-12..14).
 
 | Check | Result |
 |---|---|
-| PTP `auth.users` | confirmed 2026-02-05, bcrypt password set, not banned, not deleted |
-| PTP `user_profiles` | `email` matches `auth.users.email` exactly, `gateway_sub` = NULL, onboarded |
-| Gateway `auth.users` | confirmed 2026-08-11 17:14 (admin-provisioned) |
-| Gateway `grants` | lifetime, includes `prop-tracer-pro`, no expiry, not revoked |
-| GoTrue config | SITE_URL correct; `/auth/callback` + `/reset-password` both allowlisted |
-| Email delivery | WORKING — see below |
+| MCP trace rows in the run window | 77 |
+| Rows where `trace_result.owner_name` holds a real person | **45** |
+| Rows where `business_trace_contacts.owner_name` holds a person | 29 |
+| Rows where `individual_behind_business` holds a person | 49 |
+| Entity-input rows whose person name merely echoes the company | **0** (85 checked) |
+| Those 45 person names present anywhere in the delivered CSV | **0 of 18 sampled — all ABSENT** |
 
-**Emails are being delivered.** Every one of his `auth.flow_state` rows has
-`auth_code_issued_at` set 20–30s after the send, i.e. he clicked each link promptly:
+The person's *email* landed in the sheet while their *name* did not, which is what makes this
+conclusive — the data was in the response and the consumer dropped only the name:
 
-| When (UTC) | Flow | Link clicked | PTP session created |
-|---|---|---|---|
-| 08-10 17:36 | email/signup | 17:37:31 | no |
-| 08-12 11:38 | magiclink | 11:39:04 | no |
-| 08-12 11:41 | recovery | 11:41:39 | no |
-| 08-12 12:10 | magiclink | 12:10:43 | no |
+| Sheet `Owner Name` | Sheet email that landed | PTP `trace_result.owner_name` |
+|---|---|---|
+| Magnolia Property Company | `dhamann2@gmail.com` | **Daniel Hamann** |
+| Kisna Investment Group LLC | `drshetal@aol.com` | **Shetal Patel** |
+| iForte Properties, LLC | alt `hidoski@comcast.net` | **Gazim Idoski** |
+| Westdale Real Estate Investment | `joebeardjr@yahoo.com`, alt `jbeard@westdale.com` | **Joe Beard** |
+| Sphinx Development Corporation | (none) | **Paul Osaji** |
 
-Newest session in `auth.sessions` is **2026-08-09**. So four clicked links produced zero
-sessions: the PKCE code reaches the app and is never successfully exchanged.
+## Root cause
 
-`last_sign_in_at` is still 08-09, so his password attempts genuinely failed the credential
-check (the endpoint is healthy — probing it returns a normal `invalid_credentials`).
+`buildPerRecordResult` — duplicated in `lib/suite/mcp-tools.ts:348` (MCP) and
+`app/api/v1/trace/bulk/status/route.ts:328` (REST) — emits **four keys named some variant of
+"owner name", at three nesting levels, carrying two different meanings**:
 
-No deploy since ~2026-07-24, so nothing regressed in code between his 08-09 success and now.
+```jsonc
+{
+  "input_owner_name": "Magnolia Property Company",   // the ENTITY we asked about
+  "result":   { "owner_name": "Daniel Hamann" },     // the PERSON we resolved  <-- the payload
+  "research": { "owner_name": "Magnolia Property Company",
+                "individual_behind_business": "Daniel Hamann" },
+  "contacts": { "owner_name": "Daniel Hamann" }      // the PERSON (FastAppend)
+}
+```
 
-## Root causes (all in PTP, all affect every user)
+A consumer mapping a column called "Owner Name" finds `input_owner_name` / `research.owner_name`
+— the company, matching what it already had — then harvests `result.phones` and `result.emails`.
+`result.owner_name` reads as a *restatement of the owner it already knows*, not as "the human
+behind the entity", so it is discarded. Nothing in the payload is named for the thing the entity
+skip trace exists to produce.
 
-**A. `/reset-password` never exchanges the code — forgot-password is broken for everyone.**
-`app/(auth)/reset-password/page.tsx` receives `?code=` and only calls
-`updateUser({ password })`. With no session that returns "Auth session missing!".
-Nothing on the page calls `exchangeCodeForSession`. This alone fully explains
-"forgot password is not working".
-
-**B. Middleware bounces authenticated users off the reset page.**
-`lib/supabase/middleware.ts` lists `/reset-password` + `/forgot-password` in `publicRoutes`,
-then redirects any authenticated user away from public routes to `/dashboard`. Confirmed
-live in Chrome: `/forgot-password` → `/dashboard`. So fixing A without B just moves the
-wall — both must change together.
-
-**C. Magic-link failures are silent.**
-`app/auth/callback/route.ts` redirects failures to `/login?error=auth_callback_error`, but
-`app/(auth)/login/page.tsx` only reads the `suite_error` param. The user lands back on the
-login form with no message. This is why it reads as "nothing happens", and why it went
-undiagnosed this long.
-
-**D. Suite button assumes a live gateway session.**
-The OAuth chain itself is configured correctly (client registered, redirect_uri matches,
-consent page reachable and unprotected, `next` preserved through gateway login, grant
-present). But the gateway is invite-only passwordless, so a first-time member must do an
-email round-trip mid-flow, while PTP's `suite_state`/`suite_verifier`/`suite_nonce` cookies
-expire after 10 minutes (`app/api/auth/suite/start/route.ts`). Exceed that and the callback
-fails `invalid_request`. His gateway sign-in (08-12 03:12) never produced a link
-(`gateway_sub` still NULL), consistent with an abandoned/expired first-run flow.
-
-## Open question (needs one datum from Dennis)
-
-Why the PKCE `code_verifier` cookie was absent at exchange time. Two candidates, neither of
-which PKCE can survive:
-1. He opens the emailed link on a different device/browser than the one that requested it.
-2. He is using the AcquisitionPRO/GoHighLevel embed, where the `SameSite=None` verifier
-   cookie is dropped as a third-party cookie. (That `SameSite=None` config in
-   `lib/supabase/client.ts` exists precisely for iframe embedding — commit d0f7c02.)
-
-Top-level cookies are fine, so this is contextual, not blanket-broken.
+Not the cause (ruled out with evidence):
+- Not the gateway. `suite-gateway` proxies `ptp_*` verbatim (`lib/aggregator/registry.ts`); it adds
+  and strips nothing.
+- Not the FastAppend parse. `downloadBusinessTraceResults` correctly builds `owner_name` from the
+  CSV's `First Name` + `Last Name` (`lib/tracerfy/client.ts:237`).
+- Not entitlements. `prop-tracer-pro` is granted on David's gateway account.
+- Not a storage bug. Every one of the 178 MCP rows carrying a phone or email also carries a
+  `trace_result.owner_name`; zero echo the company.
 
 ## Plan
 
-- [x] 1. Add `app/auth/confirm/route.ts`: server route consuming `token_hash` + `type` via
-      `verifyOtp`, then redirect to a safe `next`. Device-independent, needs no prior cookie.
-- [x] 2. Point `forgot-password` and `login` (magic link) at the new route; update the
-      Supabase **Recovery** and **Magic Link** email templates to `{{ .TokenHash }}`.
-- [x] 3. Let `/reset-password` render for an authenticated user.
-- [x] 4. Surface the callback error on the login page (`error`, not just `suite_error`).
-- [x] 5. Raise the Suite cookie TTL from 10 min to 30 min.
-- [x] 6. Tests + mutation checks.
-- [x] 7. Verify end-to-end in production.
-- [x] 8. `SameSite=None` → `Lax` (dead iframe config; David confirmed the embed is gone).
+- [ ] 1. Extract the person-resolution precedence into one shared helper,
+      `resolveOwnerContact(row)` in `lib/ai-research/contacts.ts`, returning
+      `{ owner_contact_name, owner_contact_source }`. Precedence is the chain that already exists
+      inline at `app/api/cron/sweep-bulk-research/route.ts:138-146`:
+      `business_trace_contacts.owner_name` (`fastappend`) → `trace_result.owner_name`
+      (`person_trace`) → `individual_behind_business` (`ai_research`) →
+      `owner_name` when `owner_type === 'individual'` (`ai_research`). Null when none — never a
+      company name, never a fabricated value.
+- [ ] 2. Failing test first: assert the MCP per-record payload for an entity input
+      (`Magnolia Property Company` → `Daniel Hamann`) exposes a top-level `owner_contact_name`.
+      Confirm it fails before touching the source.
+- [ ] 3. Add `owner_contact_name` + `owner_contact_source` to the top level of
+      `buildPerRecordResult` in `lib/suite/mcp-tools.ts`.
+- [ ] 4. Mirror it in the REST twin `app/api/v1/trace/bulk/status/route.ts` so the two surfaces
+      cannot diverge (they are line-for-line identical today, by design).
+- [ ] 5. Point the shared helper at `sweep-bulk-research`'s inline `resolvedPerson` so the
+      precedence has exactly one definition, matching the `isEntityRecord` single-source-of-truth
+      convention already used for the person/entity split.
+- [ ] 6. Surface it in `list_traces` too — it currently selects neither `trace_result` nor
+      `ai_research`, so it returns `input_owner_name` (the company) plus bare phone/email *counts*
+      and no contact at all.
+- [ ] 7. Update the tool descriptions so an agent knows the field exists and what it means, and
+      the API docs page (`app/(dashboard)/settings/api-keys/docs/page.tsx:234`).
+- [ ] 8. Verify: re-read a settled Dallas job through the MCP surface and confirm Daniel Hamann,
+      Shetal Patel, Gazim Idoski, Joe Beard and Paul Osaji all appear in `owner_contact_name`.
+      No re-trace, no new spend — these rows are already settled in `trace_history`.
 
-David's call on sequencing: fix first, Dennis waits. No temporary password was set.
+## Confirming natural experiment (David, 2026-08-17)
+
+David re-ran the same pipeline for Houston with one prompt change: he appended "including the
+owner contact, the person." Same PTP code, same payload, different consumer instruction:
+
+| Run | Prompt asked for the person | Person names delivered |
+|---|---|---|
+| Dallas | no | **0** (the sheet had no such column at all) |
+| Houston | yes | **66 of 83** (`Owner Contact Person`) |
+
+This is the diagnosis confirmed from the outside. The data was always in the response; it only
+surfaced when a human explicitly told the agent to go looking for it. Each run also invented its
+own column name (`Owner Contact Person`, `Owner Contact Name`, none), which is the same defect
+showing up as naming drift. Field name approved: `owner_contact_name`.
 
 ## Review
 
-Shipped on branch `fix/auth-email-links` (commit `4349955`, off `origin/main`), deployed to
-production 2026-08-12.
+**Fixed.** The resolved human now has exactly one self-describing name in the payload, so it no
+longer takes a prompt hint to extract.
 
-**Verified live on proptracerpro.com**, not just in tests:
+Changes (all in PropTracerPRO; `suite-gateway` needed no change, it proxies `ptp_*` verbatim):
 
-| Check | Result |
-|---|---|
-| `/auth/confirm` with no token | 307 → `/login?error=link_invalid` |
-| Recovery email link | 307 → `/reset-password` + `sb-…-auth-token` cookie, `SameSite=lax` |
-| `GET /reset-password` **with** that session | 200, renders "Set new password" (previously bounced to `/dashboard`) |
-| Magic link email | 307 → `/dashboard` + session cookie |
-| Template rendering | `{{ .RedirectTo }}` produced a well-formed link, inspected in Gmail |
-| Test suite | 129 passing across 23 files; `tsc --noEmit` clean |
-| Mutation checks | open-redirect guard → 1 red; middleware allowance → 2 red; `error` param read → 1 red |
+1. `lib/ai-research/contacts.ts` — new `resolveOwnerContact(row)` returning
+   `{ owner_contact_name, owner_contact_source }`, the single source of truth for "who is the
+   human behind this owner", same convention as `isEntityRecord`. Source is one of
+   `fastappend` | `person_trace` | `ai_research` so the consumer can see provenance. A company
+   name is never returned; an entity with no resolved human returns null.
+2. `lib/suite/mcp-tools.ts` — `buildPerRecordResult` emits `owner_contact_name` +
+   `owner_contact_source` at the TOP level, beside `input_owner_name` (the entity).
+3. `app/api/v1/trace/bulk/status/route.ts` — identical change to the REST twin so the two
+   surfaces cannot diverge.
+4. `lib/suite/mcp-tools.ts` (`listTraces`) — previously returned the company name plus bare
+   phone/email COUNTS and no contact at all. Now selects `trace_result` + `ai_research` solely to
+   derive `owner_contact_name` (neither is echoed back).
+5. `app/api/cron/sweep-bulk-research/route.ts` — the inline `resolvedPerson` precedence chain now
+   calls the shared helper. Behavior-preserving: that row has not been traced yet, so
+   `trace_result: null` reproduces the old chain exactly.
+6. `app/api/[transport]/route.ts` — `skip_trace_bulk`, `bulk_status` and `list_traces`
+   descriptions now state that the trace resolves a named human, that `owner_contact_name` and
+   `input_owner_name` are different fields, and that the company must never be substituted.
+7. `app/(dashboard)/settings/api-keys/docs/page.tsx` — documented both new fields.
 
-Throwaway test accounts (`david+ptpauthtest…`) were deleted; zero remain. Two test emails
-are sitting in David's inbox and can be deleted.
+Verification:
 
-### Open follow-ups
+- `resolveOwnerContact` unit tests (7) written FIRST and watched fail (`is not a function`).
+- MCP payload test and `list_traces` test each watched fail (`undefined`) before implementing.
+- **Mutation test:** deleting the `owner_type === 'individual'` guard makes the payload return
+  `Fountain Parc Apartments LLC` as a contact person and turns the guard test red. Restored, green.
+- **Against real production data:** all 77 real MCP rows from the 2026-08-13 Dallas run replayed
+  through the shipped helper. 56 of 77 resolve a human, 50 of those from entity inputs, including
+  every name the delivered sheet lost: Daniel Hamann, Paul Osaji, Shetal Patel, Gazim Idoski,
+  Joe Beard. Invariants hold: no resolved contact is a company name, and for an entity input the
+  contact always differs from the input. No re-trace and no wallet spend (rows already settled).
+- Full suite: 138 passed / 24 files. `tsc --noEmit` clean.
 
-1. **`main` does not have this fix.** Production currently runs the `fix/auth-email-links`
-   branch build. Merge the branch into `main` before any future deploy, or the next
-   deploy from `main` silently reverts all of it. This is the one thing that must not be
-   forgotten.
-2. **Dennis's password is genuinely wrong** (`last_sign_in_at` never advanced past 08-09,
-   and the endpoint returns a normal `invalid_credentials`). He should use "Forgot
-   password", which now works. No admin password reset needed.
-3. Signup confirmation emails still use `{{ .ConfirmationURL }}` → `/auth/callback`, so a
-   new user who opens the confirmation on a different device than they signed up on still
-   hits the old PKCE limitation. Lower stakes (a fresh signup can simply retry), but it is
-   the same class of bug and worth migrating.
-4. CSP `frame-ancestors` in `lib/supabase/middleware.ts` still allowlists the GoHighLevel
-   domains. Dead config now that the embed is gone; left alone to keep this diff focused.
-5. `password_min_length` in Supabase is 6 while `reset-password/page.tsx` enforces 8.
-   Harmless (the stricter one wins in the UI) but inconsistent.
-6. Auth audit logging is empty (`auth.audit_log_entries` has 0 rows) and Vercel runtime
-   logs had already rolled off, so `[suite-signin]` alerts left no trail. `alertSuite` is
-   console-only by design and its own comment flags this as a prod prerequisite. Worth
-   wiring to a real channel before the next auth incident.
+Not done, deliberately, and separate from this bug: the Atlanta sheet has 9 rows where the MPS
+source column `owner_contact` is genuinely NULL, so `batch_lookup` correctly returned nothing and
+no skip trace was ever run against them. That is an MPS coverage gap, not a payload defect.

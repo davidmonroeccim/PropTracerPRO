@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { researchProperty } from '@/lib/ai-research/client';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
+import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { AI_RESEARCH, PRICING } from '@/lib/constants';
 import type { AIResearchResult } from '@/types';
 
@@ -132,18 +132,16 @@ export async function GET(request: Request) {
         } = research as AIResearchResult & { pending_business_trace?: unknown };
 
         // Determine the best person name to use for the follow-up person-
-        // skip-trace. Prefer business_trace_contacts.owner_name (FastAppend
-        // was authoritative), then individual_behind_business, then owner_name
-        // if it doesn't itself look like a business.
-        let resolvedPerson: string | null = null;
-        const btContacts = researchForStorage.business_trace_contacts;
-        if (btContacts?.owner_name) {
-          resolvedPerson = btContacts.owner_name;
-        } else if (researchForStorage.individual_behind_business) {
-          resolvedPerson = researchForStorage.individual_behind_business;
-        } else if (researchForStorage.owner_name && researchForStorage.owner_type === 'individual') {
-          resolvedPerson = researchForStorage.owner_name;
-        }
+        // skip-trace, via the shared resolveOwnerContact precedence (FastAppend
+        // first, then individual_behind_business, then owner_name only when the
+        // owner is itself a person). This row has not been traced yet, so there
+        // is no trace_result to consider -- passing null keeps this identical to
+        // the chain that used to be inlined here, while leaving ONE definition
+        // of "who is the human behind this owner" for the whole codebase.
+        const { owner_contact_name: resolvedPerson } = resolveOwnerContact({
+          trace_result: null,
+          ai_research: researchForStorage,
+        });
 
         const ownerFound = !!researchForStorage.owner_name;
 

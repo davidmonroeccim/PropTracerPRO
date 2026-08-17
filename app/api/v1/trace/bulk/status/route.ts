@@ -6,6 +6,7 @@ import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
+import { resolveOwnerContact } from '@/lib/ai-research/contacts';
 import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -327,6 +328,10 @@ export async function GET(request: Request) {
 // research + contacts (FastAppend sidecar) + trace_result, per row.
 function buildPerRecordResult(row: TraceHistoryRow) {
   const contacts = row.ai_research?.business_trace_contacts || null;
+  // owner_contact_name is the resolved HUMAN behind input_owner_name (the entity asked about).
+  // Kept identical to the MCP twin in lib/suite/mcp-tools.ts -- the two surfaces are
+  // line-for-line the same payload by design and must not diverge.
+  const { owner_contact_name, owner_contact_source } = resolveOwnerContact(row);
   return {
     address: row.normalized_address,
     city: row.city,
@@ -334,6 +339,8 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     zip: row.zip,
     status: row.status,
     input_owner_name: row.input_owner_name,
+    owner_contact_name,
+    owner_contact_source,
     result: row.trace_result,
     research: row.ai_research,
     contacts,

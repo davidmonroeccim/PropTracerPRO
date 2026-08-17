@@ -4,6 +4,46 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-08-17
+
+### Resolved owner contact (person) now has a name in the payload
+
+- **Problem:** Suite Gateway consumers were delivering the company name, its phone and the
+  owner's email into a spreadsheet, but never the owner contact person. Reported as "PTP is only
+  returning the company name and phone and email, not the owner contact (Person)."
+- **Root cause: not a data problem — a naming problem.** PTP was resolving the person all along.
+  The per-record payload carried FOUR keys named some variant of "owner name" at three nesting
+  levels, meaning two different things: `input_owner_name` and `research.owner_name` are the
+  ENTITY, while `trace_result.owner_name` and `contacts.owner_name` are the PERSON. Consumers
+  mapping a column called "owner name" matched the company they already had and discarded the
+  person. Nothing in the payload was named for the thing an entity skip trace exists to produce.
+- **Proof:** in the 2026-08-13 Dallas run, 45 of 77 traces resolved a real human and 0 of them
+  reached the delivered CSV, while those same people's *personal emails* did
+  (`dhamann2@gmail.com` next to "Magnolia Property Company", `joebeardjr@yahoo.com` next to
+  "Westdale"). David independently confirmed it by re-running Houston with "including the owner
+  contact, the person" appended to the prompt: same code, 66 of 83 names delivered.
+- **Changes:**
+  - New `resolveOwnerContact()` in `lib/ai-research/contacts.ts` — one definition of "who is the
+    human behind this owner", returning `owner_contact_name` + `owner_contact_source`
+    (`fastappend` | `person_trace` | `ai_research`). Never returns a company name.
+  - `owner_contact_name` / `owner_contact_source` added at the top level of the per-record payload
+    in both the MCP surface (`lib/suite/mcp-tools.ts`) and its REST twin
+    (`app/api/v1/trace/bulk/status/route.ts`), which stay line-for-line identical by design.
+  - `list_traces` now includes the resolved contact; it previously returned the company name plus
+    bare phone/email counts and no contact at all.
+  - `sweep-bulk-research`'s inline `resolvedPerson` chain collapsed onto the shared helper
+    (behavior-preserving — no `trace_result` exists at that point).
+  - Tool descriptions + API docs page now state that the two owner-name fields are different and
+    that the company must never be substituted for the contact person.
+- **Verification:** TDD throughout (every test watched fail first). Mutation test: deleting the
+  `owner_type === 'individual'` guard makes the payload emit "Fountain Parc Apartments LLC" as a
+  contact person and turns the test red. Replayed all 77 real Dallas rows through the shipped
+  helper: 56 resolve a human, including every name the sheet lost, with no re-trace and no wallet
+  spend. 138 tests pass, `tsc --noEmit` clean.
+- **Not changed:** `suite-gateway` (it proxies `ptp_*` verbatim and needed no edit).
+
+---
+
 ## 2026-08-12
 
 ### Fix the emailed sign-in links: password reset was broken for every user

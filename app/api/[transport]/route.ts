@@ -37,13 +37,13 @@ const handler = createMcpHandler(
     );
     server.tool(
       "skip_trace_bulk",
-      "Skip-trace a list of owners to resolve phones and emails, drawn from the user's PropTracerPRO wallet. Up to 500 records per call (use one record for a single owner). Requires confirm: true, so quote and confirm the cost with the user first. Persons cost $0.07 each on success, entities up to $0.25. Returns a job_id; poll bulk_status for results.",
+      "Skip-trace a list of owners to resolve the CONTACT PERSON (a named human) plus their phones and emails, drawn from the user's PropTracerPRO wallet. When the owner is a company, LLC or trust, this resolves the individual behind it, so the result is a person's name and not the company you passed in. Up to 500 records per call (use one record for a single owner). Requires confirm: true, so quote and confirm the cost with the user first. Persons cost $0.07 each on success, entities up to $0.25. Returns a job_id; poll bulk_status for results.",
       bulkSchema.shape,
       tool((admin, sub, args) => skipTraceBulk(admin, sub, args)),
     );
     server.tool(
       "bulk_status",
-      "Retrieve the results of a skip_trace_bulk job by job_id. Returns each record's resolved contacts and status; successful matches settle their per-trace charge to the wallet as they land.",
+      "Retrieve the results of a skip_trace_bulk job by job_id. Each record returns owner_contact_name (the resolved human, which is the point of the trace) with owner_contact_source showing where it came from, alongside input_owner_name (the company or person you asked about), phones and emails. owner_contact_name and input_owner_name are DIFFERENT fields: report the former as the contact person and never substitute the company name for it. It is null when no human was resolved; leave the field empty in that case. Successful matches settle their per-trace charge to the wallet as they land.",
       bulkStatusSchema.shape,
       tool((admin, sub, args) => bulkStatus(admin, sub, args)),
     );
@@ -55,7 +55,7 @@ const handler = createMcpHandler(
     );
     server.tool(
       "list_traces",
-      "List the caller's own past skip-traces (results already paid for), most recent first. Use to reuse prior contacts without tracing again.",
+      "List the caller's own past skip-traces (results already paid for), most recent first, including each trace's resolved owner_contact_name. Use to reuse prior contacts without tracing again.",
       listTracesSchema.shape,
       tool((admin, sub, args) => listTraces(admin, sub, args)),
     );

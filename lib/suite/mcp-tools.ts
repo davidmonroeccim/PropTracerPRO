@@ -5,6 +5,7 @@ import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerTrace } from "@/lib/suite/pricing";
 import { PRICING } from "@/lib/constants";
 import { isLikelyBusiness } from "@/lib/ai-research/client";
+import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
 import {
   validateAddressInput,
@@ -13,7 +14,7 @@ import {
 } from "@/lib/utils/address-normalizer";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob, type TraceHistoryRow } from "@/lib/trace/settleBulkJob";
-import type { AddressInput, TraceJob } from "@/types";
+import type { AddressInput, TraceJob, TraceResult, AIResearchResult } from "@/types";
 
 // ---- wallet_balance ---------------------------------------------------------
 export async function walletBalance(admin: SupabaseClient, gatewaySub: string) {
@@ -46,10 +47,13 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   const profile = await resolvePtpProfile(admin, gatewaySub);
   if (!profile) return UNLINKED_MESSAGE;
   const limit = Math.min(Math.max(args.limit ?? 25, 1), 200);
+  // trace_result + ai_research are selected ONLY to derive owner_contact_name below; they are
+  // not echoed back. Without them this tool returned input_owner_name (the COMPANY) plus bare
+  // phone/email COUNTS, so a caller reviewing past traces could not see who was actually found.
   let q = admin
     .from("trace_history")
     .select(
-      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at",
+      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research",
     )
     .eq("user_id", profile.id)
     .order("created_at", { ascending: false })
@@ -57,7 +61,14 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   if (args.since) q = q.gte("created_at", args.since);
   const { data, error } = await q;
   if (error) throw new Error(`list_traces failed: ${error.message}`);
-  return { traces: data ?? [] };
+  const traces = (data ?? []).map((row) => {
+    const { trace_result, ai_research, ...rest } = row as Record<string, unknown> & {
+      trace_result: TraceResult | null;
+      ai_research: AIResearchResult | null;
+    };
+    return { ...rest, ...resolveOwnerContact({ trace_result, ai_research }) };
+  });
+  return { traces };
 }
 
 // ---- skip_trace_quote (free) -------------------------------------------------
@@ -344,8 +355,17 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
 
 export const bulkStatusSchema = z.object({ job_id: z.string() });
 
-/** Per-record payload, matching the v1 bulk/status route's buildPerRecordResult. */
+/** Per-record payload, matching the v1 bulk/status route's buildPerRecordResult.
+ *
+ *  owner_contact_name is the RESOLVED HUMAN behind input_owner_name (which is the entity that
+ *  was asked about). It is surfaced at the top level, next to the entity it belongs to, because
+ *  the person previously appeared only as `result.owner_name` / `contacts.owner_name` -- keys
+ *  that collide semantically with `input_owner_name` and `research.owner_name` (both the
+ *  COMPANY). Consumers matched the company they already had and dropped the person; the
+ *  2026-08-13 Dallas run lost all 45 resolved people that way. Null when no human was
+ *  resolved -- never the company name. */
 function buildPerRecordResult(row: TraceHistoryRow) {
+  const { owner_contact_name, owner_contact_source } = resolveOwnerContact(row);
   return {
     address: row.normalized_address,
     city: row.city,
@@ -353,6 +373,8 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     zip: row.zip,
     status: row.status,
     input_owner_name: row.input_owner_name,
+    owner_contact_name,
+    owner_contact_source,
     result: row.trace_result,
     research: row.ai_research,
     contacts: row.ai_research?.business_trace_contacts || null,

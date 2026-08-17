@@ -116,6 +116,31 @@ describe("listTraces", () => {
     expect(JSON.stringify(out)).toMatch(/Sign into PropTracerPRO/i);
   });
 
+  // list_traces used to return input_owner_name (the COMPANY) plus bare phone/email COUNTS
+  // and no contact at all, so an agent reviewing past traces could not see who was found.
+  it("names the resolved contact person on each listed trace", async () => {
+    const admin = adminStub({
+      profile: { id: "p1", wallet_balance: 0 },
+      traces: [
+        {
+          id: "t1",
+          input_owner_name: "Magnolia Property Company",
+          trace_result: { owner_name: "Daniel Hamann" },
+          ai_research: {
+            owner_name: "Magnolia Property Company",
+            owner_type: "business",
+            business_trace_contacts: { owner_name: "Daniel Hamann" },
+          },
+        },
+      ],
+    });
+    const out = (await listTraces(admin, "sub-1", { limit: 10 })) as {
+      traces: Array<{ owner_contact_name: string | null; owner_contact_source: string | null }>;
+    };
+    expect(out.traces[0].owner_contact_name).toBe("Daniel Hamann");
+    expect(out.traces[0].owner_contact_source).toBe("fastappend");
+  });
+
   describe("limit clamp", () => {
     it("clamps 0 up to the floor of 1", async () => {
       const limitFn = vi.fn();
@@ -549,5 +574,79 @@ describe("bulk_status", () => {
     };
     expect(arg.bucketRows.map((r) => r.id)).toEqual(["r3"]);
     for (const r of arg.bucketRows) expect(r.status).toBe("processing");
+  });
+
+  // Regression: the 2026-08-13 Dallas run resolved a person behind every entity, but the
+  // delivered CSV carried only the company name, its phone and the person's email. The
+  // person WAS in the payload -- as trace_result.owner_name, a key that reads as a
+  // restatement of the owner the consumer already had -- so it was discarded. The payload
+  // must name the resolved person for what it is.
+  it("names the resolved contact person at the top level of each per-record result", async () => {
+    const { admin } = statusAdminStub({
+      profile,
+      job: {
+        id: "job-1",
+        user_id: "p1",
+        status: "completed",
+        records_submitted: 2,
+        records_matched: 2,
+      },
+      rows: [
+        {
+          id: "r1",
+          status: "success",
+          normalized_address: "1904 AIRPORT FWY|BEDFORD|TX|76022",
+          input_owner_name: "Magnolia Property Company",
+          is_successful: true,
+          charge: 0.25,
+          ai_research_status: "found",
+          trace_result: { owner_name: "Daniel Hamann", phones: [], emails: [] },
+          ai_research: {
+            owner_name: "Magnolia Property Company",
+            owner_type: "business",
+            individual_behind_business: "Daniel Hamann",
+            business_trace_contacts: {
+              owner_name: "Daniel Hamann",
+              phones: [],
+              emails: ["dhamann2@gmail.com"],
+              address: null,
+            },
+          },
+        },
+        // An entity with NO resolved human must stay empty, never fall back to the LLC.
+        {
+          id: "r2",
+          status: "no_match",
+          normalized_address: "4846 E 62ND ST|INDIANAPOLIS|IN|46220",
+          input_owner_name: "Fountain Parc Apartments LLC",
+          is_successful: false,
+          charge: 0,
+          ai_research_status: "found",
+          trace_result: null,
+          ai_research: {
+            owner_name: "Fountain Parc Apartments LLC",
+            owner_type: "business",
+          },
+        },
+      ],
+    });
+
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+      results: Array<{
+        input_owner_name: string;
+        owner_contact_name: string | null;
+        owner_contact_source: string | null;
+      }>;
+    };
+
+    const magnolia = out.results.find((r) => r.input_owner_name === "Magnolia Property Company")!;
+    expect(magnolia.owner_contact_name).toBe("Daniel Hamann");
+    expect(magnolia.owner_contact_source).toBe("fastappend");
+
+    const fountain = out.results.find(
+      (r) => r.input_owner_name === "Fountain Parc Apartments LLC",
+    )!;
+    expect(fountain.owner_contact_name).toBeNull();
+    expect(fountain.owner_contact_source).toBeNull();
   });
 });

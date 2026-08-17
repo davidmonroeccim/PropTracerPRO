@@ -448,7 +448,9 @@ export default function ApiDocsPage() {
       "state": "NC",
       "zip": "27615",
       "status": "success",
-      "input_owner_name": "Extra Space Storage LLC",
+      "input_owner_name": "Extra Space Storage LLC",   // the ENTITY you asked about
+      "owner_contact_name": "Joseph Margolis",         // the PERSON resolved behind it
+      "owner_contact_source": "fastappend",            // fastappend | person_trace | ai_research
       "result": {
         "phones": [{ "number": "9196249818", "type": "mobile" }],
         "emails": ["owner@example.com"]
