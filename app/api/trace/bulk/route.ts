@@ -169,7 +169,7 @@ export async function POST(request: Request) {
 
     // Insert pending trace_history rows for each new record
     const historyRows = newRecords.map((record) => {
-      const normalizedAddress = normalizeAddress(record.address, record.city, record.state, record.zip);
+      const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
       const addressHash = createAddressHash(normalizedAddress);
       return {
         user_id: user.id,

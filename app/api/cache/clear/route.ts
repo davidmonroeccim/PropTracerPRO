@@ -32,7 +32,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const normalizedAddress = normalizeAddress(address, city, state, zip);
+    const normalizedAddress = normalizeAddress(address, city, state);
     const addressHash = createAddressHash(normalizedAddress);
     const adminClient = createAdminClient();
 

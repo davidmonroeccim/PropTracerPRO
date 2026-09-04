@@ -164,7 +164,7 @@ export async function POST(request: Request) {
       record: AddressInput,
       opts: { aiResearchStatus: string | null }
     ) => {
-      const normalizedAddress = normalizeAddress(record.address, record.city, record.state, record.zip);
+      const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
       const addressHash = createAddressHash(normalizedAddress);
       return {
         user_id: profile.id,

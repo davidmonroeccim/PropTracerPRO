@@ -48,13 +48,13 @@ export async function POST(request: Request) {
     }
 
     // Normalize address and create hash
-    const normalizedAddress = normalizeAddress(address, city, state, zip);
+    const normalizedAddress = normalizeAddress(address, city, state);
     const addressHash = createAddressHash(normalizedAddress);
 
     const adminClient = createAdminClient();
 
     // Check for cached result (90-day dedup)
-    const cachedResult = await checkSingleDuplicate(profile.id, address, city, state, zip);
+    const cachedResult = await checkSingleDuplicate(profile.id, address, city, state);
 
     if (cachedResult) {
       const cached = cachedResult.trace_result as TraceResult | null;

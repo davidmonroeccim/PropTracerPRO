@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     const adminClient = createAdminClient();
 
     // Check for cached AI research (90-day window)
-    const normalizedAddress = normalizeAddress(address, city, state, zip);
+    const normalizedAddress = normalizeAddress(address, city, state);
     const addressHash = createAddressHash(normalizedAddress);
 
     if (!skipCache) {

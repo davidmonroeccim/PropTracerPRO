@@ -4,6 +4,51 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-04
+
+### ZIP is optional; the dedup key drops to STREET|CITY|STATE
+
+- **Why:** the property-registry is being wired into the suite gateway for owner enrichment and
+  could not clear the door. ZIP was required on every record — and `skipTraceBulk` fails the
+  ENTIRE batch if one record is invalid — while never reaching either vendor. The Tracerfy
+  person CSV has no zip column (`lib/tracerfy/client.ts:54`) and FastAppend submits
+  `business_name,state` only. The registry supplies a situs city for 804 counties and a ZIP for
+  766, so requiring it made **241 counties / 16,062,225 parcels** untraceable for a field
+  nothing downstream reads.
+- **Code:** `normalizeAddress` now returns `STREET|CITY|STATE` and its `zip` parameter was
+  REMOVED rather than ignored, so TypeScript forced every one of the 12 call sites across 9
+  files to be revisited. `validateAddressInput` takes `zip?` — absent is valid, supplied and
+  malformed still errors. `recordSchema.zip` and `AddressInput.zip` are optional.
+  `checkSingleDuplicate` lost its now-unused `zip` parameter.
+- **Tests:** `address-normalizer.ts` had **no test coverage at all**; it now has 13. Suite
+  138 → **151 passing**, `tsc` clean, build clean, eslint unchanged from `main` (55 pre-existing).
+  Both fences mutation-proved: restoring the ZIP requirement reds 2 tests, putting ZIP back in
+  the key reds 4, reverting is green.
+- **Migration `20260904_zip_optional_three_part_dedup.sql`**, applied and independently verified.
+  Re-keys 3,617 rows; **deletes nothing**.
+- ⚠️ **The first draft was wrong and Postgres caught it.** It deleted the redundant row of each
+  colliding group and hit `23503: violates foreign key constraint
+  wallet_transactions_trace_history_id_fkey`. **7 of the 15 redundant rows are referenced by the
+  billing ledger** — they are receipts. The transaction rolled back with nothing changed. The
+  shipped version re-keys only each group's survivor and leaves the 15 non-survivors
+  byte-identical, which is safe by construction: a 4-part string cannot hash to a 3-part one, so
+  `UNIQUE(user_id, address_hash)` holds automatically.
+- **Verified after applying:** 3,632 rows total (unchanged), 3,617 three-part, 15 four-part by
+  design, 0 hash mismatches, 0 duplicate keys, 2,591 wallet rows unchanged, **0 orphaned wallet
+  references**.
+- **It fixed a billing defect, not just a blocker.** The 15 collisions are not distinct
+  properties — `3661 AIRPORT BLVD|MOBILE|AL` under both 36608 and 36609, `1850 MAGWOOD DR|
+  CHARLESTON|SC` under both 29414 and 29403. The old four-part key was letting the same property
+  be traced and charged twice.
+- **Docs:** `docs/AGENT_BULK_INTEGRATION.md` said ZIP was required. Corrected.
+- **Found, not fixed here:** `suite-gateway/lib/tools/crm-push-owners.ts:493-499` reads five
+  field names PTP does not emit (`owner_name`, `email`, `phone`, `cost`, `is_entity` versus the
+  real `input_owner_name`, `owner_contact_name`, `owner_contact_source`, `charge`, `phone_count`,
+  `email_count`), so enrichment always reports found-nothing with `spent: 0`. Its poll budget is
+  also 2.4 seconds against jobs that run 5 to 30 minutes.
+
+---
+
 ## 2026-08-17
 
 ### Resolved owner contact (person) now has a name in the payload

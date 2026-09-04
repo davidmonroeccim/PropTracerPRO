@@ -79,7 +79,13 @@ export const recordSchema = z.object({
   address: z.string(),
   city: z.string(),
   state: z.string(),
-  zip: z.string(),
+  // OPTIONAL as of 2026-09-04. ZIP never reached either vendor -- the Tracerfy person CSV has
+  // no zip column and FastAppend takes business_name + state -- while rejecting whole batches
+  // at the door, since skipTraceBulk fails the batch if any one record is invalid. The
+  // property-registry supplies a city for 804 counties and a ZIP for only 766, so requiring it
+  // made 241 counties / 16,062,225 parcels untraceable for a field nothing downstream reads.
+  // Still validated by validateAddressInput when supplied; absent is fine, wrong is not.
+  zip: z.string().optional(),
 });
 export type TraceRecord = z.infer<typeof recordSchema>;
 
@@ -259,7 +265,7 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
   // Per-record pending trace_history row, tagged source:'mcp' and linked to the
   // bulk job via trace_job_id so bulk_status + the cron aggregate per-record.
   const buildHistoryRow = (record: AddressInput, aiResearchStatus: string | null) => {
-    const normalizedAddress = normalizeAddress(record.address, record.city, record.state, record.zip);
+    const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
     return {
       user_id: profile.id,
       trace_job_id: job.id,

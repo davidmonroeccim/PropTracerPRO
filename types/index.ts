@@ -166,7 +166,9 @@ export interface AddressInput {
   address: string;
   city: string;
   state: string;
-  zip: string;
+  /** OPTIONAL as of 2026-09-04. Not part of the dedup key and never sent to either vendor;
+   *  kept for storage and display. See lib/utils/address-normalizer.ts for the reasoning. */
+  zip?: string;
   owner_name?: string;
   owner_name_2?: string;
   mailing_address?: string;

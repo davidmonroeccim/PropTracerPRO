@@ -20,14 +20,9 @@ export async function checkDuplicates(
   // Create hashes for all input records
   const recordsWithHashes = records.map((record) => ({
     ...record,
-    normalizedAddress: normalizeAddress(
-      record.address,
-      record.city,
-      record.state,
-      record.zip
-    ),
+    normalizedAddress: normalizeAddress(record.address, record.city, record.state),
     hash: createAddressHash(
-      normalizeAddress(record.address, record.city, record.state, record.zip)
+      normalizeAddress(record.address, record.city, record.state)
     ),
   }));
 
@@ -97,12 +92,11 @@ export async function checkSingleDuplicate(
   userId: string,
   address: string,
   city: string,
-  state: string,
-  zip: string
+  state: string
 ): Promise<TraceHistory | null> {
   const supabase = await createClient();
 
-  const normalizedAddress = normalizeAddress(address, city, state, zip);
+  const normalizedAddress = normalizeAddress(address, city, state);
   const hash = createAddressHash(normalizedAddress);
 
   const cutoffDate = new Date();
@@ -141,7 +135,7 @@ export function removeBatchDuplicates(records: AddressInput[]): {
 
   for (const record of records) {
     const hash = createAddressHash(
-      normalizeAddress(record.address, record.city, record.state, record.zip)
+      normalizeAddress(record.address, record.city, record.state)
     );
 
     if (!seen.has(hash)) {

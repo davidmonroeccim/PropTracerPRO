@@ -87,7 +87,7 @@ curl -X POST https://proptracerpro.vercel.app/api/v1/trace/bulk \
 | `address`        | yes      | Street address only (no city/state/zip)                        |
 | `city`           | yes      |                                                                |
 | `state`          | yes      | Two-letter abbreviation                                        |
-| `zip`            | yes      | 5 digits                                                       |
+| `zip`            | **no**   | 5 or 9 digits when supplied. Optional since 2026-09-04: it is not sent to the trace vendors and is not part of the dedup key. A malformed zip is still rejected; an absent one is fine |
 | `owner_name`     | no       | Person or entity name. Leave blank to let AI research discover |
 | `mailing_address`| no       | Override if different from property address                    |
 

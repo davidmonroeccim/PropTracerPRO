@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     }
 
     // Create normalized address and hash
-    const normalizedAddress = normalizeAddress(address, city, state, zip);
+    const normalizedAddress = normalizeAddress(address, city, state);
     const addressHash = createAddressHash(normalizedAddress);
 
     const adminClient = createAdminClient();
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
         .eq('address_hash', addressHash);
     } else {
       // Check for duplicate (cached result)
-      const cachedResult = await checkSingleDuplicate(user.id, address, city, state, zip);
+      const cachedResult = await checkSingleDuplicate(user.id, address, city, state);
 
       if (cachedResult) {
         const cached = cachedResult.trace_result as TraceResult | null;
