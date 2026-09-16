@@ -4,6 +4,61 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-16
+
+### Owner routing module: vendor selection, tier pricing, portfolio-debt detection
+
+- **Why:** measured whether the AI research step can identify a commercial parcel's owner well
+  enough to route it to the right skip-trace vendor. It cannot. Across 13 parcels Brave search
+  returned **0 owners**, because county parcel records are not in any web index (probed directly:
+  `site:esearch.mobilecopropertytax.com` returns the landing page, cart page and terms page, and
+  zero parcel records). `trace/parcel/lookup/` also returned **0 owners** on 13 parcels while
+  billing 55 credits, because it returns people and a commercial owner is an entity.
+- **What works:** `property-search/lookup/` (the dossier) returned an owner name on **23 of 24**
+  parcels at $0.20/hit, entity-vs-individual classifies deterministically from the name string
+  for free, and FastAppend resolved contacts with `role` and `is_registered_agent` on
+  **13 of 22** entities at $0.10/hit. No search step is used anywhere in that path.
+- **Added:** `lib/routing/ownerRoute.ts` — `classifyOwnerName()`, `assessLoan()`, `planRoute()`.
+  Pure decision logic, no I/O. 63 tests, 5 mutations verified red.
+- **Pricing encoded:** tier 1 $0.15 per successful trace (owner already known), tier 2 $0.40 per
+  record (owner absent, or the caller wants the 60+ field dossier).
+- **Findings that changed the design:**
+  - `corporate_owned` is unreliable — returned `false` for `STORAGE TRUST PROPERTIES, L.P.`,
+    a Delaware LP. The name-string test got it right. Classify from the name.
+  - `estimated_value === assessed_value` on **23 of 23** parcels in OH, CA and UT. There is no
+    AVM. Assessed/sale ran 0.07 to 0.59 within Ohio alone, so assessed cannot be scaled to
+    market and `estimated_equity`, `equity_percent`, `high_equity` and `free_clear` are unusable.
+  - `open_mortgage_balance` carries blanket debt ($175M against a 41,588 sqft building).
+    `assessLoan()` weeds these out using sale price as the basis, never assessed value.
+  - `property_owner` returned **false for a verified owner of record** on an absentee-owned
+    parcel. It is a guard for fishing without a name, not a filter to apply once you have one.
+  - The dossier's APN and address keys **fail independently** — one parcel missed on APN and hit
+    on address returning the owner the county recorder confirms, another did the reverse. Misses
+    are free, so `planRoute` emits both and the caller stops at the first hit.
+- **Verified against both vendor ledgers**, not documentation: Tracerfy 290 credits @ $0.0200,
+  FastAppend 13 credits @ $0.10, 25 calls billed on 13 hits. Total research spend $8.32.
+- **Not committed:** `tasks/research-test/` is gitignored. It holds purchased skip-trace PII for
+  63 real individuals (DOBs, phones, emails). Test fixtures use synthetic individual names that
+  preserve the string shapes under test; entity names are real and public.
+
+---
+
+## 2026-09-14
+
+### Manual $20 wallet credit: anthony.matina@gmail.com
+
+- **Why:** David authorized a $20 courtesy credit, knowing PTP pays the Tracerfy / FastAppend
+  cost for whatever it's spent on.
+- **How:** called the existing `credit_wallet_balance` RPC on production (`rmmwkjmjchpfebxroyoo`)
+  for user `9807af67-acde-4ee8-ad6e-8b073607165d`, description `Manual credit: $20.00 (admin)`,
+  no Stripe payment intent. No code or schema change. Guarded with a NOT EXISTS so a re-run
+  within 24h is a no-op.
+- **Verified live:** the credit transaction reads `10.23 -> 30.23` at 16:28:31 UTC and the ledger
+  chains without a gap. The user was running a bulk trace at the time; the next debit
+  (`30.23 -> 30.08`) landed one second later on top of the credit, which proves the row lock held.
+
+---
+
 ## 2026-09-04
 
 ### ZIP is optional; the dedup key drops to STREET|CITY|STATE

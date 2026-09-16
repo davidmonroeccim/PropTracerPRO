@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Purchased skip-trace research artifacts. Contain PII for real individuals
+# (names, DOBs, phones, emails) bought from Tracerfy/FastAppend. Never commit.
+tasks/research-test/

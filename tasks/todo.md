@@ -102,3 +102,58 @@ billing defect it was only meant to work around. $0.28 of charge sits on the red
   the five match, so every row is skipped and enrichment always reports found-nothing with
   `spent: 0`. That is workstream C.
 - Its poll budget is 6 polls at 400ms — 2.4 seconds — against jobs that run 5 to 30 minutes.
+
+---
+
+# Owner routing module — Review (2026-09-16)
+
+## What was built
+
+`lib/routing/ownerRoute.ts` plus `lib/routing/__tests__/ownerRoute.test.ts`. Pure decision
+logic, no I/O, nothing wired to a route yet. 63 tests, `tsc --noEmit` clean, lint unchanged.
+
+- `classifyOwnerName()` — entity / individual / trust / unknown, from the name string only.
+- `assessLoan()` — parcel-level vs portfolio debt, so blanket loans are not shown as parcel debt.
+- `planRoute()` — tier selection, dossier key selection, vendor selection, and the warnings that
+  encode every trap found during testing.
+
+## Routing, as implemented
+
+| Case | Step | Cost/hit |
+|---|---|---|
+| Owner known, entity | FastAppend `business-trace/lookup/` (name + state) | $0.10 |
+| Owner known, individual, situs present | Tracerfy `trace/lookup/` `find_owner:false` + name | $0.10 |
+| Owner known, individual, situs missing | Tracerfy `trace/parcel/lookup/` (APN) | $0.10 |
+| Owner known, trust only | none — manual review | — |
+| Owner absent | dossier `property-search/lookup/`, APN key then address key | $0.20 |
+
+Situs is the axis: address-keyed endpoints need it, APN-keyed endpoints do not, entities need
+neither. Every vendor on this path is free on a miss.
+
+## Verified, not assumed
+
+Rates come from the Tracerfy and FastAppend account ledgers, which reconciled to the credit
+against our own instrumentation. Hit rates come from 24 commercial parcels in OH, CA and UT.
+
+## Open, in priority order
+
+1. **Nothing is wired to a route.** `planRoute` returns a plan; no caller executes it.
+2. **Registration state is unresolved.** Every entity call sends the property state because
+   nothing resolves the true one. It worked 13 of 22 times. FastAppend keys on state of
+   registration per the vendor's own product page, so this is a known-partial workaround.
+3. **Dossier field capture is not built.** 60+ fields are purchased per record and three are
+   used. Storage is per-user, for that user's own use, not a shared registry.
+4. **Two branches of `lib/ai-research/` hardening remain uncommitted** in the
+   `PTP-owner-extraction-fix` worktree (244 tests, two review rounds). That work guards the
+   `researchProperty` path, which this research says does not belong in this flow. Decide
+   separately.
+5. **UI and marketing pages** still advertise the old pricing and the search step. Next session.
+
+## Deliberately not done
+
+- No changes to billing or contact routing. `resolveOwnerContact()`,
+  `traceCreditFromFastAppend()`, `business_trace_contacts` and `business_at_address_contacts`
+  are untouched.
+- No vendor payload, endpoint or credit-spending code changed outside the new module.
+- `PRICING.COST_PER_RECORD` is still $0.009 and still contradicts the verified $0.02/credit.
+  Left alone to keep this diff minimal; it is written at 14 sites and read at none.
