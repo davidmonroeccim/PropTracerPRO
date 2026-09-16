@@ -1,3 +1,8 @@
+> **SUPERSEDED for owner discovery. Read `SESSION-HANDOFF-2026-09-16.md` first.**
+> This file is still correct on vendor mechanics and its eight defects. Its assumption that
+> the AI research step is the path to a commercial owner was measured on 2026-09-16 and is
+> wrong: county parcel records are not in any web index. Do not rebuild that query path.
+
 # SESSION HANDOFF, 2026-09-15 into 09-16
 
 ## READ THIS FIRST: what is shipped, what is committed, what is unrun
