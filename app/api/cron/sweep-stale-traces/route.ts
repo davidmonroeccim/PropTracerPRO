@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult, TracerfyResult } from '@/types';
@@ -101,7 +102,19 @@ export async function GET(request: Request) {
         const perTraceCharge = profile
           ? chargePerTrace(profile)
           : PRICING.CHARGE_PER_SUCCESS_WALLET;
-        const charge = isSuccessful ? perTraceCharge : 0;
+        // Charge the wallet FIRST so the row records what actually moved: a
+        // short wallet returns false without deducting, and trace_history.charge
+        // is summed back to the customer as money they paid.
+        const attemptedCharge = isSuccessful ? perTraceCharge : 0;
+        const charge =
+          attemptedCharge > 0
+            ? await deductOrZero(adminClient, {
+                p_user_id: trace.user_id,
+                p_amount: attemptedCharge,
+                p_trace_history_id: trace.id,
+                p_description: 'Skip trace - successful match (cron recovery)',
+              })
+            : 0;
 
         // Update trace record
         await adminClient
@@ -117,16 +130,10 @@ export async function GET(request: Request) {
           })
           .eq('id', trace.id);
 
-        // Charge wallet if successful
-        if (isSuccessful && charge > 0) {
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: trace.user_id,
-            p_amount: charge,
-            p_trace_history_id: trace.id,
-            p_description: 'Skip trace - successful match (cron recovery)',
-          });
-
-          // Fire-and-forget: auto-rebill if balance dropped below threshold
+        if (attemptedCharge > 0) {
+          // Fire-and-forget: auto-rebill if balance dropped below threshold.
+          // Still fires when the deduct failed -- that is exactly the wallet
+          // that needs topping up.
           triggerAutoRebillIfNeeded(trace.user_id).catch(() => {});
         }
 
@@ -238,7 +245,6 @@ export async function GET(request: Request) {
           const parsed = parseTracerfyResult(rawResult);
           const isSuccessful =
             (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-          const charge = isSuccessful ? perTraceCharge : 0;
 
           if (isSuccessful) recordsMatched++;
 
@@ -257,6 +263,17 @@ export async function GET(request: Request) {
 
           const historyId = historyRows?.[0]?.id;
           if (historyId) {
+            // Deduct FIRST, then persist the amount that actually moved.
+            const charge =
+              isSuccessful && perTraceCharge > 0
+                ? await deductOrZero(adminClient, {
+                    p_user_id: job.user_id,
+                    p_amount: perTraceCharge,
+                    p_trace_history_id: historyId,
+                    p_description: 'Bulk skip trace - successful match (cron recovery)',
+                  })
+                : 0;
+
             await adminClient
               .from('trace_history')
               .update({
@@ -269,15 +286,6 @@ export async function GET(request: Request) {
                 charge,
               })
               .eq('id', historyId);
-
-            if (isSuccessful && charge > 0) {
-              await adminClient.rpc('deduct_wallet_balance', {
-                p_user_id: job.user_id,
-                p_amount: charge,
-                p_trace_history_id: historyId,
-                p_description: 'Bulk skip trace - successful match (cron recovery)',
-              });
-            }
           }
         }
 

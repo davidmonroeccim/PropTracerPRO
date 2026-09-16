@@ -15,16 +15,34 @@ vi.mock("@/lib/tracerfy/client", async (orig) => ({
   parseTracerfyResult,
 }));
 
-/** Recording admin: `.rpc` captures every wallet call so we can assert amounts. */
-function makeAdmin() {
-  const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
-  const from = vi.fn(() => ({
-    update: vi.fn(() => ({
-      eq: vi.fn().mockResolvedValue({ error: null }),
-      in: vi.fn().mockResolvedValue({ error: null }),
-    })),
+/**
+ * Recording admin: `.rpc` captures every wallet call so we can assert amounts,
+ * and `.from(t).update(p)` captures every persisted payload so we can assert
+ * what actually lands in trace_history.charge (not just the in-memory row).
+ *
+ * `deductResult` overrides ONLY the deduct_wallet_balance envelope, so a test
+ * can simulate an insufficient-balance wallet (`{ data: false }`) while
+ * credit_wallet_balance still succeeds.
+ */
+function makeAdmin(opts: { deductResult?: unknown } = {}) {
+  const updates: Array<{ table: string; payload: Record<string, unknown> }> = [];
+  const rpc = vi.fn().mockImplementation((fn: string) =>
+    Promise.resolve(
+      fn === "deduct_wallet_balance" && "deductResult" in opts
+        ? opts.deductResult
+        : { data: true, error: null }
+    )
+  );
+  const from = vi.fn((table: string) => ({
+    update: vi.fn((payload: Record<string, unknown>) => {
+      updates.push({ table, payload });
+      return {
+        eq: vi.fn().mockResolvedValue({ error: null }),
+        in: vi.fn().mockResolvedValue({ error: null }),
+      };
+    }),
   }));
-  return { rpc, from };
+  return { rpc, from, updates };
 }
 
 /** A trace_history row with every required field defaulted; override per test. */
@@ -186,5 +204,160 @@ describe("settleBulkJob money contract", () => {
     // And the row records exactly what the wallet moved.
     expect(row.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
     expect(row.ai_research_charge).toBe(0);
+  });
+});
+
+/**
+ * deduct_wallet_balance RETURNS BOOLEAN and returns FALSE **without deducting**
+ * when the wallet is short (supabase/schema.sql:290). trace_history.charge is
+ * now SUMMED by the dashboard and history pages, so a charge written next to a
+ * deduct that returned false is money the customer is shown as having paid and
+ * that was never collected. One test per deduct call site in settleBulkJob.
+ */
+describe('settleBulkJob records $0 when the wallet deduct fails', () => {
+  /** ai_research payload carrying FastAppend contacts (drives the credit branch). */
+  const fastAppendResearch = {
+    owner_name: 'Jane Principal',
+    owner_type: 'business' as const,
+    business_name: 'Acme LLC',
+    individual_behind_business: 'Jane Principal',
+    is_deceased: null,
+    deceased_details: null,
+    relatives: [],
+    decision_makers: [],
+    property_type: 'commercial',
+    confidence: 80,
+    confidence_reasoning: null,
+    sources: [],
+    business_trace_contacts: {
+      owner_name: 'Jane Principal',
+      phones: [{ number: '5125550000', type: 'mobile' }],
+      emails: ['jane@acme.com'],
+      address: '1 Main St',
+    },
+  };
+
+  const historyUpdates = (admin: ReturnType<typeof makeAdmin>) =>
+    admin.updates.filter((u) => u.table === 'trace_history');
+
+  it('site 1 (entity row, Tracerfy contacts): persists charge 0, keeps the contacts', async () => {
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: '1 Main St',
+          phones: [{ number: '5125550123', type: 'mobile' }],
+          emails: [],
+        },
+      ],
+    });
+    const admin = makeAdmin({ deductResult: { data: false, error: null } });
+    const row = mkRow({ id: 'row-entity' });
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: 'tj-poor-1',
+      bucketRows: [row],
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    });
+
+    const persisted = historyUpdates(admin)[0].payload;
+    expect(persisted.charge).toBe(0);
+    expect(persisted.charge).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(row.charge).toBe(0);
+    // The customer's data survives a short wallet: the trace result still lands.
+    expect(persisted.status).toBe('success');
+    expect(persisted.phone_count).toBe(1);
+    expect(row.is_successful).toBe(true);
+  });
+
+  it('site 2 (FastAppend credit): persists charge 0 after the refund', async () => {
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [{ address: '1 Main St', phones: [], emails: [] }],
+    });
+    const admin = makeAdmin({ deductResult: { data: false, error: null } });
+    const row = mkRow({
+      id: 'row-entity',
+      ai_research_charge: AI_RESEARCH.CHARGE_PER_RECORD,
+      ai_research: fastAppendResearch as never,
+    });
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: 'tj-poor-2',
+      bucketRows: [row],
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    });
+
+    // The research refund still goes out -- that money genuinely moves back.
+    const credits = admin.rpc.mock.calls.filter((c) => c[0] === 'credit_wallet_balance');
+    expect(credits).toHaveLength(1);
+
+    const persisted = historyUpdates(admin)[0].payload;
+    expect(persisted.charge).toBe(0);
+    expect(persisted.charge).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(row.charge).toBe(0);
+    expect(persisted.status).toBe('success');
+    expect(persisted.email_count).toBe(1);
+  });
+
+  it('site 3 (shared bulk person match): persists charge 0', async () => {
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [
+        { city: 'Austin', state: 'TX', phones: [{ number: '5125550123', type: 'mobile' }], emails: [] },
+      ],
+    });
+    const admin = makeAdmin({ deductResult: { data: false, error: null } });
+    const rows = [
+      mkRow({ id: 'row-a', city: 'Austin', state: 'TX' }),
+      mkRow({ id: 'row-b', city: 'Dallas', state: 'TX' }),
+    ];
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: 'tj-poor-3',
+      bucketRows: rows,
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS,
+    });
+
+    const persisted = historyUpdates(admin)[0].payload;
+    expect(persisted.charge).toBe(0);
+    expect(persisted.charge).not.toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(rows[0].charge).toBe(0);
+    expect(persisted.status).toBe('success');
+    expect(rows[0].is_successful).toBe(true);
+  });
+
+  it('a missing rpc envelope is NOT treated as a failed charge', async () => {
+    // Production supabase-js always resolves { data, error }; a bare `undefined`
+    // only comes from a loose test double. Guarding it must not silently zero a
+    // charge that really was collected -- see the comment in lib/wallet/deduct.ts.
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [
+        { city: 'Austin', state: 'TX', phones: [{ number: '5125550123', type: 'mobile' }], emails: [] },
+      ],
+    });
+    const admin = makeAdmin({ deductResult: undefined });
+    const rows = [
+      mkRow({ id: 'row-a', city: 'Austin', state: 'TX' }),
+      mkRow({ id: 'row-b', city: 'Dallas', state: 'TX' }),
+    ];
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: 'tj-undef',
+      bucketRows: rows,
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS,
+    });
+
+    expect(historyUpdates(admin)[0].payload.charge).toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(rows[0].charge).toBe(PRICING.CHARGE_PER_SUCCESS);
   });
 });

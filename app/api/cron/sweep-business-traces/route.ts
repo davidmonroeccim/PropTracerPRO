@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult, BusinessTraceJob } from '@/types';
@@ -175,7 +176,8 @@ export async function GET(request: Request) {
                   'Refund: AI research folded into the successful trace charge',
               });
             }
-            await adminClient.rpc('deduct_wallet_balance', {
+            // Persist the amount that actually moved, not the intended one.
+            const charge = await deductOrZero(adminClient, {
               p_user_id: job.user_id,
               p_amount: tier1Rate,
               p_trace_history_id: historyRow.id,
@@ -195,7 +197,7 @@ export async function GET(request: Request) {
                 email_count: fastAppendCredit.email_count,
                 is_successful: true,
                 cost: PRICING.COST_PER_RECORD,
-                charge: tier1Rate,
+                charge,
               })
               .eq('id', historyRow.id);
 

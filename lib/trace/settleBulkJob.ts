@@ -16,6 +16,7 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING } from '@/lib/constants';
 import type { TraceResult, AIResearchResult } from '@/types';
 
@@ -113,8 +114,16 @@ export async function settleBulkJob(
 
     if (tracerfyHasContacts) {
       // Tracerfy delivered contacts -- charge tier-aware trace fee on top
-      // of the AI research charge already booked by the cron.
-      const charge = personRate;
+      // of the AI research charge already booked by the cron. Deduct FIRST so
+      // the row records what the wallet actually gave up (0 if it was short),
+      // never the intended amount.
+      const charge = await deductOrZero(admin, {
+        p_user_id: userId,
+        p_amount: personRate,
+        p_trace_history_id: row.id,
+        p_description: 'Bulk skip trace - entity row (post-research)',
+      });
+
       await admin
         .from('trace_history')
         .update({
@@ -127,13 +136,6 @@ export async function settleBulkJob(
           charge,
         })
         .eq('id', row.id);
-
-      await admin.rpc('deduct_wallet_balance', {
-        p_user_id: userId,
-        p_amount: charge,
-        p_trace_history_id: row.id,
-        p_description: 'Bulk skip trace - entity row (post-research)',
-      });
 
       row.status = 'success';
       row.trace_result = parsed;
@@ -155,7 +157,7 @@ export async function settleBulkJob(
             'Refund: AI research folded into the successful trace charge',
         });
       }
-      await admin.rpc('deduct_wallet_balance', {
+      const charge = await deductOrZero(admin, {
         p_user_id: userId,
         p_amount: personRate,
         p_trace_history_id: row.id,
@@ -171,7 +173,7 @@ export async function settleBulkJob(
           email_count: fastAppendCredit.email_count,
           is_successful: true,
           cost: PRICING.COST_PER_RECORD,
-          charge: personRate,
+          charge,
           ai_research_charge: 0,
         })
         .eq('id', row.id);
@@ -181,7 +183,7 @@ export async function settleBulkJob(
       row.phone_count = fastAppendCredit.phone_count;
       row.email_count = fastAppendCredit.email_count;
       row.is_successful = true;
-      row.charge = personRate;
+      row.charge = charge;
       row.ai_research_charge = 0;
     } else {
       // No contacts from either provider -- no_match. The AI research charge
@@ -227,7 +229,16 @@ export async function settleBulkJob(
       const parsed = parseTracerfyResult(rawResult);
       const isSuccessful =
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-      const charge = isSuccessful ? personRate : 0;
+      // Deduct FIRST, then persist the amount that actually moved.
+      const charge =
+        isSuccessful && personRate > 0
+          ? await deductOrZero(admin, {
+              p_user_id: userId,
+              p_amount: personRate,
+              p_trace_history_id: match.id,
+              p_description: 'Bulk skip trace - successful match',
+            })
+          : 0;
 
       await admin
         .from('trace_history')
@@ -241,15 +252,6 @@ export async function settleBulkJob(
           charge,
         })
         .eq('id', match.id);
-
-      if (isSuccessful && charge > 0) {
-        await admin.rpc('deduct_wallet_balance', {
-          p_user_id: userId,
-          p_amount: charge,
-          p_trace_history_id: match.id,
-          p_description: 'Bulk skip trace - successful match',
-        });
-      }
 
       // Reflect in local copy so the completion check below is accurate.
       match.status = isSuccessful ? 'success' : 'no_match';

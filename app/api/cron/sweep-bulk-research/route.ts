@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { researchProperty } from '@/lib/ai-research/client';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { AI_RESEARCH, PRICING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
@@ -172,6 +173,14 @@ export async function GET(request: Request) {
         const fastAppendCredit = traceCreditFromFastAppend(researchForStorage);
         if (fastAppendCredit) {
           const tier1Rate = await tier1RateFor(row.user_id);
+          // Deduct FIRST, then persist the amount that actually moved.
+          const charge = await deductOrZero(adminClient, {
+            p_user_id: row.user_id,
+            p_amount: tier1Rate,
+            p_trace_history_id: row.id,
+            p_description: 'FastAppend business-trace contacts (successful trace)',
+          });
+
           await adminClient
             .from('trace_history')
             .update({
@@ -185,23 +194,29 @@ export async function GET(request: Request) {
               email_count: fastAppendCredit.email_count,
               is_successful: true,
               cost: PRICING.COST_PER_RECORD,
-              charge: tier1Rate,
+              charge,
             })
             .eq('id', row.id);
-
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: row.user_id,
-            p_amount: tier1Rate,
-            p_trace_history_id: row.id,
-            p_description: 'FastAppend business-trace contacts (successful trace)',
-          });
           fastAppendCredited++;
           continue;
         }
 
         // No FastAppend contacts at this point -- proceed with the research
         // charge + Tracerfy submit fallback, same as before.
-        const researchCharge = ownerFound ? AI_RESEARCH.CHARGE_PER_RECORD : 0;
+        // Deduct FIRST, then persist the amount that actually moved. This one
+        // also feeds the FastAppend refund paths, which credit back whatever
+        // ai_research_charge says -- recording an uncollected charge here would
+        // later refund money the customer never paid.
+        const researchCharge =
+          ownerFound
+            ? await deductOrZero(adminClient, {
+                p_user_id: row.user_id,
+                p_amount: AI_RESEARCH.CHARGE_PER_RECORD,
+                p_trace_history_id: row.id,
+                p_description: 'AI property research (bulk API)',
+              })
+            : 0;
+
         await adminClient
           .from('trace_history')
           .update({
@@ -211,15 +226,6 @@ export async function GET(request: Request) {
             ai_research_claimed_at: null,
           })
           .eq('id', row.id);
-
-        if (researchCharge > 0) {
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: row.user_id,
-            p_amount: researchCharge,
-            p_trace_history_id: row.id,
-            p_description: 'AI property research (bulk API)',
-          });
-        }
 
         if (!resolvedPerson) {
           // No FastAppend contacts and no person to skip-trace -- mark
