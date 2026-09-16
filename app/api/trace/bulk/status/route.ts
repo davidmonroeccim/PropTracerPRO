@@ -50,17 +50,22 @@ export async function GET(request: Request) {
 
     const traceJob = job as TraceJob;
 
-    // Already completed or failed — return stored stats
+    // Already completed or failed — return stored stats.
+    // total_charge SUMS THE STORED PER-ROW CHARGES. It must never be
+    // records_matched x a live rate: the rate moves, the history does not, and a
+    // repriced constant would restate what the user was actually billed on every
+    // past job. The stored charge is the amount the settle path wrote at the time.
     if (traceJob.status === 'completed' || traceJob.status === 'failed') {
-      // Fetch profile for tier-aware pricing
-      const { data: doneProfile } = await adminClient
-        .from('user_profiles')
-        .select('subscription_tier, is_acquisition_pro_member, gateway_products')
-        .eq('id', user.id)
-        .single();
-      const doneCharge = doneProfile
-        ? chargePerTrace(doneProfile)
-        : PRICING.CHARGE_PER_SUCCESS_WALLET;
+      const { data: doneRows } = await adminClient
+        .from('trace_history')
+        .select('charge')
+        .eq('user_id', user.id)
+        .eq('trace_job_id', traceJob.id);
+
+      const doneTotal = (doneRows || []).reduce(
+        (sum: number, r: { charge: number | null }) => sum + (r.charge || 0),
+        0
+      );
 
       return NextResponse.json({
         success: true,
@@ -68,7 +73,7 @@ export async function GET(request: Request) {
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
-        total_charge: traceJob.records_matched * doneCharge,
+        total_charge: Number(doneTotal.toFixed(4)),
         error_message: traceJob.error_message,
       });
     }

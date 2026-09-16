@@ -5,13 +5,13 @@
 // route and the (later) Suite MCP tool settle a bulk trace job through ONE code
 // path and can never diverge on money.
 //
-// The ONLY parameterized value is the person-trace rate (`personRate`): the v1
-// route passes its current getChargePerTrace(...) rate; the MCP passes the
-// grant-aware rate. Every other branch and every wallet effect (entity
-// Tracerfy-delivered charge at the person rate, entity FastAppend
-// refund-$0.15-then-charge-$0.25, no-match $0) is IDENTICAL to the original
-// route. The wallet owner (p_user_id) is always the local user_profiles.id,
-// supplied as `userId`, never derived from tool/request input.
+// The ONLY parameterized value is the TIER 1 per-successful-trace rate
+// (`personRate`): the v1 route passes its current getChargePerTrace(...) rate;
+// the MCP passes the grant-aware rate. Owner type selects the VENDOR, never the
+// price, so every settled success on this path bills that one rate, whether the
+// contacts came from Tracerfy or from FastAppend. The wallet owner (p_user_id)
+// is always the local user_profiles.id, supplied as `userId`, never derived
+// from tool/request input.
 
 import type { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
@@ -51,9 +51,10 @@ export type SettleBulkJobArgs = {
   bucketRows: TraceHistoryRow[];
   // Wallet owner: ALWAYS the local user_profiles.id, never tool/request input.
   userId: string;
-  // Per-successful-person-trace charge. Injected so the caller decides
-  // grant-awareness (v1 = getChargePerTrace(...); MCP = grant-aware $0.07).
-  // Entity/FastAppend amounts stay flat constants and are NOT affected by this.
+  // Tier 1 per-successful-trace charge for this caller's plan. Injected so the
+  // caller decides grant-awareness (v1 = getChargePerTrace(...); MCP =
+  // grant-aware chargePerTrace(...)). It prices EVERY success on this path,
+  // including the FastAppend entity branch.
   personRate: number;
 };
 
@@ -100,11 +101,11 @@ export async function settleBulkJob(
     const tracerfyHasContacts =
       (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
 
-    // FastAppend bundled fallback: if Tracerfy returned nothing for this
-    // entity row, check whether FastAppend lent its async business-trace
-    // results between cron and now (sweep-business-traces merges contacts
-    // into ai_research). When it has, refund the $0.15 research charge
-    // the cron already booked and apply the single bundled $0.25 -- the
+    // FastAppend fallback: if Tracerfy returned nothing for this entity row,
+    // check whether FastAppend lent its async business-trace results between
+    // cron and now (sweep-business-traces merges contacts into ai_research).
+    // When it has, refund the AI research charge the cron already booked and
+    // apply ONE tier 1 per-success charge at the caller's plan rate -- the
     // user paid for one credited row, not research-plus-trace separately.
     const fastAppendCredit = tracerfyHasContacts
       ? null
@@ -141,25 +142,24 @@ export async function settleBulkJob(
       row.is_successful = true;
       row.charge = charge;
     } else if (fastAppendCredit) {
-      // Tracerfy whiffed but FastAppend has contacts now. Refund the
-      // $0.15 research charge the cron booked (so the wallet ledger and
-      // row both reflect the bundled $0.25 model) and apply the bundled
-      // FastAppend success charge.
+      // Tracerfy whiffed but FastAppend has contacts now. Refund the research
+      // charge the cron booked, then bill ONE tier 1 per-success charge at the
+      // caller's plan rate. Owner type picks the vendor, never the price, so
+      // this is the SAME personRate the Tracerfy branch above uses.
       const priorResearchCharge = row.ai_research_charge || 0;
       if (priorResearchCharge > 0) {
         await admin.rpc('credit_wallet_balance', {
           p_user_id: userId,
           p_amount: priorResearchCharge,
           p_description:
-            'Refund: AI research bundled into FastAppend success ($0.25)',
+            'Refund: AI research folded into the successful trace charge',
         });
       }
       await admin.rpc('deduct_wallet_balance', {
         p_user_id: userId,
-        p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+        p_amount: personRate,
         p_trace_history_id: row.id,
-        p_description:
-          'FastAppend business-trace contacts (bundled research + trace)',
+        p_description: 'FastAppend business-trace contacts (successful trace)',
       });
 
       await admin
@@ -171,7 +171,7 @@ export async function settleBulkJob(
           email_count: fastAppendCredit.email_count,
           is_successful: true,
           cost: PRICING.COST_PER_RECORD,
-          charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+          charge: personRate,
           ai_research_charge: 0,
         })
         .eq('id', row.id);
@@ -181,13 +181,13 @@ export async function settleBulkJob(
       row.phone_count = fastAppendCredit.phone_count;
       row.email_count = fastAppendCredit.email_count;
       row.is_successful = true;
-      row.charge = PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
+      row.charge = personRate;
       row.ai_research_charge = 0;
     } else {
-      // No contacts from either provider -- no_match. The $0.15
-      // research charge already booked stays put. If FastAppend lands
-      // later via sweep-business-traces, that cron will refund the
-      // $0.15 and apply the bundled credit.
+      // No contacts from either provider -- no_match. The AI research charge
+      // already booked STAYS PUT: this row is not free. If FastAppend lands
+      // later via sweep-business-traces, that cron refunds the research charge
+      // and applies the tier 1 per-success charge instead.
       await admin
         .from('trace_history')
         .update({

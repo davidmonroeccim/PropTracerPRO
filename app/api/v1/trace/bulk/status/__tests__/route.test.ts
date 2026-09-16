@@ -62,9 +62,9 @@ beforeEach(() => {
 
 describe("v1 bulk-status route personRate wiring", () => {
   it("passes getChargePerTrace(tier, flag) as settleBulkJob's personRate", async () => {
-    // wallet tier + not acquisition-pro => getChargePerTrace = $0.11, which is
-    // deliberately DIFFERENT from the pro/grant rate ($0.07). So the assertion
-    // catches a wire-up to 0, to the grant rate, or to any hardcoded constant.
+    // wallet tier + not acquisition-pro => getChargePerTrace = CHARGE_PER_SUCCESS_WALLET,
+    // which is deliberately DIFFERENT from the pro/grant rate (CHARGE_PER_SUCCESS). So the
+    // assertion catches a wire-up to 0, to the grant rate, or to any hardcoded constant.
     H.profile = { id: "user-abc", subscription_tier: "wallet", is_acquisition_pro_member: false };
     H.job = {
       id: "job-1",
@@ -89,13 +89,13 @@ describe("v1 bulk-status route personRate wiring", () => {
 
     expect(H.settleBulkJobSpy).toHaveBeenCalledTimes(1);
     const passedArgs = H.settleBulkJobSpy.mock.calls[0][1];
-    const expectedRate = getChargePerTrace("wallet", false); // 0.11
+    const expectedRate = getChargePerTrace("wallet", false); // CHARGE_PER_SUCCESS_WALLET
 
     // The route must pass its tier-aware rate through verbatim.
     expect(passedArgs.personRate).toBe(expectedRate);
     // Sharpen the fence against the three named wrong-wirings.
     expect(passedArgs.personRate).not.toBe(0);
-    expect(passedArgs.personRate).not.toBe(PRICING.CHARGE_PER_SUCCESS); // 0.07 grant/pro rate
+    expect(passedArgs.personRate).not.toBe(PRICING.CHARGE_PER_SUCCESS); // the grant/pro rate
     // Wallet owner is always the local profile id.
     expect(passedArgs.userId).toBe("user-abc");
   });

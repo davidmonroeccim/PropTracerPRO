@@ -6,6 +6,43 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-16
 
+### Pricing repriced across every surface, three billing defects fixed, notification drafted
+
+- **Why:** the app advertised $0.07/$0.11 in 19 customer-visible places while the new model
+  charges $0.15/$0.25/$0.40. Hard merge blocker; it deploys with the app.
+- **The canonical pricing table now lives in `SESSION-HANDOFF-2026-09-16.md`.** Two axes, tier
+  and plan, four numbers. Tier 1 (owner known) $0.15 Pro/AcqPro, $0.25 PAYG. Tier 2 (owner
+  unknown or dossier wanted) $0.25 Pro/AcqPro, $0.40 PAYG. **Owner type selects the VENDOR, not
+  the price.** It took three restatements from David to land; see lessons L-005.
+- **`CHARGE_PER_FASTAPPEND_SUCCESS` (flat $0.25) retired**, not repriced. Under the new model an
+  entity trace with a known owner is an ordinary tier 1 trace. Entity settle path in
+  `settleBulkJob.ts` and both cron sweeps now bill the plan-aware tier 1 rate. A test asserts the
+  constant cannot come back.
+- **Three defects found by adversarial review, all fixed and mutation-verified:**
+  1. A new MCP string promised "a record that comes back with no match is not charged". False:
+     `settleBulkJob.ts` leaves the $0.15 research charge booked on an entity no-match. That string
+     is quoted to Claude *before* it spends a user's wallet. Now scoped to what the settle code does.
+  2. `worstCaseCost()` reserved a flat $0.25 per entity where the v1 route reserves rate + $0.15.
+     The gap went from $0.01 to $0.15 per record at the new rates. Now matches the v1 formula,
+     with a test fencing it.
+  3. **Four surfaces recomputed historical bulk charges as `records_matched × today's rate`**,
+     so every past job would have displayed a number the user was never charged. Now sums the
+     stored `trace_history.charge` via new `lib/trace/bulkJobCharges.ts`. A fifth instance at
+     `app/api/trace/bulk/status/route.ts` was found during the fix. Jobs with no reachable rows
+     render a dash, never a fabricated $0.00.
+- **Dossier field inventory measured and documented** by counting keys in the 24 saved raw
+  responses: 86 fields returned, 46 with a usable value. "60+ fields" is accurate and conservative.
+- **The handoff's "every status flag at 100%" was a presence count and is corrected.** Across 24
+  commercial parcels `absentee_owner` is true 88% of the time, `owner_occupied` 4%, and the other
+  nine flags (vacant, tax delinquent, tax lien, pre-foreclosure, foreclosure, inherited, death,
+  judgment, HOA) are true **zero** times. The distress flags were pulled from all customer copy.
+- **Verified:** 221 tests passing (was 217), `tsc` 9 pre-existing dotenv errors unchanged, eslint
+  55 problems unchanged from the `main` baseline. Nothing committed, nothing pushed, no migration
+  applied, `main` untouched.
+- **Deliberately not done:** tier 2 is not wired, so nothing here ships until `planRoute()` has a
+  caller. The landing page's free-no-match promise is true against the canonical model and false
+  against the legacy code path, and resolves when the wiring lands.
+
 ### Owner routing module: vendor selection, tier pricing, portfolio-debt detection
 
 - **Why:** measured whether the AI research step can identify a commercial parcel's owner well

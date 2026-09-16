@@ -13,8 +13,7 @@ import { format } from 'date-fns';
 import { Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceHistory, TraceJob } from '@/types';
-import { PRICING } from '@/lib/constants';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
 
 type HistoryEntry =
   | { type: 'single'; date: string; data: TraceHistory }
@@ -70,16 +69,12 @@ export default async function HistoryPage() {
 
   if (!user) return null;
 
-  // Fetch jobs and profile in parallel
-  const [jobs, profileResult] = await Promise.all([
-    getTraceJobs(user.id),
-    supabase.from('user_profiles').select('subscription_tier, is_acquisition_pro_member, gateway_products').eq('id', user.id).single(),
-  ]);
+  const jobs = await getTraceJobs(user.id);
 
-  const userProfile = profileResult.data;
-  const perTrace = userProfile
-    ? chargePerTrace(userProfile)
-    : PRICING.CHARGE_PER_SUCCESS_WALLET;
+  // What each bulk job ACTUALLY billed, summed from the stored per-row charges.
+  // Never records_matched x a live rate: that restates history every reprice.
+  const bulkCharges = await getBulkJobCharges(supabase, user.id, jobs);
+
   const bulkTracerfyJobIds = jobs
     .map(j => j.tracerfy_job_id)
     .filter((id): id is string => id !== null);
@@ -200,7 +195,7 @@ export default async function HistoryPage() {
 
                   // Bulk job row
                   const job = entry.data;
-                  const bulkCharge = job.records_matched * perTrace;
+                  const bulkCharge = bulkCharges.get(job.id);
 
                   return (
                     <TableRow key={`job-${job.id}`}>
@@ -231,7 +226,9 @@ export default async function HistoryPage() {
                         )}
                       </TableCell>
                       <TableCell className="hidden xl:table-cell text-right">
-                        {bulkCharge > 0 ? (
+                        {bulkCharge === undefined ? (
+                          <span className="text-gray-400">-</span>
+                        ) : bulkCharge > 0 ? (
                           formatCurrency(bulkCharge)
                         ) : (
                           <span className="text-gray-400">Free</span>

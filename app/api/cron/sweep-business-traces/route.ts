@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult, BusinessTraceJob } from '@/types';
 
 /**
@@ -34,6 +35,23 @@ export async function GET(request: Request) {
   let resolved = 0;
   let stillPending = 0;
   let erroredStale = 0;
+
+  // Tier 1 per-successful-trace rate for a user, resolved once per run. Owner
+  // type selects the VENDOR, not the price, so a FastAppend entity success
+  // bills the same plan rate a Tracerfy person success does.
+  const tier1RateCache = new Map<string, number>();
+  const tier1RateFor = async (userId: string): Promise<number> => {
+    const cached = tier1RateCache.get(userId);
+    if (cached !== undefined) return cached;
+    const { data: rateProfile } = await adminClient
+      .from('user_profiles')
+      .select('subscription_tier, is_acquisition_pro_member, gateway_products')
+      .eq('id', userId)
+      .single();
+    const rate = rateProfile ? chargePerTrace(rateProfile) : PRICING.CHARGE_PER_SUCCESS_WALLET;
+    tier1RateCache.set(userId, rate);
+    return rate;
+  };
 
   try {
     // Mark anything older than 24h as error before working the rest
@@ -137,31 +155,32 @@ export async function GET(request: Request) {
           }
 
           // Re-evaluate billing for this row now that FastAppend has landed.
-          // If the row was previously finalised as no_match (with a $0.15
-          // research charge already booked) and FastAppend now provides
-          // phones/emails, refund the research charge and apply the bundled
-          // $0.25 credit so the user is billed once for a successful row.
-          // Rows already credited as success are left alone.
+          // If the row was previously finalised as no_match (with a research
+          // charge already booked) and FastAppend now provides phones/emails,
+          // refund the research charge and apply ONE tier 1 per-success charge
+          // at the user's plan rate, so the user is billed once for a
+          // successful row. Rows already credited as success are left alone.
           const fastAppendCredit = traceCreditFromFastAppend(mergedResearch);
           const wasNotSuccess = !historyRow.is_successful;
           const shouldUpgradeBilling = !!fastAppendCredit && wasNotSuccess;
 
           if (shouldUpgradeBilling && fastAppendCredit) {
+            const tier1Rate = await tier1RateFor(job.user_id);
             const priorResearchCharge = historyRow.ai_research_charge || 0;
             if (priorResearchCharge > 0) {
               await adminClient.rpc('credit_wallet_balance', {
                 p_user_id: job.user_id,
                 p_amount: priorResearchCharge,
                 p_description:
-                  'Refund: AI research bundled into FastAppend success ($0.25)',
+                  'Refund: AI research folded into the successful trace charge',
               });
             }
             await adminClient.rpc('deduct_wallet_balance', {
               p_user_id: job.user_id,
-              p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+              p_amount: tier1Rate,
               p_trace_history_id: historyRow.id,
               p_description:
-                'FastAppend business-trace contacts (bundled research + trace, async)',
+                'FastAppend business-trace contacts (successful trace, async)',
             });
 
             await adminClient
@@ -176,7 +195,7 @@ export async function GET(request: Request) {
                 email_count: fastAppendCredit.email_count,
                 is_successful: true,
                 cost: PRICING.COST_PER_RECORD,
-                charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+                charge: tier1Rate,
               })
               .eq('id', historyRow.id);
 

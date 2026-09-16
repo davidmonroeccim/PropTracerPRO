@@ -22,16 +22,39 @@ export const VENDOR_COST = {
   TRACERFY_PARCEL: 0.10,
 } as const
 
-export const PRICE = {
-  /** Owner already in the registry. Billed per SUCCESSFUL trace. */
-  TIER_1_PER_SUCCESS: 0.15,
-  /**
-   * Owner absent, OR the caller wants the enriched dossier. Billed per RECORD submitted.
-   * Covers a $0.20 dossier plus a $0.10 contact call and returns the 60+ field property
-   * record, which is the reason this tier is worth buying on its own.
-   */
-  TIER_2_PER_RECORD: 0.40,
+/**
+ * What the CUSTOMER pays. TWO axes, tier and plan. FOUR numbers, no more and no fewer.
+ *
+ *   pro      $97/mo                      tier 1 $0.15   tier 2 $0.25
+ *   acqPro   AcquisitionPRO, no monthly  tier 1 $0.15   tier 2 $0.25
+ *   wallet   Pay-As-You-Go               tier 1 $0.25   tier 2 $0.40
+ *
+ * TIER 1: the owner of record is already known. Billed per SUCCESSFUL trace, misses free.
+ * TIER 2: the owner is absent, OR the caller wants the enriched dossier. Billed per RECORD
+ *   SUBMITTED, so misses ARE billed. Covers a $0.20 dossier plus a $0.10 contact call and
+ *   returns the 60+ field property record, which is the reason this tier is worth buying.
+ *   Customer-facing label is "per record", never "per search".
+ *
+ * OWNER TYPE IS NOT A PRICING AXIS. An individual routes to Tracerfy and an entity routes to
+ * FastAppend, and both bill the same tier 1 rate for that plan. Tier 2 does not split by owner
+ * type either. The vendor split and the vendor COSTS in VENDOR_COST above are real and are
+ * cost-side only; do not let them leak into this table. Anyone adding an entity rate here is
+ * restoring a model David has now corrected three times.
+ *
+ * NOTE: planRoute() does not yet select by plan. It still reports the `pro` column, which is
+ * what the previous shape's TIER_1 number was. Wiring the plan through is the next session's
+ * job and changes planRoute's signature; see tasks/todo.md section A.
+ */
+export type PricePlan = 'pro' | 'acqPro' | 'wallet'
+
+export const PRICE: Record<PricePlan, { tier1PerSuccess: number; tier2PerRecord: number }> = {
+  pro: { tier1PerSuccess: 0.15, tier2PerRecord: 0.25 },
+  acqPro: { tier1PerSuccess: 0.15, tier2PerRecord: 0.25 },
+  wallet: { tier1PerSuccess: 0.25, tier2PerRecord: 0.40 },
 } as const
+
+/** The plan planRoute() prices against until the caller passes one. See the note on PRICE. */
+export const DEFAULT_PRICE_PLAN: PricePlan = 'pro'
 
 export interface ParcelInput {
   parcelIdLocal: string
@@ -304,7 +327,7 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
     }
 
     return {
-      tier, billing: { model: 'per_record', amount: PRICE.TIER_2_PER_RECORD },
+      tier, billing: { model: 'per_record', amount: PRICE[DEFAULT_PRICE_PLAN].tier2PerRecord },
       ownerName: null, ownerType: 'unknown', needsOwnerDiscovery: true, steps,
       // Only one dossier key can hit, so the realistic ceiling is one dossier plus one contact call.
       maxVendorCost: VENDOR_COST.DOSSIER + VENDOR_COST.FASTAPPEND_ENTITY,
@@ -375,7 +398,7 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
 
   return {
     tier,
-    billing: { model: 'per_successful_trace', amount: PRICE.TIER_1_PER_SUCCESS },
+    billing: { model: 'per_successful_trace', amount: PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess },
     ownerName, ownerType, needsOwnerDiscovery: false, steps,
     maxVendorCost: steps.reduce((a, s) => a + s.costOnHit, 0),
     warnings,

@@ -178,7 +178,7 @@ export default function ApiDocsPage() {
     "business_name": null,
     "individual_behind_business": null
   },
-  "charge": 0.07,
+  "charge": 0.15,
   "is_cached": false
 }`}
               section="status-response"
@@ -440,7 +440,7 @@ export default function ApiDocsPage() {
   "job_id": "uuid",
   "records_submitted": 95,
   "records_matched": 82,
-  "total_charge": 5.74,
+  "total_charge": 12.30,
   "results": [
     {
       "address": "160 MINE LAKE CT|RALEIGH|NC|27615",
@@ -461,7 +461,7 @@ export default function ApiDocsPage() {
         "phones": [ /* ... */ ],
         "emails": [ /* ... */ ]
       },
-      "charge": 0.07,
+      "charge": 0.15,
       "ai_research_charge": 0.15,
       "business_trace_pending": false,
       "business_trace_job_id": null
@@ -808,7 +808,7 @@ Headers: Authorization: Bearer ptp_your_api_key
     "business_name": null,
     "individual_behind_business": null
   },
-  "charge": 0.07,
+  "charge": 0.15,
   "timestamp": "2026-01-27T15:30:00Z"
 }`}
             section="webhook-single"
@@ -879,7 +879,7 @@ Headers: Authorization: Bearer ptp_your_api_key
   "job_id": "uuid",
   "records_submitted": 100,
   "records_matched": 86,
-  "total_charge": 6.02,
+  "total_charge": 12.90,
   "results": [
     {
       "address": "123 MAIN ST",

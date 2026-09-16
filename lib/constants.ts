@@ -8,16 +8,43 @@ export const PRICING = {
   // Monthly subscription fees
   PRO_MONTHLY: 97,
 
-  // Per-trace charges
-  CHARGE_PER_SUCCESS: 0.07,
-  CHARGE_PER_SUCCESS_WALLET: 0.11,
+  // ── TIER 1 ─────────────────────────────────────────────────────────────
+  // The owner of record is already known. Billed per SUCCESSFUL trace.
+  // A no-match is free. Customer-facing label: "per successful trace".
+  //
+  // OWNER TYPE DOES NOT AFFECT PRICE. An individual routes to Tracerfy and an
+  // entity routes to FastAppend, and both bill these same two numbers. The
+  // vendor split and the vendor COSTS ($0.10 entity contacts, $0.10 individual
+  // contacts) are cost-side only. There is no entity price, no entity
+  // surcharge and no entity discount anywhere in the model.
+  CHARGE_PER_SUCCESS: 0.15,
+  CHARGE_PER_SUCCESS_WALLET: 0.25,
 
-  // FastAppend business-trace success: flat bundled price covering both the
-  // $0.15 AI research lookup AND the trace credit. Applied when an LLC/entity
-  // row's contacts are sourced from FastAppend (instead of Tracerfy person
-  // skip-trace). Replaces the would-be ai_research_charge ($0.15) + trace
-  // charge ($0.07/$0.11) split with a single $0.25 ledger entry.
-  CHARGE_PER_FASTAPPEND_SUCCESS: 0.25,
+  // ── TIER 2 ─────────────────────────────────────────────────────────────
+  // The owner of record is absent, OR the caller wants the enriched property
+  // record. Billed per RECORD SUBMITTED, so a no-match IS billed: the county
+  // dossier lookup is spent on submission whether or not contacts follow.
+  // Customer-facing label: "per record". Never "per search".
+  //
+  // These are NOT:
+  //   - CHARGE_PER_SUCCESS / CHARGE_PER_SUCCESS_WALLET, the tier 1 per-success
+  //     rates, which are free on a miss.
+  //   - AI_RESEARCH.CHARGE_PER_RECORD (also 0.15), which is the AI research
+  //     line item, a different product on a different ledger entry.
+  // TIER2_PER_RECORD_SUBMITTED_PRO shares its digits with
+  // CHARGE_PER_SUCCESS_WALLET. Same digits, different meaning. Check the name
+  // before reusing a number.
+  /** Tier 2 per record submitted, Pro and AcquisitionPRO. NOT a per-success rate. */
+  TIER2_PER_RECORD_SUBMITTED_PRO: 0.25,
+  /** Tier 2 per record submitted, Pay-As-You-Go. NOT a per-success rate. */
+  TIER2_PER_RECORD_SUBMITTED_WALLET: 0.40,
+
+  // RETIRED 2026-09-16: CHARGE_PER_FASTAPPEND_SUCCESS. It existed because the
+  // old model priced the FastAppend entity path separately from the Tracerfy
+  // person path. Under the canonical model owner type selects the VENDOR, not
+  // the price, so an entity trace on a known owner bills the plan's tier 1
+  // rate above (getChargePerTrace / chargePerTrace) exactly like a person
+  // trace. Do not reintroduce a separate entity constant.
 
   // Our cost from Tracerfy
   COST_PER_RECORD: 0.009,
@@ -38,14 +65,20 @@ export const SUBSCRIPTION_TIERS = {
   wallet: {
     name: 'Pay-As-You-Go',
     monthlyFee: 0,
+    /** Tier 1. Billed per successful trace; a no-match is free. */
     perTrace: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    /** Tier 2. Billed per record submitted, so a no-match is billed. */
+    perRecord: PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET,
     apiAccess: false,
-    description: 'Perfect for occasional users. No monthly fee, pay only for successful traces.',
+    description: 'No monthly fee. Pay per successful trace when you already have the owner, or per record when we go find them for you.',
   },
   pro: {
     name: 'Pro',
     monthlyFee: PRICING.PRO_MONTHLY,
+    /** Tier 1. Billed per successful trace; a no-match is free. */
     perTrace: PRICING.CHARGE_PER_SUCCESS,
+    /** Tier 2. Billed per record submitted, so a no-match is billed. */
+    perRecord: PRICING.TIER2_PER_RECORD_SUBMITTED_PRO,
     apiAccess: true,
     description: 'Full API access for power users and automation.',
   },

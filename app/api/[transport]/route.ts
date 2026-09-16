@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyToken } from "@/lib/suite/mcp-auth";
 import { assertPtpAccess, ctx, ok, err } from "@/lib/suite/mcp-shared";
+import { AI_RESEARCH, PRICING } from "@/lib/constants";
 import {
   walletBalance,
   listTraces, listTracesSchema,
@@ -27,17 +28,36 @@ function tool(fn: (admin: ReturnType<typeof createAdminClient>, gatewaySub: stri
   };
 }
 
+/** The TIER 1 per-successful-trace rates these tools actually bill, read from PRICING so a tool
+ *  description can never drift from the ledger. Claude quotes these to the user BEFORE spending
+ *  their wallet, so a stale number here buys a wrong promise with real money. ONE rate per plan:
+ *  owner type selects the vendor, never the price, so there is no entity carve-out to quote. Tier
+ *  2 per-record pricing is deliberately absent: no MCP tool routes to it yet. */
+const TIER_1_RATES =
+  `$${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} per successful trace on Pro or AcquisitionPRO and ` +
+  `$${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go`;
+
+/** The no-match promise, scoped to what is ACTUALLY free. Verified against
+ *  lib/trace/settleBulkJob.ts and app/api/cron/sweep-bulk-research/route.ts: a record whose owner
+ *  is blank or a company is researched first, and that research fee is booked as soon as an owner
+ *  is identified, whether or not contacts follow. Never restore the blanket "a record that comes
+ *  back with no match is not charged". */
+const NO_MATCH_TERMS =
+  `Give us an individual owner's name and a trace that finds nothing is not charged. When the ` +
+  `owner is blank or a company, we research the owner first, and that research step costs ` +
+  `$${AI_RESEARCH.CHARGE_PER_RECORD.toFixed(2)} once we identify them, even if no contacts follow.`;
+
 const handler = createMcpHandler(
   (server) => {
     server.tool(
       "skip_trace_quote",
-      "Free cost estimate for a skip-trace list. Give records (owner_name, address, city, state, zip). Returns the dedup count, how many are people vs entities, the worst-case cost (persons at $0.07, entities up to $0.25), your current wallet balance, and whether the list exceeds the 500-per-call cap. Always call this first and show the cost to the user before skip_trace_bulk.",
+      `Free cost estimate for a skip-trace list. Give records (owner_name, address, city, state, zip). Returns the dedup count, how many are people vs entities, the worst-case cost (${TIER_1_RATES}), your current wallet balance, and whether the list exceeds the 500-per-call cap. ${NO_MATCH_TERMS} Always call this first and show the cost to the user before skip_trace_bulk.`,
       quoteSchema.shape,
       tool((admin, sub, args) => skipTraceQuote(admin, sub, args)),
     );
     server.tool(
       "skip_trace_bulk",
-      "Skip-trace a list of owners to resolve the CONTACT PERSON (a named human) plus their phones and emails, drawn from the user's PropTracerPRO wallet. When the owner is a company, LLC or trust, this resolves the individual behind it, so the result is a person's name and not the company you passed in. Up to 500 records per call (use one record for a single owner). Requires confirm: true, so quote and confirm the cost with the user first. Persons cost $0.07 each on success, entities up to $0.25. Returns a job_id; poll bulk_status for results.",
+      `Skip-trace a list of owners to resolve the CONTACT PERSON (a named human) plus their phones and emails, drawn from the user's PropTracerPRO wallet. When the owner is a company, LLC or trust, this resolves the individual behind it, so the result is a person's name and not the company you passed in. Up to 500 records per call (use one record for a single owner). Requires confirm: true, so quote and confirm the cost with the user first. Traces are charged on success: ${TIER_1_RATES}. ${NO_MATCH_TERMS} Returns a job_id; poll bulk_status for results.`,
       bulkSchema.shape,
       tool((admin, sub, args) => skipTraceBulk(admin, sub, args)),
     );

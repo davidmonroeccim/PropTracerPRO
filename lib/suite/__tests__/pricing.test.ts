@@ -2,7 +2,9 @@ import { afterEach, expect, test } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { chargePerTrace } from "@/lib/suite/pricing";
 
-// The flag is a kill-switch: the grant-aware $0.07 rate applies ONLY while Suite sign-in is enabled.
+// The flag is a kill-switch: the grant-aware pro rate (PRICING.CHARGE_PER_SUCCESS) applies ONLY
+// while Suite sign-in is enabled. Named by constant, not by number, so a reprice does not leave
+// this comment lying.
 const FLAG = "NEXT_PUBLIC_SUITE_SIGNIN_ENABLED";
 const original = process.env[FLAG];
 afterEach(() => {

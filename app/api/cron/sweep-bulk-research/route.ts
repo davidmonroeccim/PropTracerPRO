@@ -4,6 +4,7 @@ import { researchProperty } from '@/lib/ai-research/client';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { AI_RESEARCH, PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
 
 /**
@@ -47,6 +48,23 @@ export async function GET(request: Request) {
   let fastAppendCredited = 0;
   let errored = 0;
   let staleReverted = 0;
+
+  // Tier 1 per-successful-trace rate for a user, resolved once per run. Owner
+  // type selects the VENDOR, not the price, so a FastAppend entity success
+  // bills the same plan rate a Tracerfy person success does.
+  const tier1RateCache = new Map<string, number>();
+  const tier1RateFor = async (userId: string): Promise<number> => {
+    const cached = tier1RateCache.get(userId);
+    if (cached !== undefined) return cached;
+    const { data: rateProfile } = await adminClient
+      .from('user_profiles')
+      .select('subscription_tier, is_acquisition_pro_member, gateway_products')
+      .eq('id', userId)
+      .single();
+    const rate = rateProfile ? chargePerTrace(rateProfile) : PRICING.CHARGE_PER_SUCCESS_WALLET;
+    tier1RateCache.set(userId, rate);
+    return rate;
+  };
 
   try {
     // Stale-claim recovery: revert rows whose previous claim never finished
@@ -145,20 +163,21 @@ export async function GET(request: Request) {
 
         const ownerFound = !!researchForStorage.owner_name;
 
-        // FastAppend bundled path: when the inline business-trace poll
-        // succeeded and produced phones/emails, the row has already
-        // delivered everything the user needs. Charge the bundled
-        // $0.25 (research + trace combined) as a single ledger entry
-        // and skip the per-row Tracerfy submit entirely -- FastAppend's
-        // commercial-DB contacts are what the user paid for.
+        // FastAppend path: when the inline business-trace poll succeeded and
+        // produced phones/emails, the row has already delivered everything the
+        // user needs. Bill ONE tier 1 per-success charge at the user's plan
+        // rate as a single ledger entry (no separate research line) and skip
+        // the per-row Tracerfy submit entirely -- FastAppend's commercial-DB
+        // contacts are what the user paid for.
         const fastAppendCredit = traceCreditFromFastAppend(researchForStorage);
         if (fastAppendCredit) {
+          const tier1Rate = await tier1RateFor(row.user_id);
           await adminClient
             .from('trace_history')
             .update({
               ai_research: researchForStorage,
               ai_research_status: 'found',
-              ai_research_charge: 0, // Bundled into the $0.25 trace charge
+              ai_research_charge: 0, // Folded into the single trace charge
               ai_research_claimed_at: null,
               status: 'success',
               trace_result: fastAppendCredit.trace_result,
@@ -166,16 +185,15 @@ export async function GET(request: Request) {
               email_count: fastAppendCredit.email_count,
               is_successful: true,
               cost: PRICING.COST_PER_RECORD,
-              charge: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+              charge: tier1Rate,
             })
             .eq('id', row.id);
 
           await adminClient.rpc('deduct_wallet_balance', {
             p_user_id: row.user_id,
-            p_amount: PRICING.CHARGE_PER_FASTAPPEND_SUCCESS,
+            p_amount: tier1Rate,
             p_trace_history_id: row.id,
-            p_description:
-              'FastAppend business-trace contacts (bundled research + trace)',
+            p_description: 'FastAppend business-trace contacts (successful trace)',
           });
           fastAppendCredited++;
           continue;
@@ -207,7 +225,7 @@ export async function GET(request: Request) {
           // No FastAppend contacts and no person to skip-trace -- mark
           // no_match so the bulk job can finalize. (If FastAppend lands
           // async later via sweep-business-traces, that cron will refund
-          // the research charge and apply the bundled $0.25 credit.)
+          // the research charge and apply the tier 1 per-success charge.)
           await adminClient
             .from('trace_history')
             .update({

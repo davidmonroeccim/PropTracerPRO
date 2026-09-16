@@ -1,0 +1,230 @@
+PROPTRACERPRO PRICING CHANGE
+Draft for David's review. Nothing has been sent.
+
+
+=====================================================================
+EMAIL
+=====================================================================
+
+
+SUBJECT LINE, THREE OPTIONS
+
+
+1. PropTracerPRO pricing is changing on [DATE]
+
+2. A heads up before your next trace
+
+3. What's changing with PropTracerPRO pricing, and why
+
+
+-----------------------------------------------------------
+
+
+Hi [FIRST NAME],
+
+PropTracerPRO pricing changes on [DATE]. Some of it goes up and some
+of it comes down, and I'd rather walk you through it than have you
+piece it together from an invoice.
+
+Here's what it looks like.
+
+If you're on Pro or you're an AcquisitionPRO member:
+
+   You already have the owner's name       $0.15 per successful trace
+   You don't, or you want the full
+   property record                         $0.25 per record
+
+If you're pay as you go:
+
+   You already have the owner's name       $0.25 per successful trace
+   You don't, or you want the full
+   property record                         $0.40 per record
+
+It makes no difference whether the owner turns out to be a person or
+an LLC. Same price either way.
+
+The $97 Pro subscription isn't changing.
+
+What that means in practice. If you're on Pro and you work
+company-owned property where you already have the owner name, you'll
+pay less than you do today, because that trace drops from $0.25 to
+$0.15. On pay as you go that same trace stays where it is. Most of the
+rest goes up.
+
+Why it changed at all. Finding the owner of a commercial property is a
+different problem than finding the owner of a house. The method we had
+been leaning on worked reasonably well on property held by a person
+and fell down on property held by an LLC. Most commercial property is
+held by an LLC. So we rebuilt that part of the product on county
+assessor records, which is where the owner of record actually lives.
+That data costs us real money on every lookup, and the new pricing is
+what it takes to run it.
+
+Now the part worth reading, because we've never charged for it before
+and we've never explained it either.
+
+When you send us a record without an owner name, you don't just get a
+name back anymore. You get the property record behind it, better than
+60 fields of it.
+
+Every one carries the parcel number, the lot size, the assessed value,
+the land use, map coordinates, and whether the owner lives somewhere
+other than the property. Most carry the building size, the last sale
+date, and how long the current owner has held it. A good number carry
+the year built, the open mortgage balance, the lender and the flood
+zone. Fewer carry the unit count, the last sale price, and how much
+other property that same owner holds.
+
+Which ones land depends on the county. Some counties publish a lot and
+some publish very little, so the record runs deeper in some markets
+than it does in others. You are buying the county's record, not a
+guess at what the county might have said.
+
+That's the reason the higher tier costs what it costs. You're buying
+the property file, not just a phone number.
+
+One thing I want to be straight about, because it's a change and I
+don't want you finding it on a statement. The lower tier works the way
+it always has. You pay when we find somebody, and a miss costs you
+nothing. The higher tier is priced per record you send, whether or not
+contacts come back, because we're buying that property record either
+way.
+
+A couple of honest limits while I'm at it. Assessed value is the
+county's assessed value. It is not a market value and we don't
+pretend it is. And the sale and mortgage fields are only there when
+the county publishes them, which is most of the time but not all of
+it.
+
+If this creates a problem for how you're using PropTracerPRO, hit
+reply and tell me. I read these myself.
+
+David
+
+
+=====================================================================
+IN-APP NOTICE
+=====================================================================
+
+
+HEADLINE
+
+   Pricing changes on [DATE]
+
+
+BODY
+
+   When you already have the owner name, a trace is $0.15 on Pro and
+   AcquisitionPRO and $0.25 on pay as you go. You're only charged when
+   we find somebody.
+
+   When you don't have the owner, or you want the full property
+   record, it's $0.25 per record on Pro and AcquisitionPRO and $0.40
+   on pay as you go. That one is priced per record you send, because
+   we pull the property file whether or not contacts come back.
+
+   Person or LLC makes no difference to the price.
+
+   That property file is better than 60 fields from county assessor
+   records. Every one carries the parcel number, lot size, assessed
+   value, land use and whether the owner lives elsewhere. Most carry
+   building size, last sale date and how long it's been held. How deep
+   it runs depends on what the county publishes.
+
+   The $97 Pro subscription isn't changing.
+
+
+BUTTON
+
+   See the details
+
+
+=====================================================================
+END OF COPY. NOTHING BELOW THIS LINE IS FOR SENDING.
+=====================================================================
+
+
+NOTES FOR DAVID
+
+1. TIMING. This notice describes both tiers as live. The higher
+   per-record tier is not wired yet. Do not send this until the
+   planRoute wiring lands and ships, or you will be announcing a price
+   for something the app cannot charge.
+
+2. THE CHANGE IS MIXED, NOT A FLAT INCREASE. Verified against main,
+   where entity rows bill a flat $0.25 through
+   CHARGE_PER_FASTAPPEND_SUCCESS (lib/trace/settleBulkJob.ts:184):
+
+   Owner known, individual, Pro       $0.07 to $0.15   up 2.1x
+   Owner known, individual, PAYG      $0.11 to $0.25   up 2.3x
+   Owner known, entity, Pro           $0.25 to $0.15   DOWN
+   Owner known, entity, PAYG          $0.25 to $0.25   unchanged
+   Owner unknown, Pro                 about $0.25 to $0.25   flat
+   Owner unknown, PAYG                about $0.25 to $0.40   up
+
+   The handoff measured 22 of 24 commercial parcels as entity-owned.
+   So a Pro user who already has owner names sees the dominant
+   commercial case get CHEAPER, and the same user on pay as you go
+   sees it unchanged. Only the individual-owner and unknown-owner
+   cases are increases.
+
+   An earlier draft opened with "it's going up" flat. That was wrong
+   and would have spent goodwill you did not need to spend.
+
+   Under this model owner type no longer affects price at all, so the
+   email says so in one line rather than showing customers a matrix.
+
+3. WHY I WORDED THE REASON THAT WAY. I did not write that the old
+   method failed outright. The evidence says it worked on individually
+   owned property and failed on entity-owned property, and 22 of the
+   24 commercial parcels tested were entity-owned. Saying it plainly
+   failed would be inaccurate and would invite refund requests for AI
+   Search charges already billed.
+
+4. EVERY FIELD NAMED IS ONE THE HANDOFF VERIFIED. Nothing here claims
+   estimated value, equity, high equity, free and clear, or any
+   propensity score. The handoff shows estimated value is just the
+   assessed value with no AVM behind it. The email says assessed value
+   is not market value, on purpose.
+
+5. FILL RATES ARE HEDGED, NOT PROMISED. The copy groups fields by
+   their measured rate and never promises one above what was measured.
+   "Every one" is the 100 percent set. "Most" is the 70 to 91 percent
+   band: building size 91, year built 78, stories 70, mortgage balance
+   70, lender 74. "Roughly half" is sale price at 52. "About four in
+   ten" is unit count at 43.
+
+   An earlier draft of this listed unit count and stories flat in with
+   the 100 percent fields. That was an overclaim on the lowest-filling
+   field in the set and it is corrected above.
+
+6. "60+ FIELDS" IS CORRECT AND I WAS WRONG TO QUESTION IT. Counted
+   directly from the 24 saved raw vendor responses: the dossier
+   returns 86 fields, and 46 of them carry a usable value at least
+   somewhere. Your framing was right too. Which fields are useful
+   depends on the county, which is why the copy above bands them by
+   how often they land instead of listing them flat.
+
+   I had claimed the handoff only supported 30. That was me reading
+   its illustrative list as an exhaustive one. The full inventory is
+   now written into the handoff so nobody has to re-derive it.
+
+7. THE DISTRESS FLAGS ARE NOT SAFE TO ADVERTISE AND I PULLED THEM.
+   The handoff called all eleven status flags "100%". That is a
+   presence count. Measured over 24 records:
+
+   absentee_owner     TRUE on 21 of 24  (88%)
+   owner_occupied     TRUE on  1 of 24  (4%)
+   vacant, tax_delinquent, tax_lien, pre_foreclosure, foreclosure,
+   inherited, death, judgment, hoa    TRUE on 0 of 24
+
+   Nine of the eleven have never once fired on a commercial parcel.
+   Could be that commercial property genuinely isn't distressed, could
+   be the vendor doesn't populate those for commercial. 24 records
+   can't tell us. Either way, selling "tax delinquent and
+   pre-foreclosure flags" would be selling something with no evidence
+   behind it, so the copy now names only the absentee owner signal,
+   which is real and is the useful one for CRE anyway.
+
+7. BLANKS TO FILL. [DATE] appears four times across both pieces.
+   [FIRST NAME] once.

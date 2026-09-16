@@ -135,6 +135,40 @@ a consumer-data product.
 
 ## PRICING, AS DECIDED
 
+### CANONICAL TABLE. David settled this on 2026-09-16 after three restatements.
+
+**TWO axes: tier and plan. FOUR numbers. If your table has more or fewer cells than four, it is
+wrong.**
+
+| Tier | When | Model | Pro + AcquisitionPRO | Pay-as-you-go |
+|---|---|---|---|---|
+| 1 | Owner of record is **known** | per **successful trace** | **$0.15** | **$0.25** |
+| 2 | Owner **not** known, OR the caller wants the enriched dossier | per **record** | **$0.25** | **$0.40** |
+
+**Owner type does NOT affect price. It selects the vendor.** An individual routes to Tracerfy, an
+entity routes to FastAppend, and both bill the same tier 1 rate for that plan. There is no
+entity price, no entity surcharge and no entity discount anywhere in the model.
+
+**Tier 2 does not split by owner type either.** Once the owner is unknown, or the caller wants the
+dossier, the price is the same for an individual and an entity.
+
+**The trap that cost three restatements:** the vendor split (Tracerfy vs FastAppend) and the
+vendor COSTS ($0.10 entity contacts, $0.10 individual contacts, $0.20 dossier) are real and are
+documented above in WHAT WORKS. They are cost-side only. Do not let them leak into the price
+table. `CHARGE_PER_FASTAPPEND_SUCCESS` existed because the old model priced the FastAppend path
+separately; under this model that is retired and an entity trace bills the plan's tier 1 rate.
+
+**Tier 2 blended cost is about $0.25 per record**, which is why the Pro tier-2 rate of $0.25 runs
+at cost. **That is intentional**; David covers it from membership revenue outside PTP. Do not
+raise it and do not flag it again.
+
+**Costs, for margin checks:** FastAppend entity contacts $0.10/hit. Tracerfy individual contacts
+$0.10/hit. Dossier $0.20/hit. Tier 2 blended cost is about $0.25 per parcel analyzed, which is why
+the Pro tier-2 rate of $0.25 runs at cost. **That is intentional**; David covers it from membership
+revenue outside PTP. Do not raise it and do not flag it again.
+
+### The superseded version, kept only so nobody restores it
+
 | Tier | When | Model | Price |
 |---|---|---|---|
 | 1 | Owner already in the registry | per **successful trace** | **$0.15** |
@@ -152,7 +186,50 @@ because revenue is fixed and each hit costs $0.10. Success is a cost.
 
 ---
 
-## THE DOSSIER RETURNS 84 FIELDS. WE USE THREE.
+## THE DOSSIER RETURNS 86 FIELDS. WE USE THREE.
+
+### MEASURED FIELD INVENTORY. Re-derived 2026-09-16 by counting keys in the 24 unique saved raw responses.
+
+This is the empirical answer to "is 60+ fields a defensible claim". **It is.**
+
+| | Count |
+|---|---|
+| Keys returned on `response.property` | **86** |
+| Forbidden to display (AVM, equity, `corporate_owned`, `price_per_sqft`) | 7 |
+| Propensity and renovation scores (built on the equity math) | 15 |
+| Never once populated across all 24 | 18 |
+| **Fields with at least one usable value** | **46** |
+
+Plus `owners`, `mailing_address`, `contacts` and `meta` as sibling objects on the same response.
+
+**So "60+ fields" is accurate for what is RETURNED and is conservative against 86.** It is NOT
+accurate as a claim about what is reliably populated. David's framing is the correct one: the
+fields are there, and which ones are useful depends on the market, the county and the state.
+Copy should state the count and then band by reliability. Never promise a field flat.
+
+**Usable-rate bands, measured, not assumed:**
+
+- **100%** (16): `address`, `city`, `state`, `zip_code`, `county`, `latitude`, `longitude`, `apn`,
+  `property_type`, `property_use`, `land_use`, `lot_size_sqft`, `assessed_value`,
+  `absentee_owner`, `area_median_income`, `investor_buyer`
+- **75-99%** (5): `building_size_sqft` 91, `last_sale_date` 82, `years_owned` 82,
+  `document_type` 82, `recording_date` 82
+- **50-74%** (6): `year_built`, `open_mortgage_balance`, `lender_name`,
+  `estimated_mortgage_payment`, `flood_zone`, `stories`
+- **25-49%** (6): `units_count`, `prior_sale_date`, `total_properties_owned`,
+  `total_portfolio_value`, `last_sale_price`, `cash_buyer`
+- **1-24%** (10): MLS fields, `beds`, `has_ac`, `has_garage`, `roof_construction`,
+  `prior_sale_price`, `quit_claim`
+
+**Fields nobody had documented that matter for CRE:** `years_owned` (82%, hold-period signal),
+`total_properties_owned` and `total_portfolio_value` (36%, portfolio-scale signal),
+`flood_zone` (64%), `area_median_income` (100%), `investor_buyer` (100%).
+
+**Note on the band numbers:** these are computed over the 24 unique records and differ slightly
+from the per-field rates below, which were measured over a 23-hit subset. Where they disagree,
+prefer these, because they are reproducible from the saved files.
+
+---
 
 Worth capturing per-user (the user bought it, for their own use — this is NOT a shared registry).
 Fill rates below treat **0 as absent**, measured over 23 hits.
@@ -160,19 +237,83 @@ Fill rates below treat **0 as absent**, measured over 23 hits.
 **Trustworthy** — county-sourced facts and observations:
 `lot_size_sqft` 100%, `assessed_value` 100% (label it assessed, never market), `latitude`/
 `longitude` 100%, `property_type`/`property_use`/`land_use` 100%, `building_size_sqft` **91%**,
-`year_built` 78%, `stories` 70%, `units_count` 43%, normalized `apn` 100%, plus every status flag
-at 100%: `absentee_owner`, `owner_occupied`, `vacant`, `tax_delinquent`, `tax_lien`,
-`pre_foreclosure`, `foreclosure`, `inherited`, `death`, `judgment`, `hoa`.
+`year_built` 78%, `stories` 70%, `units_count` 43%, normalized `apn` 100%.
+
+> **CORRECTION, 2026-09-16, re-derived from the 24 saved raw responses in `tasks/research-test/`.**
+> An earlier version of this line said "every status flag at 100%". **That was a PRESENCE count and
+> it is misleading.** The flag keys are present on 24 of 24 records. What they actually contain:
+>
+> | Flag | Present | Actually TRUE | |
+> |---|---|---|---|
+> | `absentee_owner` | 24/24 | **21 (88%)** | genuinely useful, the one worth surfacing |
+> | `owner_occupied` | 24/24 | 1 (4%) | |
+> | `vacant`, `tax_delinquent`, `tax_lien`, `pre_foreclosure`, `foreclosure`, `inherited`, `death`, `judgment`, `hoa` | 24/24 | **0 (0%)** | never fired once |
+>
+> Nine of the eleven flags have **never been true on a commercial parcel in this sample.** Whether
+> that is because commercial property genuinely is not distressed, or because the vendor does not
+> populate distress flags for commercial, is UNKNOWN and 24 records cannot settle it.
+>
+> **Do not advertise the distress flags as a reason to buy.** `absentee_owner` is the only one
+> with evidence behind it. This is the exact presence-versus-usable error this document's own
+> closing warning names, committed inside this document.
 
 **Transaction and debt layer** (bank debt — Maturr covers CMBS/HUD/Ginnie, not this):
 `last_sale_price` **52%** (Ohio-only in our sample), `last_sale_date` / `recording_date` /
 `document_type` ~91% of those, `open_mortgage_balance` 70%, `estimated_mortgage_payment` 70%,
 `lender_name` 74%.
 
-**Do NOT store or display:** `estimated_value` (it is the assessed value), `estimated_equity`,
-`equity_percent`, `high_equity`, `free_clear`, `corporate_owned`, and every propensity score
-(they are built on the equity math). `price_per_sqft` is just sale ÷ sqft and is **0 whenever
-there is no sale price**, so it is not an independent value source.
+### CAPTURE EVERYTHING. GATE DISPLAY, NOT STORAGE. Revised 2026-09-16 on David's challenge.
+
+An earlier version of this section said "do NOT store or display" for three groups at once. David
+pushed back: a field that is empty in 24 parcels across OH, CA and UT may be populated in other
+counties, and blocking storage on a 24-parcel sample is the L-001 mistake. He is right. **Nothing
+is blocked from STORAGE.** The rules below govern DISPLAY only, and each one names its reason,
+because the reasons are not the same and they do not age the same way.
+
+**Group A, 7 fields. Do not DISPLAY. Reason: provably wrong, not missing.**
+`estimated_value` (100% populated, but it equals `assessed_value` on 23 of 23; there is no AVM),
+and everything derived from it: `estimated_equity` (46%), `equity_percent` (46%), `high_equity`
+(33%), `free_clear` (33%). Plus `corporate_owned` (92% populated but returned FALSE for
+`STORAGE TRUST PROPERTIES, L.P.`) and `price_per_sqft` (sale ÷ sqft, 0 with no sale).
+**More counties will not fix these.** The defect is in the vendor's math, not in county coverage.
+Store them; if the vendor ever ships a real AVM the history is there.
+
+**Group B, 15 propensity fields. The blanket ban was TOO BROAD. Two separate problems:**
+
+1. *Equity contamination, varies by model.* The `_factors` arrays name every input with points.
+   `refi_propensity` is almost entirely equity math: `thin_equity` -15 (fires 14/24),
+   `high_equity` +15, `free_clear` +6, `ltv_sweet_spot`. That one is genuinely unusable.
+   `sell_propensity` is MIXED: only `low_equity_distress` +10 and `free_clear` +4 are tainted,
+   while `absentee_owner` +8 (21/24), `investor_buyer` +5 (21/24), `portfolio_size` up to +5,
+   `years_owned` up to +12, `quit_claim_deed` +4, `mls_cancelled` +15 and `aging_property` are
+   real, independently checkable signals.
+2. *They are RESIDENTIAL models run on commercial buildings.* Verbatim from the factors:
+   `"41,588 sqft — large home, higher HVAC cost and complexity"` on the building the handoff
+   elsewhere records as carrying $175,000,000 of blanket debt. Also `"79,684 sqft — large home"`,
+   `"Home built in 1904 (122 years old)"`, and `home_value` scoring off `estimated_value`.
+   The roof, HVAC and solar models are homeowner models. They are not wrong about equity so much
+   as inapplicable to the asset class.
+
+   **`sell_propensity` also consumes `corporate_owned` (+3, fires 22/24), a field this document
+   already flags as unreliable.** And `low_equity_distress` fires on 14 of 24 at +10 points, off
+   an equity number computed from assessed value, where assessed/sale ran 0.07 to 0.59 in Ohio
+   alone. So the sell score is being inflated on more than half the sample by a signal that is
+   wrong by construction.
+
+   **Do not display the scores. DO mine the `_factors` arrays**, which surface `years_owned`,
+   `portfolio_size`, `flood_zone`, `absentee_owner` and `quit_claim` as raw signals. Surface those
+   from the underlying fields directly, where they are checkable.
+
+**Group C, 18 fields never populated in this sample. NOT BLOCKED. Coverage, not correctness.**
+`tax_delinquent`, `tax_delinquent_year`, `tax_lien`, `foreclosure`, `pre_foreclosure`, `inherited`,
+`death`, `judgment`, `vacant`, `hoa`, `adjustable_rate`, `subdivision`, `mls_active`,
+`mls_pending`, `mls_sold`, `baths`, `has_pool`, `has_deck`.
+
+These are absent in 24 parcels across three states. **That is a statement about OH, CA and UT, not
+about the field.** Several are exactly the distress signals a CRE prospector wants, and county
+recorders differ enormously in what they publish. Capture all of them, display them when present,
+and do not ADVERTISE them until a wider sample shows a rate. The only honest current statement is
+"not observed in the 24 parcels measured."
 
 Always empty on commercial: `subdivision`, `tax_delinquent_year`. Residential-only fields
 (`beds`, `baths`, `roof_material`) fill under 10%.

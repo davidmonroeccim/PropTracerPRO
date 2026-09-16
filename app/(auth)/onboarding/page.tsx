@@ -61,7 +61,7 @@ export default function OnboardingPage() {
       }
 
       // Profile preferences only. AcquisitionPRO membership is deliberately NOT written here:
-      // it is entitlement (it gates /api/v1 and selects the $0.07 vs $0.11 per-trace rate), so
+      // it is entitlement (it gates /api/v1 and selects the pro vs wallet per-trace rate), so
       // it is persisted server-side by /api/verify-member at verification time, from
       // HighLevel's answer rather than from this component's state. Migration 20260716 revokes
       // UPDATE on those columns from `authenticated`, so re-adding them here would not just be

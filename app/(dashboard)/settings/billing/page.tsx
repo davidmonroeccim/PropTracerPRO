@@ -364,11 +364,17 @@ export default function BillingPage() {
             <div className={`border rounded-lg p-4 ${profile.subscription_tier !== 'pro' ? 'border-blue-500 bg-blue-50' : ''}`}>
               <h3 className="font-semibold">Pay-As-You-Go</h3>
               <p className="text-2xl font-bold mt-2">$0<span className="text-sm font-normal">/month</span></p>
-              <p className="text-sm text-gray-500 mt-1">+ $0.11 per successful trace</p>
+              <p className="text-sm text-gray-500 mt-1">
+                + ${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} per successful trace when you already have the owner
+              </p>
+              <p className="text-sm text-gray-500">
+                or ${PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET.toFixed(2)} per record when we find the owner for you
+              </p>
               <ul className="mt-4 space-y-2 text-sm">
                 <li>No monthly commitment</li>
                 <li>Wallet-based billing</li>
                 <li>Full access to skip tracing</li>
+                <li>Owner of record plus a 60+ field property record on every record we look up</li>
               </ul>
               {profile.subscription_tier !== 'pro' && (
                 <Badge className="mt-4">Current Plan</Badge>
@@ -381,12 +387,18 @@ export default function BillingPage() {
                 <h3 className="font-semibold">Pro</h3>
                 <Badge className="bg-purple-100 text-purple-800">Popular</Badge>
               </div>
-              <p className="text-2xl font-bold mt-2">$97<span className="text-sm font-normal">/month</span></p>
-              <p className="text-sm text-gray-500 mt-1">+ $0.07 per successful trace</p>
+              <p className="text-2xl font-bold mt-2">${PRICING.PRO_MONTHLY}<span className="text-sm font-normal">/month</span></p>
+              <p className="text-sm text-gray-500 mt-1">
+                + ${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} per successful trace when you already have the owner
+              </p>
+              <p className="text-sm text-gray-500">
+                or ${PRICING.TIER2_PER_RECORD_SUBMITTED_PRO.toFixed(2)} per record when we find the owner for you
+              </p>
               <ul className="mt-4 space-y-2 text-sm">
                 <li className="font-medium text-purple-700">Full API access</li>
                 <li>Webhook support</li>
                 <li>Integrations</li>
+                <li>Owner of record plus a 60+ field property record on every record we look up</li>
               </ul>
               {profile.subscription_tier === 'pro' ? (
                 <Badge className="mt-4">Current Plan</Badge>

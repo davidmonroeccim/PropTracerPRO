@@ -70,6 +70,10 @@ export async function GET(request: Request) {
     const rows = (rowsRaw || []) as TraceHistoryRow[];
 
     // Already-finalized jobs: just emit the stored summary + per-record details.
+    // total_charge SUMS THE STORED PER-ROW CHARGES. It must never be
+    // records_matched x a live rate: the rate moves, the history does not, and a
+    // repriced constant would restate what the user was actually billed on every
+    // past job. The stored charge is the amount the settle path wrote at the time.
     if (traceJob.status === 'completed' || traceJob.status === 'failed') {
       return NextResponse.json({
         success: true,
@@ -77,7 +81,9 @@ export async function GET(request: Request) {
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
-        total_charge: traceJob.records_matched * chargePerTrace,
+        total_charge: Number(
+          rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)
+        ),
         error_message: traceJob.error_message,
         results: rows.map(buildPerRecordResult),
       });

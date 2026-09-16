@@ -32,7 +32,8 @@ export async function POST() {
     // state and then wrote `is_acquisition_pro_member: verificationStatus === 'verified'`
     // itself. The server verified honestly and the client decided what to save, which is a
     // self-grant: is_acquisition_pro_member gates /api/v1 access AND selects the per-trace
-    // rate ($0.07 vs $0.11), so it is entitlement and money, not a preference.
+    // rate (CHARGE_PER_SUCCESS vs CHARGE_PER_SUCCESS_WALLET), so it is entitlement
+    // and money, not a preference.
     //
     // Migration 20260716 revokes UPDATE on this column from `authenticated`, so the old
     // browser write can no longer succeed. This is the replacement path, not an addition.

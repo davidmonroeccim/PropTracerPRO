@@ -74,6 +74,50 @@ The defect is never "a tenant got in." It is "a name got in with no record behin
 
 ---
 
+## L-005: Do not let the COST model's dimensions leak into the PRICE model (2026-09-16)
+
+**The correction, which took three passes.** David restated pricing, I implemented it wrong, he
+restated it (*"We hashed this already. Here it is AGAIN!"*), I implemented THAT wrong in the
+opposite direction, and he corrected it a third time with one sentence: *"The pay as you go owner
+known is wrong. It should be $0.25."*
+
+**The actual model.** Two axes, tier and plan, four numbers. Tier 1 (owner known) is $0.15 for
+Pro and AcquisitionPRO, $0.25 for pay-as-you-go. Tier 2 is $0.25 and $0.40. **Owner type selects
+the VENDOR, not the price.**
+
+**The root cause.** This project has two tables that share a shape and do not share dimensions:
+
+- The **cost** table genuinely has a vendor axis. FastAppend entity contacts $0.10, Tracerfy
+  individual contacts $0.10, dossier $0.20. That axis is real and is documented in the handoff.
+- The **price** table has no vendor axis at all.
+
+David describes routing and price in the same breath, because to him they are one workflow: *"if
+the owner is known and is an entity, the cost is $0.15 per successful trace through fastappend."*
+I read the vendor clause as a pricing dimension and manufactured an entity rate that never
+existed. The word "cost" in that sentence also means price-to-customer, not vendor cost, which is
+the same conflation running the other way.
+
+**The compounding error.** Told a single number for the entity case, I inferred it was FLAT across
+plans rather than asking which plan it belonged to. One number for a case that has a plan axis is
+an incomplete statement, not a statement of uniformity. I then wrote that invented flat rate into
+the handoff as canonical, marked it "do not fix this into a plan split," and wrote a lesson
+congratulating myself for recording axes carefully. All three artifacts were confidently wrong.
+
+**The rule.** Before writing any price into code or copy, say out loud which axes PRICE varies on
+and which axes only VENDOR or COST varies on. They are different tables. A sentence naming a
+vendor is a routing fact until the speaker says the price differs by vendor.
+
+**And: one number for a multi-axis case is missing information, not a flat rate.** When a value
+arrives for a case whose axes you know, and the speaker names fewer coordinates than there are
+axes, you have an underspecified cell. Ask. Do not resolve it by assuming uniformity, and
+absolutely do not then record the assumption as canonical.
+
+**Second-order cost.** Two full implementation passes, an adversarial review, and a customer
+notification draft, each internally consistent with a different wrong model. The reviewer could
+not catch it because it was auditing against the same bad table.
+
+---
+
 ## L-003: Owner TYPE is the product, not just owner NAME (2026-09-16)
 
 The research step's output feeds a routing decision: individual owner goes to Tracerfy, entity owner

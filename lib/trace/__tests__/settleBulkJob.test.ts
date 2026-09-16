@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PRICING } from "@/lib/constants";
+import { PRICING, AI_RESEARCH } from "@/lib/constants";
 import { settleBulkJob, type TraceHistoryRow } from "@/lib/trace/settleBulkJob";
 
 // Mock the tracerfy client so getJobStatus returns a controlled result set and
@@ -65,7 +65,7 @@ describe("settleBulkJob money contract", () => {
   it("charges the injected personRate on a successful person match", async () => {
     // Shared-bulk (person) branch requires bucketRows.length > 1. One result
     // matches row-a by city/state and carries a phone -> successful.
-    const injectedRate = PRICING.CHARGE_PER_SUCCESS; // 0.07
+    const injectedRate = PRICING.CHARGE_PER_SUCCESS; // the tier 1 pro/grant per-success rate
     getJobStatus.mockResolvedValue({
       success: true,
       pending: false,
@@ -120,8 +120,12 @@ describe("settleBulkJob money contract", () => {
     expect(rows[0].is_successful).toBe(false);
   });
 
-  it("refunds the $0.15 research then charges $0.25 on a FastAppend-sourced entity match", async () => {
-    expect(PRICING.CHARGE_PER_FASTAPPEND_SUCCESS).toBe(0.25);
+  it("refunds the AI research charge then charges the tier 1 rate on an entity match", async () => {
+    // Owner type selects the VENDOR, not the price: a FastAppend entity success bills the SAME
+    // injected tier 1 rate a Tracerfy person success does. The old flat per-entity constant
+    // PRICING.CHARGE_PER_FASTAPPEND_SUCCESS is retired and must not come back.
+    expect(PRICING).not.toHaveProperty("CHARGE_PER_FASTAPPEND_SUCCESS");
+    expect(AI_RESEARCH.CHARGE_PER_RECORD).toBe(0.15);
     // Entity single-trace branch (bucketRows.length === 1). Tracerfy whiffed
     // (no phones/emails) but FastAppend contacts are present in ai_research.
     getJobStatus.mockResolvedValue({
@@ -132,7 +136,7 @@ describe("settleBulkJob money contract", () => {
     const admin = makeAdmin();
     const row = mkRow({
       id: "row-entity",
-      ai_research_charge: 0.15,
+      ai_research_charge: AI_RESEARCH.CHARGE_PER_RECORD,
       ai_research: {
         owner_name: "Jane Principal",
         owner_type: "business",
@@ -155,11 +159,14 @@ describe("settleBulkJob money contract", () => {
       },
     });
 
+    // Inject the PAY-AS-YOU-GO rate ($0.25) deliberately. The Pro rate ($0.15) collides with
+    // AI_RESEARCH.CHARGE_PER_RECORD, so injecting it would let a settle path that charged the
+    // research fee instead of the trace rate pass unnoticed. The wallet rate discriminates.
     await settleBulkJob(admin as never, {
       tracerfyJobId: "tj-3",
       bucketRows: [row],
       userId: USER_ID,
-      personRate: PRICING.CHARGE_PER_SUCCESS,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
     });
 
     const calls = admin.rpc.mock.calls;
@@ -167,14 +174,17 @@ describe("settleBulkJob money contract", () => {
     const deductIdx = calls.findIndex((c) => c[0] === "deduct_wallet_balance");
     expect(creditIdx).toBeGreaterThanOrEqual(0);
     expect(deductIdx).toBeGreaterThanOrEqual(0);
-    // Refund the prior $0.15 research charge, then charge the bundled $0.25.
-    expect(calls[creditIdx][1].p_amount).toBe(0.15);
-    expect(calls[deductIdx][1].p_amount).toBe(PRICING.CHARGE_PER_FASTAPPEND_SUCCESS);
+    // Refund the prior research charge, then charge ONE tier 1 per-success trace at the
+    // caller's plan rate. Same rate the Tracerfy branch bills: the vendor changed, not the price.
+    expect(calls[creditIdx][1].p_amount).toBe(AI_RESEARCH.CHARGE_PER_RECORD);
+    expect(calls[deductIdx][1].p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(calls[deductIdx][1].p_amount).not.toBe(AI_RESEARCH.CHARGE_PER_RECORD);
     // Choreography: refund BEFORE charge; must not be netted or reordered.
     expect(creditIdx).toBeLessThan(deductIdx);
     expect(calls[creditIdx][1].p_user_id).toBe(USER_ID);
     expect(calls[deductIdx][1].p_user_id).toBe(USER_ID);
-    // Person rate is NOT used on the FastAppend branch (flat constants only).
-    expect(calls[deductIdx][1].p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS);
+    // And the row records exactly what the wallet moved.
+    expect(row.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(row.ai_research_charge).toBe(0);
   });
 });

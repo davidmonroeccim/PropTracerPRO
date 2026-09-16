@@ -5,8 +5,7 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { Search, FileUp, ArrowRight, Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
-import { PRICING } from '@/lib/constants';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
 import type { TraceHistory, TraceJob } from '@/types';
 
 async function getUsageStats(userId: string) {
@@ -97,16 +96,14 @@ export default async function DashboardPage() {
 
   if (!user) return null;
 
-  const [stats, recentJobs, profileResult] = await Promise.all([
+  const [stats, recentJobs] = await Promise.all([
     getUsageStats(user.id),
     getRecentJobs(user.id),
-    supabase.from('user_profiles').select('subscription_tier, is_acquisition_pro_member, gateway_products').eq('id', user.id).single(),
   ]);
 
-  const userProfile = profileResult.data;
-  const perTrace = userProfile
-    ? chargePerTrace(userProfile)
-    : PRICING.CHARGE_PER_SUCCESS_WALLET;
+  // What each bulk job ACTUALLY billed, summed from the stored per-row charges.
+  // Never records_matched x a live rate: that restates history every reprice.
+  const bulkCharges = await getBulkJobCharges(supabase, user.id, recentJobs);
 
   const bulkTracerfyJobIds = recentJobs
     .map(j => j.tracerfy_job_id)
@@ -279,7 +276,7 @@ export default async function DashboardPage() {
 
                 // Bulk job entry
                 const job = entry.data;
-                const bulkCharge = job.records_matched * perTrace;
+                const bulkCharge = bulkCharges.get(job.id);
 
                 return (
                   <div
@@ -294,7 +291,12 @@ export default async function DashboardPage() {
                       <p className="text-xs text-gray-500">
                         {job.total_records} total, {job.records_submitted} submitted
                         {job.status === 'completed' && (
-                          <> &middot; {job.records_matched} matched &middot; {formatCurrency(bulkCharge)}</>
+                          <>
+                            {' '}&middot; {job.records_matched} matched
+                            {bulkCharge !== undefined && (
+                              <> &middot; {formatCurrency(bulkCharge)}</>
+                            )}
+                          </>
                         )}
                       </p>
                     </div>

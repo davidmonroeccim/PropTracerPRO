@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { PRICING } from '@/lib/constants';
 import {
   Search,
   FileUp,
@@ -83,7 +84,7 @@ function Hero() {
           The Lowest Cost Per Found Lead. Fully Automated.
         </h1>
         <p className="mt-6 text-lg sm:text-xl text-gray-600 max-w-2xl mx-auto">
-          PropTracerPRO&trade; is the only skip tracing platform with full inbound and outbound API access &mdash; so you can send addresses in, get results back, and push to your CRM without ever touching a spreadsheet. Starting at just $0.07 per found lead.
+          PropTracerPRO&trade; is the only skip tracing platform with full inbound and outbound API access, so you can send addresses in, get results back, and push to your CRM without ever touching a spreadsheet. Traces start at ${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} per successful match when you already have the owner.
         </p>
         <div className="mt-10 flex flex-col sm:flex-row gap-4 justify-center">
           <Link href="/register">
@@ -106,9 +107,9 @@ function Hero() {
 
 function SocialProof() {
   const stats = [
-    { value: '$0.07', label: 'Per found lead on Pro' },
+    { value: `$${PRICING.CHARGE_PER_SUCCESS.toFixed(2)}`, label: 'Per found lead on Pro when you already have the owner' },
     { value: '2-Way API', label: 'The only skip tracer with full API automation' },
-    { value: '$0', label: 'Charge for no-match results' },
+    { value: '$0', label: 'For a no-match when you already have the owner' },
   ];
 
   return (
@@ -131,7 +132,7 @@ const features = [
   {
     icon: Search,
     title: 'Single Property Trace',
-    description: 'Enter an address and get owner phone numbers and emails back in seconds.',
+    description: 'Enter an address and get owner phone numbers and emails back in seconds. If you do not have the owner, we pull the owner of record plus a 60+ field property record from county data.',
   },
   {
     icon: FileUp,
@@ -158,7 +159,7 @@ const features = [
   {
     icon: Wallet,
     title: 'Wallet Billing',
-    description: 'Pre-fund your wallet and only pay for successful matches. Optional auto-refill so you never run out.',
+    description: 'Pre-fund your wallet and draw from it as you go. Optional auto-refill so you never run out.',
   },
 ];
 
@@ -169,7 +170,7 @@ function Features() {
         <div className="text-center mb-14">
           <h2 className="text-3xl font-bold text-[#1B3A5C]">The Lowest Cost. The Only Full-Automation Platform.</h2>
           <p className="mt-3 text-gray-600 max-w-2xl mx-auto">
-            Other skip tracers make you download CSVs and re-upload everywhere. PropTracerPRO&trade; connects your entire pipeline &mdash; at the lowest per-lead price in the industry.
+            Other skip tracers make you download CSVs and re-upload everywhere. PropTracerPRO&trade; connects your entire pipeline, at the lowest per-lead price in the industry.
           </p>
         </div>
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -206,7 +207,7 @@ function Features() {
 function HowItWorks() {
   const steps = [
     { icon: Upload, num: '1', title: 'Upload or Search', description: 'Enter a single address or upload a CSV with thousands of records.' },
-    { icon: Search, num: '2', title: 'We Trace', description: 'Our engine finds owner names, phone numbers, and emails from multiple data sources.' },
+    { icon: Search, num: '2', title: 'We Trace', description: 'We pull the owner of record from county assessor data, then resolve their phone numbers and emails.' },
     { icon: Download, num: '3', title: 'Get Results', description: 'View results instantly, download CSV, or push directly to your CRM.' },
   ];
 
@@ -235,31 +236,49 @@ function HowItWorks() {
 
 /* ──────────────────────────── PRICING ──────────────────────────── */
 
+/**
+ * Two tiers per plan, and the cards must show both.
+ *   perTrace  = tier 1, billed per SUCCESSFUL trace, a no-match is free.
+ *   perRecord = tier 2, billed per RECORD SUBMITTED, so a no-match is billed.
+ * Customer-facing label for tier 2 is "per record", never "per search".
+ * Values read from PRICING so a card can never drift from the ledger.
+ */
+const TIER_1_PRO = `$${PRICING.CHARGE_PER_SUCCESS.toFixed(2)}`;
+const TIER_1_WALLET = `$${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)}`;
+const TIER_2_PRO = `$${PRICING.TIER2_PER_RECORD_SUBMITTED_PRO.toFixed(2)}`;
+const TIER_2_WALLET = `$${PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET.toFixed(2)}`;
+
+const PROPERTY_RECORD_FEATURE =
+  'Owner of record plus a 60+ field property record whenever we do the lookup';
+
 const plans = [
   {
     name: 'Pay-As-You-Go',
     price: '$0',
     period: '/mo',
-    perTrace: '$0.11',
+    perTrace: TIER_1_WALLET,
+    perRecord: TIER_2_WALLET,
     description: 'No commitment. Fund your wallet and trace.',
     features: [
       'Single & bulk tracing',
       'Smart 90-day deduplication',
       'CSV download',
       'Wallet billing with auto-refill',
+      PROPERTY_RECORD_FEATURE,
     ],
     cta: 'Get Started',
     highlight: false,
   },
   {
     name: 'Pro',
-    price: '$97',
+    price: `$${PRICING.PRO_MONTHLY}`,
     period: '/mo',
-    perTrace: '$0.07',
+    perTrace: TIER_1_PRO,
+    perRecord: TIER_2_PRO,
     description: 'For power users who need integrations and lower rates.',
     features: [
       'Everything in Pay-As-You-Go',
-      'Lowest per-lead rate ($0.07)',
+      `Our lowest rates (${TIER_1_PRO} per trace, ${TIER_2_PRO} per record)`,
       'Full inbound + outbound API access',
       'HighLevel CRM auto-push',
       'Webhook automations (Zapier, Make, etc.)',
@@ -271,11 +290,12 @@ const plans = [
     name: 'AcquisitionPRO\u00AE Members',
     price: '$0',
     period: '/mo',
-    perTrace: '$0.07',
+    perTrace: TIER_1_PRO,
+    perRecord: TIER_2_PRO,
     description: 'Included with your AcquisitionPRO\u00AE membership.',
     features: [
       'Everything in Pro',
-      'Pro-rate pricing ($0.07)',
+      `Pro-rate pricing (${TIER_1_PRO} per trace, ${TIER_2_PRO} per record)`,
       'No monthly subscription fee',
       'Auto-verified membership',
     ],
@@ -290,7 +310,7 @@ function Pricing() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-14">
           <h2 className="text-3xl font-bold text-[#1B3A5C]">The Lowest Cost Per Found Lead</h2>
-          <p className="mt-3 text-gray-600">Pay only for successful matches. No charge for no-match results. No hidden fees. No contracts.</p>
+          <p className="mt-3 text-gray-600">Bring your own owner and you only pay for successful matches, with no charge for a no-match. Ask us to find the owner and it is a flat price per record you send us. No hidden fees. No contracts.</p>
         </div>
         <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto">
           {plans.map((p) => (
@@ -309,7 +329,8 @@ function Pricing() {
                   <span className="text-4xl font-bold text-[#1B3A5C]">{p.price}</span>
                   <span className="text-gray-500">{p.period}</span>
                 </div>
-                <p className="mt-1 text-sm text-gray-500">+ {p.perTrace} per successful trace</p>
+                <p className="mt-1 text-sm text-gray-500">+ {p.perTrace} per successful trace when you already have the owner</p>
+                <p className="text-sm text-gray-500">or {p.perRecord} per record when we find the owner for you</p>
                 <p className="mt-2 text-sm text-gray-600">{p.description}</p>
               </CardHeader>
               <CardContent className="pt-4">
@@ -346,11 +367,11 @@ function Pricing() {
 const faqs = [
   {
     q: 'What data do I get back from a trace?',
-    a: 'Each successful trace returns the property owner name, up to 8 phone numbers (with type labels), up to 5 email addresses, and a mailing address when available.',
+    a: 'Each successful trace returns the property owner name, up to 8 phone numbers (with type labels), up to 5 email addresses, and a mailing address when available. When we look up the owner for you, you also get the property record behind it, over 60 fields from county data. Every record carries the parcel number, lot size, assessed value (the county assessment, not a market estimate), map coordinates, property and land use, and whether the owner lives somewhere other than the property. Most carry the building size, the last sale date, the recorded document type and how long the current owner has held it. A good number carry the year built, the open mortgage balance, the lender name and the flood zone. Fewer carry the unit count, the last sale price, and how much other property that same owner holds. Which fields land depends on what the county publishes, so the record runs deeper in some markets than in others.',
   },
   {
     q: 'Do I get charged if there is no match?',
-    a: 'No. You are only charged for successful matches that return at least one phone number or email address.',
+    a: 'It depends which way you are using it. If you give us the owner name, you are only charged for successful matches that return at least one phone number or email address, and a no-match costs you nothing. If you ask us to find the owner, you are charged per record you send us, whether or not contacts come back. That is because we buy the county record on every one of them.',
   },
   {
     q: 'What is the 90-day deduplication cache?',
@@ -362,7 +383,7 @@ const faqs = [
   },
   {
     q: 'What makes PropTracerPRO\u2122 different from other skip tracers?',
-    a: 'Two things. First, we offer the lowest cost per found lead starting at $0.07. Second, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM — no manual exports, no spreadsheets, no extra steps.',
+    a: 'Two things. First, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM, with no manual exports and no spreadsheets. Second, when we look up an owner for you, you get the property record behind it and not just a phone number. That is over 60 fields of county data in the same response.',
   },
   {
     q: 'How does wallet billing work?',
@@ -370,7 +391,7 @@ const faqs = [
   },
   {
     q: 'What is AcquisitionPRO\u00AE membership?',
-    a: 'AcquisitionPRO\u00AE is the ONLY fully automated platform with CRM, Pipeline, Underwriting Tools, fully automated Market Analysis tools, prospecting tools, and more. Members get Pro-level access to PropTracerPRO\u2122 at no monthly fee, with the lower $0.07 per-trace rate.',
+    a: `AcquisitionPRO\u00AE is the ONLY fully automated platform with CRM, Pipeline, Underwriting Tools, fully automated Market Analysis tools, prospecting tools, and more. Members get Pro-level access to PropTracerPRO\u2122 at no monthly fee, at the same ${TIER_1_PRO} per successful trace and ${TIER_2_PRO} per record that Pro members pay.`,
   },
 ];
 
@@ -416,7 +437,7 @@ function FinalCTA() {
       <div className="mx-auto max-w-3xl px-4 sm:px-6 text-center">
         <h2 className="text-3xl font-bold text-white">Stop Overpaying. Start Automating.</h2>
         <p className="mt-4 text-lg text-gray-300">
-          The lowest cost per found lead and the only skip tracer with full API automation. Create a free account in 60 seconds &mdash; no credit card required.
+          The lowest cost per found lead and the only skip tracer with full API automation. Create a free account in 60 seconds, no credit card required.
         </p>
         <div className="mt-8">
           <Link href="/register">

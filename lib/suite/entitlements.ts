@@ -12,7 +12,7 @@ export interface EntitlementProfile {
 
 /** Does the gateway currently confer PTP on this user? False whenever Suite sign-in is disabled: the
  *  flag is a kill-switch, so flipping it off makes every grant-derived decision (pro access AND the
- *  $0.07 trace rate) revert to the user's native plan. Additive: the caller ORs it with local pro. */
+ *  pro trace rate) revert to the user's native plan. Additive: the caller ORs it with local pro. */
 export function hasSuiteAccess(p: EntitlementProfile): boolean {
   return isSuiteSignInEnabled() && (p.gateway_products ?? []).includes(SUITE_PRODUCT);
 }

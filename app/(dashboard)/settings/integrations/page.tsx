@@ -29,7 +29,7 @@ const WEBHOOK_PAYLOAD_EXAMPLE = `{
     "mailing_state": "TX",
     "mailing_zip": "75202"
   },
-  "charge": 0.07,
+  "charge": 0.15,
   "timestamp": "2026-01-27T15:30:00Z"
 }`;
 

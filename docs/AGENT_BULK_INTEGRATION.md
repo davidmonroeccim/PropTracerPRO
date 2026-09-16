@@ -124,9 +124,11 @@ curl -X POST https://proptracerpro.vercel.app/api/v1/trace/bulk \
   AI research before tracing)
 - `duplicatesRemoved` — records removed because they were traced within the
   last 90 days or appeared multiple times in your batch
-- `estimatedCost` — worst-case total: `$0.07-0.11 per trace × records +
-  $0.15 per AI research × entity records`. You're only charged when a record
-  resolves successfully — failed traces and failed research are free.
+- `estimatedCost` is the worst-case total: `$0.15-0.25 per trace × records +
+  $0.15 per AI research × entity records`. A trace that returns no contacts is
+  free. Research is free only when it comes back with no owner: once it
+  identifies an owner, the `$0.15` research charge stands even if the trace
+  that follows finds nothing. See the Cost model section below.
 - `status: "processing"` — always returned even if nothing is queued for
   research. Bulk jobs never finalize synchronously; the response is the
   submission acknowledgment.
@@ -189,7 +191,7 @@ A bulk job is "processing" while **either** of those counters is non-zero.
   "job_id": "7b3e9a4c-1d2f-4a5b-8c9d-0e1f2a3b4c5d",
   "records_submitted": 3,
   "records_matched": 2,
-  "total_charge": 0.37,
+  "total_charge": 0.65,
   "results": [
     {
       "address": "123 MAIN ST|RALEIGH|NC|27601",
@@ -209,7 +211,7 @@ A bulk job is "processing" while **either** of those counters is non-zero.
       },
       "research": null,
       "contacts": null,
-      "charge": 0.11,
+      "charge": 0.25,
       "ai_research_charge": 0,
       "business_trace_pending": false,
       "business_trace_job_id": null
@@ -250,7 +252,7 @@ A bulk job is "processing" while **either** of those counters is non-zero.
         "emails": ["jane@acmeholdings.com"],
         "address": "789 Oak St, Charlotte, NC"
       },
-      "charge": 0.11,
+      "charge": 0.25,
       "ai_research_charge": 0.15,
       "business_trace_pending": false,
       "business_trace_job_id": null
@@ -291,7 +293,7 @@ A bulk job is "processing" while **either** of those counters is non-zero.
 | `result`                 | Tracerfy person-skip-trace output, or `null` if no person was traced    |
 | `research`               | Full AI research object, or `null` for person-only records              |
 | `contacts`               | Top-level alias for `research.business_trace_contacts` (FastAppend data)|
-| `charge`                 | Trace charge actually billed (`$0.07–0.11`, or `0` on no match)         |
+| `charge`                 | Trace charge actually billed (`$0.15-0.25`, or `0` on no match)         |
 | `ai_research_charge`     | Research charge actually billed (`$0.15` per record with owner found)   |
 | `business_trace_pending` | `true` if FastAppend business trace is still async-resolving            |
 | `business_trace_job_id`  | Job id to correlate with a later `business_trace.completed` webhook     |
@@ -365,7 +367,7 @@ longer than the 45-second inline window.
   "job_id": "7b3e9a4c-1d2f-4a5b-8c9d-0e1f2a3b4c5d",
   "records_submitted": 3,
   "records_matched": 2,
-  "total_charge": 0.37,
+  "total_charge": 0.65,
   "results": [ /* same per-record array as the status endpoint response */ ],
   "timestamp": "2026-04-11T18:42:00.000Z"
 }
@@ -433,13 +435,13 @@ does not currently expose a `skipCache` parameter.
 
 ## Cost model
 
-- **Trace charge:** `$0.07` per successful trace for Pro-tier accounts,
-  `$0.11` per successful trace for Pay-As-You-Go. No charge on `no_match` or
+- **Trace charge:** `$0.15` per successful trace for Pro-tier accounts,
+  `$0.25` per successful trace for Pay-As-You-Go. No charge on `no_match` or
   `error`.
 - **AI research charge:** `$0.15` per record where research found an owner
   name. No charge when research comes back empty.
 - **Both charges are independent** — an entity-owned record can incur up to
-  `$0.26` total (research + trace) if it resolves successfully end-to-end.
+  `$0.40` total (research + trace) if it resolves successfully end-to-end.
 
 The `estimatedCost` field in the submit response assumes every record will
 match, so your actual bill after completion is typically lower.

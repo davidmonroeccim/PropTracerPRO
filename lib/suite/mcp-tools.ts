@@ -3,7 +3,7 @@ import { z } from "zod";
 import { resolvePtpProfile, UNLINKED_MESSAGE } from "@/lib/suite/mcp-shared";
 import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerTrace } from "@/lib/suite/pricing";
-import { PRICING } from "@/lib/constants";
+import { AI_RESEARCH } from "@/lib/constants";
 import { isLikelyBusiness } from "@/lib/ai-research/client";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
@@ -96,22 +96,32 @@ export const quoteSchema = z.object({ records: z.array(recordSchema).min(1) });
  *  business. This is the EXACT negation of skipTraceBulk's person condition
  *  (`owner && !isLikelyBusiness(owner)`, where `owner = (owner_name || "").trim()`), so the
  *  worst-case wallet gate and the submit split can NEVER disagree on how a record is priced vs
- *  routed. Entities settle via FastAppend at the flat $0.25 ceiling; persons settle at the
- *  grant-aware per-trace rate ($0.07 for a grant-holder, $0.11 otherwise). An address-only record
- *  with no owner_name is an ENTITY (it routes to FastAppend), so the gate reserves $0.25 for it. */
+ *  routed. The split selects the ROUTE, not the rate: an entity row goes through AI research and
+ *  FastAppend, a person row goes straight to Tracerfy, and a settled success on either route bills
+ *  the same tier 1 rate (grant-aware chargePerTrace: CHARGE_PER_SUCCESS for a grant-holder,
+ *  CHARGE_PER_SUCCESS_WALLET otherwise). An address-only record with no owner_name is an ENTITY,
+ *  so it carries the entity route's extra research exposure. */
 export function isEntityRecord(owner_name?: string): boolean {
   const owner = (owner_name || "").trim();
   return !owner || isLikelyBusiness(owner);
 }
 
 /** Worst-case pre-flight cost. Prices each record via the shared isEntityRecord classifier so the
- *  gate reserves exactly what the submit split will queue. */
+ *  gate reserves exactly what the submit split will queue.
+ *
+ *  An ENTITY record reserves the tier 1 rate PLUS AI_RESEARCH.CHARGE_PER_RECORD, because the
+ *  entity route can book BOTH: sweep-bulk-research charges the research fee the moment it finds an
+ *  owner name, and settleBulkJob then charges the tier 1 rate on top when Tracerfy returns contacts
+ *  (lib/trace/settleBulkJob.ts, the tracerfyHasContacts branch). Reserving only one of the two
+ *  under-reserved the wallet by a whole research fee per entity record. This is the SAME formula
+ *  app/api/v1/trace/bulk/route.ts uses (records x perTrace + entityRecords x research fee), so the
+ *  MCP gate can never be looser than the v1 route's; mcp-tools.test.ts fences that. */
 export function worstCaseCost(records: TraceRecord[], profile: PtpProfile) {
   const personRate = chargePerTrace(profile);
   let persons = 0;
   let entities = 0;
   for (const r of records) {
-    if (isEntityRecord(r.owner_name)) entities += PRICING.CHARGE_PER_FASTAPPEND_SUCCESS;
+    if (isEntityRecord(r.owner_name)) entities += personRate + AI_RESEARCH.CHARGE_PER_RECORD;
     else persons += personRate;
   }
   return { persons, entities, total: persons + entities };
@@ -148,10 +158,12 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
 // is a worst-case pre-flight only. Real spend happens later, at poll time, in
 // bulk_status -> settleBulkJob. The submit orchestration mirrors the live
 // app/api/v1/trace/bulk/route.ts (the source of truth) with exactly three
-// deliberate differences: the source:'mcp' tag, the stricter worstCaseCost gate
-// (entities at the $0.25 FastAppend ceiling), and the confirm + MAX_RECORDS
-// guards. Everything else (dedup, person/entity split, insert shapes, person
-// CSV, submitBulkTrace, entity queueing for the sweep-bulk-research cron) is the
+// deliberate differences: the source:'mcp' tag, the grant-aware tier 1 rate
+// inside worstCaseCost, and the confirm + MAX_RECORDS guards. The gate's SHAPE
+// is the v1 route's shape (every record at the tier 1 rate, plus a research fee
+// for every entity record), so it can never reserve less than the route does.
+// Everything else (dedup, person/entity split, insert shapes, person CSV,
+// submitBulkTrace, entity queueing for the sweep-bulk-research cron) is the
 // route's behavior, reused.
 
 export const bulkSchema = z.object({
@@ -211,9 +223,12 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     else personRecords.push(record);
   }
 
-  // Guard 3 (money fence): worst-case pre-flight. Stricter than the v1 route --
-  // entities are priced at the $0.25 FastAppend ceiling (not the route's $0.11
-  // trace + $0.15 research split) and the person rate is grant-aware. Nothing is
+  // Guard 3 (money fence): worst-case pre-flight, using the SAME formula the v1
+  // route uses -- every record at the tier 1 per-success rate, plus
+  // AI_RESEARCH.CHARGE_PER_RECORD for every entity record, which is the most the
+  // entity route can book (research fee on owner discovery, then a tier 1 charge
+  // when contacts land). The only difference from v1 is that the tier 1 rate here
+  // is grant-aware, and that is also the rate this surface settles at. Nothing is
   // submitted or charged when the wallet cannot cover the worst case.
   const worst = worstCaseCost(newRecords, profile).total;
   if (profile.wallet_balance < worst) {
@@ -354,8 +369,8 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
 // POLLS a bulk job and SETTLES it. This is where money actually moves, via the
 // shared settleBulkJob from Task 4 -- the SAME code path the v1 REST route uses,
 // so the two surfaces can never diverge on money. The one MCP-specific value is
-// the grant-aware person rate: chargePerTrace(profile) ($0.07 for a grant
-// holder), deliberately different from the v1 route's non-grant getChargePerTrace.
+// the grant-aware person rate: chargePerTrace(profile) (CHARGE_PER_SUCCESS for a
+// grant holder), deliberately different from the v1 route's non-grant getChargePerTrace.
 // The ownership fence below is the money-safety boundary: a caller can only ever
 // settle their OWN job.
 
@@ -416,13 +431,17 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   const rows = (rowsRaw || []) as TraceHistoryRow[];
 
   // Already finalized: emit the stored summary + per-record details.
+  // total_charge SUMS THE STORED PER-ROW CHARGES. It must never be
+  // records_matched x a live rate: the rate moves, the history does not, and a
+  // repriced constant would restate what the user was actually billed on every
+  // past job. The stored charge is the amount settleBulkJob wrote at the time.
   if (job.status === "completed" || job.status === "failed") {
     return {
       status: job.status,
       job_id: job.id,
       records_submitted: job.records_submitted,
       records_matched: job.records_matched,
-      total_charge: Number(((job.records_matched || 0) * personRate).toFixed(4)),
+      total_charge: Number(rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)),
       error_message: job.error_message ?? null,
       results: rows.map(buildPerRecordResult),
     };

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  classifyOwnerName, splitPersonName, assessLoan, planRoute, PRICE, VENDOR_COST,
+  classifyOwnerName, splitPersonName, assessLoan, planRoute, PRICE, DEFAULT_PRICE_PLAN, VENDOR_COST,
   type ParcelInput,
 } from '../ownerRoute'
 
@@ -157,12 +157,53 @@ const parcel = (over: Partial<ParcelInput> = {}): ParcelInput => ({
   ownerName: null, ...over,
 })
 
+describe('PRICE', () => {
+  // The old shape held TIER_1_PER_SUCCESS 0.15 + TIER_2_PER_RECORD 0.40, which mixed the
+  // pro tier-1 rate with the pay-as-you-go tier-2 rate and so described no real customer.
+  it('carries all four customer-facing numbers, keyed by plan', () => {
+    expect(PRICE.pro).toEqual({ tier1PerSuccess: 0.15, tier2PerRecord: 0.25 })
+    expect(PRICE.acqPro).toEqual({ tier1PerSuccess: 0.15, tier2PerRecord: 0.25 })
+    expect(PRICE.wallet).toEqual({ tier1PerSuccess: 0.25, tier2PerRecord: 0.40 })
+  })
+
+  it('prices AcquisitionPRO members at the Pro rate on both tiers', () => {
+    expect(PRICE.acqPro).toEqual(PRICE.pro)
+  })
+
+  // Owner type is NOT a pricing axis. It selects the vendor (Tracerfy vs FastAppend) and nothing
+  // else. A third key here, whatever it is named, is an entity rate and is wrong.
+  it('carries exactly two numbers per plan, with no owner-type axis', () => {
+    for (const plan of Object.values(PRICE)) {
+      expect(Object.keys(plan).sort()).toEqual(['tier1PerSuccess', 'tier2PerRecord'])
+    }
+  })
+
+  it('never mixes plans: every plan tier 2 costs more than its own tier 1', () => {
+    for (const plan of Object.values(PRICE)) {
+      expect(plan.tier2PerRecord).toBeGreaterThan(plan.tier1PerSuccess)
+    }
+  })
+})
+
 describe('planRoute', () => {
   it('bills tier 1 per successful trace and tier 2 per record', () => {
     expect(planRoute(parcel({ ownerName: 'Abc Rentals Llc' })).billing)
-      .toEqual({ model: 'per_successful_trace', amount: PRICE.TIER_1_PER_SUCCESS })
+      .toEqual({ model: 'per_successful_trace', amount: PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess })
     expect(planRoute(parcel()).billing)
-      .toEqual({ model: 'per_record', amount: PRICE.TIER_2_PER_RECORD })
+      .toEqual({ model: 'per_record', amount: PRICE[DEFAULT_PRICE_PLAN].tier2PerRecord })
+  })
+
+  it('bills an entity and an individual the SAME tier 1 amount, differing only in vendor', () => {
+    const entity = planRoute(parcel({ ownerName: 'Abc Rentals Llc' }))
+    const person = planRoute(parcel({ ownerName: 'Marcus T Halloway' }))
+    expect(entity.ownerType).toBe('entity')
+    expect(person.ownerType).toBe('individual')
+    // Different vendor...
+    expect(entity.steps[0].kind).toBe('FASTAPPEND_ENTITY')
+    expect(person.steps[0].kind).toBe('TRACERFY_INSTANT_NAMED')
+    // ...same price. There is no entity rate, surcharge or discount in the model.
+    expect(entity.billing).toEqual(person.billing)
+    expect(entity.billing.amount).toBe(PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess)
   })
 
   it('routes a known entity to FastAppend with no address', () => {

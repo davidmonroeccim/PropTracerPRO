@@ -10,7 +10,7 @@ import {
   skipTraceBulk,
   bulkStatus,
 } from "@/lib/suite/mcp-tools";
-import { PRICING } from "@/lib/constants";
+import { AI_RESEARCH, PRICING } from "@/lib/constants";
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
@@ -166,7 +166,7 @@ describe("listTraces", () => {
 describe("isEntityRecord (single source of truth for the person/entity split)", () => {
   // The gate (worstCaseCost) and the submit split (skipTraceBulk) both classify through this one
   // helper, so they can never disagree. Entity == empty/absent/whitespace owner OR a business name.
-  it("treats an empty owner_name as an ENTITY (routes to FastAppend / $0.25)", () => {
+  it("treats an empty owner_name as an ENTITY (routes to FastAppend)", () => {
     expect(isEntityRecord("")).toBe(true);
   });
   it("treats an absent owner_name as an ENTITY", () => {
@@ -187,7 +187,19 @@ describe("worstCaseCost", () => {
   const proProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"] } as never;
   const walletProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: [] } as never;
 
-  it("prices persons at the grant rate and entities at the $0.25 ceiling", () => {
+  /** What an ENTITY record can cost end to end. The entity route books BOTH charges:
+   *  sweep-bulk-research deducts AI_RESEARCH.CHARGE_PER_RECORD the moment it identifies an owner,
+   *  and settleBulkJob then deducts the tier 1 rate on top when Tracerfy returns contacts. */
+  const entityCeiling = (tier1Rate: number) => tier1Rate + AI_RESEARCH.CHARGE_PER_RECORD;
+
+  /** The reserve app/api/v1/trace/bulk/route.ts computes for the same batch:
+   *  every record at the tier 1 rate, plus a research fee for every entity record. The MCP gate
+   *  must never come out below this for the rate that surface settles at. */
+  const v1Reserve = (records: { owner_name?: string }[], tier1Rate: number) =>
+    records.length * tier1Rate +
+    records.filter((r) => isEntityRecord(r.owner_name)).length * AI_RESEARCH.CHARGE_PER_RECORD;
+
+  it("prices persons at the grant rate and entities at the trace rate plus the research fee", () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     const out = worstCaseCost(
       [
@@ -196,41 +208,65 @@ describe("worstCaseCost", () => {
       ],
       proProfile,
     );
-    expect(out.persons).toBeCloseTo(0.07);
-    expect(out.entities).toBeCloseTo(0.25);
-    expect(out.total).toBeCloseTo(0.32);
+    expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS);
+    expect(out.entities).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS));
+    expect(out.total).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS + entityCeiling(PRICING.CHARGE_PER_SUCCESS));
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 
-  // MONEY-GATE CORRECTNESS: an address-only record with NO owner_name must price as an ENTITY
-  // ($0.25 FastAppend ceiling), never a person -- because skipTraceBulk routes that same record to
-  // entityRecords, where it can settle at $0.25. Pricing it as a person ($0.11) under-reserves the
-  // wallet gate by up to $0.14/record. This is the exact bug this fix closes; mutation-fenced below.
-  it("prices an address-only record with NO owner_name as an ENTITY ($0.25), not a person", () => {
+  // MONEY-GATE FENCE (defect 2, 2026-09-16). The MCP gate previously reserved a single flat
+  // per-entity constant, which was LESS than the v1 route reserves for the same batch, while its
+  // own comment claimed it was stricter. An entity record can book the research fee AND the tier 1
+  // trace charge, so anything less than the sum under-reserves the wallet. Deleting the
+  // AI_RESEARCH.CHARGE_PER_RECORD term from worstCaseCost must fail this test.
+  it("never reserves less than the v1 bulk route does for the same batch", () => {
+    const records = [
+      { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" },
+      { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" },
+      { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" },
+      { address: "4 D St", city: "X", state: "TX", zip: "75001" },
+    ];
+    // Non-grant profile: both surfaces use the same tier 1 rate, so the two reserves must match.
+    const wallet = worstCaseCost(records, walletProfile);
+    expect(wallet.total).toBeGreaterThanOrEqual(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET));
+    expect(wallet.total).toBeCloseTo(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET));
+
+    // Grant holder: the MCP settles at the lower grant rate, so that is the rate it must cover.
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const grant = worstCaseCost(records, proProfile);
+    expect(grant.total).toBeGreaterThanOrEqual(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS));
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+  });
+
+  // MONEY-GATE CORRECTNESS: an address-only record with NO owner_name must price as an ENTITY,
+  // never a person, because skipTraceBulk routes that same record to entityRecords where the
+  // research fee can land on top of the trace charge. These assertions check the persons/entities
+  // SPLIT, not just the total, so the fence survives any collision between the two rates.
+  it("prices an address-only record with NO owner_name as an ENTITY, not a person", () => {
     const out = worstCaseCost(
       [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
-    expect(out.entities).toBeCloseTo(PRICING.CHARGE_PER_FASTAPPEND_SUCCESS); // 0.25
+    expect(out.entities).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET));
     expect(out.persons).toBe(0);
-    expect(out.total).toBeCloseTo(0.25);
+    expect(out.total).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET));
   });
 
-  it("prices a business-name record as an ENTITY ($0.25)", () => {
+  it("prices a business-name record as an ENTITY (trace rate plus research fee)", () => {
     const out = worstCaseCost(
       [{ owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
-    expect(out.entities).toBeCloseTo(0.25);
+    expect(out.entities).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET));
     expect(out.persons).toBe(0);
   });
 
-  it("prices a plain-person-name record at the person rate (not the entity ceiling)", () => {
+  it("prices a plain-person-name record at the bare trace rate, with no research fee", () => {
     const out = worstCaseCost(
       [{ owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
-    expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET); // 0.11
+    expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
     expect(out.entities).toBe(0);
   });
 
@@ -246,7 +282,9 @@ describe("worstCaseCost", () => {
     ];
     const expectedEntities = records.filter((r) => isEntityRecord(r.owner_name)).length;
     const out = worstCaseCost(records, walletProfile);
-    const pricedAsEntities = Math.round(out.entities / PRICING.CHARGE_PER_FASTAPPEND_SUCCESS);
+    const pricedAsEntities = Math.round(
+      out.entities / entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET),
+    );
     expect(pricedAsEntities).toBe(expectedEntities); // 4
     expect(pricedAsEntities).toBe(4);
   });
@@ -543,10 +581,42 @@ describe("bulk_status", () => {
     expect(vi.mocked(settleBulkJob).mock.calls[0][1]).toMatchObject({
       tracerfyJobId: "tf-1",
       userId: "p1",
-      personRate: 0.11,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
     });
     // The no-op settle left the row 'processing', so the job is still in flight.
     expect(out).toMatchObject({ status: "processing", job_id: "job-1" });
+  });
+
+  // DEFECT 3 FENCE (2026-09-16): a finalized job's total_charge must SUM THE STORED per-row
+  // charges, never records_matched x a live rate. The rate moves, the history does not, so the
+  // old formula restated every past job the instant a pricing constant changed. The row charges
+  // below are deliberately amounts no current constant produces, so restoring
+  // `records_matched * personRate` cannot coincidentally pass.
+  it("totals a finalized job from the stored per-row charges, not from a live rate", async () => {
+    const { admin } = statusAdminStub({
+      profile,
+      job: {
+        id: "job-1",
+        user_id: "p1",
+        status: "completed",
+        records_submitted: 3,
+        records_matched: 2,
+      },
+      rows: [
+        { id: "r1", status: "success", is_successful: true, charge: 0.07, ai_research_status: null },
+        { id: "r2", status: "success", is_successful: true, charge: 0.11, ai_research_status: null },
+        { id: "r3", status: "no_match", is_successful: false, charge: 0, ai_research_status: null },
+      ],
+    });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+      status: string;
+      total_charge: number;
+    };
+    expect(out.status).toBe("completed");
+    expect(out.total_charge).toBeCloseTo(0.18);
+    // What the old formula would have reported for this same job.
+    expect(out.total_charge).not.toBeCloseTo(2 * PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(settleBulkJob).not.toHaveBeenCalled();
   });
 
   it("RE-POLL IDEMPOTENCY: only still-processing rows enter the settlement bucket, never already-settled rows", async () => {
@@ -561,7 +631,7 @@ describe("bulk_status", () => {
       job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 3 },
       rows: [
         // already settled on a prior poll -- must be excluded from the bucket
-        { id: "r1", status: "success", tracerfy_job_id: "tf-1", is_successful: true, charge: 0.11, ai_research_status: null },
+        { id: "r1", status: "success", tracerfy_job_id: "tf-1", is_successful: true, charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
         { id: "r2", status: "no_match", tracerfy_job_id: "tf-1", is_successful: false, charge: 0, ai_research_status: null },
         // still in flight -- the only row that should be settled this round
         { id: "r3", status: "processing", tracerfy_job_id: "tf-1", is_successful: null, charge: 0, ai_research_status: null },
