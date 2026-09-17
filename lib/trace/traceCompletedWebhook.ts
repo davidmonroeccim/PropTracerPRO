@@ -1,0 +1,108 @@
+/**
+ * The `trace.completed` webhook for a TIER 2 trace.
+ *
+ * WHY THIS EXISTS. Tier 1 completes in the POLL route (app/api/trace/status,
+ * app/api/v1/trace/status) and both poll routes fire `trace.completed` from there.
+ * Tier 2 completes INLINE inside the submit request and never reaches a poll route,
+ * so without this a customer with a webhook configured would silently stop receiving
+ * events the moment their traces started arriving as tier 2. Silently is the problem:
+ * a webhook that stops firing looks exactly like a customer with no traces.
+ *
+ * THE PAYLOAD is the poll route's, key for key, plus the three things tier 2 has and
+ * tier 1 does not: `property_record`, `tier`, `owner_type`. A webhook is a JSON POST to
+ * the customer's own URL, so extra keys need no pre-declaration anywhere -- that
+ * constraint belongs to the HighLevel CRM push (phase 4b), not here.
+ *
+ * `property_record` CARRIES 65 OF THE VENDOR'S 86 KEYS. The 21 blocked ones are
+ * withheld from every egress, this one most of all: it lands in the customer's own
+ * system by definition. Storage is untouched and stays at 86. The single list and the
+ * filter live in lib/trace/publicPropertyRecord.ts.
+ *
+ * WHEN IT FIRES, and this is a billing rule wearing a webhook's clothes:
+ *
+ *   EVERY completed tier 2, INCLUDING A BILLED MISS. Tier 2 bills per record
+ *   SUBMITTED, so "the county has no parcel at this address" is a paid-for answer
+ *   and is precisely the case a customer most needs told about. It matches the poll
+ *   route's existing rule, which sends for all completed traces and not only
+ *   successful ones.
+ *
+ *   NEVER on a vendor failure. A vendor failure charges nothing, persists nothing
+ *   billable and returns 502, so there is no completion to report. The poll route's
+ *   stall-error branch fires nothing either. The call sites enforce this structurally:
+ *   the failure branch returns before reaching this function.
+ *
+ * FIRE AND FORGET. A webhook failure must never fail the request or the charge: the
+ * money has already moved and the record is already persisted by the time this runs.
+ * Nothing awaits it and every rejection is swallowed into console.error.
+ */
+import type { TraceResult } from '@/types';
+import { TRACE_TIER } from './billedRows';
+import { toPublicPropertyRecord } from './publicPropertyRecord';
+
+export interface TraceCompletedWebhookInput {
+  /** `user_profiles.webhook_url`. Absent or empty means the customer configured none. */
+  webhookUrl?: string | null;
+  traceId: string;
+  /** 'success' when contacts were delivered, 'no_match' otherwise. A no_match may be billed. */
+  status: 'success' | 'no_match';
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  result: TraceResult | null;
+  /** What the wallet ACTUALLY collected, never what was attempted. */
+  charge: number;
+  /**
+   * The vendor's RAW property object, by reference. Null on a billed miss.
+   *
+   * Raw is what this function wants: it applies toPublicPropertyRecord() itself,
+   * so a caller never has to remember to, and cannot forget.
+   */
+  propertyRecord: unknown;
+  ownerType?: string | null;
+}
+
+/**
+ * POST `trace.completed` to the customer's webhook, if they have one.
+ *
+ * Returns immediately. The only reason it returns the promise at all is so a test can
+ * await the dispatch; no caller may await it in production, and none does.
+ */
+export function dispatchTraceCompleted(input: TraceCompletedWebhookInput): void {
+  const url = input.webhookUrl?.trim();
+  if (!url) return;
+
+  void fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event: 'trace.completed',
+      trace_id: input.traceId,
+      status: input.status,
+      address: input.address ?? null,
+      city: input.city ?? null,
+      state: input.state ?? null,
+      zip: input.zip ?? null,
+      result: input.result,
+      // Shape parity with the two poll routes, which send `research` on every
+      // trace.completed. The AI Search engine was removed on 2026-09-17 and tier 2
+      // never had one, so the honest value is null -- not an omission, which would
+      // make the key disappear from the JSON and change the shape a consumer parses.
+      research: null,
+      charge: input.charge,
+      // The three tier 2 additions.
+      //
+      // FILTERED HERE, AT THE ONE DOOR. This payload lands in the customer's own
+      // system by definition, which is the case the whole rule was written for: a
+      // wrong `estimated_value` sitting in their CRM looks authoritative and
+      // outlives any caveat we could put on a screen. Both call sites hand this
+      // function the RAW record, on purpose -- the same variable they persist --
+      // so there is exactly one place to get this wrong and it is this line.
+      // 65 keys of the vendor's 86. See lib/trace/publicPropertyRecord.ts.
+      property_record: toPublicPropertyRecord(input.propertyRecord),
+      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      owner_type: input.ownerType ?? null,
+      timestamp: new Date().toISOString(),
+    }),
+  }).catch((err) => console.error('Webhook dispatch error:', err));
+}

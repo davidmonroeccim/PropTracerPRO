@@ -1,6 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { getChargePerTrace } from "@/lib/constants";
-import { TRACE_TIER } from "@/lib/trace/billedRows";
+import { isBilledRow, TRACE_TIER } from "@/lib/trace/billedRows";
+import { BLOCKED_PROPERTY_RECORD_KEYS } from "@/lib/trace/publicPropertyRecord";
+import entityHitAddress from "@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json";
 
 /**
  * Money fence for the API-key single-trace status route.
@@ -184,5 +186,243 @@ describe("v1 trace/status route reports only the wallet amount actually collecte
     await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
 
     expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+  });
+});
+
+/* ====================================================================
+ * A ROW THAT WAS BILLED MUST NEVER BECOME UNBILLED.
+ *
+ * Same lockout as the session status route. `charge` and `tier` are
+ * RECEIPTS and this settle used to treat them as scratch fields, so a
+ * tier 2 row reused by a later tier 1 trace came out of here reading
+ * UNBILLED while a wallet_transactions row still referenced it by FK.
+ * The next submit's failed sweep then raised 23503 and that address
+ * answered "Failed to clear previous trace" FOREVER.
+ * ==================================================================== */
+describe("v1 trace/status route never writes a billed row back to unbilled", () => {
+  beforeEach(() => {
+    H.trace = {
+      ...H.trace,
+      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      charge: 0.4,
+      property_record: null,
+    };
+    H.jobStatus = { success: true, pending: false, results: [] };
+  });
+
+  it("keeps the 0.40 the integrator already paid", async () => {
+    // WAS: 0. MUTATION: write `charge` straight from this settle again and
+    // this goes red.
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.charge).toBe(0.4);
+  });
+
+  it("does not downgrade tier 2 to tier 1", async () => {
+    // WAS: 1. Downgrading alone breaks isCacheHitRow's `tier = 2 AND
+    // charge > 0` arm, so a billed tier 2 miss silently starts re-buying.
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_RECORD_SUBMITTED);
+  });
+
+  it("leaves a row the delete guard still refuses to touch", async () => {
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    const written = billingUpdate()!.payload;
+    expect(isBilledRow({ charge: written.charge as number, property_record: null })).toBe(true);
+  });
+
+  it("reports the tier it WROTE, not the one this settle applied", async () => {
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"))
+    ).json();
+
+    expect(body.tier).toBe(TRACE_TIER.PER_RECORD_SUBMITTED);
+  });
+
+  it("adds a second real collection to the first rather than replacing it", async () => {
+    // Two genuine debits against one address are two rows in
+    // wallet_transactions, and the dashboard SUMs trace_history.charge.
+    // MUTATION: replace instead of fold and this goes red.
+    H.jobStatus = {
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: "123 MAIN ST",
+          city: "Austin",
+          state: "TX",
+          first_name: "Jane",
+          last_name: "Doe",
+          primary_phone: "5125550100",
+          email_1: "jane@example.com",
+        },
+      ],
+    };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.charge).toBe(0.4 + getChargePerTrace("wallet", false));
+  });
+
+  it("leaves an ordinary tier 1 row exactly as it always was", async () => {
+    H.trace = { ...H.trace, tier: null, charge: 0, property_record: null };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.charge).toBe(0);
+    expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+  });
+});
+
+/**
+ * Retrieving the record the integrator already paid for.
+ *
+ * Tier 2 bills per RECORD SUBMITTED. Polling is the documented way an API
+ * caller collects an async result, and this route returned neither
+ * `property_record` nor `tier`, so the 86-field county record they were charged
+ * for had no retrieval path at all. Nothing below re-buys anything.
+ */
+describe("v1 trace/status route serves back the record already bought", () => {
+  it("returns the stored property record and tier on a finished trace", async () => {
+    // MUTATION: drop property_record from the completed branch and this goes red.
+    H.trace = {
+      ...H.trace,
+      status: "success",
+      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      charge: 0.4,
+      property_record: { apn: "16-18-306-029", county: "Salt Lake County" },
+      trace_result: { phones: [], emails: [] },
+    };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+      )
+    ).json();
+
+    expect(body.property_record).toEqual({
+      apn: "16-18-306-029",
+      county: "Salt Lake County",
+    });
+    expect(body.tier).toBe(TRACE_TIER.PER_RECORD_SUBMITTED);
+  });
+
+  it("charges nothing to hand back a record already paid for", async () => {
+    H.trace = {
+      ...H.trace,
+      status: "no_match",
+      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      charge: 0.4,
+      property_record: { apn: "16-18-306-029" },
+    };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+    );
+
+    expect(H.rpcCalls).toHaveLength(0);
+    expect(H.updates).toHaveLength(0);
+  });
+
+  it("reports null rather than inventing a record when there is none", async () => {
+    H.trace = { ...H.trace, status: "no_match", tier: null, charge: 0 };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+      )
+    ).json();
+
+    expect(body.property_record).toBeNull();
+    expect(body.tier).toBeNull();
+  });
+
+  it("names the tier it just billed when it settles a poll", async () => {
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+      )
+    ).json();
+
+    expect(body.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+    expect(body.property_record).toBeNull();
+  });
+});
+
+/* ====================================================================
+ * THE POLL IS AN EGRESS TOO, AND ON v1 IT IS A PUBLIC ONE.
+ *
+ * This route re-reads a record the integrator already bought. The row holds
+ * the raw 86 keys; the response publishes 65. Without this the 21 blocked
+ * fields would simply arrive on the POLL instead of the submit, which is not
+ * a gate, it is a delay.
+ * ==================================================================== */
+
+describe("v1 trace/status route publishes 65 of the stored 86 keys", () => {
+  const STORED_RAW = (
+    entityHitAddress as { response: { property: Record<string, unknown> } }
+  ).response.property;
+
+  it("carries no blocked key on a finished trace", async () => {
+    // MUTATION: drop toPublicPropertyRecord from the completed branch and this
+    // goes red.
+    H.trace = {
+      ...H.trace,
+      status: "success",
+      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      charge: 0.4,
+      property_record: STORED_RAW,
+      trace_result: { phones: [], emails: [] },
+    };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"))
+    ).json();
+
+    expect(Object.keys(body.property_record)).toHaveLength(65);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(body.property_record, `${key} left PTP on a poll`).not.toHaveProperty(key);
+    }
+    expect(body.property_record.assessed_value).toBe(STORED_RAW.assessed_value);
+  });
+
+  it("carries no blocked key on the branch that settles a tier 1 poll", async () => {
+    // MUTATION: drop toPublicPropertyRecord from the settle branch and this
+    // goes red. A row is not supposed to arrive here with a record on it, but
+    // if one does it must not be the one door that publishes 86.
+    H.trace = { ...H.trace, property_record: STORED_RAW };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"))
+    ).json();
+
+    expect(Object.keys(body.property_record)).toHaveLength(65);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(body.property_record, `${key} left PTP on a settled poll`).not.toHaveProperty(key);
+    }
+  });
+
+  it("does not mutate the stored row while filtering it", async () => {
+    const row: Record<string, unknown> = { ...STORED_RAW };
+    H.trace = { ...H.trace, status: "success", property_record: row, trace_result: null };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(Object.keys(row)).toHaveLength(86);
   });
 });

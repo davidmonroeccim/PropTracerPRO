@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash } from './address-normalizer';
 import { DEDUPE, STALE_PROCESSING } from '@/lib/constants';
 import { CACHE_HIT_FILTER } from '@/lib/trace/billedRows';
@@ -15,6 +16,17 @@ import type { AddressInput, DedupeResult, TraceHistory } from '@/types';
  * here, and already free. The bias runs the other way -- a plain failed row
  * also blocks resubmission -- which is pre-existing behaviour, costs the
  * customer nothing, and is not this phase's to change.
+ *
+ * STILL ON THE ANON CLIENT, AND THAT IS A KNOWN DEFECT, not an oversight.
+ * checkSingleDuplicate moved to the service-role client on 2026-09-17 because
+ * RLS made it blind on every API-key surface. This one has the identical
+ * problem: `app/api/v1/trace/bulk/route.ts` and `lib/suite/mcp-tools.ts` both
+ * call it with no session cookie, so it sees nothing and those two surfaces
+ * dedupe nothing. It was NOT moved in the same pass because the move is not
+ * purely a billing fix here: unlike the single lookup this one counts ANY row
+ * in the window as a duplicate, including a plain failure, so switching the
+ * client would also start blocking retries of failed addresses on a public API.
+ * That is a product decision and it belongs to whoever owns the bulk routes.
  */
 export async function checkDuplicates(
   userId: string,
@@ -96,6 +108,35 @@ export async function checkDuplicates(
 /**
  * Checks if a single address is a duplicate.
  * Returns the cached result if found, null otherwise.
+ *
+ * THE CLIENT IS PART OF THE BILLING BEHAVIOUR, so it is chosen here rather than
+ * passed in. Until 2026-09-17 this built the COOKIE-BACKED ANON client from
+ * `lib/supabase/server`. `trace_history` carries RLS
+ * `USING (auth.uid() = user_id)` (supabase/schema.sql:239-241), and an
+ * `/api/v1/*` request authenticates by API KEY and carries no Supabase session
+ * cookie, so `auth.uid()` was NULL, the select matched zero rows, and this
+ * returned null every single time on that surface. Both cache branches in
+ * `app/api/v1/trace/single/route.ts` were unreachable code, and every repeat
+ * call re-bought the dossier and charged the wallet again. Ten calls for one
+ * address were ten charges, against David's settled rule that a result served
+ * from the user's own stored record is FREE and only a fresh vendor call is
+ * charged.
+ *
+ * `userId` is ALWAYS the authenticated caller: `profile.id` from
+ * `validateApiKey` on v1, `user.id` from `supabase.auth.getUser()` on the
+ * session route. It is never request input, and it must never become request
+ * input.
+ *
+ * WHAT THE SERVICE-ROLE CLIENT COSTS: RLS is no longer a second fence, so the
+ * `.eq('user_id', userId)` below is the ONLY thing separating two customers.
+ * `trace_history` is UNIQUE(user_id, address_hash) and two customers who trace
+ * the same parcel hold two separate rows and BOTH pay, because serving user B
+ * from user A's purchase would redistribute one customer's paid-for data to
+ * another. That is a product rule and a vendor-contract boundary, not an
+ * optimisation, so the filter is unconditional and has no branch to hide
+ * behind. Its removal is mutation-tested in
+ * `lib/utils/__tests__/deduplication.test.ts` and in both single-trace route
+ * suites.
  */
 export async function checkSingleDuplicate(
   userId: string,
@@ -103,7 +144,7 @@ export async function checkSingleDuplicate(
   city: string,
   state: string
 ): Promise<TraceHistory | null> {
-  const supabase = await createClient();
+  const supabase = createAdminClient();
 
   const normalizedAddress = normalizeAddress(address, city, state);
   const hash = createAddressHash(normalizedAddress);

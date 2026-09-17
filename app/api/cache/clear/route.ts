@@ -16,13 +16,17 @@ export async function POST(request: Request) {
       );
     }
 
+    // `type` is accepted and deliberately not branched on: the delete below clears the
+    // address's row whatever the caller asked for. The 'ai_research' arm was dropped on
+    // 2026-09-17 with the AI Search engine; a stale client still sending that value is
+    // ignored rather than rejected, and gets the same clear it always got.
     const body = await request.json();
-    const { address, city, state, zip, type } = body as {
+    const { address, city, state, zip } = body as {
       address: string;
       city: string;
       state: string;
       zip: string;
-      type: 'ai_research' | 'trace' | 'all';
+      type?: 'trace' | 'all';
     };
 
     const validation = validateAddressInput(address, city, state, zip);
@@ -39,8 +43,8 @@ export async function POST(request: Request) {
 
     // Delete this address's trace_history rows regardless of type.
     //
-    // BILLED ROWS SURVIVE ON PURPOSE. A row carrying a charge, an AI research
-    // charge or a property record is something the customer paid for, and
+    // BILLED ROWS SURVIVE ON PURPOSE. A row carrying a charge, a historical AI
+    // research charge or a property record is something the customer paid for, and
     // `wallet_transactions.trace_history_id` references it with no ON DELETE
     // clause — deleting it raises 23503 and this route used to report success
     // anyway. "Clear cache" means "let me re-trace", not "destroy my receipt":

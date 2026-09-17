@@ -183,3 +183,35 @@ So correctness has three axes, each independently failable: **name**, **type**, 
 **state of registration**. Any measurement of this step that counts only "did it return a name" is
 measuring the wrong thing. Trusts are a distinct third case: entity-like, frequently with no SoS
 registration at all.
+
+---
+
+## L-009: A test for a flag-gated distinction proves nothing while the flag is off (2026-09-17)
+
+Phase 4 wired tier 2 into the public v1 API. v1 is **Track B** and must price from the RAW
+`getChargePerTrace` inputs, never the grant-aware Track A helpers — reusing them would move an
+existing API-key caller's bill from $0.40 to $0.25, in the direction nobody reports.
+
+I wrote the guard, wrote a test named "is blind to a gateway grant, because v1 is Track B", and
+mutation-tested it by swapping in the Track A helpers. **Zero tests went red.**
+
+The reason: the only thing that separates the two tracks is `hasSuiteAccess()`, which is gated on
+`NEXT_PUBLIC_SUITE_SIGNIN_ENABLED`. That flag is off in the test environment, so
+`effectiveIsPro()` collapses to the raw predicate, both tracks return `wallet`, and the test passed
+under both implementations. It was asserting a tautology with a confident name on it.
+
+**The rule.** When a test exists to prove that two code paths DIFFER, first prove they CAN differ in
+the environment the test runs in. If the difference is behind a feature flag, an env var, or a
+config toggle, set it inside the test. Otherwise the test pins the collapsed case and reports green
+forever.
+
+**How to spot it without a mutation run.** Ask what single value, if changed, would make the two
+sides of the comparison identical — then check whether that value is already at its identical
+setting in the test environment. A test whose two branches are equal by default is measuring
+nothing.
+
+**Why the mutation run is not optional.** This one was invisible to reading. The guard was correct,
+the test was correct, the name was correct, and the pair was still worthless. Only deleting the
+guard and watching nothing happen exposed it. That is the whole argument for
+`feedback_mutation_test_security`: a guard without a test that FAILS when you delete the guard is
+not a guard, and a test that keeps passing after you delete it is the evidence.

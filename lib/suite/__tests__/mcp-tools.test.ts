@@ -6,11 +6,13 @@ import {
   skipTraceQuote,
   worstCaseCost,
   isEntityRecord,
+  isBlankOwnerRecord,
   MAX_RECORDS,
   skipTraceBulk,
   bulkStatus,
 } from "@/lib/suite/mcp-tools";
-import { AI_RESEARCH, PRICING } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
+import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
@@ -187,19 +189,27 @@ describe("worstCaseCost", () => {
   const proProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"] } as never;
   const walletProfile = { subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: [] } as never;
 
-  /** What an ENTITY record can cost end to end. The entity route books BOTH charges:
-   *  sweep-bulk-research deducts AI_RESEARCH.CHARGE_PER_RECORD the moment it identifies an owner,
-   *  and settleBulkJob then deducts the tier 1 rate on top when Tracerfy returns contacts. */
-  const entityCeiling = (tier1Rate: number) => tier1Rate + AI_RESEARCH.CHARGE_PER_RECORD;
+  /** REWRITTEN 2026-09-17 for the removal of AI Search. These assertions used to pin an entity
+   *  record at `tier1Rate + AI_RESEARCH.CHARGE_PER_RECORD`, because the entity route booked BOTH:
+   *  the old sweep-bulk-research cron charged a $0.15 research fee the moment it identified an
+   *  owner, and settleBulkJob charged the tier 1 rate on top when contacts landed. That cron is
+   *  gone and nothing books the research fee any more, so keeping the old ceiling would have
+   *  over-quoted every entity record by $0.15 before a wallet spend. The fences below are the same
+   *  fences, re-pointed at the model that is now true.
+   *
+   *  What an ENTITY record can cost end to end: ONE tier 1 per-success charge, the same as a
+   *  person. Owner type picks the vendor (FastAppend vs Tracerfy) and never the price. */
+  const entityCeiling = (tier1Rate: number) => tier1Rate;
 
-  /** The reserve app/api/v1/trace/bulk/route.ts computes for the same batch:
-   *  every record at the tier 1 rate, plus a research fee for every entity record. The MCP gate
-   *  must never come out below this for the rate that surface settles at. */
+  /** The reserve app/api/v1/trace/bulk/route.ts computes for the same batch: every record that
+   *  has an owner of record, at the tier 1 rate. A blank-owner record contributes nothing there
+   *  because it is skipped rather than traced, so it must contribute nothing here either. The MCP
+   *  gate must never come out below this for the rate that surface settles at. */
   const v1Reserve = (records: { owner_name?: string }[], tier1Rate: number) =>
-    records.length * tier1Rate +
-    records.filter((r) => isEntityRecord(r.owner_name)).length * AI_RESEARCH.CHARGE_PER_RECORD;
+    records.filter((r) => !isBlankOwnerRecord(r.owner_name)).length * tier1Rate;
 
-  it("prices persons at the grant rate and entities at the trace rate plus the research fee", () => {
+  it("prices persons and named entities at the same tier 1 rate, with no research fee", () => {
+    // MUTATION: add AI_RESEARCH.CHARGE_PER_RECORD back onto the entity arm and this goes red.
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     const out = worstCaseCost(
       [
@@ -209,16 +219,14 @@ describe("worstCaseCost", () => {
       proProfile,
     );
     expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS);
-    expect(out.entities).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS));
-    expect(out.total).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS + entityCeiling(PRICING.CHARGE_PER_SUCCESS));
+    expect(out.entities).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS);
+    expect(out.total).toBeCloseTo(2 * PRICING.CHARGE_PER_SUCCESS);
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 
-  // MONEY-GATE FENCE (defect 2, 2026-09-16). The MCP gate previously reserved a single flat
-  // per-entity constant, which was LESS than the v1 route reserves for the same batch, while its
-  // own comment claimed it was stricter. An entity record can book the research fee AND the tier 1
-  // trace charge, so anything less than the sum under-reserves the wallet. Deleting the
-  // AI_RESEARCH.CHARGE_PER_RECORD term from worstCaseCost must fail this test.
+  // MONEY-GATE FENCE (defect 2, 2026-09-16, re-pointed 2026-09-17). The MCP gate must never
+  // reserve LESS than the v1 route reserves for the same batch, or the MCP submits work the
+  // wallet cannot cover. Both surfaces now reserve one tier 1 charge per traceable record.
   it("never reserves less than the v1 bulk route does for the same batch", () => {
     const records = [
       { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" },
@@ -238,21 +246,30 @@ describe("worstCaseCost", () => {
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 
-  // MONEY-GATE CORRECTNESS: an address-only record with NO owner_name must price as an ENTITY,
-  // never a person, because skipTraceBulk routes that same record to entityRecords where the
-  // research fee can land on top of the trace charge. These assertions check the persons/entities
-  // SPLIT, not just the total, so the fence survives any collision between the two rates.
-  it("prices an address-only record with NO owner_name as an ENTITY, not a person", () => {
+  // MONEY-GATE CORRECTNESS, the case that changed. An address-only record has NO route on this
+  // surface: the engine that used to find an owner from an address alone is gone, so the record
+  // is skipped with a reason and never charged. Reserving anything for it would quote a caller
+  // money the submit cannot spend and would 402 a wallet that can afford the real batch.
+  // MUTATION: price it as an entity (drop the isBlankOwnerRecord guard) and this goes red.
+  it("reserves NOTHING for an address-only record with no owner_name", () => {
     const out = worstCaseCost(
       [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
-    expect(out.entities).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET));
     expect(out.persons).toBe(0);
-    expect(out.total).toBeCloseTo(entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET));
+    expect(out.entities).toBe(0);
+    expect(out.total).toBe(0);
   });
 
-  it("prices a business-name record as an ENTITY (trace rate plus research fee)", () => {
+  it("reserves nothing for a whitespace-only owner_name either", () => {
+    const out = worstCaseCost(
+      [{ owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }],
+      walletProfile,
+    );
+    expect(out.total).toBe(0);
+  });
+
+  it("prices a business-name record at the bare tier 1 rate", () => {
     const out = worstCaseCost(
       [{ owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
@@ -261,7 +278,7 @@ describe("worstCaseCost", () => {
     expect(out.persons).toBe(0);
   });
 
-  it("prices a plain-person-name record at the bare trace rate, with no research fee", () => {
+  it("prices a plain-person-name record at the bare tier 1 rate", () => {
     const out = worstCaseCost(
       [{ owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
@@ -270,23 +287,27 @@ describe("worstCaseCost", () => {
     expect(out.entities).toBe(0);
   });
 
-  // CONSISTENCY: the set worstCaseCost prices as entities is EXACTLY the set skipTraceBulk routes to
-  // entityRecords, because both classify through isEntityRecord. Assert it across the mixed batch.
-  it("prices exactly the isEntityRecord set as entities (gate == submit split)", () => {
+  // CONSISTENCY: the set worstCaseCost prices as entities is EXACTLY the set skipTraceBulk routes
+  // to entityRecords, because both classify through isEntityRecord AND isBlankOwnerRecord.
+  it("prices exactly the named-entity set as entities (gate == submit split)", () => {
     const records = [
       { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
       { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
       { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
-      { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // entity (no owner)
-      { owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }, // entity (whitespace)
+      { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // skipped (no owner)
+      { owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }, // skipped (whitespace)
     ];
-    const expectedEntities = records.filter((r) => isEntityRecord(r.owner_name)).length;
+    const expectedEntities = records.filter(
+      (r) => isEntityRecord(r.owner_name) && !isBlankOwnerRecord(r.owner_name),
+    ).length;
     const out = worstCaseCost(records, walletProfile);
     const pricedAsEntities = Math.round(
       out.entities / entityCeiling(PRICING.CHARGE_PER_SUCCESS_WALLET),
     );
-    expect(pricedAsEntities).toBe(expectedEntities); // 4
-    expect(pricedAsEntities).toBe(4);
+    expect(pricedAsEntities).toBe(expectedEntities); // 2
+    expect(pricedAsEntities).toBe(2);
+    // And the two skipped records are priced at nothing, not folded into persons.
+    expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
   });
 });
 
@@ -342,10 +363,26 @@ describe("skip_trace_quote", () => {
         ],
       }),
     );
-    // The address-only record is an ENTITY (routes to FastAppend), consistent with the money gate.
+    // The address-only record is neither a person nor a traceable entity: it is SKIPPED, and
+    // reported as such with the reason, so the caller can see why it came back empty and free.
     expect(out.persons).toBe(1);
-    expect(out.entities).toBe(3);
+    expect(out.entities).toBe(2);
+    expect(out.skipped).toBe(1);
+    expect(out.skipped_reason).toBe(BLANK_OWNER_SKIP_REASON);
     expect(out.after_dedup).toBe(4);
+    // And the skipped record costs nothing: three traceable records at the wallet tier 1 rate.
+    expect(out.worst_case_cost).toBeCloseTo(3 * PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
+
+  it("reports no skip reason when every record has an owner", () => {
+    const admin = adminStub({ profile: { id: "p1", subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: [], wallet_balance: 5 } });
+    return skipTraceQuote(admin, "sub-1", {
+      records: [{ owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }],
+    }).then((raw) => {
+      const out = expectQuote(raw);
+      expect(out.skipped).toBe(0);
+      expect(out.skipped_reason).toBeNull();
+    });
   });
 });
 
@@ -471,17 +508,57 @@ describe("skip_trace_bulk", () => {
     expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 1, entities: 0 });
   });
 
-  it("routes an address-only record (NO owner_name) to entityRecords, matching the worst-case gate", async () => {
-    // Submit-split side of the money-gate consistency: the same no-owner record worstCaseCost
-    // prices at $0.25 (entity) is routed here to entityRecords -> FastAppend, never the person
-    // Tracerfy path. Proves the gate and the split classify identically.
-    const { admin } = submitAdminStub({ profile: linked });
+  it("SKIPS an address-only record (NO owner_name) instead of queueing it, and charges nothing", async () => {
+    // Submit-split side of the money-gate consistency, rewritten 2026-09-17. This record used to
+    // be queued to the AI Search cron, which went and found an owner from the web. That engine is
+    // gone, so queueing it now would park the row in 'queued' forever behind a cron that cannot
+    // resolve it, and hold the whole bulk job open. It is accepted, written terminal with the
+    // skip status, and never charged.
+    // MUTATION: route it to entityRecords (drop the isBlankOwnerRecord arm) and this goes red on
+    // both the counts and the ai_research_status of the upserted row.
+    const { admin, captured } = submitAdminStub({ profile: linked });
     const out = await skipTraceBulk(admin, "sub-1", {
       records: [{ address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
       confirm: true,
     });
-    expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 0, entities: 1 });
-    // No person CSV submitted -- the record went entirely to the entity (FastAppend) queue.
+    expect(out).toMatchObject({
+      job_id: "job-1",
+      accepted: 1,
+      persons: 0,
+      entities: 0,
+      skipped: 1,
+      skipped_reason: BLANK_OWNER_SKIP_REASON,
+      committed_worst_case: 0,
+    });
+    // Not submitted to Tracerfy either: no vendor is asked about this record at all.
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+
+    const rows = captured.traceHistoryUpserts.flatMap((u) => u.batch) as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      ai_research_status: BLANK_OWNER_SKIP_STATUS,
+      status: "no_match",
+      input_owner_name: null,
+    });
+    // Nothing money-shaped is written, so the row is not a receipt and stays deletable.
+    for (const paid of ["charge", "ai_research_charge", "tier"]) {
+      expect(Object.keys(rows[0])).not.toContain(paid);
+    }
+    // And it is NOT queued, so no cron is left waiting on an engine that no longer exists.
+    expect(rows[0].ai_research_status).not.toBe("queued");
+  });
+
+  it("still queues a NAMED entity for the business trace", async () => {
+    // The other half of the split: a company name is a real owner of record, so it keeps its
+    // route and keeps reserving one tier 1 charge.
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ owner_name: "Acme Holdings LLC", address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    expect(out).toMatchObject({ accepted: 1, persons: 0, entities: 1, skipped: 0 });
+    const rows = captured.traceHistoryUpserts.flatMap((u) => u.batch) as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ ai_research_status: "queued", status: "processing" });
     expect(submitBulkTrace).not.toHaveBeenCalled();
   });
 });

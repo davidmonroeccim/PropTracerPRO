@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Copy, Check, Phone, Mail, MapPin, User } from 'lucide-react';
+import { Copy, Check, Phone, Mail, MapPin, User, Building2 } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceResult } from '@/types';
 
@@ -88,15 +88,25 @@ export function TraceResultCard({ result, isCached, charge, address, traceId }: 
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Owner Name */}
+        {/*
+          TWO NAMES, TWO MEANINGS. They used to sit under one unlabelled "Owner
+          Name" heading, which made a company and a person look like two guesses
+          at the same thing.
+
+            owner_name    the CONTACT PERSON we resolved behind the owner. Null
+                          for an entity with no named principal, because a
+                          company name is never a contact person.
+            owner_name_2  the OWNER OF RECORD as the county roll has it, which
+                          is what a Full Property Trace bought.
+        */}
         {(result.owner_name || result.owner_name_2) && (
-          <div>
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-2">
-              <User className="h-4 w-4" />
-              Owner Name
-            </div>
-            <div className="space-y-1">
-              {result.owner_name && (
+          <div className="space-y-3">
+            {result.owner_name && (
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-2">
+                  <User className="h-4 w-4" />
+                  Contact Person
+                </div>
                 <div className="flex items-center justify-between">
                   <span className="text-gray-900">{result.owner_name}</span>
                   <Button
@@ -111,8 +121,14 @@ export function TraceResultCard({ result, isCached, charge, address, traceId }: 
                     )}
                   </Button>
                 </div>
-              )}
-              {result.owner_name_2 && (
+              </div>
+            )}
+            {result.owner_name_2 && (
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium text-gray-500 mb-2">
+                  <Building2 className="h-4 w-4" />
+                  Owner of Record
+                </div>
                 <div className="flex items-center justify-between">
                   <span className="text-gray-900">{result.owner_name_2}</span>
                   <Button
@@ -127,8 +143,11 @@ export function TraceResultCard({ result, isCached, charge, address, traceId }: 
                     )}
                   </Button>
                 </div>
-              )}
-            </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  The name on the county roll for this parcel.
+                </p>
+              </div>
+            )}
           </div>
         )}
 

@@ -43,3 +43,11 @@ next-env.d.ts
 # Purchased skip-trace research artifacts. Contain PII for real individuals
 # (names, DOBs, phones, emails) bought from Tracerfy/FastAppend. Never commit.
 tasks/research-test/
+
+# Agent worktrees. Each holds a FULL duplicate copy of the repo, so a `git add -A`
+# without this would commit thousands of stray files and make any grep-based
+# sweep of the codebase look like it missed half its targets.
+.claude/worktrees/
+
+# Supabase CLI scratch state (linked project ref, temp files). Machine-local.
+supabase/.temp/

@@ -3,8 +3,13 @@ import { z } from "zod";
 import { resolvePtpProfile, UNLINKED_MESSAGE } from "@/lib/suite/mcp-shared";
 import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerTrace } from "@/lib/suite/pricing";
-import { AI_RESEARCH } from "@/lib/constants";
-import { isLikelyBusiness } from "@/lib/ai-research/client";
+import { isLikelyBusiness } from "@/lib/trace/ownerClassification";
+import {
+  BLANK_OWNER_SKIP_REASON,
+  BLANK_OWNER_SKIP_STATUS,
+  skipReasonFor,
+} from "@/lib/trace/blankOwnerSkip";
+import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
 import {
@@ -96,33 +101,50 @@ export const quoteSchema = z.object({ records: z.array(recordSchema).min(1) });
  *  business. This is the EXACT negation of skipTraceBulk's person condition
  *  (`owner && !isLikelyBusiness(owner)`, where `owner = (owner_name || "").trim()`), so the
  *  worst-case wallet gate and the submit split can NEVER disagree on how a record is priced vs
- *  routed. The split selects the ROUTE, not the rate: an entity row goes through AI research and
- *  FastAppend, a person row goes straight to Tracerfy, and a settled success on either route bills
- *  the same tier 1 rate (grant-aware chargePerTrace: CHARGE_PER_SUCCESS for a grant-holder,
- *  CHARGE_PER_SUCCESS_WALLET otherwise). An address-only record with no owner_name is an ENTITY,
- *  so it carries the entity route's extra research exposure. */
+ *  routed. The split selects the ROUTE, not the rate: a named entity goes to FastAppend, a person
+ *  goes straight to Tracerfy, and a settled success on either route bills the same tier 1 rate
+ *  (grant-aware chargePerTrace: CHARGE_PER_SUCCESS for a grant-holder, CHARGE_PER_SUCCESS_WALLET
+ *  otherwise). An address-only record with no owner_name is NOT a person, so it lands here too --
+ *  but it has no vendor at all, which is what isBlankOwnerRecord below separates out. */
 export function isEntityRecord(owner_name?: string): boolean {
   const owner = (owner_name || "").trim();
   return !owner || isLikelyBusiness(owner);
 }
 
-/** Worst-case pre-flight cost. Prices each record via the shared isEntityRecord classifier so the
- *  gate reserves exactly what the submit split will queue.
+/** A record that arrived with no owner of record at all. It is a strict subset of isEntityRecord:
+ *  every blank-owner record is a non-person, but not every non-person is blank. It matters because
+ *  a blank-owner record has NO route on this surface. The engine that used to find an owner from an
+ *  address alone is gone, so the record is accepted, skipped with a reason, and never charged
+ *  (lib/trace/blankOwnerSkip.ts). Keep this as the one test, so the quote, the wallet gate and the
+ *  submit split cannot disagree about which records are free. */
+export function isBlankOwnerRecord(owner_name?: string): boolean {
+  return (owner_name || "").trim().length === 0;
+}
+
+/** Worst-case pre-flight cost, in dollars, for the caller's own plan.
  *
- *  An ENTITY record reserves the tier 1 rate PLUS AI_RESEARCH.CHARGE_PER_RECORD, because the
- *  entity route can book BOTH: sweep-bulk-research charges the research fee the moment it finds an
- *  owner name, and settleBulkJob then charges the tier 1 rate on top when Tracerfy returns contacts
- *  (lib/trace/settleBulkJob.ts, the tracerfyHasContacts branch). Reserving only one of the two
- *  under-reserved the wallet by a whole research fee per entity record. This is the SAME formula
- *  app/api/v1/trace/bulk/route.ts uses (records x perTrace + entityRecords x research fee), so the
- *  MCP gate can never be looser than the v1 route's; mcp-tools.test.ts fences that. */
+ *  THE MODEL THIS RESERVES FOR. Every record that has an owner of record is tier 1: charged per
+ *  SUCCESSFUL trace, free on a miss. Owner type picks the vendor and never the price, so a
+ *  FastAppend business trace on an LLC and a Tracerfy trace on a person reserve the identical
+ *  amount. The $0.15 AI research fee that used to be added on top of every entity record is gone
+ *  with the engine that charged it, so there is no per-entity surcharge to reserve any more.
+ *
+ *  A BLANK-OWNER RECORD RESERVES NOTHING, because nothing can be charged for it: this surface has
+ *  no tier 2 route yet, so the record is skipped with a reason instead of traced. Reserving the
+ *  tier 2 per-record rate here would quote a caller for money the submit cannot spend and would
+ *  402 a wallet that can actually afford the batch. When tier 2 is wired into this path, the blank
+ *  arm becomes chargePerRecord(profile) and this comment is what has to change with it.
+ *
+ *  `persons` and `entities` are DOLLARS, not counts. This stays at or above what
+ *  app/api/v1/trace/bulk/route.ts reserves for the same batch; mcp-tools.test.ts fences that. */
 export function worstCaseCost(records: TraceRecord[], profile: PtpProfile) {
-  const personRate = chargePerTrace(profile);
+  const tier1Rate = chargePerTrace(profile);
   let persons = 0;
   let entities = 0;
   for (const r of records) {
-    if (isEntityRecord(r.owner_name)) entities += personRate + AI_RESEARCH.CHARGE_PER_RECORD;
-    else persons += personRate;
+    if (isBlankOwnerRecord(r.owner_name)) continue;
+    if (isEntityRecord(r.owner_name)) entities += tier1Rate;
+    else persons += tier1Rate;
   }
   return { persons, entities, total: persons + entities };
 }
@@ -138,13 +160,20 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   if (!profile) return UNLINKED_MESSAGE;
   const { unique, internalDuplicates } = removeBatchDuplicates(records);
   const cost = worstCaseCost(unique, profile);
-  const entities = unique.filter((r) => isEntityRecord(r.owner_name)).length;
+  const skipped = unique.filter((r) => isBlankOwnerRecord(r.owner_name)).length;
+  const entities = unique.filter(
+    (r) => isEntityRecord(r.owner_name) && !isBlankOwnerRecord(r.owner_name),
+  ).length;
   return {
     submitted: records.length,
     after_dedup: unique.length,
     duplicates_removed: internalDuplicates,
-    persons: unique.length - entities,
+    persons: unique.length - entities - skipped,
     entities,
+    // Records with no owner of record. They are accepted and reported, never traced and never
+    // charged, so they contribute nothing to worst_case_cost.
+    skipped,
+    skipped_reason: skipped > 0 ? BLANK_OWNER_SKIP_REASON : null,
     worst_case_cost: Number(cost.total.toFixed(2)),
     wallet_balance: profile.wallet_balance,
     over_cap: unique.length > MAX_RECORDS,
@@ -160,11 +189,11 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
 // app/api/v1/trace/bulk/route.ts (the source of truth) with exactly three
 // deliberate differences: the source:'mcp' tag, the grant-aware tier 1 rate
 // inside worstCaseCost, and the confirm + MAX_RECORDS guards. The gate's SHAPE
-// is the v1 route's shape (every record at the tier 1 rate, plus a research fee
-// for every entity record), so it can never reserve less than the route does.
-// Everything else (dedup, person/entity split, insert shapes, person CSV,
-// submitBulkTrace, entity queueing for the sweep-bulk-research cron) is the
-// route's behavior, reused.
+// is the v1 route's shape (every traceable record at the tier 1 rate, and
+// nothing for a record that cannot be traced), so it can never reserve less
+// than the route does. Everything else (dedup, the three-way split, insert
+// shapes, person CSV, submitBulkTrace, entity queueing for the
+// sweep-entity-traces cron) is the route's behavior, reused.
 
 export const bulkSchema = z.object({
   records: z.array(recordSchema).min(1),
@@ -211,25 +240,27 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     };
   }
 
-  // Split person vs entity through the SHARED isEntityRecord classifier -- the same
-  // single source of truth worstCaseCost prices with, so the gate can never
-  // under-reserve. A person (non-empty owner_name the classifier does NOT call a
-  // business) goes straight to Tracerfy; everything else (empty/absent owner OR a
-  // business name) queues for AI research / FastAppend.
+  // Three-way split through the SHARED classifiers -- the same single source of truth
+  // worstCaseCost prices with, so the gate can never under-reserve. A person (non-empty
+  // owner_name the classifier does NOT call a business) goes straight to Tracerfy; a named
+  // entity queues for the FastAppend business trace; a record with no owner of record has
+  // no vendor and is skipped with a reason, free.
   const personRecords: AddressInput[] = [];
   const entityRecords: AddressInput[] = [];
+  const skippedRecords: AddressInput[] = [];
   for (const record of newRecords) {
-    if (isEntityRecord(record.owner_name)) entityRecords.push(record);
+    if (isBlankOwnerRecord(record.owner_name)) skippedRecords.push(record);
+    else if (isEntityRecord(record.owner_name)) entityRecords.push(record);
     else personRecords.push(record);
   }
 
   // Guard 3 (money fence): worst-case pre-flight, using the SAME formula the v1
-  // route uses -- every record at the tier 1 per-success rate, plus
-  // AI_RESEARCH.CHARGE_PER_RECORD for every entity record, which is the most the
-  // entity route can book (research fee on owner discovery, then a tier 1 charge
-  // when contacts land). The only difference from v1 is that the tier 1 rate here
-  // is grant-aware, and that is also the rate this surface settles at. Nothing is
-  // submitted or charged when the wallet cannot cover the worst case.
+  // route uses -- every TRACEABLE record at the tier 1 per-success rate, which is
+  // the most either route can book now that the research fee is retired. A
+  // blank-owner record reserves nothing because it is skipped, not traced. The
+  // only difference from v1 is that the tier 1 rate here is grant-aware, and that
+  // is also the rate this surface settles at. Nothing is submitted or charged when
+  // the wallet cannot cover the worst case.
   const worst = worstCaseCost(newRecords, profile).total;
   if (profile.wallet_balance < worst) {
     return {
@@ -264,7 +295,11 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       file_name: "MCP bulk submit",
       total_records: records.length,
       dedupe_removed: duplicatesRemoved,
-      records_submitted: newRecords.length,
+      // The rows a vendor is actually asked about. A blank-owner row is accepted
+      // and skipped, never traced and never charged, so counting it here would
+      // overstate the work and drag the match rate down by however many rows
+      // arrived without an owner. Same meaning as both bulk REST routes.
+      records_submitted: personRecords.length + entityRecords.length,
       records_matched: 0,
       status: "processing",
       source: "mcp",
@@ -279,7 +314,11 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
 
   // Per-record pending trace_history row, tagged source:'mcp' and linked to the
   // bulk job via trace_job_id so bulk_status + the cron aggregate per-record.
-  const buildHistoryRow = (record: AddressInput, aiResearchStatus: string | null) => {
+  const buildHistoryRow = (
+    record: AddressInput,
+    aiResearchStatus: string | null,
+    status: "processing" | "no_match" = "processing",
+  ) => {
     const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
     return {
       user_id: profile.id,
@@ -291,13 +330,26 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       zip: (record.zip || "").substring(0, 5),
       input_owner_name: record.owner_name || null,
       ai_research_status: aiResearchStatus,
-      status: "processing" as const,
+      status,
       source: "mcp",
     };
   };
 
-  // Entity rows first, ai_research_status:'queued' so the existing
-  // sweep-bulk-research cron picks them up unchanged as soon as we return.
+  // Blank-owner rows land already finished, never queued, so no cron waits on them
+  // and nothing money-shaped is written: no charge, no ai_research_charge, no tier.
+  if (skippedRecords.length > 0) {
+    const skippedRows = skippedRecords.map((r) =>
+      buildHistoryRow(r, BLANK_OWNER_SKIP_STATUS, "no_match"),
+    );
+    for (let i = 0; i < skippedRows.length; i += BULK_BATCH_SIZE) {
+      await admin
+        .from("trace_history")
+        .upsert(skippedRows.slice(i, i + BULK_BATCH_SIZE), { onConflict: "user_id,address_hash" });
+    }
+  }
+
+  // Entity rows next, ai_research_status:'queued' so the sweep-entity-traces
+  // cron picks them up as soon as we return.
   if (entityRecords.length > 0) {
     const entityRows = entityRecords.map((r) => buildHistoryRow(r, "queued"));
     for (let i = 0; i < entityRows.length; i += BULK_BATCH_SIZE) {
@@ -360,6 +412,8 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     accepted: newRecords.length,
     persons: personRecords.length,
     entities: entityRecords.length,
+    skipped: skippedRecords.length,
+    skipped_reason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : null,
     committed_worst_case: Number(worst.toFixed(2)),
   };
 }
@@ -399,6 +453,10 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     result: row.trace_result,
     research: row.ai_research,
     contacts: row.ai_research?.business_trace_contacts || null,
+    // Why a row came back empty without being traced. Null on every row we
+    // actually asked a vendor about, so a status of no_match is never left to
+    // speak for itself when no vendor was ever called.
+    skip_reason: skipReasonFor(row.ai_research_status),
     charge: row.charge || 0,
     ai_research_charge: row.ai_research_charge || 0,
   };
@@ -462,8 +520,10 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   }
 
   // Still in flight while any row awaits research or its Tracerfy result.
-  const isPendingResearch = (r: TraceHistoryRow) =>
-    r.ai_research_status === "queued" || r.ai_research_status === "processing";
+  // Asked of lib/trace/entityTraceAttempts.ts, not compared against two
+  // literals: a retried entity row carries its attempt number in that column,
+  // and a row whose attempts ran out is terminal rather than pending.
+  const isPendingResearch = (r: TraceHistoryRow) => isEntityTracePending(r.ai_research_status);
   const anyPendingResearch = rows.some(isPendingResearch);
   const anyPendingTrace = rows.some((r) => r.status === "processing");
   if (anyPendingResearch || anyPendingTrace) {

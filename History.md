@@ -6,6 +6,109 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 4a COMPLETE: AI Search removed, the UI shipped, v1 wired
+
+Consolidated entry. The per-pass entries below carry the detail; this is the summary.
+
+- **AI Search is gone.** The Brave and Claude engine, four research routes, the Brave client and
+  the results card, deleted with no deprecation window. Historical data is untouched: 1,301 rows of
+  `ai_research`, `ai_research_status` and `ai_research_charge` are still stored, still served, and
+  still protected from deletion by `isBilledRow`. Both refund sites still service them.
+- **Four things the written deletion list got wrong, all caught before deleting.**
+  `app/api/v1/research/status` had to survive (it polls `business_trace_jobs`, not AI research, and
+  customers poll it); `isLikelyBusiness()` had to be relocated; `AIResearchResult` could not leave
+  `types/`; and deleting `sweep-bulk-research` would have broken BULK for 987 of the 1,301 rows,
+  because it was the only path resolving entity-owned bulk rows. Rewritten as `sweep-entity-traces`
+  on `lookupBusinessTrace()`, no Brave, no Claude.
+- **The UI, which is the visible slice.** `PropertyRecordCard` renders the county record, pure and
+  server-renderable. The 6 provably-wrong fields and 15 propensity scores never reach the screen; a
+  numeric 0 renders blank because 0 is this vendor's unpopulated default, and a "$0 mortgage
+  balance" would assert free-and-clear. Opt-in toggle, the disclosure firing on both billing
+  triggers, and the two owner names finally labelled: contact person versus owner of record.
+- **v1 runs tier 2 automatically on an absent owner**, on its own RAW Track B price derivation
+  (`lib/api/pricing.ts`), never the grant-aware Track A helpers. `trace.completed` now fires for
+  tier 2 from both surfaces, including a billed miss, never on a vendor failure.
+- **Two reviews caught two money defects a green suite could not.** The v1 cache could never fire
+  (anon client under RLS, no session cookie on an API-key request), so every repeat call re-bought
+  and re-charged. And a billed row could be written back to unbilled, after which a foreign key
+  violation made that address return 500 permanently. Both fixed, both mutation-verified.
+- **Receipts are monotonic now.** `foldBillingWrite` accumulates charge and never downgrades tier;
+  the ledger is the idempotency marker and it fails closed. Note the dashboard's charge column now
+  reports the total collected against an address rather than the most recent collection, which is
+  what puts it back in agreement with `wallet_transactions`.
+- **L-009 was earned twice in one phase**: a correctly written guard with a correctly named test is
+  worthless when the two paths it separates are identical in the test environment. Only the
+  mutation runs exposed either one.
+- **Numbers:** 848 tests passing from 497, 56 files, 0 failing. `tsc` 0. eslint 47 from 54. Build
+  compiles. 56 files changed.
+- **Not done, deliberately:** phase 4b (the CRM push with 65 auto-created custom fields and the PIT
+  scope warning) and phase 5 (bulk tier 2, the pre-flight balance check, the 65-column export).
+
+### Full Property Trace, phase 4: the 21 blocked dossier fields are withheld from EVERY egress, not just the screen
+
+David's decision: the 6 provably-wrong fields and the 15 propensity scores are blocked from the v1
+API, the session API, both poll routes and the `trace.completed` webhook, on the reasoning that
+already blocked them from the CSV export. A payload lands in a customer's own system, where a wrong
+`estimated_value` looks authoritative and outlives any caveat we could put on a screen.
+
+- **Storage is untouched.** `trace_history.property_record` still holds all 86 keys, verbatim. No
+  migration, no backfill, no filter on the way in. The raw dump is the product.
+- **New `lib/trace/publicPropertyRecord.ts`**: the one blocked list plus a pure
+  `toPublicPropertyRecord()` that returns a COPY. Both submit routes persist the raw record and
+  return the filtered one from the same variable, so an in-place delete would have written a
+  65-key row to the database; a test fences that and the mutation was verified red.
+- **11 egress sites filtered**: 3 on `app/api/v1/trace/single` (both cached branches and the tier 2
+  inline response), 3 on `app/api/trace/single`, 2 on each poll route, and the webhook payload.
+  The webhook filters at the dispatch itself, so both call sites hand it the raw record and there
+  is exactly one place to get it wrong.
+- **One list, not two.** `PropertyRecordCard` now runs its input through the same filter before any
+  accessor touches it, so a field re-added to the panel renders nothing rather than reappearing on
+  screen while the API withholds it. Its test file pins its sentinel map to the shared list.
+- **A source scan** over `app/`, `lib/` and `components/` fails on any new unfiltered emission, so a
+  fifth egress added later is caught rather than shipping quietly.
+- A caller now receives **65 keys**. "Over 60 fields" in the API docs is still exact.
+- 761 tests passing (from 699, 40 of them this change and the rest a concurrent agent's), `tsc` 0
+  errors, eslint 47 problems, build compiles. 14 mutations applied one at a time, all 14 caught.
+
+### Full Property Trace, phase 4 tasks 11 and 12: tier 2 on the public v1 API, and the completion webhook
+
+**Task 11. `app/api/v1/trace/single` now runs tier 2**, automatic on an absent `ownerName` and on
+an explicit opt-in, mirroring the phase 3b charge sequence step for step. Characterization tests
+were written against the route FIRST and four of them went red on the change, which is what they
+were for.
+
+- **Track B keeps its own price derivation.** New `lib/api/pricing.ts` carries `rawPricePlanFor()`
+  and `rawChargePerRecord()`, the RAW twins of `pricePlanFor` / `chargePerRecord`. The Track A
+  helpers are grant-aware and reusing them here would have moved an existing API-key caller's bill
+  from $0.40 to $0.25. No plan is hardcoded; the caller's real plan is derived and passed.
+- The pre-flight gate now reserves the TIER 2 rate. It reserved the tier 1 rate and under-reserved.
+- A billed tier 2 row is SERVED from the database, free. v1 had no tier-2 cache branch, so the
+  customer re-bought a record they already owned.
+- Fixed the latent 500: `zip.substring(0, 5)` was unguarded on a validation-OPTIONAL field, so a
+  submit with no zip threw a TypeError before any vendor was called.
+- Tier 2 returns the finished record inline; tier 1 is untouched and still returns a `traceId`.
+
+**Task 12. `trace.completed` now fires for tier 2 on BOTH routes.** Tier 2 completes inline and
+never reaches a poll route, so a webhook customer silently stopped receiving events. New
+`lib/trace/traceCompletedWebhook.ts` sends the poll route's payload plus `property_record`, `tier`
+and `owner_type`. Fires for every completed tier 2 INCLUDING a billed miss; never on a vendor
+failure, which charges nothing. Fire-and-forget: a webhook failure cannot fail the request or the
+charge. The HighLevel CRM push is deliberately NOT wired; it stays phase 4b.
+
+**Files created:** `lib/api/pricing.ts`, `lib/api/__tests__/pricing.test.ts`,
+`lib/trace/traceCompletedWebhook.ts`
+**Files modified:** `app/api/v1/trace/single/route.ts`, `app/api/trace/single/route.ts`,
+`app/api/v1/trace/single/__tests__/route.test.ts`, `app/api/trace/single/__tests__/route.test.ts`
+
+**Numbers:** vitest 663 passing / 47 files / 0 failing (was 593 / 46). `tsc --noEmit` 0 errors.
+`eslint app lib components` 49 problems, unchanged. `npm run build` compiles, exit 0.
+**Mutations:** 20 applied in isolation, 20 caught. One (swapping in the Track A price helpers)
+initially survived with ZERO tests red because the Suite sign-in kill-switch is off in the test
+environment, which makes the two tracks agree; the test now sets the flag and the mutation is
+caught.
+
+---
+
 ### Full Property Trace, phase 3c: the single-trace page discloses the tier 2 charge
 
 **The gate on shipping 3b.** The route bills per record submitted and bills a total miss too, so
@@ -702,3 +805,128 @@ anything can create it. Nothing is wired; no user-facing behaviour is added.
 - Updated `CLAUDE.md` to add Rule 9: update `History.md` after every task before moving to the next.
 
 ---
+
+### Phase 4 review fixes: six defects found in review, fixed
+
+**Fix 1. The dashboard bulk route charged for blank-owner rows.** `app/api/trace/bulk/route.ts`
+never got the blank-owner skip the v1 route and the MCP submit got this phase. It put a CSV line
+with an empty first and last name into the Tracerfy submit, and `bulk/status` then deducted the
+tier 1 rate on whatever came back. It now splits the batch, writes the blank-owner rows terminal
+with `BLANK_OWNER_SKIP_STATUS` and no money columns, reserves nothing for them, and never calls a
+vendor about them. An upload that is entirely blank-owner closes its job out instead of leaving the
+page polling forever.
+
+- Rows now carry `trace_job_id`, as the v1 rows already did. Without it a skipped row, which never
+  gets a `tracerfy_job_id`, was invisible to the results CSV.
+- `app/api/trace/bulk/download` finds rows by either key and emits the `skip_reason` column, so the
+  reason reaches the customer rather than sitting in a database column.
+- The bulk page counts blank-owner rows before submit and says they will be skipped and not
+  charged. That counter went away with the AI Research toggle and nothing replaced it.
+
+**Fix 2. A poisoned row starved the entity queue forever.** `lookupBusinessTrace()` never throws,
+so a lapsed `FASTAPPEND_API_KEY` or an hour of 503s left `sweep-entity-traces` re-queuing the same
+five oldest rows every minute, and no newer row was ever reached. New
+`lib/trace/entityTraceAttempts.ts` carries the attempt number in `ai_research_status` itself
+(`queued`, `queued_2`, ... and the matching `processing_N`), so it survives between runs with no
+migration and no new column. After five attempts the row is written terminal as
+`entity_trace_failed` with a readable reason and no charge. The stale-claim sweep steps the same
+ladder, so a row that kills the run every time is bounded too. Retrying a transient failure is
+unchanged.
+
+**Fix 3. A customer could not retrieve the record they paid for.** Neither status route returned
+`property_record` or `tier`, so a Pay-As-You-Go customer billed for a Full Property Trace who
+closed the tab, or an API caller polling for an async result, had no way to get the 86-field record
+back. Both routes now read both keys off the existing `trace_history` row. No vendor call, no
+second charge.
+
+**Fix 4. Comments describing money that no longer moves.** `lib/trace/settleBulkJob.ts` said the
+tier fee is charged on top of an AI research charge the cron books, and that the booked charge
+"stays put". `sweep-entity-traces` writes `ai_research_charge: 0` on every new row, so that was
+false for all of them. The refund code is correct and still services the 1,301 historical rows;
+the narration now says so. `lib/constants.ts` called the retired `AI_RESEARCH.CHARGE_PER_RECORD`
+"a different product on a different ledger entry", contradicting its own RETIRED banner. They
+agree now.
+
+**Fix 5. Two copy defects on the single trace page.** The clear-cache confirm promised a permanent
+delete and a fresh search, which is false for a billed row: `excludeBilledRows` protects it and the
+cache serves it back. It now says what actually happens, which is good news. The Full Property
+Trace toggle displayed a tick driven by `!hasOwnerName` while the request body sent
+`wantsPropertyRecord`; one derived value now drives the checkbox, the request and the disclosure.
+
+**Fix 6. Two data-honesty defects in `PropertyRecordCard`.** `total_portfolio_value` was labelled
+"Portfolio value". It is the sum of the vendor's per-parcel values, and those equal ASSESSED value
+on 23 of 23 parcels, so it inherits the defect that got `estimated_value` blocked. It is not
+blocked, it is labelled "Portfolio assessed value" with a note saying it is not a market valuation,
+the same treatment `assessed_value` gets. And `date()` printed a vendor `0000-00-00` verbatim; it
+is blank now.
+
+**Verification.** 699 tests / 49 files / 0 failing (up from 651 / 47). `tsc --noEmit` clean.
+eslint 48 problems, down 1 from an unused import removed. `npm run build` compiles. Ten mutations
+run and confirmed red, listed in `tasks/todo.md`.
+
+---
+
+## 2026-09-17 — Phase 4 second-review fixes: the bulk surfaces
+
+Five findings from the second review of phase 4, all on the bulk path. Files belonging to other
+workstreams (the single-trace routes, `lib/trace/traceCompletedWebhook.ts`,
+`lib/utils/deduplication.ts`, `docs/`, the settings pages) were not touched.
+
+**Fix 1. The v1 bulk route reported skipped rows as submitted work.** `records_submitted` on the
+job row was every record that survived dedup, blank-owner rows included, and those are never sent
+to any vendor. The dashboard route already writes the traceable count with a comment saying
+counting skipped rows would overstate the work; the two routes now agree. The number is the
+denominator of the match rate, so a 100-row upload with 40 blank owners was showing a match rate
+40 percent below the work actually attempted, in the status response, the `bulk_job.completed`
+webhook and the history page. Checked first that nothing computes on the column: `settleBulkJob`
+never reads it, the v1 status route passes it through with no arithmetic, `sweep-stale-traces`
+only copies it into a webhook.
+
+**Fix 2. David's blank-owner rule was half implemented on the dashboard.** The rule is accepted,
+skipped with a reason, charged nothing, reason visible in the job summary and the CSV. Only the
+CSV had it, so a mixed upload finished with those rows reading as a bare `no_match`. The session
+bulk status route now returns `records_skipped` and `skip_reason`, derived through `skipReasonFor()`
+so the wording is the same one the v1 payload, the MCP payload and the CSV serve. The page reads
+them back and renders `components/trace/BulkSkipSummary.tsx` in both the processing and the
+complete phase, and the pre-submit line counts the rows that will actually be traced.
+
+**Fix 3. The entity cron could charge a row twice.** A throw after the deduct and before the row
+write left the money moved with nothing on the row, and the catch requeued it for another claim,
+another FastAppend call and another deduct. The marker is the `wallet_transactions` debit
+`deduct_wallet_balance` already writes carrying `trace_history_id`. No new column: the cron asks
+the ledger before deducting and persists the amount that already moved.
+
+**Fix 4. A row could become permanently invisible.** The stale-claim sweep used `.lt()` on
+`ai_research_claimed_at`, and SQL `<` never matches NULL, so a row in `processing_N` with a null
+claim timestamp was unreachable by both the sweep and the claim query and held its bulk job open
+forever. Both arms are matched now. Latent: no current writer produces that pair.
+
+**Fix 5. A comment that invented a database field.** It documented `normalized_address` as
+carrying a zip. `normalizeAddress()` returns `STREET|CITY|STATE`, zip-free on purpose since
+migration 20260904.
+
+**Verification.** 772 tests / 53 files / 0 failing (up from 737 / 51). `tsc --noEmit` clean.
+eslint 47 problems, unchanged. `npm run build` compiles. Fifteen mutations run and confirmed red,
+listed in `tasks/todo.md`, including one that survived twice and forced the skip block out of the
+page and into its own render-tested component.
+
+## 2026-09-17 — Phase 4 billing fixes: repeat billing, the double webhook, the receipt lockout, the false wallet message
+
+- **The cache could never fire on the public API.** `checkSingleDuplicate` built the cookie-backed
+  anon client, and `trace_history` RLS made it blind on every API-key request, so every repeat call
+  re-bought the dossier and charged the wallet again. It now uses the service-role client, with the
+  unconditional `user_id` filter as the cross-user fence and a mutation test on its deletion.
+- **`trace.completed` no longer fires twice for one `trace_id`** on a repeat submit. Three remaining
+  paths can emit two events for one row, and each is a genuine second purchase.
+- **Receipts are monotonic.** `foldBillingWrite` accumulates `charge` and never downgrades `tier`, so
+  a tier 1 settle can no longer zero a tier 2 receipt and lock the address out of every retrace.
+- **A row a ledger row points at is never a delete candidate.** `hasLedgerReceipt` asks
+  `wallet_transactions` and `usage_records` and fails closed, which also frees rows already damaged.
+- **`deductWallet` separates a short wallet from a failed RPC**, so a customer with a full balance is
+  no longer told they were short. On an RPC failure they are not billed and keep the record.
+- Deduplication is no longer mocked in either single-trace suite, so the cache tests can fail for the
+  real reason.
+
+**Verification.** 844 tests / 55 files / 0 failing (up from 772 / 53). `tsc --noEmit` clean. eslint
+47 problems, unchanged. `npm run build` compiles. Twenty mutations applied one at a time with a full
+suite between each, all twenty red; the table is in `tasks/todo.md`.

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import type { TraceJob, TraceHistory, TraceResult, AIResearchResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -52,20 +53,28 @@ export async function GET(request: Request) {
       );
     }
 
-    if (!traceJob.tracerfy_job_id) {
-      return NextResponse.json(
-        { success: false, error: 'No results available' },
-        { status: 400 }
-      );
-    }
-
-    // Query trace_history rows for this job
-    const { data: rows, error: queryError } = await adminClient
+    // NOTE: a missing tracerfy_job_id is no longer a reason to refuse. A job
+    // whose every row was skipped for a blank owner name never gets a Tracerfy
+    // job at all, and it still has rows that have to be downloadable, or the
+    // only place the skip reason is written is a database column the customer
+    // cannot see.
+    //
+    // Query trace_history rows for this job. TWO keys, because the two kinds of
+    // row are found by different columns: a traced row by the Tracerfy job it
+    // was submitted in, a skipped row by the bulk job it belongs to. Rows
+    // written before trace_job_id was populated on this path carry only the
+    // former, which is why the Tracerfy arm stays.
+    const historyQuery = adminClient
       .from('trace_history')
       .select('*')
-      .eq('user_id', user.id)
-      .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
-      .order('created_at', { ascending: true });
+      .eq('user_id', user.id);
+
+    const { data: rows, error: queryError } = await (traceJob.tracerfy_job_id
+      ? historyQuery.or(
+          `tracerfy_job_id.eq.${traceJob.tracerfy_job_id},trace_job_id.eq.${traceJob.id}`
+        )
+      : historyQuery.eq('trace_job_id', traceJob.id)
+    ).order('created_at', { ascending: true });
 
     if (queryError) {
       console.error('Failed to query trace history:', queryError.message);
@@ -77,16 +86,30 @@ export async function GET(request: Request) {
 
     const historyRows = (rows || []) as TraceHistory[];
 
-    // Check if any rows have AI research data
+    // The four research columns are HISTORICAL. `deceased` and `relatives` could only ever
+    // be produced by the AI Search engine, which was removed on 2026-09-17, and a row
+    // written since then carries neither. They stay because the 1,301 rows that do carry
+    // them are data the customer paid for and this download is one of the places that
+    // serves it. The header only appears when a row in this job actually has research, so a
+    // new job exports the base columns and nothing empty.
     const hasResearch = historyRows.some((row) => row.ai_research);
+
+    // A row we accepted and did not trace carries a reason. Asked of
+    // skipReasonFor(), the one accessor for "why did this come back empty
+    // without being traced", so the column appears for every such row and not
+    // just the blank-owner kind. Only added when one of them is in the file, so
+    // a normal job's CSV is unchanged. Without it a skipped row reads as a
+    // plain no_match, which is the one thing it must never silently look like.
+    const hasSkipped = historyRows.some((row) => skipReasonFor(row.ai_research_status) !== null);
 
     // Build CSV
     const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
 
     const baseHeaders = 'address,city,state,zip,owner_name,status,phone_1,phone_2,phone_3,email_1,email_2,email_3,mailing_address,mailing_city,mailing_state,charge';
+    const skipHeader = hasSkipped ? ',skip_reason' : '';
     const researchHeaders = hasResearch ? ',owner_type,deceased,relatives,property_type' : '';
 
-    const csvLines = [baseHeaders + researchHeaders];
+    const csvLines = [baseHeaders + skipHeader + researchHeaders];
 
     for (const row of historyRows) {
       const result = row.trace_result as TraceResult | null;
@@ -111,6 +134,10 @@ export async function GET(request: Request) {
         esc(result?.mailing_state || ''),
         (row.charge || 0).toFixed(2),
       ];
+
+      if (hasSkipped) {
+        baseCols.push(esc(skipReasonFor(row.ai_research_status) || ''));
+      }
 
       if (hasResearch) {
         const research = row.ai_research as AIResearchResult | null;

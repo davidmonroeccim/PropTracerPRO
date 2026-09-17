@@ -12,11 +12,20 @@ import { Badge } from '@/components/ui/badge';
 import { Eye, EyeOff, Copy, Check, ExternalLink, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
 import type { UserProfile } from '@/types';
 
+/**
+ * The real `trace.completed` body, key for key.
+ *
+ * Tier 1 is sent by the two poll routes (app/api/trace/status,
+ * app/api/v1/trace/status). Tier 2 is sent by lib/trace/traceCompletedWebhook.ts,
+ * which is the poll payload plus `property_record`, `tier` and `owner_type`.
+ * `charge` is always what the wallet actually collected, never a list price, so
+ * the number below is an example and not a quote.
+ */
 const WEBHOOK_PAYLOAD_EXAMPLE = `{
   "event": "trace.completed",
   "trace_id": "uuid",
   "status": "success",
-  "address": "123 MAIN ST",
+  "address": "123 MAIN ST|DALLAS|TX",
   "city": "DALLAS",
   "state": "TX",
   "zip": "75201",
@@ -29,8 +38,12 @@ const WEBHOOK_PAYLOAD_EXAMPLE = `{
     "mailing_state": "TX",
     "mailing_zip": "75202"
   },
-  "charge": 0.15,
-  "timestamp": "2026-01-27T15:30:00Z"
+  "research": null,
+  "charge": 0.25,
+  "property_record": { "county": "Dallas", "apn": "00000123456789000" },
+  "tier": 2,
+  "owner_type": "individual",
+  "timestamp": "2026-09-17T15:30:00Z"
 }`;
 
 export default function IntegrationsPage() {
@@ -218,7 +231,7 @@ export default function IntegrationsPage() {
                 Upgrade to Pro ($97/month) to unlock integrations, including:
               </p>
               <ul className="list-disc list-inside text-gray-600 space-y-1">
-                <li>HighLevel CRM — push contacts automatically</li>
+                <li>HighLevel CRM, push contacts automatically</li>
                 <li>Webhook support for any CRM or automation platform</li>
                 <li>Full API access</li>
               </ul>
@@ -341,7 +354,7 @@ export default function IntegrationsPage() {
                   <h4 className="font-semibold text-gray-800">GHL v1 (Legacy API Key)</h4>
                   <ol className="list-decimal list-inside mt-1 space-y-1">
                     <li>Log in to your HighLevel sub-account</li>
-                    <li>Go to <strong>Settings → Business Profile</strong></li>
+                    <li>Go to <strong>Settings, then Business Profile</strong></li>
                     <li>Scroll down to the <strong>API Key</strong> field</li>
                     <li>Copy the key and paste it above</li>
                   </ol>
@@ -352,20 +365,20 @@ export default function IntegrationsPage() {
                   <p className="mt-1 mb-1 text-xs text-gray-500">HighLevel is phasing out legacy API keys. New accounts should use Private Integrations instead.</p>
                   <ol className="list-decimal list-inside mt-1 space-y-1">
                     <li>Log in to your HighLevel sub-account</li>
-                    <li>Go to <strong>Settings → Private Integrations</strong></li>
+                    <li>Go to <strong>Settings, then Private Integrations</strong></li>
                     <li>Click <strong>Create new Integration</strong></li>
                     <li>Name it (e.g. &quot;PropTracerPRO&quot;) and select the <strong>contacts</strong> scope</li>
-                    <li>Copy the generated token immediately — <strong>you won&apos;t be able to see it again</strong></li>
+                    <li>Copy the generated token immediately. <strong>You won&apos;t be able to see it again</strong></li>
                     <li>Paste the token in the API Key field above</li>
                   </ol>
-                  <p className="mt-1 text-xs text-gray-500">If you don&apos;t see Private Integrations, enable it under <strong>Settings → Labs</strong> first.</p>
+                  <p className="mt-1 text-xs text-gray-500">If you don&apos;t see Private Integrations, enable it under <strong>Settings, then Labs</strong> first.</p>
                 </div>
 
                 <div>
                   <h4 className="font-semibold text-gray-800">Finding Your Location ID</h4>
                   <ul className="list-disc list-inside mt-1 space-y-1">
-                    <li><strong>Option A:</strong> Go to <strong>Settings → Business Profile</strong> and look for <strong>Location ID</strong></li>
-                    <li><strong>Option B:</strong> Look at your browser URL — it follows the pattern <code className="bg-gray-200 px-1 rounded text-xs">app.gohighlevel.com/location/<strong>LOCATION_ID</strong>/...</code></li>
+                    <li><strong>Option A:</strong> Go to <strong>Settings, then Business Profile</strong> and look for <strong>Location ID</strong></li>
+                    <li><strong>Option B:</strong> Look at your browser URL. It follows the pattern <code className="bg-gray-200 px-1 rounded text-xs">app.gohighlevel.com/location/<strong>LOCATION_ID</strong>/...</code></li>
                   </ul>
                 </div>
               </div>
@@ -443,9 +456,33 @@ export default function IntegrationsPage() {
               Webhook Payload Preview
             </button>
             {showPayload && (
-              <pre className="mt-2 bg-gray-50 p-4 rounded text-xs overflow-x-auto border">
-                {WEBHOOK_PAYLOAD_EXAMPLE}
-              </pre>
+              <>
+                <pre className="mt-2 bg-gray-50 p-4 rounded text-xs overflow-x-auto border">
+                  {WEBHOOK_PAYLOAD_EXAMPLE}
+                </pre>
+                <div className="mt-3 space-y-2 text-xs text-gray-600">
+                  <p>
+                    The last three fields come with a Full Property Trace. A trace where you gave
+                    us the owner of record sends the same event without{' '}
+                    <code className="bg-gray-100 px-1 rounded">property_record</code>,{' '}
+                    <code className="bg-gray-100 px-1 rounded">tier</code> and{' '}
+                    <code className="bg-gray-100 px-1 rounded">owner_type</code>.
+                  </p>
+                  <p>
+                    <code className="bg-gray-100 px-1 rounded">charge</code> is what your wallet
+                    actually paid for that trace, not a list price. When you give us the owner of
+                    record you are charged only if contacts come back, at $0.15 per successful
+                    trace on Pro and AcquisitionPRO or $0.25 pay as you go. A Full Property Trace
+                    is charged per record submitted, at $0.25 on Pro and AcquisitionPRO or $0.40
+                    pay as you go, and that charge stands whether or not contacts come back.
+                  </p>
+                  <p>
+                    A Full Property Trace fires this event even when it found no contacts, because
+                    that outcome was still charged and it is the one you most need to hear about.
+                    Nothing is sent, and nothing is charged, when a lookup fails on our side.
+                  </p>
+                </div>
+              </>
             )}
           </div>
 

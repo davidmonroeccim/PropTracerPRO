@@ -85,11 +85,67 @@ export default function ApiDocsPage() {
         </CardContent>
       </Card>
 
+      {/* Pricing */}
+      <Card>
+        <CardHeader>
+          <CardTitle>What a Trace Costs</CardTitle>
+          <CardDescription>Two ways to be charged, and which one you get depends on what you send</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left py-2 pr-4">You send</th>
+                  <th className="text-left py-2 pr-4">Charged</th>
+                  <th className="text-left py-2 pr-4">Pro and AcquisitionPRO</th>
+                  <th className="text-left py-2">Pay as you go</th>
+                </tr>
+              </thead>
+              <tbody className="text-gray-600">
+                <tr className="border-b">
+                  <td className="py-2 pr-4">The owner of record</td>
+                  <td className="py-2 pr-4">Per successful trace</td>
+                  <td className="py-2 pr-4">$0.15</td>
+                  <td className="py-2">$0.25</td>
+                </tr>
+                <tr>
+                  <td className="py-2 pr-4">No owner, or you ask for the property record</td>
+                  <td className="py-2 pr-4">Per record submitted</td>
+                  <td className="py-2 pr-4">$0.25</td>
+                  <td className="py-2">$0.40</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-gray-600 text-sm">
+            When you give us the owner of record, you only pay when the trace comes back with a
+            phone or an email. A miss costs you nothing.
+          </p>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <p className="text-amber-900 text-sm">
+              A Full Property Trace is charged per record submitted, so the charge stands whether
+              or not contacts come back. You can send an address, get no county parcel and no
+              contacts, and still be charged for it. What you are buying is the lookup against the
+              county record for that address, not a guaranteed result.
+            </p>
+          </div>
+          <p className="text-gray-600 text-sm">
+            Whether the owner is a person or a company decides which vendor runs the lookup. It
+            never changes the price. There is no entity rate and no surcharge.
+          </p>
+          <p className="text-gray-600 text-sm">
+            Results are kept for 90 days. Resubmitting an address you already traced returns your
+            stored result and costs nothing. Polling any status endpoint is free.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Endpoints */}
       <Card>
         <CardHeader>
           <CardTitle>API Endpoints</CardTitle>
-          <CardDescription>Available endpoints for skip tracing and AI research</CardDescription>
+          <CardDescription>Available endpoints for skip tracing and full property traces</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           {/* Single Trace */}
@@ -98,7 +154,7 @@ export default function ApiDocsPage() {
               <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
               <code className="text-sm font-semibold">/trace/single</code>
             </div>
-            <p className="text-gray-600 text-sm">Trace a single property address. Optionally run AI research to discover the owner automatically.</p>
+            <p className="text-gray-600 text-sm">Trace a single property address. Send the owner of record and you get a skip trace on that owner. Leave it out and you get a Full Property Trace instead, which buys the county record for the address and then traces whoever it says owns it.</p>
 
             <h5 className="font-medium text-sm">Request Body:</h5>
             <CodeBlock
@@ -106,38 +162,88 @@ export default function ApiDocsPage() {
   "address": "123 Main Street",
   "city": "Austin",
   "state": "TX",
-  "zip": "78701",
-  "ownerName": "John Smith",  // optional, improves accuracy
-  "aiResearch": true           // optional, discovers owner if ownerName is omitted
+  "zip": "78701",                 // optional
+  "ownerName": "John Smith",      // optional. Leaving it out runs a Full Property Trace
+  "fullPropertyTrace": false      // optional. Set true to get the property record anyway
 }`}
               section="single-request"
             />
 
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-2">
               <p className="text-blue-800 text-sm">
-                <strong>AI Research:</strong> When <code className="bg-blue-100 px-1 rounded">aiResearch: true</code> and no <code className="bg-blue-100 px-1 rounded">ownerName</code> is provided, PropTracerPRO will run AI-powered property research to discover the owner before skip tracing. This adds $0.15 to the cost (only charged if an owner is found). If <code className="bg-blue-100 px-1 rounded">ownerName</code> is provided, research is skipped.
+                <strong>Which one runs.</strong> If <code className="bg-blue-100 px-1 rounded">ownerName</code> is missing or blank, a Full Property Trace runs automatically. If you already have the owner but you want the county record too, send <code className="bg-blue-100 px-1 rounded">fullPropertyTrace: true</code>. The spelling <code className="bg-blue-100 px-1 rounded">full_property_trace</code> is accepted as well.
+              </p>
+              <p className="text-blue-800 text-sm">
+                A Full Property Trace runs start to finish inside the request and returns the finished result, so give your HTTP client a timeout of at least 60 seconds. A trace where you supplied the owner returns a <code className="bg-blue-100 px-1 rounded">traceId</code> for you to poll instead.
               </p>
             </div>
 
-            <h5 className="font-medium text-sm">Response (processing):</h5>
+            <h5 className="font-medium text-sm">Response when you supplied the owner (poll for it):</h5>
             <CodeBlock
               code={`{
   "success": true,
   "status": "processing",
   "traceId": "uuid",
   "tracerfyJobId": "job_abc123",
-  "research": {                        // included when aiResearch was used
-    "owner_name": "John Smith",
-    "owner_type": "individual",
-    "confidence": 75,
-    "business_name": null,
-    "individual_behind_business": null
-  },
-  "researchCharge": 0.15,
   "message": "Trace submitted. Poll /api/v1/trace/status?trace_id=uuid for results."
 }`}
               section="single-response"
             />
+
+            <h5 className="font-medium text-sm">Response from a Full Property Trace (already finished):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "status": "success",
+  "traceId": "uuid",
+  "tier": 2,
+  "charge": 0.25,
+  "result": {
+    "owner_name": "John Smith",
+    "phones": [{ "number": "5125551234", "type": "mobile" }],
+    "emails": ["john.smith@email.com"],
+    "mailing_address": "456 Oak Ave",
+    "mailing_city": "Austin",
+    "mailing_state": "TX",
+    "mailing_zip": "78702"
+  },
+  "propertyRecord": { /* the county record, over 60 fields */ },
+  "ownerName": "John Smith",
+  "ownerType": "individual",
+  "needsManualReview": false,
+  "warnings": []
+}`}
+              section="single-response-full"
+            />
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">status</code> is <code className="bg-gray-100 px-1 rounded">success</code> when contacts came back and <code className="bg-gray-100 px-1 rounded">no_match</code> when they did not. A <code className="bg-gray-100 px-1 rounded">no_match</code> here is still charged, and it usually still carries the property record, which is the thing you paid for. <code className="bg-gray-100 px-1 rounded">charge</code> is the amount actually taken from your wallet, so read it rather than assuming a rate. <code className="bg-gray-100 px-1 rounded">ownerType</code> is one of <code className="bg-gray-100 px-1 rounded">individual</code>, <code className="bg-gray-100 px-1 rounded">entity</code>, <code className="bg-gray-100 px-1 rounded">trust</code> or <code className="bg-gray-100 px-1 rounded">unknown</code>.
+            </p>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-amber-900 text-sm font-semibold mb-1">Field names differ between these two endpoints, on purpose</p>
+              <p className="text-amber-800 text-sm">
+                The Full Property Trace response is camelCase: <code className="bg-amber-100 px-1 rounded">traceId</code>, <code className="bg-amber-100 px-1 rounded">propertyRecord</code>, <code className="bg-amber-100 px-1 rounded">ownerName</code>, <code className="bg-amber-100 px-1 rounded">ownerType</code>, <code className="bg-amber-100 px-1 rounded">needsManualReview</code>. The status endpoint below is snake_case: <code className="bg-amber-100 px-1 rounded">trace_id</code>, <code className="bg-amber-100 px-1 rounded">is_cached</code>. So are the webhooks. Write your parser against the endpoint you are actually calling. Code that assumes one convention across the whole API will read undefined on half of it.
+              </p>
+            </div>
+
+            <h5 className="font-medium text-sm">Response from a cached address (free):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
+  "cached": true,
+  "charge": 0,
+  "traceId": "uuid",
+  "result": { "owner_name": "John Smith", "phones": [], "emails": [] },
+  "propertyRecord": { /* present if this address was a Full Property Trace */ },
+  "tier": 2
+}`}
+              section="single-response-cached"
+            />
+
+            <p className="text-gray-600 text-sm">
+              A Full Property Trace you already paid for comes back free even when it found nothing, because the answer that the county has no parcel at that address is the answer you bought. Running it again would charge you twice for the same absence.
+            </p>
           </div>
 
           <hr />
@@ -148,7 +254,7 @@ export default function ApiDocsPage() {
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
               <code className="text-sm font-semibold">/trace/status?trace_id=uuid</code>
             </div>
-            <p className="text-gray-600 text-sm">Poll for trace results. Returns the full result when ready, including AI research data if it was used.</p>
+            <p className="text-gray-600 text-sm">Poll for the result of a trace where you supplied the owner of record. A Full Property Trace does not need this: it has already finished by the time you get its response. Polling is free.</p>
 
             <h5 className="font-medium text-sm">Response (completed):</h5>
             <CodeBlock
@@ -168,163 +274,68 @@ export default function ApiDocsPage() {
     "mailing_zip": "78702",
     "match_confidence": 95
   },
-  "research": {
-    "owner_name": "John Smith",
-    "owner_type": "individual",
-    "is_deceased": false,
-    "relatives": ["Jane Smith"],
-    "decision_makers": ["Jane Smith"],
-    "confidence": 75,
-    "business_name": null,
-    "individual_behind_business": null
-  },
+  "research": null,
   "charge": 0.15,
   "is_cached": false
 }`}
               section="status-response"
             />
 
-            <h5 className="font-medium text-sm">Response (still processing):</h5>
-            <CodeBlock
-              code={`{
-  "success": true,
-  "status": "processing",
-  "trace_id": "uuid"
-}`}
-              section="status-processing"
-            />
-          </div>
-
-          <hr />
-
-          {/* AI Research */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
-              <code className="text-sm font-semibold">/research/single</code>
-            </div>
-            <p className="text-gray-600 text-sm">Run AI research only (no skip trace). Discovers property owner using public records and AI analysis.</p>
-
-            <h5 className="font-medium text-sm">Request Body:</h5>
-            <CodeBlock
-              code={`{
-  "address": "123 Main Street",
-  "city": "Austin",
-  "state": "TX",
-  "zip": "78701",
-  "ownerName": "Smith LLC",  // optional, helps with entity resolution
-  "skipCache": false          // optional, set true to bypass 90-day cache
-}`}
-              section="research-request"
-            />
-
-            <h5 className="font-medium text-sm">Response (fast path — FastAppend finished inline):</h5>
-            <CodeBlock
-              code={`{
-  "success": true,
-  "isCached": false,
-  "research": {
-    "owner_name": "John Smith",
-    "owner_type": "individual",
-    "business_name": "Smith LLC",
-    "individual_behind_business": "John Smith",
-    "decision_makers": ["John Smith"],
-    "confidence": 80,
-    "business_trace_status": "Found: John Smith (2 phones, 1 emails)",
-    "business_trace_contacts": {
-      "owner_name": "John Smith",
-      "phones": [
-        { "number": "5125551234", "type": "mobile" },
-        { "number": "5125555678", "type": "landline" }
-      ],
-      "emails": ["john@smithllc.com"],
-      "address": "456 Oak Ave, Austin, TX"
-    }
-  },
-  "contacts": {
-    "owner_name": "John Smith",
-    "phones": [...],
-    "emails": [...],
-    "address": "456 Oak Ave, Austin, TX"
-  },
-  "charge": 0.15,
-  "business_trace_pending": false,
-  "business_trace_job_id": null
-}`}
-              section="research-response-fast"
-            />
-
-            <h5 className="font-medium text-sm">Response (slow path — FastAppend queued for async recovery):</h5>
-            <CodeBlock
-              code={`{
-  "success": true,
-  "isCached": false,
-  "research": {
-    "owner_name": "Smith LLC",
-    "owner_type": "business",
-    "business_name": "Smith LLC",
-    "individual_behind_business": null,
-    "decision_makers": [],
-    "confidence": 45,
-    "business_trace_status": "Pending async recovery (queue 48291)"
-  },
-  "contacts": null,
-  "charge": 0.15,
-  "business_trace_pending": true,
-  "business_trace_job_id": "3f9c...9af2"     // poll /research/status?job_id=...
-}`}
-              section="research-response-slow"
-            />
-
-            <div className="bg-gray-50 border rounded-lg p-4">
-              <p className="text-gray-700 text-sm">
-                <strong>Pricing:</strong> $0.15 per lookup, only charged if an owner is found. Cached results (within 90 days) are free.
-              </p>
-            </div>
-
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
-              <p className="text-amber-900 text-sm font-semibold">
-                Async business trace recovery
-              </p>
-              <p className="text-amber-800 text-sm">
-                When the property is owned by a business, LLC, or trust, PropTracerPRO runs a background FastAppend business-trace lookup to find the owner&apos;s contacts. If that lookup doesn&apos;t complete within 45 seconds, the response still returns immediately with <code className="bg-amber-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-amber-100 px-1 rounded">business_trace_job_id</code>.
-              </p>
-              <p className="text-amber-800 text-sm">
-                You have two ways to retrieve the delayed contacts:
-              </p>
-              <ul className="text-amber-800 text-sm list-disc list-inside ml-2 space-y-1">
-                <li>Poll <code className="bg-amber-100 px-1 rounded">GET /api/v1/research/status?job_id=&#123;id&#125;</code> every 30–60 seconds</li>
-                <li>Listen for a <code className="bg-amber-100 px-1 rounded">business_trace.completed</code> webhook at your configured webhook URL</li>
-              </ul>
-              <p className="text-amber-800 text-sm">
-                Delayed results typically arrive within 1–60 minutes. Jobs older than 24 hours without results are marked as errored.
-              </p>
-            </div>
-          </div>
-
-          <hr />
-
-          {/* Research Status */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
-              <code className="text-sm font-semibold">/research/status?job_id=&#123;id&#125;</code>
-            </div>
             <p className="text-gray-600 text-sm">
-              Poll the status of an async FastAppend business-trace job that was queued during <code className="bg-gray-100 px-1 rounded">/research/single</code>. Use the <code className="bg-gray-100 px-1 rounded">business_trace_job_id</code> returned in the research response.
+              Status values are <code className="bg-gray-100 px-1 rounded">processing</code>, <code className="bg-gray-100 px-1 rounded">success</code>, <code className="bg-gray-100 px-1 rounded">no_match</code> and <code className="bg-gray-100 px-1 rounded">error</code>. A <code className="bg-gray-100 px-1 rounded">no_match</code> here means we looked and found no contacts, and it is free. <code className="bg-gray-100 px-1 rounded">charge</code> is what your wallet actually paid, so the figure above is one account&apos;s example and not a rate for everyone. See the pricing table at the top of this page.
+            </p>
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">research</code> is a stored field that carries the business-trace record on rows that have one, and is <code className="bg-gray-100 px-1 rounded">null</code> on a plain person trace. Do not build a workflow that depends on it being filled in.
             </p>
 
             <h5 className="font-medium text-sm">Response (still processing):</h5>
             <CodeBlock
               code={`{
   "success": true,
+  "status": "processing",
+  "trace_id": "uuid",
+  "tracerfy_state": "pending",
+  "age_minutes": 2
+}`}
+              section="status-processing"
+            />
+
+            <p className="text-gray-600 text-sm">
+              Poll every 10 to 30 seconds. Intervals under 10 seconds add load without making anything finish sooner.
+            </p>
+          </div>
+
+          <hr />
+
+          {/* Deferred business trace status */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
+              <code className="text-sm font-semibold">/research/status?job_id=&#123;id&#125;</code>
+            </div>
+            <p className="text-gray-600 text-sm">
+              Poll one deferred business-trace job by id. Despite the word in the path this is not a research endpoint: it reads a FastAppend business-trace job and reports what that job settled to. You reach it when a bulk record comes back carrying <code className="bg-gray-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-gray-100 px-1 rounded">business_trace_job_id</code>. Pass that id here. Polling is free.
+            </p>
+
+            <h5 className="font-medium text-sm">Response (still pending):</h5>
+            <CodeBlock
+              code={`{
+  "success": true,
   "job_id": "3f9c...9af2",
   "status": "pending",
   "business_name": "Extra Space Storage",
+  "address": "160 MINE LAKE CT STE 200",
+  "city": "RALEIGH",
+  "state": "NC",
+  "zip": "27615",
   "contacts": null,
-  "research": null
+  "research": null,
+  "error_message": null,
+  "created_at": "2026-09-14T18:00:00.000Z",
+  "completed_at": null
 }`}
-              section="research-status-pending"
+              section="business-trace-status-pending"
             />
 
             <h5 className="font-medium text-sm">Response (completed):</h5>
@@ -344,18 +355,20 @@ export default function ApiDocsPage() {
       { "number": "9196249818", "type": "mobile" },
       { "number": "9198448365", "type": "landline" }
     ],
-    "emails": ["rozar1@gateway.net", "krozar@nc.rr.com"],
+    "emails": ["jmargolis@example.com"],
     "address": "2605 Scribe Ct, Raleigh, NC"
   },
-  "research": { /* merged AI research with business trace contacts */ },
-  "completed_at": "2026-04-09T18:42:00.000Z"
+  "research": null,
+  "error_message": null,
+  "created_at": "2026-09-14T18:00:00.000Z",
+  "completed_at": "2026-09-14T18:42:00.000Z"
 }`}
-              section="research-status-done"
+              section="business-trace-status-done"
             />
 
             <div className="bg-gray-50 border rounded-lg p-4">
               <p className="text-gray-700 text-sm">
-                <strong>Status values:</strong> <code className="bg-gray-100 px-1 rounded">pending</code>, <code className="bg-gray-100 px-1 rounded">completed</code>, <code className="bg-gray-100 px-1 rounded">no_match</code>, <code className="bg-gray-100 px-1 rounded">error</code>. Polling this endpoint is free.
+                <strong>Status values:</strong> <code className="bg-gray-100 px-1 rounded">pending</code> means keep polling, <code className="bg-gray-100 px-1 rounded">completed</code> means contacts were found and <code className="bg-gray-100 px-1 rounded">contacts</code> is populated, <code className="bg-gray-100 px-1 rounded">no_match</code> means the lookup finished and found nobody for that business, and <code className="bg-gray-100 px-1 rounded">error</code> means it failed or timed out. <code className="bg-gray-100 px-1 rounded">contacts</code> is null on anything other than completed. Treat <code className="bg-gray-100 px-1 rounded">no_match</code> as an answer, not an error.
               </p>
             </div>
           </div>
@@ -368,7 +381,7 @@ export default function ApiDocsPage() {
               <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
               <code className="text-sm font-semibold">/trace/bulk</code>
             </div>
-            <p className="text-gray-600 text-sm">Submit multiple addresses for batch skip tracing. Maximum 10,000 records per request.</p>
+            <p className="text-gray-600 text-sm">Submit multiple addresses for batch skip tracing. Maximum 10,000 records per request. Bulk needs the owner of record on every row: it does not run Full Property Traces.</p>
 
             <h5 className="font-medium text-sm">Request Body:</h5>
             <CodeBlock
@@ -378,15 +391,15 @@ export default function ApiDocsPage() {
       "address": "123 Main Street",
       "city": "Austin",
       "state": "TX",
-      "zip": "78701",
-      "owner_name": "John Smith",       // optional, improves match accuracy
+      "zip": "78701",                    // optional
+      "owner_name": "John Smith",        // the owner of record. Send it
       "mailing_address": "456 Oak Ave"   // optional, falls back to property address
     },
     {
-      "address": "456 Oak Avenue",
+      "address": "500 Commerce Blvd",
       "city": "Houston",
       "state": "TX",
-      "zip": "77001"
+      "owner_name": "Acme Holdings LLC"
     }
   ],
   "webhookUrl": "https://your-app.com/webhook"  // optional, overrides profile setting
@@ -396,13 +409,20 @@ export default function ApiDocsPage() {
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">owner_name</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>.
+                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional in the schema, but a row without one cannot be traced.
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-amber-900 text-sm font-semibold mb-1">Rows with no owner name are skipped, not traced</p>
+              <p className="text-amber-800 text-sm">
+                The file is still accepted and the row still comes back to you, but it is skipped with a plain-language reason and nothing is charged for it. It is never reported as a bare <code className="bg-amber-100 px-1 rounded">no_match</code>, because that would tell you we looked and found nobody when we never looked at all. Send the row again with the owner of record and it will run. The submit response counts them in <code className="bg-amber-100 px-1 rounded">recordsSkipped</code> and explains them in <code className="bg-amber-100 px-1 rounded">skippedReason</code>.
               </p>
             </div>
 
             <div className="bg-gray-50 border rounded-lg p-4">
               <p className="text-gray-700 text-sm">
-                <strong>Deduplication:</strong> Records are automatically deduplicated within the batch and against your 90-day trace history. Duplicate records are removed before processing and not charged. The response shows how many duplicates were removed.
+                <strong>Deduplication:</strong> Records are automatically deduplicated within the batch and against your 90-day trace history. Duplicate records are removed before processing and not charged. The response shows how many duplicates were removed. If every record was a duplicate, <code className="bg-gray-100 px-1 rounded">jobId</code> comes back <code className="bg-gray-100 px-1 rounded">null</code> and there is nothing to poll.
               </p>
             </div>
 
@@ -414,12 +434,24 @@ export default function ApiDocsPage() {
   "totalRecords": 100,
   "duplicatesRemoved": 5,
   "recordsToProcess": 95,
-  "estimatedCost": 6.65,
+  "recordsDirectTrace": 80,
+  "recordsPendingResearch": 12,
+  "recordsSkipped": 3,
+  "skippedReason": "No owner name came in for this address, so there was nothing to trace and you were not charged. Send it again with the owner of record and we will run it.",
+  "estimatedCost": 13.80,
   "status": "processing",
   "message": "Poll /api/v1/trace/bulk/status?job_id=uuid for results."
 }`}
               section="bulk-response"
             />
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">recordsDirectTrace</code> is the rows whose owner looks like a person, sent straight to the person skip trace. <code className="bg-gray-100 px-1 rounded">recordsPendingResearch</code> is the rows whose owner looks like a company, queued for a background business trace that finds the human behind it. That field keeps its old name so existing integrations do not break. <code className="bg-gray-100 px-1 rounded">recordsSkipped</code> is the rows that arrived with no owner name.
+            </p>
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">estimatedCost</code> is the worst case: every traceable row matching, at your plan&apos;s per-successful-trace rate. Skipped rows are left out of it because they can never be charged. Your wallet has to cover that worst case at submit time or the job is refused with a 402, and your actual bill after completion is normally lower. Resolving the human behind a company costs the same as tracing a person. There is no separate fee for it.
+            </p>
           </div>
 
           <hr />
@@ -430,7 +462,7 @@ export default function ApiDocsPage() {
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
               <code className="text-sm font-semibold">/trace/bulk/status?job_id=uuid</code>
             </div>
-            <p className="text-gray-600 text-sm">Poll for bulk trace job results. Returns per-record results when all records have been processed.</p>
+            <p className="text-gray-600 text-sm">Poll for bulk trace job results. Returns per-record results when all records have been processed. Polling is free.</p>
 
             <h5 className="font-medium text-sm">Response (completed):</h5>
             <CodeBlock
@@ -441,28 +473,49 @@ export default function ApiDocsPage() {
   "records_submitted": 95,
   "records_matched": 82,
   "total_charge": 12.30,
+  "error_message": null,
   "results": [
     {
-      "address": "160 MINE LAKE CT|RALEIGH|NC|27615",
+      "address": "160 MINE LAKE CT|RALEIGH|NC",
       "city": "RALEIGH",
       "state": "NC",
       "zip": "27615",
       "status": "success",
-      "input_owner_name": "Extra Space Storage LLC",   // the ENTITY you asked about
+      "input_owner_name": "Extra Space Storage LLC",   // the COMPANY you asked about
       "owner_contact_name": "Joseph Margolis",         // the PERSON resolved behind it
       "owner_contact_source": "fastappend",            // fastappend | person_trace | ai_research
       "result": {
+        "owner_name": "Joseph Margolis",
         "phones": [{ "number": "9196249818", "type": "mobile" }],
         "emails": ["owner@example.com"]
       },
-      "research": { /* full AI research result */ },
+      "research": { /* the stored record for this row, or null */ },
       "contacts": {
         "owner_name": "Joseph Margolis",
         "phones": [ /* ... */ ],
         "emails": [ /* ... */ ]
       },
+      "skip_reason": null,
       "charge": 0.15,
-      "ai_research_charge": 0.15,
+      "ai_research_charge": 0,
+      "business_trace_pending": false,
+      "business_trace_job_id": null
+    },
+    {
+      "address": "123 MAIN ST|AUSTIN|TX",
+      "city": "AUSTIN",
+      "state": "TX",
+      "zip": "78701",
+      "status": "no_match",
+      "input_owner_name": null,
+      "owner_contact_name": null,
+      "owner_contact_source": null,
+      "result": null,
+      "research": null,
+      "contacts": null,
+      "skip_reason": "No owner name came in for this address, so there was nothing to trace and you were not charged. Send it again with the owner of record and we will run it.",
+      "charge": 0,
+      "ai_research_charge": 0,
       "business_trace_pending": false,
       "business_trace_job_id": null
     }
@@ -472,6 +525,21 @@ export default function ApiDocsPage() {
               section="job-status"
             />
 
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-amber-900 text-sm font-semibold mb-1">Read skip_reason before you read status</p>
+              <p className="text-amber-800 text-sm">
+                A skipped row settles to <code className="bg-amber-100 px-1 rounded">status: &quot;no_match&quot;</code> so the job can finish, but that is not what happened to it. <code className="bg-amber-100 px-1 rounded">skip_reason</code> is the field that tells you the truth, and it is the one to check first on any row that came back empty. When it is set, no vendor was ever asked and nothing was charged. Report that reason rather than calling it a no match. It is <code className="bg-amber-100 px-1 rounded">null</code> on every row a vendor was actually asked about.
+              </p>
+            </div>
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">input_owner_name</code> is the company or person you asked about. <code className="bg-gray-100 px-1 rounded">owner_contact_name</code> is the human we resolved behind it, and it is the point of the trace. It comes back <code className="bg-gray-100 px-1 rounded">null</code> when no human was resolved, never the company name. Mapping a column called owner name and stopping at the first one is how a run of resolved people ends up as a sheet of company names.
+            </p>
+
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-100 px-1 rounded">charge</code> is what was actually billed for that row, which is 0 on a miss and 0 on a skip. <code className="bg-gray-100 px-1 rounded">ai_research_charge</code> is a legacy field and is always 0. It is kept so existing parsers do not break. There is no separate research fee.
+            </p>
+
             <h5 className="font-medium text-sm">Response (still processing):</h5>
             <CodeBlock
               code={`{
@@ -480,24 +548,26 @@ export default function ApiDocsPage() {
   "job_id": "uuid",
   "records_submitted": 95,
   "records_pending_research": 12,
-  "records_pending_trace": 41
+  "records_pending_trace": 41,
+  "tracerfy_state": "pending",
+  "age_minutes": 4
 }`}
               section="job-status-processing"
             />
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Polling:</strong> Poll every 5-10 seconds. Jobs typically complete within a few minutes; large entity-heavy bulks can take up to ~20 minutes since per-row AI research is throttled to 5 rows/minute. You are only charged for successful matches (records where phone or email data was found). If you have a webhook URL configured, you&apos;ll also receive a <code className="bg-blue-100 px-1 rounded">bulk_job.completed</code> event when done.
+                <strong>Polling:</strong> Poll every 30 to 60 seconds. A batch that is mostly person rows settles as fast as the trace vendor returns. A company-heavy batch takes longer, because those rows run on a background worker that takes 5 rows a minute, so 300 company rows is about an hour of queue before the last one is even attempted. <code className="bg-blue-100 px-1 rounded">records_pending_research</code> counts company rows whose business trace has not settled, and <code className="bg-blue-100 px-1 rounded">records_pending_trace</code> counts rows the trace vendor has not returned yet. The job stays in <code className="bg-blue-100 px-1 rounded">processing</code> while either is above zero. You are only charged for successful matches, meaning rows where a phone or an email was found. If you have a webhook URL configured, you&apos;ll also receive a <code className="bg-blue-100 px-1 rounded">bulk_job.completed</code> event when done.
               </p>
               <p className="text-blue-800 text-sm mt-2">
-                <strong>Stuck-job auto-recovery:</strong> If a research worker is killed mid-run (server timeout, OOM, deploy restart), its row is automatically reverted to <code className="bg-blue-100 px-1 rounded">queued</code> within 5 minutes and retried on the next cron tick — so the job will finalise on a subsequent poll. There is no need for callers to implement their own &quot;assume failure after N minutes&quot; fallback.
+                <strong>Stuck-job auto-recovery:</strong> If a background worker is killed mid-run by a server timeout, an out-of-memory kill or a deploy restart, its row is automatically reverted to <code className="bg-blue-100 px-1 rounded">queued</code> within 5 minutes and retried on the next tick, so the job finalises on a later poll. There is no need to implement your own &quot;assume failure after N minutes&quot; fallback.
               </p>
             </div>
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
               <p className="text-amber-900 text-sm font-semibold mb-1">Pending business-trace contacts on completed bulks</p>
               <p className="text-amber-800 text-sm">
-                A bulk job can finalise as <code className="bg-amber-100 px-1 rounded">completed</code> while individual records still have an in-flight FastAppend business-trace lookup. Those records carry <code className="bg-amber-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-amber-100 px-1 rounded">business_trace_job_id</code>. Retrieve the delayed contacts via <code className="bg-amber-100 px-1 rounded">GET /api/v1/research/status?job_id=&#123;business_trace_job_id&#125;</code> (see the section above) or by listening for a <code className="bg-amber-100 px-1 rounded">business_trace.completed</code> webhook.
+                A bulk job can finalise as <code className="bg-amber-100 px-1 rounded">completed</code> while individual records still have an open business-trace lookup. Those records carry <code className="bg-amber-100 px-1 rounded">business_trace_pending: true</code> and a <code className="bg-amber-100 px-1 rounded">business_trace_job_id</code>. Retrieve the delayed contacts via <code className="bg-amber-100 px-1 rounded">GET /api/v1/research/status?job_id=&#123;business_trace_job_id&#125;</code> (see the section above) or by listening for a <code className="bg-amber-100 px-1 rounded">business_trace.completed</code> webhook.
               </p>
             </div>
           </div>
@@ -553,24 +623,24 @@ Body (JSON):
                   Map the response to contact fields:
                 </p>
                 <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
-                  <li><code>result.phones[0].number</code> → Phone field</li>
-                  <li><code>result.emails[0]</code> → Email field</li>
-                  <li><code>result.mailing_address</code> → Mailing Address</li>
-                  <li><code>result.mailing_city</code> → Mailing City</li>
-                  <li><code>result.mailing_state</code> → Mailing State</li>
-                  <li><code>result.mailing_zip</code> → Mailing Zip</li>
+                  <li><code>result.phones[0].number</code> goes to the Phone field</li>
+                  <li><code>result.emails[0]</code> goes to the Email field</li>
+                  <li><code>result.mailing_address</code> goes to Mailing Address</li>
+                  <li><code>result.mailing_city</code> goes to Mailing City</li>
+                  <li><code>result.mailing_state</code> goes to Mailing State</li>
+                  <li><code>result.mailing_zip</code> goes to Mailing Zip</li>
                 </ul>
               </div>
             </TabsContent>
 
             <TabsContent value="make" className="space-y-4 mt-4">
-              <h4 className="font-semibold">Make (Integromat) — Automated Workflow</h4>
+              <h4 className="font-semibold">Make (Integromat), automated workflow</h4>
               <p className="text-gray-600 text-sm">
                 Create a scenario with HTTP modules for the full automated pipeline.
               </p>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Module 1: Submit Trace with AI Research</p>
+                <p className="font-medium text-sm">Module 1: Submit the trace</p>
                 <CodeBlock
                   code={`Module: HTTP - Make a request
 
@@ -590,10 +660,14 @@ Request content:
   "city": "{{1.city}}",
   "state": "{{1.state}}",
   "zip": "{{1.zip}}",
-  "aiResearch": true
+  "ownerName": "{{1.owner_name}}"
 }
 
-Parse response: Yes`}
+Parse response: Yes
+Timeout: 90 seconds
+
+// Drop ownerName to run a Full Property Trace instead. That one
+// comes back finished, so skip module 2 when tier == 2.`}
                   section="make-step1"
                 />
               </div>
@@ -611,32 +685,33 @@ Headers:
 
 Parse response: Yes
 
-// Add a Sleep module (10s) and Router:
-//   Route 1: status == "processing" → loop back
-//   Route 2: status != "processing" → continue`}
+// Add a Sleep module (15s) and Router:
+//   Route 1: status == "processing" -> loop back
+//   Route 2: status != "processing" -> continue`}
                   section="make-step2"
                 />
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Use a Router after the poll module to handle success/no_match/error separately. CRM push to HighLevel happens automatically on the server.
+                  <strong>Tip:</strong> Put a Router straight after module 1 that checks <code className="bg-blue-100 px-1 rounded">tier</code>. A Full Property Trace is already finished and has no job to poll, so sending it into the repeater just wastes runs. Use a second Router after the poll to handle success, no_match and error separately. The CRM push to HighLevel happens automatically on the server.
                 </p>
               </div>
             </TabsContent>
 
             <TabsContent value="n8n" className="space-y-4 mt-4">
-              <h4 className="font-semibold">n8n — Full Automated Workflow</h4>
+              <h4 className="font-semibold">n8n, full automated workflow</h4>
               <p className="text-gray-600 text-sm">
-                Complete automated pipeline: county records in, owner + contact data out. No owner name needed.
+                County records in, owner and contact data out. Send the owner of record when you have it and pay the per-successful-trace rate. Leave it out and a Full Property Trace runs instead, which buys the county record and is charged per record submitted.
               </p>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Step 1: Submit Trace with AI Research</p>
+                <p className="font-medium text-sm">Step 1: Submit the trace</p>
                 <CodeBlock
-                  code={`// HTTP Request Node — POST
+                  code={`// HTTP Request Node, POST
 URL: https://proptracerpro.vercel.app/api/v1/trace/single
 Headers: Authorization: Bearer ptp_your_api_key
+Timeout: 90000 ms
 
 Body (JSON):
 {
@@ -644,50 +719,60 @@ Body (JSON):
   "city": "={{ $json.city }}",
   "state": "={{ $json.state }}",
   "zip": "={{ $json.zip }}",
-  "aiResearch": true
+  "ownerName": "={{ $json.owner_name }}"
 }
 
-// No ownerName needed — AI discovers the owner automatically`}
+// Drop ownerName and a Full Property Trace runs instead. That one
+// returns the finished result in this same response.`}
                   section="n8n-step1"
                 />
               </div>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Step 2: Wait + Poll for Results</p>
+                <p className="font-medium text-sm">Step 2: Branch on the tier, then poll if you need to</p>
                 <CodeBlock
-                  code={`// Wait Node: 10 seconds
+                  code={`// IF Node: is this already finished?
+// Condition: {{ $json.tier }} == 2
+//   True  -> skip straight to step 3, the result is in this response
+//   False -> carry on and poll
 
-// HTTP Request Node — GET
+// Wait Node: 15 seconds
+
+// HTTP Request Node, GET
 URL: https://proptracerpro.vercel.app/api/v1/trace/status?trace_id={{ $json.traceId }}
 Headers: Authorization: Bearer ptp_your_api_key
 
-// IF Node: Check if still processing
+// IF Node: still processing?
 // Condition: {{ $json.status }} == "processing"
-//   True → loop back to Wait
-//   False → continue to next step`}
+//   True  -> loop back to Wait
+//   False -> continue to step 3`}
                   section="n8n-step2"
                 />
               </div>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Step 3: Use Results</p>
+                <p className="font-medium text-sm">Step 3: Use the results</p>
                 <CodeBlock
-                  code={`// Results available in the response:
-{{ $json.result.phones[0].number }}  → Owner phone
-{{ $json.result.emails[0] }}         → Owner email
-{{ $json.result.owner_name }}        → Owner name
-{{ $json.research.owner_type }}      → "individual" or "business"
-{{ $json.research.confidence }}      → AI confidence score
+                  code={`// From either branch:
+{{ $json.result.phones[0].number }}   -> Owner phone
+{{ $json.result.emails[0] }}          -> Owner email
+{{ $json.result.owner_name }}         -> Owner name
+
+// Full Property Trace only, and camelCase on this response:
+{{ $json.ownerType }}                 -> individual, entity, trust or unknown
+{{ $json.propertyRecord.county }}     -> County on the parcel record
+{{ $json.propertyRecord.assessed_value }} -> County tax assessment, not a market value
+{{ $json.charge }}                    -> What your wallet actually paid
 
 // CRM push happens automatically server-side (HighLevel)
-// Webhook fires automatically when trace completes`}
+// Webhook fires automatically when a trace completes`}
                   section="n8n-step3"
                 />
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security. You can also skip polling and use webhooks instead — configure your webhook URL in Settings.
+                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security. You can also skip polling entirely and use webhooks instead. Configure your webhook URL in Settings.
                 </p>
               </div>
             </TabsContent>
@@ -696,7 +781,7 @@ Headers: Authorization: Bearer ptp_your_api_key
               <h4 className="font-semibold">cURL Examples</h4>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Trace with AI Research (no owner name needed):</p>
+                <p className="font-medium text-sm">Trace an owner you already have:</p>
                 <CodeBlock
                   code={`curl -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
   -H "Authorization: Bearer ptp_your_api_key" \\
@@ -706,7 +791,7 @@ Headers: Authorization: Bearer ptp_your_api_key
     "city": "Austin",
     "state": "TX",
     "zip": "78701",
-    "aiResearch": true
+    "ownerName": "John Smith"
   }'`}
                   section="curl-trace"
                 />
@@ -722,9 +807,9 @@ Headers: Authorization: Bearer ptp_your_api_key
               </div>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">AI Research only (no skip trace):</p>
+                <p className="font-medium text-sm">Full Property Trace (no owner name, returns the finished result):</p>
                 <CodeBlock
-                  code={`curl -X POST https://proptracerpro.vercel.app/api/v1/research/single \\
+                  code={`curl --max-time 90 -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
   -H "Authorization: Bearer ptp_your_api_key" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -733,7 +818,25 @@ Headers: Authorization: Bearer ptp_your_api_key
     "state": "TX",
     "zip": "78701"
   }'`}
-                  section="curl-research"
+                  section="curl-full-property-trace"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <p className="font-medium text-sm">Full Property Trace when you already have the owner:</p>
+                <CodeBlock
+                  code={`curl --max-time 90 -X POST https://proptracerpro.vercel.app/api/v1/trace/single \\
+  -H "Authorization: Bearer ptp_your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "address": "123 Main Street",
+    "city": "Austin",
+    "state": "TX",
+    "zip": "78701",
+    "ownerName": "John Smith",
+    "fullPropertyTrace": true
+  }'`}
+                  section="curl-full-property-trace-optin"
                 />
               </div>
 
@@ -746,7 +849,7 @@ Headers: Authorization: Bearer ptp_your_api_key
   -d '{
     "records": [
       { "address": "123 Main St", "city": "Austin", "state": "TX", "zip": "78701", "owner_name": "John Smith" },
-      { "address": "456 Oak Ave", "city": "Houston", "state": "TX", "zip": "77001" }
+      { "address": "456 Oak Ave", "city": "Houston", "state": "TX", "owner_name": "Acme Holdings LLC" }
     ]
   }'`}
                   section="curl-bulk"
@@ -766,6 +869,43 @@ Headers: Authorization: Bearer ptp_your_api_key
         </CardContent>
       </Card>
 
+      {/* Property Record */}
+      <Card>
+        <CardHeader>
+          <CardTitle>What Is In the Property Record</CardTitle>
+          <CardDescription>The county record a Full Property Trace buys for the address</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-gray-600 text-sm">
+            The record carries over 60 fields. What is in yours depends on what that county
+            publishes. Coverage varies by county and by state, so treat every field as optional and
+            never assume one is populated.
+          </p>
+          <ul className="list-disc list-inside text-gray-600 text-sm space-y-1">
+            <li>Location and identity: address, county, parcel number, subdivision, property type, property use, land use, latitude and longitude</li>
+            <li>Building and land: year built, stories, units, building size, lot size, beds, baths, roof material and construction, and features such as air conditioning, garage, pool, basement and deck</li>
+            <li>Valuation: assessed value, area median income</li>
+            <li>Sale and transaction history: last sale date and price, sale price per square foot, recording date, document type, prior sale date and price</li>
+            <li>Listing history: days on market, listing price, and the MLS state</li>
+            <li>Debt: open mortgage balance, lender, estimated mortgage payment</li>
+            <li>Owner and occupancy: years owned, properties owned, portfolio value, and whether the record marks the owner absentee, owner-occupied, an investor buyer or a cash buyer</li>
+            <li>Recorded status flags, carried through when the county records them</li>
+          </ul>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <p className="text-amber-900 text-sm">
+              <code className="bg-amber-100 px-1 rounded">assessed_value</code> is the county&apos;s
+              assessment for tax purposes. It is not a market value, it is not an appraisal, and it
+              is not an estimate of what the property would sell for. Do not present it to an end
+              user as any of those.
+            </p>
+          </div>
+          <p className="text-gray-600 text-sm">
+            A field the county did not publish is simply absent. There is no placeholder, no zero
+            standing in for a missing number and no &quot;N/A&quot;.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Webhook Events */}
       <Card>
         <CardHeader>
@@ -774,17 +914,17 @@ Headers: Authorization: Bearer ptp_your_api_key
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-gray-600 text-sm">
-            Configure your webhook URL in Settings → Integrations or Settings → API Keys.
-            PropTracerPRO will POST to your URL when traces complete.
+            Configure your webhook URL in Settings, then Integrations, or in Settings, then API Keys.
+            PropTracerPRO POSTs to your URL when traces complete.
           </p>
 
-          <h5 className="font-medium text-sm">trace.completed (Single Trace):</h5>
+          <h5 className="font-medium text-sm">trace.completed, from a Full Property Trace:</h5>
           <CodeBlock
             code={`{
   "event": "trace.completed",
   "trace_id": "uuid",
   "status": "success",
-  "address": "123 MAIN ST",
+  "address": "123 MAIN ST|DALLAS|TX",
   "city": "DALLAS",
   "state": "TX",
   "zip": "75201",
@@ -798,54 +938,36 @@ Headers: Authorization: Bearer ptp_your_api_key
     "mailing_zip": "75202",
     "match_confidence": 95
   },
-  "research": {
-    "owner_name": "John Smith",
-    "owner_type": "individual",
-    "is_deceased": false,
-    "relatives": ["Jane Smith"],
-    "decision_makers": ["Jane Smith"],
-    "confidence": 75,
-    "business_name": null,
-    "individual_behind_business": null
-  },
-  "charge": 0.15,
-  "timestamp": "2026-01-27T15:30:00Z"
+  "research": null,
+  "charge": 0.25,
+  "property_record": { /* the county record, over 60 fields */ },
+  "tier": 2,
+  "owner_type": "individual",
+  "timestamp": "2026-09-17T15:30:00Z"
 }`}
             section="webhook-single"
           />
-          <div className="bg-gray-50 border rounded-lg p-3 mt-2">
+          <div className="bg-gray-50 border rounded-lg p-3 mt-2 space-y-2">
             <p className="text-gray-600 text-sm">
-              The <code className="bg-gray-200 px-1 rounded">research</code> field is included when AI research was used. It will be <code className="bg-gray-200 px-1 rounded">null</code> if research was not requested.
+              A trace where you supplied the owner sends the same event with the same keys, minus <code className="bg-gray-200 px-1 rounded">property_record</code>, <code className="bg-gray-200 px-1 rounded">tier</code> and <code className="bg-gray-200 px-1 rounded">owner_type</code>.
+            </p>
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-200 px-1 rounded">address</code> is the normalized pipe-delimited key of street, city and state, not the street line you sent. The separate <code className="bg-gray-200 px-1 rounded">city</code> and <code className="bg-gray-200 px-1 rounded">state</code> keys carry those on their own. Note that this payload is snake_case while the Full Property Trace response that describes the same trace is camelCase.
+            </p>
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-200 px-1 rounded">charge</code> is what your wallet actually paid, so the figure above is one account&apos;s example and not a rate for everyone.
+            </p>
+            <p className="text-gray-600 text-sm">
+              A Full Property Trace fires this event for every completed trace, including one that was charged and found no contacts, because that is the outcome you most need to hear about. It does not fire when a lookup failed on our side, because nothing completed and nothing was charged.
+            </p>
+            <p className="text-gray-600 text-sm">
+              <code className="bg-gray-200 px-1 rounded">research</code> carries the stored record on rows that have one and is <code className="bg-gray-200 px-1 rounded">null</code> otherwise. It is always <code className="bg-gray-200 px-1 rounded">null</code> on a Full Property Trace.
             </p>
           </div>
 
-          <h5 className="font-medium text-sm mt-4">research.completed (AI Research Only):</h5>
-          <CodeBlock
-            code={`{
-  "event": "research.completed",
-  "address": "123 MAIN ST",
-  "city": "DALLAS",
-  "state": "TX",
-  "zip": "75201",
-  "research": {
-    "owner_name": "Smith LLC",
-    "owner_type": "business",
-    "is_deceased": false,
-    "confidence": 80,
-    "business_name": "Smith LLC",
-    "individual_behind_business": "John Smith"
-  },
-  "charge": 0.15,
-  "business_trace_pending": true,
-  "business_trace_job_id": "3f9c...9af2",
-  "timestamp": "2026-01-27T15:30:00Z"
-}`}
-            section="webhook-research"
-          />
-
-          <h5 className="font-medium text-sm">Business Trace Completion (async):</h5>
+          <h5 className="font-medium text-sm mt-4">business_trace.completed (deferred):</h5>
           <p className="text-gray-600 text-xs">
-            Fired when a delayed FastAppend business-trace job finishes — minutes to hours after the initial <code className="bg-gray-100 px-1 rounded">research.completed</code> event for business/LLC-owned properties.
+            Fired when a deferred business-trace job settles, which can be minutes to hours after the bulk job it belongs to finished. It carries the contacts for the human behind a company-owned property.
           </p>
           <CodeBlock
             code={`{
@@ -863,16 +985,16 @@ Headers: Authorization: Bearer ptp_your_api_key
       { "number": "9196249818", "type": "mobile" },
       { "number": "9198448365", "type": "landline" }
     ],
-    "emails": ["rozar1@gateway.net", "krozar@nc.rr.com"],
+    "emails": ["jmargolis@example.com"],
     "address": "2605 Scribe Ct, Raleigh, NC"
   },
-  "research": { /* merged AI research with contacts attached */ },
-  "timestamp": "2026-04-09T18:42:00.000Z"
+  "research": null,
+  "timestamp": "2026-09-17T18:42:00.000Z"
 }`}
             section="webhook-business-trace"
           />
 
-          <h5 className="font-medium text-sm">Bulk Job Completion:</h5>
+          <h5 className="font-medium text-sm">bulk_job.completed:</h5>
           <CodeBlock
             code={`{
   "event": "bulk_job.completed",
@@ -880,24 +1002,8 @@ Headers: Authorization: Bearer ptp_your_api_key
   "records_submitted": 100,
   "records_matched": 86,
   "total_charge": 12.90,
-  "results": [
-    {
-      "address": "123 MAIN ST",
-      "city": "DALLAS",
-      "state": "TX",
-      "result": {
-        "owner_name": "John Smith",
-        "phones": [{ "number": "5551234567", "type": "mobile" }],
-        "emails": ["john@example.com"],
-        "mailing_address": "456 OAK AVE",
-        "mailing_city": "DALLAS",
-        "mailing_state": "TX",
-        "mailing_zip": "75202",
-        "match_confidence": 95
-      }
-    }
-  ],
-  "timestamp": "2026-01-27T15:30:00Z"
+  "results": [ /* the same per-record array as the bulk status endpoint */ ],
+  "timestamp": "2026-09-17T15:30:00Z"
 }`}
             section="webhook-bulk"
           />
@@ -906,7 +1012,7 @@ Headers: Authorization: Bearer ptp_your_api_key
             <p className="text-gray-700 text-sm">
               Webhooks are sent as <code className="bg-gray-200 px-1 rounded">POST</code> requests
               with <code className="bg-gray-200 px-1 rounded">Content-Type: application/json</code>.
-              Delivery is fire-and-forget — failures are logged but not retried.
+              Delivery is fire and forget. A failed delivery is logged on our side and not retried, so keep polling available as a fallback if you cannot afford to miss one.
             </p>
           </div>
         </CardContent>
@@ -941,12 +1047,22 @@ Headers: Authorization: Bearer ptp_your_api_key
                 <tr className="border-b">
                   <td className="py-2 pr-4 font-mono">402</td>
                   <td className="py-2 pr-4">Payment Required</td>
-                  <td className="py-2">Insufficient wallet balance</td>
+                  <td className="py-2">Your wallet does not cover this request. The balance is checked against the rate this request will actually charge, so a Full Property Trace is checked against its own rate</td>
                 </tr>
-                <tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4 font-mono">404</td>
+                  <td className="py-2 pr-4">Not Found</td>
+                  <td className="py-2">No trace or job with that id on your account</td>
+                </tr>
+                <tr className="border-b">
                   <td className="py-2 pr-4 font-mono">500</td>
                   <td className="py-2 pr-4">Server Error</td>
                   <td className="py-2">Internal server error</td>
+                </tr>
+                <tr>
+                  <td className="py-2 pr-4 font-mono">502</td>
+                  <td className="py-2 pr-4">Bad Gateway</td>
+                  <td className="py-2">A vendor lookup failed on our side during a Full Property Trace. Nothing was charged and nothing was stored, so retry it. This is the one to retry: it means we could not ask, not that we asked and came back empty</td>
                 </tr>
               </tbody>
             </table>

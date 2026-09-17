@@ -45,6 +45,13 @@ const H = vi.hoisted(() => ({
   deleteError: null as { message: string; code?: string } | null,
   /** Row the post-delete "does a row still exist?" probe resolves with. */
   survivingRow: null as Record<string, unknown> | null,
+  /** Rows wallet_transactions holds against the trace id. */
+  ledgerRefs: [] as Array<Record<string, unknown>>,
+  /** Rows usage_records holds against it. A SECOND FK into trace_history. */
+  usageRefs: [] as Array<Record<string, unknown>>,
+  ledgerRefsError: null as { message: string } | null,
+  /** How many times the BLIND anon client was asked for trace_history. */
+  anonTraceSelects: 0,
   submit: { success: true, jobId: "tj-1" } as {
     success: boolean;
     jobId?: string;
@@ -56,6 +63,8 @@ const H = vi.hoisted(() => ({
   entity: null as unknown,
   /** What the Tracerfy person lookup resolves with. */
   person: null as unknown,
+  /** Every outbound webhook POST the route made. */
+  webhookPosts: [] as Array<{ url: string; body: Record<string, unknown> }>,
 }));
 
 function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
@@ -70,7 +79,29 @@ function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
     return { data: H.insertedRow, error: null };
   }
   if (rec.table === "user_profiles") return { data: H.profile, error: null };
+  // The two tables that hold FK receipts pointing INTO trace_history. A row
+  // either of them references can never be a delete candidate, whatever
+  // trace_history's own columns say about it.
+  if (rec.table === "wallet_transactions") {
+    return { data: H.ledgerRefs, error: H.ledgerRefsError };
+  }
+  if (rec.table === "usage_records") {
+    return { data: H.usageRefs, error: H.ledgerRefsError };
+  }
+  // The cache lookup, answered the way PostgREST answers it: the row, or
+  // PGRST116 for no rows. checkSingleDuplicate THROWS on any other error, so
+  // returning a bare null here would hide a broken query as a cache miss.
+  if (isDedupSelect(rec)) {
+    return H.cached
+      ? { data: H.cached, error: null }
+      : { data: null, error: { code: "PGRST116", message: "no rows" } };
+  }
   return { data: H.survivingRow, error: null };
+}
+
+/** True when this select is the dedup lookup: only it carries the cache filter. */
+function isDedupSelect(rec: Recorded): boolean {
+  return rec.op === "select" && rec.filters.some((f) => f[0] === "or");
 }
 
 function recordingClient() {
@@ -122,20 +153,54 @@ function recordingClient() {
   };
 }
 
+/**
+ * The COOKIE-BACKED ANON client. It answers `user_profiles`, which is the
+ * caller's own row and what this route legitimately reads through it, and it is
+ * BLIND on `trace_history`.
+ *
+ * That blindness is a FENCE, not a fidelity claim: with a session cookie RLS
+ * would let this client see the caller's own traces. It is wired blind so that
+ * pointing the cache lookup back at it fails here as loudly as it does on the
+ * API-key surface, where there is no cookie and the lookup really does see
+ * nothing.
+ */
 vi.mock("@/lib/supabase/server", () => ({
-  createClient: async () => ({
-    auth: { getUser: async () => ({ data: { user: H.user } }) },
-    ...recordingClient(),
-  }),
+  createClient: async () => {
+    const client = recordingClient();
+    return {
+      auth: { getUser: async () => ({ data: { user: H.user } }) },
+      ...client,
+      from: (table: string) =>
+        table === "trace_history"
+          ? {
+              select: () => {
+                H.anonTraceSelects += 1;
+                const node: Record<string, unknown> = {};
+                const self = () => node;
+                for (const m of ["eq", "neq", "gte", "lte", "lt", "gt", "is", "or", "in", "not", "limit"]) {
+                  node[m] = self;
+                }
+                const empty = { data: null, error: { code: "PGRST116", message: "no rows" } };
+                node.single = () => Promise.resolve(empty);
+                node.maybeSingle = () => Promise.resolve(empty);
+                node.then = (res: (v: unknown) => unknown) =>
+                  Promise.resolve({ data: [], error: null }).then(res);
+                return node;
+              },
+            }
+          : client.from(table),
+    };
+  },
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => recordingClient(),
 }));
 
-vi.mock("@/lib/utils/deduplication", () => ({
-  checkSingleDuplicate: vi.fn(async () => H.cached),
-}));
+// DEDUPLICATION IS NOT MOCKED. It was, and that made every cache assertion in
+// this file a statement about the mock rather than about the lookup. The real
+// one now runs against the two clients above, so a lookup that cannot see the
+// caller's rows fails here instead of passing (lessons.md L-009).
 
 vi.mock("@/lib/tracerfy/client", () => ({
   submitSingleTrace: vi.fn(async () => H.submit),
@@ -216,6 +281,10 @@ beforeEach(() => {
   H.insertError = null;
   H.deleteError = null;
   H.survivingRow = null;
+  H.ledgerRefs = [];
+  H.usageRefs = [];
+  H.ledgerRefsError = null;
+  H.anonTraceSelects = 0;
   H.submit = { success: true, jobId: "tj-1" };
   H.profile = {
     id: "user-1",
@@ -224,6 +293,16 @@ beforeEach(() => {
     is_acquisition_pro_member: false,
     gateway_products: null,
   };
+  H.webhookPosts = [];
+  // The trace.completed webhook is a raw fetch to the customer's own URL.
+  // Capture it rather than letting a test reach the network.
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url: unknown, init: unknown) => {
+    H.webhookPosts.push({
+      url: String(url),
+      body: JSON.parse(String((init as { body?: unknown })?.body ?? "{}")),
+    });
+    return new Response("{}", { status: 200 });
+  });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -377,9 +456,12 @@ describe("POST /api/trace/single — the sweep deletes", () => {
   });
 
   it("skip_cache bypasses the cache lookup entirely", async () => {
-    const { checkSingleDuplicate } = await import("@/lib/utils/deduplication");
+    // Asserted on the query the lookup would have issued rather than on a spy,
+    // because deduplication is no longer mocked in this file. The cache lookup
+    // is the only select here that carries CACHE_HIT_FILTER.
     await post({ ...BODY, skip_cache: true });
-    expect(checkSingleDuplicate).not.toHaveBeenCalled();
+
+    expect(H.ops.some(isDedupSelect)).toBe(false);
   });
 });
 
@@ -510,6 +592,10 @@ describe("POST /api/trace/single — row creation and submission", () => {
 
 import dossierEntityFixture from "@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json";
 import dossierIndividualFixture from "@/lib/tracerfy/__tests__/fixtures/individual-hit.json";
+import {
+  BLOCKED_PROPERTY_RECORD_KEYS,
+  toPublicPropertyRecord,
+} from "@/lib/trace/publicPropertyRecord";
 
 /** A dossier HIT on an entity-owned parcel, carrying the real 86-key record. */
 const DOSSIER_ENTITY_HIT = {
@@ -839,13 +925,55 @@ describe("tier 2 — what gets persisted", () => {
     expect(stored).toEqual(dossierEntityFixture.response.property);
   });
 
-  it("returns the same raw record to the caller", async () => {
+  it("returns the PUBLISHABLE record to the caller, 65 of the stored 86", async () => {
+    // CHARACTERIZATION CHANGED, 2026-09-17, David: this asserted that the
+    // response equalled the stored record key for key. The 21 blocked fields
+    // are now withheld from every egress, not only from the screen, for the
+    // reason that already blocked them from the CSV export: the payload lands
+    // in a customer's own system, where a wrong `estimated_value` looks
+    // authoritative and outlives any caveat we could put on a screen.
+    //
+    // MUTATION: drop toPublicPropertyRecord from the response and this goes red.
     H.dossier = DOSSIER_ENTITY_HIT;
     H.entity = CONTACTS_HIT;
 
     const body = await (await post(TIER2_BODY)).json();
 
-    expect(body.property_record).toEqual(dossierEntityFixture.response.property);
+    expect(body.property_record).toEqual(
+      toPublicPropertyRecord(dossierEntityFixture.response.property)
+    );
+    expect(Object.keys(body.property_record)).toHaveLength(65);
+  });
+
+  it("carries no blocked key in the response, and all 86 in the row", async () => {
+    // The whole point in one test: the same variable leaves by two doors and
+    // only one of them is filtered.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+    const stored = persisted()!.property_record as Record<string, unknown>;
+
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(body.property_record, `${key} left PTP`).not.toHaveProperty(key);
+      expect(stored, `${key} was filtered out of STORAGE`).toHaveProperty(key);
+    }
+  });
+
+  it("does not let the response filter mutate the row it just wrote", async () => {
+    // The route persists execution.property and returns THE SAME VARIABLE
+    // filtered. An in-place delete would write a 65-key record to
+    // trace_history and destroy the raw dump, silently and permanently.
+    // MUTATION: make toPublicPropertyRecord delete from its argument and this
+    // goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    const stored = persisted()!.property_record as Record<string, unknown>;
+    expect(Object.keys(stored)).toHaveLength(86);
+    expect(stored).toEqual(dossierEntityFixture.response.property);
   });
 
   it("puts contacts where tier 1 already puts them", async () => {
@@ -1110,5 +1238,541 @@ describe("tier 2 — the charge follows the vendor call", () => {
     expect(lookupDossier).not.toHaveBeenCalled();
     expect(deducts()).toHaveLength(0);
     spy.mockRestore();
+  });
+});
+
+/* ==================================================================== *
+ * THE trace.completed WEBHOOK, session route.
+ *
+ * Tier 1 completes in app/api/trace/status and fires trace.completed from
+ * there. Tier 2 completes INLINE inside this request and never reaches
+ * that route, so without the dispatch below a webhook customer silently
+ * stops receiving events -- and silence is the failure mode nobody
+ * notices. Phase 3b flagged this as a known gap; phase 4 closes it.
+ *
+ * Deliberately NOT tested here, because it is deliberately NOT wired:
+ * the HighLevel CRM push. That is phase 4b -- it needs all 65 dossier
+ * fields auto-created as custom fields plus a Private Integration Token
+ * scope warning, and the poll route's `isSuccessful && result` gate is
+ * wrong for tier 2.
+ * ==================================================================== */
+const WEBHOOK_PROFILE = { ...PRO_PROFILE, webhook_url: "https://hooks.example.invalid/ptp" };
+
+function webhooks() {
+  return H.webhookPosts.filter((p) => p.body.event === "trace.completed");
+}
+
+describe("tier 2 — trace.completed", () => {
+  it("fires after a successful tier 2, carrying the three new keys", async () => {
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].url).toBe("https://hooks.example.invalid/ptp");
+    expect(webhooks()[0].body).toMatchObject({
+      event: "trace.completed",
+      trace_id: "trace-new",
+      status: "success",
+      tier: 2,
+      owner_type: "entity",
+      charge: 0.25,
+    });
+    expect(webhooks()[0].body.property_record).not.toBeNull();
+  });
+
+  it("keeps the poll route's payload shape, key for key", async () => {
+    // An existing webhook consumer parses the poll route's payload. Tier 2 adds
+    // keys; it must not remove or rename any.
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    for (const key of [
+      "event",
+      "trace_id",
+      "status",
+      "address",
+      "city",
+      "state",
+      "zip",
+      "result",
+      "research",
+      "charge",
+      "timestamp",
+    ]) {
+      expect(Object.keys(webhooks()[0].body)).toContain(key);
+    }
+  });
+
+  it("FIRES ON A BILLED MISS, which is the case a customer most needs told about", async () => {
+    // The poll route's rule is "send for all completed traces", not "send for
+    // successful ones". A billed miss is a completed trace the customer paid for.
+    // MUTATION: gate the dispatch on isSuccessful and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({
+      status: "no_match",
+      charge: 0.25,
+      tier: 2,
+      property_record: null,
+    });
+  });
+
+  it("does NOT fire on a vendor failure, which charges nothing", async () => {
+    // MUTATION: move the dispatch above the !execution.success return and this
+    // goes red. The poll route's stall-error branch fires nothing either.
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_FAILURE;
+
+    await post(TIER2_BODY);
+
+    expect(webhooks()).toHaveLength(0);
+  });
+
+  it("does not fire for a caller with no webhook configured", async () => {
+    H.profile = PRO_PROFILE;
+    H.dossier = DOSSIER_MISS;
+    await post(TIER2_BODY);
+    expect(webhooks()).toHaveLength(0);
+  });
+
+  it("does not fire on the TIER 1 path, where the poll route still owns it", async () => {
+    // Firing here too would double every tier 1 customer's events.
+    H.profile = WEBHOOK_PROFILE;
+    await post(BODY);
+    expect(webhooks()).toHaveLength(0);
+  });
+
+  it("does not fire when the answer was served free from the cache", async () => {
+    // Nothing completed: the row was already the customer's.
+    H.profile = WEBHOOK_PROFILE;
+    H.cached = { id: "trace-billed-miss", trace_result: null, charge: 0.25, tier: 2 };
+    await post(TIER2_BODY);
+    expect(webhooks()).toHaveLength(0);
+  });
+
+  it("never fails the request or the charge when the webhook throws", async () => {
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_MISS;
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("customer endpoint down"));
+
+    const res = await post(TIER2_BODY);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.charge).toBe(0.25);
+    expect(deducts()).toHaveLength(1);
+  });
+
+  it("reports the charge that was COLLECTED, not the one attempted", async () => {
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_MISS;
+    H.deductData = false;
+
+    await post(TIER2_BODY);
+
+    expect(webhooks()[0].body.charge).toBe(0);
+  });
+
+  it("reports the address that was persisted, including a learned zip", async () => {
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_ENTITY_HIT;
+    const { address, city, state } = TIER2_BODY;
+
+    await post({ address, city, state });
+
+    const sent = webhooks()[0].body;
+    expect(sent.city).toBe("AUSTIN");
+    expect(sent.state).toBe("TX");
+    expect(typeof sent.zip).toBe("string");
+    expect(String(sent.zip)).toHaveLength(5);
+  });
+});
+
+/* ====================================================================
+ * EVERY DOOR, NOT JUST THE ONE THAT SPENDS MONEY.
+ *
+ * The tier 2 response above is the obvious egress. These are the two that
+ * are easy to miss, because the record comes back out of our own database
+ * rather than from a vendor call and so does not look like it is leaving.
+ * A cached row holds the RAW 86 keys; a cache hit must publish 65 just as
+ * the purchase did, or the blocked fields reach the customer on their
+ * SECOND request instead of their first.
+ * ==================================================================== */
+
+describe("session tier 2 — the cached branches filter too", () => {
+  /** The real stored shape: a row holding all 86 keys, raw. */
+  const STORED_RAW = dossierEntityFixture.response.property as Record<string, unknown>;
+
+  it("filters the cache hit that carries contacts", async () => {
+    // MUTATION: drop toPublicPropertyRecord from the contacts cache branch and
+    // this goes red.
+    H.cached = {
+      id: "trace-cached",
+      trace_result: { phones: [{ number: "5125550100" }], emails: [] },
+      property_record: STORED_RAW,
+      tier: 2,
+    };
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.is_cached).toBe(true);
+    expect(Object.keys(body.property_record)).toHaveLength(65);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(body.property_record, `${key} left PTP on a cache hit`).not.toHaveProperty(key);
+    }
+  });
+
+  it("filters the billed tier 2 row served with no contacts", async () => {
+    // MUTATION: drop toPublicPropertyRecord from the isCacheHitRow branch and
+    // this goes red.
+    H.cached = {
+      id: "trace-tier2",
+      trace_result: null,
+      is_successful: false,
+      charge: 0.4,
+      ai_research_charge: 0,
+      property_record: STORED_RAW,
+      tier: 2,
+    };
+    H.survivingRow = { id: "trace-tier2" };
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.charge).toBe(0);
+    expect(Object.keys(body.property_record)).toHaveLength(65);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(body.property_record, `${key} left PTP on a billed cache hit`).not.toHaveProperty(key);
+    }
+  });
+
+  it("publishes the same 65 keys whether the record was just bought or cached", async () => {
+    // A customer must not be able to tell the two apart by field count. If
+    // they can, one of the two branches is the leak.
+    H.cached = {
+      id: "trace-cached",
+      trace_result: { phones: [{ number: "5125550100" }], emails: [] },
+      property_record: STORED_RAW,
+      tier: 2,
+    };
+    const cachedBody = await (await post(TIER2_BODY)).json();
+
+    H.ops = [];
+    H.cached = null;
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const freshBody = await (await post(TIER2_BODY)).json();
+
+    expect(Object.keys(cachedBody.property_record).sort()).toEqual(
+      Object.keys(freshBody.property_record).sort()
+    );
+  });
+
+  it("still reports a row with no record as null, not as an empty object", async () => {
+    H.cached = {
+      id: "trace-billed-miss",
+      trace_result: null,
+      status: "no_match",
+      is_successful: false,
+      charge: 0.4,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: 2,
+    };
+    H.survivingRow = { id: "trace-billed-miss" };
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.property_record).toBeNull();
+  });
+});
+
+/* ====================================================================
+ * TELLING THE TRUTH WHEN NOTHING WAS COLLECTED.
+ *
+ * lib/wallet/deduct.ts answered 0 for an insufficient balance AND for an
+ * RPC that never ran, and both routes then said "the wallet did not cover
+ * this record". A customer with a full wallet was told they were short.
+ * ==================================================================== */
+describe("POST /api/trace/single — the two zeros say different things", () => {
+  it("blames the balance only when the balance was actually short", async () => {
+    H.deductData = false;
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.charge).toBe(0);
+    expect(String(body.warnings.join(" "))).toContain("did not cover");
+  });
+
+  it("owns the failure when the deduct RPC itself errored", async () => {
+    // WAS: the same "your wallet did not cover this" sentence, which is false
+    // for a customer whose wallet is full.
+    // MUTATION: collapse the two outcomes back into `charge === 0` and this
+    // goes red.
+    H.deductData = true;
+    H.deductError = { message: "fetch failed" };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.charge).toBe(0);
+    const said = String(body.warnings.join(" "));
+    expect(said).not.toContain("did not cover");
+    expect(said).toContain("error on our side");
+    expect(said).toContain("nothing was taken from your balance");
+  });
+
+  it("says nothing about the wallet at all when the charge went through", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(String(body.warnings.join(" "))).not.toContain("wallet");
+  });
+
+  it("delivers the record either way, because we already bought it", async () => {
+    // The decision, named rather than buried: on an RPC failure we spent at the
+    // vendor and could not collect. The customer is not billed and keeps the
+    // record. Billing them later for a record already delivered is exactly the
+    // surprise charge this phase exists to remove.
+    H.deductError = { message: "connection reset" };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.property_record).not.toBeNull();
+    expect(body.result.phones).toHaveLength(1);
+  });
+});
+
+/* ====================================================================
+ * A ROW A LEDGER ROW POINTS AT IS NEVER A DELETE CANDIDATE.
+ *
+ * excludeBilledRows derives billed-ness from trace_history's own columns,
+ * which is exactly what failed when a settle zeroed them: the guard was
+ * wrong because its inputs were. Asking the ledger is the only question
+ * that stays right, and it is the only thing that can free a row whose
+ * receipt columns were ALREADY zeroed before the monotonic rule landed.
+ * ==================================================================== */
+describe("POST /api/trace/single — the deletes consult the ledger", () => {
+  it("issues no delete when wallet_transactions references the row", async () => {
+    // The row looks unbilled: charge 0, no property record, no research
+    // charge. Only the FK knows better, and a delete would raise 23503.
+    // MUTATION: drop the ledgerProtected guard from runDelete and this goes red.
+    H.survivingRow = {
+      id: "trace-zeroed",
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: 1,
+    };
+    H.ledgerRefs = [{ id: "wt-1" }];
+
+    await post();
+
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("still deletes a row nothing references", async () => {
+    // The guard must not become a blanket refusal: an ordinary stale row is
+    // still swept.
+    H.survivingRow = {
+      id: "trace-free",
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: 1,
+    };
+    H.ledgerRefs = [];
+
+    await post();
+
+    expect(deletes().length).toBeGreaterThan(0);
+  });
+
+  it("fails CLOSED when the ledger cannot be read", async () => {
+    // Not knowing whether a row is referenced is not permission to delete it.
+    // A refused delete is a 500 the customer cannot get past; a skipped one
+    // just reuses the row in place.
+    H.survivingRow = {
+      id: "trace-unknown",
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+    };
+    H.ledgerRefsError = { message: "statement timeout" };
+
+    await post();
+
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("does not ask the ledger about a row that already reads billed", async () => {
+    // isBilledRow answers first. The extra round trip is only spent on the rows
+    // where the columns and the ledger can actually disagree.
+    H.survivingRow = { id: "trace-billed", charge: 0.25, property_record: null };
+
+    await post();
+
+    expect(H.ops.some((o) => o.table === "wallet_transactions")).toBe(false);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("asks about nothing at all when the address has no row", async () => {
+    H.survivingRow = null;
+
+    await post();
+
+    expect(H.ops.some((o) => o.table === "wallet_transactions")).toBe(false);
+    expect(deletes().length).toBeGreaterThan(0);
+  });
+});
+
+describe("POST /api/trace/single — the cache lookup reaches the caller's own rows", () => {
+  it("runs on a client that can see them, not on the session client", async () => {
+    // MUTATION: build checkSingleDuplicate's client from @/lib/supabase/server
+    // again and this goes red here and on the v1 surface, where it is not a
+    // fence but the live defect.
+    await post();
+
+    expect(H.anonTraceSelects).toBe(0);
+    expect(H.ops.some(isDedupSelect)).toBe(true);
+  });
+
+  it("keys the lookup to the CALLER, unconditionally", async () => {
+    // RLS is no longer a second fence on this query, so this filter is the only
+    // thing between two customers who traced the same parcel. Two of them hold
+    // two separate rows and BOTH pay; serving user B from user A's purchase
+    // would redistribute one customer's paid-for data to another.
+    //
+    // MUTATION: delete `.eq('user_id', userId)` from checkSingleDuplicate and
+    // this goes red.
+    await post();
+
+    const lookup = H.ops.find(isDedupSelect)!;
+    expect(lookup.filters).toContainEqual(["eq", "user_id", "user-1"]);
+  });
+});
+
+describe("POST /api/trace/single — clear cache and re-run ADDS to the receipt", () => {
+  it("folds the second purchase into the first rather than replacing it", async () => {
+    // David's rule: a re-run that pulls from Tracerfy rather than the database
+    // IS charged, and this is the button that forces one. The row is the single
+    // receipt for this address (UNIQUE(user_id, address_hash)), so after two
+    // real debits it must read as both. Replacing would drop the first from
+    // SUM(trace_history.charge) while wallet_transactions still holds it.
+    // MUTATION: write `charge` straight into the payload and this goes red.
+    H.survivingRow = { id: "trace-billed", charge: 0.4, tier: 2, property_record: null };
+    H.insertedRow = { id: "trace-billed", charge: 0.4, tier: 2 };
+    H.dossier = DOSSIER_MISS;
+
+    await post({ ...TIER2_BODY, skip_cache: true });
+
+    // Pay-As-You-Go: 0.40 already collected, 0.40 collected again.
+    expect(persisted()).toMatchObject({ charge: 0.8, tier: 2 });
+    expect(deducts()).toHaveLength(1);
+  });
+
+  it("deletes nothing on that path, because the row is the receipt", async () => {
+    H.survivingRow = { id: "trace-billed", charge: 0.4, tier: 2, property_record: null };
+    H.insertedRow = { id: "trace-billed", charge: 0.4, tier: 2 };
+    H.dossier = DOSSIER_MISS;
+
+    await post({ ...TIER2_BODY, skip_cache: true });
+
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("leaves a fresh row's receipt exactly as this submit collected it", async () => {
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(persisted()).toMatchObject({ charge: 0.4, tier: 2 });
+  });
+});
+
+describe("POST /api/trace/single — usage_records is the SECOND FK into trace_history", () => {
+  it("protects a row only usage_records references", async () => {
+    // wallet_transactions is the one that fires today, but usage_records
+    // carries the same `REFERENCES trace_history(id)` with no ON DELETE clause,
+    // so a row it points at raises 23503 exactly the same way. Nothing writes
+    // it at present, which is precisely why it would be the branch nobody
+    // noticed was missing.
+    // MUTATION: drop usage_records from LEDGER_TABLES and this goes red.
+    H.survivingRow = {
+      id: "trace-usage-only",
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+    };
+    H.ledgerRefs = [];
+    H.usageRefs = [{ id: "ur-1" }];
+
+    await post();
+
+    expect(deletes()).toHaveLength(0);
+  });
+});
+
+describe("POST /api/trace/single — one address, submitted twice", () => {
+  /**
+   * The repeat submit end to end, with the database in between: whatever the
+   * first submit persisted is what the second submit's cache lookup finds.
+   * Deduplication is not mocked here, so this exercises the real lookup.
+   */
+  async function submitTwice() {
+    H.profile = { ...H.profile, webhook_url: "https://hooks.example.invalid/ptp" };
+    H.insertedRow = { id: "trace-1" };
+    H.dossier = DOSSIER_MISS;
+
+    const first = await (await post(TIER2_BODY)).json();
+    const row = persisted();
+    H.cached = row ? { id: "trace-1", ...row } : null;
+    H.survivingRow = { id: "trace-1" };
+    const second = await (await post(TIER2_BODY)).json();
+    return { first, second };
+  }
+
+  it("charges once and serves the second from the caller's own row", async () => {
+    const { first, second } = await submitTwice();
+
+    expect(first.charge).toBe(0.4);
+    expect(deducts()).toHaveLength(1);
+    expect(second).toMatchObject({ is_cached: true, charge: 0, trace_id: "trace-1" });
+  });
+
+  it("fires trace.completed ONCE for one trace_id", async () => {
+    // FIX 2, which falls out of the cache fix: the surviving row is REUSED
+    // rather than re-inserted, so traceRecord.id is identical on the second
+    // submit. A second event with the same trace_id and a second non-zero
+    // charge is silently dropped by a consumer deduplicating on trace_id, and
+    // double-counted by one that is not.
+    await submitTwice();
+
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ trace_id: "trace-1", charge: 0.4 });
+  });
+
+  it("calls no vendor on the second submit", async () => {
+    const { lookupDossier } = await import("@/lib/tracerfy/dossier");
+
+    await submitTwice();
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
   });
 });

@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyToken } from "@/lib/suite/mcp-auth";
 import { assertPtpAccess, ctx, ok, err } from "@/lib/suite/mcp-shared";
-import { AI_RESEARCH, PRICING } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
 import {
   walletBalance,
   listTraces, listTracesSchema,
@@ -37,21 +37,28 @@ const TIER_1_RATES =
   `$${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} per successful trace on Pro or AcquisitionPRO and ` +
   `$${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go`;
 
-/** The no-match promise, scoped to what is ACTUALLY free. Verified against
- *  lib/trace/settleBulkJob.ts and app/api/cron/sweep-bulk-research/route.ts: a record whose owner
- *  is blank or a company is researched first, and that research fee is booked as soon as an owner
- *  is identified, whether or not contacts follow. Never restore the blanket "a record that comes
- *  back with no match is not charged". */
+/** The no-match promise. Verified against lib/trace/settleBulkJob.ts and
+ *  app/api/cron/sweep-entity-traces/route.ts: every record with an owner of record is tier 1,
+ *  charged only on a successful trace, and the vendor it routes to (Tracerfy for a person,
+ *  FastAppend for a company) changes nothing about the price.
+ *
+ *  The old version of this string carved out the blank or company owner case because those records
+ *  ran through a $0.15 AI research step that was charged on owner discovery. That engine was
+ *  removed on 2026-09-17 and nothing books that fee any more, so repeating the carve-out would
+ *  over-quote every entity record. Do not put a research fee back in here.
+ *
+ *  Carries NO figure of its own. The two tier 1 plan rates are already in TIER_1_RATES above,
+ *  where both plans are named together, so a Pay-As-You-Go caller can never be shown a Pro price. */
 const NO_MATCH_TERMS =
-  `Give us an individual owner's name and a trace that finds nothing is not charged. When the ` +
-  `owner is blank or a company, we research the owner first, and that research step costs ` +
-  `$${AI_RESEARCH.CHARGE_PER_RECORD.toFixed(2)} once we identify them, even if no contacts follow.`;
+  `Give us the owner of record, a person or a company, and you are charged only when the trace ` +
+  `succeeds. A trace that finds nothing is free. A record with no owner name is not traced on ` +
+  `this surface yet, so it comes back skipped with a reason and costs nothing.`;
 
 const handler = createMcpHandler(
   (server) => {
     server.tool(
       "skip_trace_quote",
-      `Free cost estimate for a skip-trace list. Give records (owner_name, address, city, state, zip). Returns the dedup count, how many are people vs entities, the worst-case cost (${TIER_1_RATES}), your current wallet balance, and whether the list exceeds the 500-per-call cap. ${NO_MATCH_TERMS} Always call this first and show the cost to the user before skip_trace_bulk.`,
+      `Free cost estimate for a skip-trace list. Give records (owner_name, address, city, state, zip). Returns the dedup count, how many are people vs entities, how many are skipped for having no owner name, the worst-case cost (${TIER_1_RATES}), your current wallet balance, and whether the list exceeds the 500-per-call cap. ${NO_MATCH_TERMS} Show the user the skipped count alongside the cost. Always call this first and show the cost to the user before skip_trace_bulk.`,
       quoteSchema.shape,
       tool((admin, sub, args) => skipTraceQuote(admin, sub, args)),
     );
@@ -63,7 +70,7 @@ const handler = createMcpHandler(
     );
     server.tool(
       "bulk_status",
-      "Retrieve the results of a skip_trace_bulk job by job_id. Each record returns owner_contact_name (the resolved human, which is the point of the trace) with owner_contact_source showing where it came from, alongside input_owner_name (the company or person you asked about), phones and emails. owner_contact_name and input_owner_name are DIFFERENT fields: report the former as the contact person and never substitute the company name for it. It is null when no human was resolved; leave the field empty in that case. Successful matches settle their per-trace charge to the wallet as they land.",
+      "Retrieve the results of a skip_trace_bulk job by job_id. Each record returns owner_contact_name (the resolved human, which is the point of the trace) with owner_contact_source showing where it came from, alongside input_owner_name (the company or person you asked about), phones and emails. owner_contact_name and input_owner_name are DIFFERENT fields: report the former as the contact person and never substitute the company name for it. It is null when no human was resolved; leave the field empty in that case. A record can also come back with skip_reason set, which means no vendor was ever asked and nothing was charged for it; report that reason rather than calling it a no match. Successful matches settle their per-trace charge to the wallet as they land.",
       bulkStatusSchema.shape,
       tool((admin, sub, args) => bulkStatus(admin, sub, args)),
     );

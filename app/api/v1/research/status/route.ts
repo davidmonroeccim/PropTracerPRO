@@ -5,10 +5,19 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 /**
  * GET /api/v1/research/status?job_id=<business_trace_job_id>
  *
- * Polls the status of an async FastAppend business-trace job that was queued
- * during /api/v1/research/single. Use this endpoint when the initial research
- * response returned `business_trace_pending: true` and you want to retrieve
- * the delayed contact results without waiting for the webhook.
+ * Polls one row of `business_trace_jobs`, the async FastAppend recovery queue.
+ * It reads that table and nothing else, so it SURVIVED the removal of the AI
+ * Search engine on 2026-09-17 even though "research" is in its path.
+ *
+ * THE PATH STAYS. It is a documented customer polling endpoint, cross-referenced
+ * twice in the API docs, and renaming a public path is a breaking change. Do not
+ * "tidy" it to match the current feature names.
+ *
+ * The endpoint that used to hand out these job ids, POST /api/v1/research/single,
+ * is gone, and nothing queues a NEW async job any more: the business trace is
+ * synchronous now (lib/tracerfy/client.ts lookupBusinessTrace). What is left is
+ * the tail of jobs the old engine queued, which app/api/cron/sweep-business-traces
+ * is still finalizing, and this is how a customer watches one land.
  *
  * Returns:
  *   status: 'pending' | 'completed' | 'no_match' | 'error'

@@ -5,11 +5,11 @@ import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
-import { PRICING, AI_RESEARCH } from '@/lib/constants';
+import { BulkSkipSummary } from '@/components/trace/BulkSkipSummary';
+import { PRICING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { Search } from 'lucide-react';
 
 // ─── Column Mapping ─────────────────────────────────────────────────────────
 
@@ -130,7 +130,7 @@ function downloadTemplate() {
 
 // ─── Page Component ─────────────────────────────────────────────────────────
 
-type Phase = 'upload' | 'researching' | 'processing' | 'complete';
+type Phase = 'upload' | 'processing' | 'complete';
 
 interface JobStats {
   job_id: string | null;
@@ -139,6 +139,12 @@ interface JobStats {
   records_submitted: number;
   cached_count: number;
   estimated_cost: number;
+  // Rows accepted but never traced, and the reason. Both come straight off the
+  // submit response; the route derives the reason from skipReasonFor(), the one
+  // accessor the API, the MCP and the results CSV all use, so the wording on
+  // screen is the wording everywhere else.
+  records_skipped?: number;
+  skipped_reason?: string;
   message?: string;
 }
 
@@ -146,6 +152,11 @@ interface CompleteStats {
   records_submitted: number;
   records_matched: number;
   total_charge: number;
+  // The same two facts read back off the FINISHED job rather than the submit,
+  // because that is what the user is looking at when they ask why a row came
+  // back empty. Null reason means nothing was skipped.
+  records_skipped: number;
+  skip_reason: string | null;
 }
 
 export default function BulkUploadPage() {
@@ -162,10 +173,6 @@ export default function BulkUploadPage() {
   const [allRecords, setAllRecords] = useState<MappedRecord[]>([]);
   const [totalRows, setTotalRows] = useState(0);
   const [mappingErrors, setMappingErrors] = useState<string[]>([]);
-
-  // AI Research toggle
-  const [enableResearch, setEnableResearch] = useState(false);
-  const [researchProgress, setResearchProgress] = useState<string | null>(null);
 
   // Processing phase
   const [jobStats, setJobStats] = useState<JobStats | null>(null);
@@ -235,9 +242,6 @@ export default function BulkUploadPage() {
 
   // Drag state
   const [dragActive, setDragActive] = useState(false);
-
-  // Count records missing owner names
-  const recordsMissingOwner = allRecords.filter((r) => !r.owner_name).length;
 
   // ─── File Parsing ───────────────────────────────────────────────────
 
@@ -342,63 +346,9 @@ export default function BulkUploadPage() {
     setError(null);
     abortRef.current = false;
 
-    let recordsToSubmit = [...allRecords];
+    const recordsToSubmit = [...allRecords];
 
-    // Phase 1: AI Research (if enabled and records need it)
-    if (enableResearch && recordsMissingOwner > 0) {
-      setPhase('researching');
-
-      const recordsNeedingResearch = recordsToSubmit.filter((r) => !r.owner_name);
-      const chunkSize = AI_RESEARCH.BULK_CHUNK_SIZE;
-      let researchedCount = 0;
-
-      try {
-        for (let i = 0; i < recordsNeedingResearch.length; i += chunkSize) {
-          if (abortRef.current) break;
-
-          const chunk = recordsNeedingResearch.slice(i, i + chunkSize);
-          setResearchProgress(`Researching ${researchedCount} of ${recordsNeedingResearch.length} records...`);
-
-          const response = await fetch('/api/research/bulk', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ records: chunk }),
-          });
-
-          const data = await response.json();
-
-          if (!response.ok) {
-            setError(data.error || 'AI research failed');
-            setLoading(false);
-            setPhase('upload');
-            return;
-          }
-
-          // Merge enriched records back
-          const enrichedChunk = data.records as MappedRecord[];
-          for (let j = 0; j < enrichedChunk.length; j++) {
-            const originalIdx = recordsToSubmit.findIndex(
-              (r) => r.address === chunk[j].address && r.city === chunk[j].city && !r.owner_name
-            );
-            if (originalIdx !== -1 && enrichedChunk[j].owner_name) {
-              recordsToSubmit[originalIdx] = {
-                ...recordsToSubmit[originalIdx],
-                owner_name: enrichedChunk[j].owner_name,
-              };
-            }
-          }
-
-          researchedCount += chunk.length;
-          setResearchProgress(`Researched ${researchedCount} of ${recordsNeedingResearch.length} records. ${data.records_found} owners found in this batch.`);
-        }
-      } catch {
-        setError('AI research failed. Proceeding with available data.');
-      }
-    }
-
-    // Phase 2: Submit for tracing
     setPhase('processing');
-    setResearchProgress(null);
 
     try {
       const response = await fetch('/api/trace/bulk', {
@@ -427,6 +377,10 @@ export default function BulkUploadPage() {
           records_submitted: 0,
           records_matched: 0,
           total_charge: 0,
+          // Nothing reached a job, so the only skip facts that exist are the
+          // ones the submit response just handed back.
+          records_skipped: data.records_skipped || 0,
+          skip_reason: data.skipped_reason || null,
         });
         setLoading(false);
         return;
@@ -465,6 +419,13 @@ export default function BulkUploadPage() {
             records_submitted: statusData.records_submitted,
             records_matched: statusData.records_matched,
             total_charge: statusData.total_charge,
+            // Fall back to what the SUBMIT response said rather than to zero.
+            // `data` is used rather than the jobStats state because this closure
+            // still holds the pre-setState value. A status response that has not
+            // been taught to carry these would otherwise erase a skip the user
+            // was already told about at submit time.
+            records_skipped: statusData.records_skipped ?? data.records_skipped ?? 0,
+            skip_reason: statusData.skip_reason ?? data.skipped_reason ?? null,
           });
           setPhase('complete');
           setLoading(false);
@@ -501,8 +462,6 @@ export default function BulkUploadPage() {
     setAllRecords([]);
     setTotalRows(0);
     setMappingErrors([]);
-    setEnableResearch(false);
-    setResearchProgress(null);
     setJobStats(null);
     setPollProgress(null);
     setCompleteStats(null);
@@ -512,6 +471,21 @@ export default function BulkUploadPage() {
   // ─── Render ─────────────────────────────────────────────────────────
 
   const mappedFields = Object.values(mapping);
+
+  /**
+   * Rows with no owner of record.
+   *
+   * The page used to count these for the AI Research toggle, which went and
+   * found those owners on the open web. That engine and that toggle were
+   * removed on 2026-09-17 and nothing replaced them, so these rows now have no
+   * route at all: the bulk route accepts them, skips them with a reason and
+   * charges nothing. Counting them here is what stops a user discovering that
+   * after the upload instead of before it.
+   */
+  const blankOwnerCount = allRecords.filter(
+    (record) => !(record.owner_name || '').trim()
+  ).length;
+  const traceableCount = allRecords.length - blankOwnerCount;
 
   return (
     <div className="space-y-6">
@@ -661,49 +635,38 @@ export default function BulkUploadPage() {
                 </CardContent>
               </Card>
 
-              {/* AI Research Toggle + Submit */}
+              {/* Submit */}
               {mappingErrors.length === 0 && allRecords.length > 0 && (
                 <Card>
                   <CardContent className="pt-6 space-y-4">
-                    {/* AI Research option */}
-                    {recordsMissingOwner > 0 && (
-                      <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-                        <div className="flex items-start gap-3">
-                          <input
-                            type="checkbox"
-                            id="enable-research"
-                            checked={enableResearch}
-                            onChange={(e) => setEnableResearch(e.target.checked)}
-                            className="mt-1"
-                          />
-                          <label htmlFor="enable-research" className="cursor-pointer">
-                            <div className="flex items-center gap-2">
-                              <Search className="h-4 w-4 text-blue-600" />
-                              <span className="font-medium text-gray-900">
-                                AI Research ({recordsMissingOwner} records missing owner names)
-                              </span>
-                            </div>
-                            <p className="text-sm text-gray-600 mt-1">
-                              Use AI to find owner names before tracing. ${AI_RESEARCH.CHARGE_PER_RECORD.toFixed(2)}/record, only charged when an owner is found.
-                            </p>
-                            <p className="text-sm text-gray-500 mt-1">
-                              Estimated max research cost: ${(recordsMissingOwner * AI_RESEARCH.CHARGE_PER_RECORD).toFixed(2)}
-                            </p>
-                          </label>
-                        </div>
+                    {blankOwnerCount > 0 && (
+                      <div
+                        data-testid="blank-owner-warning"
+                        className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+                      >
+                        <p className="font-medium">
+                          {blankOwnerCount} of these records have no owner name.
+                        </p>
+                        <p className="mt-1">
+                          We skip those and you are not charged for them. Add the owner of record
+                          to those rows and upload again if you want them traced.
+                        </p>
                       </div>
                     )}
-
                     <div className="flex items-center justify-between">
                       <div>
+                        {/* The count has to be the TRACEABLE one when some rows
+                            are being skipped. Saying "100 valid records ready to
+                            submit" directly above a banner saying 40 of them are
+                            skipped is two numbers describing the same upload and
+                            disagreeing. */}
                         <p className="font-medium text-gray-900">
-                          {allRecords.length} valid records ready to submit
+                          {blankOwnerCount > 0
+                            ? `${traceableCount} of ${allRecords.length} records will be traced`
+                            : `${allRecords.length} valid records ready to submit`}
                         </p>
                         <p className="text-sm text-gray-500">
-                          Estimated max trace cost: ${(allRecords.length * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
-                          {enableResearch && recordsMissingOwner > 0 && (
-                            <> + up to ${(recordsMissingOwner * AI_RESEARCH.CHARGE_PER_RECORD).toFixed(2)} for AI research</>
-                          )}
+                          Estimated max trace cost: ${(traceableCount * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
                         </p>
                       </div>
                       <div className="flex gap-3">
@@ -721,23 +684,6 @@ export default function BulkUploadPage() {
             </>
           )}
         </div>
-      )}
-
-      {/* Researching Phase */}
-      {phase === 'researching' && (
-        <Card>
-          <CardContent className="py-12 text-center space-y-4">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto" />
-            <p className="text-gray-700 font-medium">Running AI Research...</p>
-            {researchProgress && (
-              <p className="text-gray-500 text-sm">{researchProgress}</p>
-            )}
-            <p className="text-gray-400 text-xs">Finding owner names for records missing them. Tracing will begin automatically after.</p>
-            {error && (
-              <p className="text-sm text-red-600 mt-4">{error}</p>
-            )}
-          </CardContent>
-        </Card>
       )}
 
       {/* Processing Phase */}
@@ -762,8 +708,23 @@ export default function BulkUploadPage() {
                   <p className="text-sm text-gray-500">Estimated Max Cost</p>
                   <p className="text-2xl font-bold">${jobStats.estimated_cost.toFixed(2)}</p>
                 </div>
+                {(jobStats.records_skipped || 0) > 0 && (
+                  <div className="bg-amber-50 rounded-lg p-4">
+                    <p className="text-sm text-gray-500">Skipped, not charged</p>
+                    <p className="text-2xl font-bold text-amber-800">{jobStats.records_skipped}</p>
+                  </div>
+                )}
               </div>
             )}
+
+            {/* The user is told at submit time, not only at the end. The same
+                component renders it in the finished summary below. */}
+            <div className="text-left">
+              <BulkSkipSummary
+                recordsSkipped={jobStats?.records_skipped}
+                skipReason={jobStats?.skipped_reason}
+              />
+            </div>
 
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto" />
             <p className="text-gray-700 font-medium">Processing your upload...</p>
@@ -808,12 +769,37 @@ export default function BulkUploadPage() {
                         <p className="text-sm text-gray-500">Total Charged</p>
                         <p className="text-2xl font-bold">${completeStats.total_charge.toFixed(2)}</p>
                       </div>
+                      {completeStats.records_skipped > 0 && (
+                        <div className="bg-amber-50 rounded-lg p-4">
+                          <p className="text-sm text-gray-500">Skipped, not charged</p>
+                          <p className="text-2xl font-bold text-amber-800">
+                            {completeStats.records_skipped}
+                          </p>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
               )}
 
-              {jobStats?.message && (
+              {/* Why those rows came back empty, on screen, next to the counts.
+                  Until this was here the only place that said it was the results
+                  CSV, so a user had to download a file to find out that a row was
+                  never traced and never charged rather than looked up and missed.
+                  The sentence comes from the status route, which derives it from
+                  skipReasonFor(), so it reads the same here, in the API, in the
+                  MCP payload and in the CSV. The component decides whether there
+                  is anything to show, so there is no second condition here that
+                  can drift away from it. */}
+              <BulkSkipSummary
+                recordsSkipped={completeStats?.records_skipped}
+                skipReason={completeStats?.skip_reason}
+              />
+
+              {/* The route's own message, which today only ever talks about
+                  skipped rows. Shown only when the block above did not already
+                  say it, so the same fact is never on screen twice. */}
+              {!completeStats?.records_skipped && jobStats?.message && (
                 <p className="text-sm text-gray-600">{jobStats.message}</p>
               )}
 

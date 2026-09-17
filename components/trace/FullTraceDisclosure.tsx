@@ -16,7 +16,12 @@ import type { EntitlementProfile } from '@/lib/suite/entitlements';
  * 1. IT SHOWS EXACTLY WHEN THE ROUTE WOULD BILL TIER 2. The predicate is
  *    isFullPropertyTrace(), the same function the route bills from, rather than
  *    a second "is it blank" test that can drift away from it. A whitespace-only
- *    owner name is blank to the biller, so it is blank here too.
+ *    owner name is blank to the biller, so it is blank here too, and the opt-in
+ *    toggle is passed straight through: the route bills tier 2 on EITHER
+ *    trigger, so the disclosure has to fire on either trigger. The two cases
+ *    open with different sentences because they are different situations. The
+ *    customer who opted in already has the owner name and would be confused by
+ *    a notice telling them they do not. There is only ever ONE price sentence.
  *
  * 2. THE NUMBER IS THE CALLER'S OWN RATE, or there is no number. The rate is
  *    derived here, from the profile, via chargePerRecord() -- the same helper
@@ -29,15 +34,23 @@ import type { EntitlementProfile } from '@/lib/suite/entitlements';
 export function FullTraceDisclosure({
   ownerName,
   profile,
+  fullPropertyTrace = false,
 }: {
   /** The owner name field's current value, verbatim. */
   ownerName: string;
   /** The caller's own profile, or null while it is still loading. */
   profile: EntitlementProfile | null;
+  /** The opt-in toggle, verbatim: the caller has the owner and wants the record anyway. */
+  fullPropertyTrace?: boolean;
 }) {
-  if (!isFullPropertyTrace({ owner_name: ownerName })) return null;
+  if (!isFullPropertyTrace({ owner_name: ownerName, full_property_trace: fullPropertyTrace })) {
+    return null;
+  }
 
   const rate = profile ? chargePerRecord(profile) : null;
+  // The opening depends on WHICH trigger fired. A blank owner name is the
+  // reason tier 2 runs at all, so it wins when both are true.
+  const optedIn = fullPropertyTrace && Boolean(ownerName.trim());
 
   return (
     <div
@@ -45,8 +58,17 @@ export function FullTraceDisclosure({
       data-testid="full-trace-disclosure"
       className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
     >
-      No owner name, so this runs as a Full Property Trace. We go find the owner of record and
-      pull the full property record for this address.{' '}
+      {optedIn ? (
+        <>
+          You asked for the property record, so this runs as a Full Property Trace. We pull the
+          full property record for this address and find contacts for the owner of record.
+        </>
+      ) : (
+        <>
+          No owner name, so this runs as a Full Property Trace. We go find the owner of record and
+          pull the full property record for this address.
+        </>
+      )}{' '}
       {rate === null ? (
         <>
           You are charged at your per-record rate whether or not we come back with contacts.{' '}

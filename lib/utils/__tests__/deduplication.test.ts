@@ -26,6 +26,8 @@ const H = vi.hoisted(() => ({
   /** Envelope every awaited/`.single()`-ed query resolves with, in call order. */
   results: [] as Array<{ data: unknown; error: unknown }>,
   resultIndex: 0,
+  /** Which Supabase client factory each lookup reached for, in order. */
+  clientsBuilt: [] as string[],
 }));
 
 function nextResult(): { data: unknown; error: unknown } {
@@ -68,8 +70,25 @@ function recordingClient() {
   };
 }
 
+/**
+ * Which client each lookup builds is a BILLING fact, not a plumbing detail.
+ * `@/lib/supabase/server` is the cookie-backed ANON client and `trace_history`
+ * carries RLS `USING (auth.uid() = user_id)`, so on any surface with no session
+ * cookie it matches zero rows and every repeat call re-buys. Both factories are
+ * mocked and counted so a test can name which one ran.
+ */
 vi.mock("@/lib/supabase/server", () => ({
-  createClient: async () => recordingClient(),
+  createClient: async () => {
+    H.clientsBuilt.push("anon");
+    return recordingClient();
+  },
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    H.clientsBuilt.push("admin");
+    return recordingClient();
+  },
 }));
 
 const { checkDuplicates, checkSingleDuplicate, removeBatchDuplicates } = await import(
@@ -84,6 +103,98 @@ beforeEach(() => {
   H.ops = [];
   H.results = [];
   H.resultIndex = 0;
+  H.clientsBuilt = [];
+});
+
+describe("checkSingleDuplicate's client", () => {
+  it("is the SERVICE-ROLE client, so the lookup works on every surface", async () => {
+    // WAS, until 2026-09-17: the cookie-backed anon client. trace_history
+    // carries RLS `USING (auth.uid() = user_id)`, and an /api/v1/* request
+    // authenticates by API key with no Supabase session cookie, so `auth.uid()`
+    // was NULL, the select matched zero rows, and this returned null every time
+    // on that surface. Both cache branches in the v1 route were unreachable and
+    // every repeat call re-bought the dossier and charged the wallet again.
+    //
+    // MUTATION: build it from @/lib/supabase/server again and this goes red.
+    H.results = [{ data: null, error: { code: "PGRST116" } }];
+
+    await checkSingleDuplicate("user-1", "123 Main St", "Austin", "TX");
+
+    expect(H.clientsBuilt).toEqual(["admin"]);
+  });
+
+  it("leaves the bulk lookup on the anon client, which is a KNOWN open defect", async () => {
+    // Pinned so the asymmetry is deliberate rather than forgotten. checkDuplicates
+    // has the identical blindness on v1 bulk and on the MCP surface, and moving
+    // it is not purely a billing fix: it counts ANY row in the window as a
+    // duplicate, including a plain failure, so the move would also start
+    // blocking retries of failed addresses on a public API. That is a product
+    // call and it belongs to whoever owns the bulk routes.
+    H.results = [{ data: [], error: null }];
+
+    await checkDuplicates("user-1", [
+      { address: "123 Main St", city: "Austin", state: "TX", zip: "78701" },
+    ]);
+
+    expect(H.clientsBuilt).toEqual(["anon"]);
+  });
+});
+
+/**
+ * THE CROSS-USER FENCE.
+ *
+ * `trace_history` is UNIQUE(user_id, address_hash), so two customers who trace
+ * the same parcel hold two separate rows and BOTH pay: serving user B from user
+ * A's purchase would redistribute one customer's paid-for data to another. That
+ * is a product rule and a vendor-contract boundary, not an optimisation
+ * (SESSION-HANDOFF, 2026-09-17).
+ *
+ * These assert the predicate rather than a return value, because a mock will
+ * hand back whatever it is told regardless of filters. Delete the `user_id`
+ * filter from either lookup and they go red.
+ */
+describe("every lookup is keyed to the caller, unconditionally", () => {
+  it("keys the single lookup to the user id it was given, whoever that is", async () => {
+    // Two different callers, two different filter values. A constant, a
+    // hardcoded id or a dropped filter all fail this.
+    H.results = [
+      { data: null, error: { code: "PGRST116" } },
+      { data: null, error: { code: "PGRST116" } },
+    ];
+
+    await checkSingleDuplicate("user-a", "123 Main St", "Austin", "TX");
+    await checkSingleDuplicate("user-b", "123 Main St", "Austin", "TX");
+
+    expect(filter(H.ops[0], "eq", "user_id")).toEqual(["eq", "user_id", "user-a"]);
+    expect(filter(H.ops[1], "eq", "user_id")).toEqual(["eq", "user_id", "user-b"]);
+  });
+
+  it("keys the bulk lookup to the user id it was given", async () => {
+    H.results = [{ data: [], error: null }];
+
+    await checkDuplicates("user-b", [
+      { address: "123 Main St", city: "Austin", state: "TX", zip: "78701" },
+    ]);
+
+    expect(filter(H.ops[0], "eq", "user_id")).toEqual(["eq", "user_id", "user-b"]);
+  });
+
+  it("emits the user_id filter on the single lookup whatever else the row looks like", async () => {
+    // The filter has no branch to hide behind: the same predicate is sent for a
+    // hit and for a miss. A `user_id` filter applied only on some paths is the
+    // shape that leaks.
+    H.results = [
+      { data: { id: "t1", is_successful: true }, error: null },
+      { data: null, error: { code: "PGRST116" } },
+    ];
+
+    await checkSingleDuplicate("user-1", "123 Main St", "Austin", "TX");
+    await checkSingleDuplicate("user-1", "999 Other Rd", "Austin", "TX");
+
+    for (const rec of H.ops) {
+      expect(filter(rec, "eq", "user_id")).toEqual(["eq", "user_id", "user-1"]);
+    }
+  });
 });
 
 describe("checkSingleDuplicate", () => {

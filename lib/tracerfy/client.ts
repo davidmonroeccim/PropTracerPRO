@@ -339,8 +339,12 @@ function parseCSVLine(line: string): string[] {
  * with the dossier (see lib/tracerfy/dossier.ts).
  *
  * These do NOT replace submitBusinessTrace/getBusinessTraceStatus/
- * downloadBusinessTraceResults above. Those are the batch path the AI research
- * flow still runs on and they are left exactly as they are.
+ * downloadBusinessTraceResults above, which are the ASYNC batch path and are
+ * left exactly as they are. app/api/cron/sweep-business-traces still polls and
+ * downloads through them to finalize the FastAppend jobs the removed AI Search
+ * engine queued, and customers still poll /api/v1/research/status for those
+ * jobs. Nothing submits a NEW async job since 2026-09-17, because
+ * lookupBusinessTrace answers on the same request.
  *
  * THREE TRAPS, each measured on the 2026-09-16 saved payloads, not assumed:
  *

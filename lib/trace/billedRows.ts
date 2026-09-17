@@ -121,6 +121,136 @@ export interface CacheHitRow extends BillableTraceRow {
   tier?: number | string | null;
 }
 
+/* ------------------------------------------------------------------ *
+ * RECEIPTS ARE MONOTONIC.
+ *
+ * `charge` and `tier` are receipts, not scratch fields, and until 2026-09-17
+ * two settle paths wrote over them. The sequence, reachable with NO error on
+ * ordinary usage:
+ *
+ *   1. Trace an address with no owner. Tier 2 charges per RECORD SUBMITTED;
+ *      the county has no parcel, so the row lands `tier = 2, charge > 0,
+ *      property_record = NULL, status = no_match`.
+ *   2. Trace the SAME address again WITH an owner name. It goes tier 1, the
+ *      billed row survives the guarded deletes and is reused, and the status
+ *      route settles it: `charge` overwritten with 0, `tier` with 1.
+ *   3. The row now reads UNBILLED to excludeBilledRows while a
+ *      wallet_transactions row still references it by FK.
+ *   4. The next submit's failed sweep targets it, Postgres raises 23503,
+ *      runDelete collects the error, and that address answers
+ *      "Failed to clear previous trace" FOREVER.
+ *
+ * Downgrading `tier` alone does the second half of the damage on its own:
+ * isCacheHitRow's third arm is `tier = 2 AND charge > 0`, so a billed tier 2
+ * MISS stops being a cache hit and the customer re-buys the same absence.
+ *
+ * A ROW THAT WAS BILLED MUST NEVER BECOME UNBILLED. Both rules below are
+ * one-way.
+ * ------------------------------------------------------------------ */
+
+/** What a settle wants to write, and what the row already carries. */
+export interface BillingWrite {
+  /** The amount THIS settle actually collected. Never the intended amount. */
+  charge: number;
+  /** The billing model THIS settle applied. */
+  tier: number;
+}
+
+/**
+ * Folds a settle's collection into the receipt already on the row.
+ *
+ * `charge` ACCUMULATES rather than replacing. The row is one receipt per
+ * (user, address) -- UNIQUE(user_id, address_hash) guarantees it -- and it is
+ * reused rather than re-inserted, so a second genuine purchase against the same
+ * address is a second real debit in `wallet_transactions`. Replacing would drop
+ * the earlier one from SUM(trace_history.charge) and under-report what the
+ * customer was charged; accumulating keeps that sum in agreement with the
+ * ledger. Passing a collection of 0 therefore changes nothing, which is the
+ * property that closes the lockout.
+ *
+ * `tier` never downgrades. A row that was billed per RECORD SUBMITTED keeps
+ * saying so, because that is what both the delete guard and the cache filter
+ * read. A row that only ever saw tier 1 is untouched by this.
+ */
+export function foldBillingWrite(
+  existing: CacheHitRow | null | undefined,
+  write: BillingWrite
+): BillingWrite {
+  const collectedBefore = toAmount(existing?.charge);
+  const tierBefore = Number(existing?.tier);
+
+  return {
+    charge: round2(collectedBefore + toAmount(write.charge)),
+    tier: Number.isFinite(tierBefore) && tierBefore > write.tier ? tierBefore : write.tier,
+  };
+}
+
+/**
+ * Two amounts in cents added as floats give 0.30000000000000004, and this value
+ * is written to a DECIMAL column, summed on the dashboard and shown as money.
+ */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** The two tables whose rows are FK receipts pointing INTO trace_history. */
+const LEDGER_TABLES = ['wallet_transactions', 'usage_records'] as const;
+
+/**
+ * The slice of the client `hasLedgerReceipt` needs. Keeps it client-agnostic.
+ *
+ * `from` is declared as returning `unknown` on purpose. Describing its real
+ * shape here makes TypeScript match this interface structurally against
+ * SupabaseClient's generic `from`, which resolves the whole schema union and
+ * trips TS2589 ("type instantiation is excessively deep"). Returning `unknown`
+ * is a trivial check; the shape that matters is asserted at the call below,
+ * where it is one query and not a whole client.
+ */
+interface LedgerLookupClient {
+  from(table: string): unknown;
+}
+
+/** The three calls this makes on whatever `from` hands back. */
+interface LedgerQuery {
+  select(columns: string): {
+    eq(column: string, value: string): {
+      limit(n: number): PromiseLike<{ data: unknown[] | null; error: unknown }>;
+    };
+  };
+}
+
+/**
+ * True when a ledger row REFERENCES this trace_history row, so deleting it
+ * would raise 23503.
+ *
+ * `excludeBilledRows` derives billed-ness from trace_history's own columns,
+ * which is exactly what failed above: once those columns were wrong, the guard
+ * was wrong with them. This asks the ledger instead. It is the only thing that
+ * can free an address whose receipt columns were ALREADY zeroed before the
+ * monotonic rule landed, because for those rows the columns say "unbilled" and
+ * only the FK still knows better.
+ *
+ * FAILS CLOSED. An error means we could not prove the row is unreferenced, and
+ * an unprovable row must not be deleted: a refused delete is a 500 the customer
+ * cannot get past, while a skipped delete just reuses the row in place, which
+ * is what a billed row does anyway.
+ */
+export async function hasLedgerReceipt(
+  client: LedgerLookupClient,
+  traceHistoryId: string
+): Promise<boolean> {
+  for (const table of LEDGER_TABLES) {
+    const { data, error } = await (client.from(table) as LedgerQuery)
+      .select('id')
+      .eq('trace_history_id', traceHistoryId)
+      .limit(1);
+
+    if (error) return true;
+    if (Array.isArray(data) && data.length > 0) return true;
+  }
+  return false;
+}
+
 /**
  * The JS twin of CACHE_HIT_FILTER: true when this row is the customer's to be
  * served from the database, free.

@@ -4,8 +4,9 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { deductOrZero } from '@/lib/wallet/deduct';
-import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { deductWallet } from '@/lib/wallet/deduct';
+import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
+import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult } from '@/types';
@@ -50,13 +51,27 @@ export async function GET(request: Request) {
       );
     }
 
-    // Already completed - return the result
+    // Already completed - return the result.
+    //
+    // property_record and tier are READ, never re-bought. A Full Property Trace
+    // bills per record submitted, so a Pay-As-You-Go customer who closed the tab
+    // has already paid for the county record; without these two keys there was
+    // no way left to get it back, and the trace page reads both off this
+    // response and was always handed null. Nothing here calls a vendor.
+    //
+    // The row holds all 86 keys and this response carries 65. Re-reading a
+    // stored record is an egress: the 21 blocked fields are withheld here
+    // exactly as they are on the submit that bought it, or a customer could
+    // collect the wrong `estimated_value` on the second request instead of the
+    // first. See lib/trace/publicPropertyRecord.ts.
     if (trace.status === 'success' || trace.status === 'no_match' || trace.status === 'error') {
       return NextResponse.json({
         success: true,
         status: trace.status,
         trace_id: trace.id,
         result: trace.trace_result as TraceResult | null,
+        property_record: toPublicPropertyRecord(trace.property_record),
+        tier: trace.tier ?? null,
         charge: trace.charge || 0,
         is_cached: false,
       });
@@ -174,15 +189,42 @@ export async function GET(request: Request) {
     // JSON response body. Reporting the INTENDED amount tells the customer and
     // their webhook consumer they paid money that was never collected.
     const attemptedCharge = isSuccessful ? perTraceCharge : 0;
-    const charge =
+    const deduction =
       attemptedCharge > 0
-        ? await deductOrZero(adminClient, {
+        ? await deductWallet(adminClient, {
             p_user_id: user.id,
             p_amount: attemptedCharge,
             p_trace_history_id: trace.id,
             p_description: 'Skip trace - successful match',
           })
-        : 0;
+        : ({ collected: 0, outcome: 'charged' } as const);
+    const charge = deduction.collected;
+
+    if (deduction.outcome === 'error') {
+      // OUR failure, not the customer's balance. They keep the contacts and are
+      // not billed. Logged so the uncollected charge is findable rather than
+      // silent; nothing here may tell them their wallet was short, because it
+      // may well not have been.
+      console.error(
+        '[trace/status] wallet deduct failed, result delivered uncharged:',
+        trace.id,
+        deduction.message
+      );
+    }
+
+    // RECEIPTS ARE MONOTONIC, and this is the write that used to destroy one.
+    //
+    // A tier 2 row reused by a later tier 1 trace arrives here carrying
+    // `tier = 2` and a real `charge`. Writing this settle's numbers over them
+    // zeroed a paid receipt and downgraded the tier, which made the row read
+    // UNBILLED to excludeBilledRows while wallet_transactions still referenced
+    // it by FK, and the next submit then 500'd on 23503 forever. It also broke
+    // isCacheHitRow's `tier = 2 AND charge > 0` arm, so a billed tier 2 miss
+    // silently started re-buying. See lib/trace/billedRows.ts.
+    const billing = foldBillingWrite(trace, {
+      charge,
+      tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+    });
 
     // Update trace record
     await adminClient
@@ -194,11 +236,11 @@ export async function GET(request: Request) {
         email_count: result?.emails?.length || 0,
         is_successful: isSuccessful,
         cost: PRICING.COST_PER_RECORD,
-        charge,
+        charge: billing.charge,
         // Stamp the billing model alongside the amount. `charge` alone is
         // ambiguous: PRICING.CHARGE_PER_SUCCESS_WALLET and
         // PRICING.TIER2_PER_RECORD_SUBMITTED_PRO are both 0.25.
-        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+        tier: billing.tier,
       })
       .eq('id', trace.id);
 
@@ -257,6 +299,15 @@ export async function GET(request: Request) {
       status: isSuccessful ? 'success' : 'no_match',
       trace_id: trace.id,
       result,
+      // Whatever the row already carries, filtered to the 65 publishable keys.
+      // This branch settles a tier 1 poll, so the record is normally null and
+      // the tier is the 1 just stamped above; both are reported rather than
+      // assumed, so a row that arrived here with a property record on it is not
+      // silently dropped a second time.
+      property_record: toPublicPropertyRecord(trace.property_record),
+      // The tier that was WRITTEN, which is not always the one this settle
+      // applied: a row already billed per record submitted keeps saying so.
+      tier: billing.tier,
       charge,
       is_cached: false,
       _debug: {

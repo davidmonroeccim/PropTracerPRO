@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
-import { PRICING } from '@/lib/constants';
+import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
 
@@ -78,9 +78,28 @@ export async function POST(request: Request) {
       });
     }
 
-    // Check wallet balance for all users
+    // Split the batch in two. A row with no owner of record has no route: the
+    // AI Search engine that used to find an owner from an address alone was
+    // removed on 2026-09-17, and the page's AI Research toggle went with it.
+    // Sending it to Tracerfy anyway means a CSV line with an empty first and
+    // last name, and bulk/status then deducts the tier 1 rate on whatever comes
+    // back. David's rule: accept the file, skip the row, say why, charge
+    // nothing. See lib/trace/blankOwnerSkip.ts, which the v1 bulk route and the
+    // MCP submit already use.
+    const traceableRecords: AddressInput[] = [];
+    const skippedRecords: AddressInput[] = [];
+    for (const record of newRecords) {
+      if ((record.owner_name || '').trim()) {
+        traceableRecords.push(record);
+      } else {
+        skippedRecords.push(record);
+      }
+    }
+
+    // Check wallet balance for all users. Skipped rows are excluded because
+    // they can never be charged.
     const perTrace = chargePerTrace(profile);
-    const estimatedCost = newRecords.length * perTrace;
+    const estimatedCost = traceableRecords.length * perTrace;
     if (profile.wallet_balance < estimatedCost) {
       return NextResponse.json(
         {
@@ -101,7 +120,9 @@ export async function POST(request: Request) {
         file_name: fileName || null,
         total_records: records.length,
         dedupe_removed: totalDeduped,
-        records_submitted: newRecords.length,
+        // Only the rows a vendor is actually asked about. A skipped row was
+        // never submitted, and counting it here would overstate the work.
+        records_submitted: traceableRecords.length,
         records_matched: 0,
         status: 'processing',
       })
@@ -116,22 +137,89 @@ export async function POST(request: Request) {
       );
     }
 
-    // Build Tracerfy CSV from new records
+    const BATCH_SIZE = 500;
+
+    // trace_job_id links every row of this upload to its job, the same way the
+    // v1 route does. Without it the skipped rows, which never get a
+    // tracerfy_job_id, are invisible to the results CSV.
+    const buildHistoryRow = (record: AddressInput) => {
+      const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
+      return {
+        user_id: user.id,
+        trace_job_id: job.id,
+        address_hash: createAddressHash(normalizedAddress),
+        normalized_address: normalizedAddress,
+        city: record.city.toUpperCase(),
+        state: record.state.toUpperCase(),
+        zip: (record.zip || '').substring(0, 5),
+        input_owner_name: record.owner_name || null,
+      };
+    };
+
+    const insertHistoryRows = async (rows: Record<string, unknown>[]) => {
+      for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+        const { error: insertError } = await adminClient
+          .from('trace_history')
+          .upsert(rows.slice(i, i + BATCH_SIZE), { onConflict: 'user_id,address_hash' });
+        if (insertError) {
+          console.error('Failed to insert trace history batch:', insertError.message);
+        }
+      }
+    };
+
+    // Blank-owner rows land already finished. No tracerfy_job_id, so the status
+    // route never picks them up to settle or bill, and nothing money-shaped is
+    // written: no charge, no ai_research_charge, no tier, because nothing was
+    // billed. The reason reaches the user through the response below and the
+    // skip_reason column of the results CSV.
+    if (skippedRecords.length > 0) {
+      await insertHistoryRows(
+        skippedRecords.map((r) => ({
+          ...buildHistoryRow(r),
+          ai_research_status: BLANK_OWNER_SKIP_STATUS,
+          status: 'no_match' as const,
+        }))
+      );
+    }
+
+    // Nothing to trace. Close the job out here rather than leave the page
+    // polling a job no vendor will ever finish.
+    if (traceableRecords.length === 0) {
+      await adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'completed',
+          records_matched: 0,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', job.id);
+
+      return NextResponse.json({
+        success: true,
+        job_id: job.id,
+        total_records: records.length,
+        dedupe_removed: totalDeduped,
+        records_submitted: 0,
+        records_skipped: skippedRecords.length,
+        skipped_reason: BLANK_OWNER_SKIP_REASON,
+        cached_count: dedupeResult.cachedResults.length,
+        estimated_cost: 0,
+        message: `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`,
+      });
+    }
+
+    // Build Tracerfy CSV from the traceable records only.
     const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
 
     const csvLines = [
       'address,city,state,first_name,last_name,mail_address,mail_city,mail_state',
     ];
 
-    for (const record of newRecords) {
-      // Split owner_name into first/last if needed
-      let firstName = '';
-      let lastName = '';
-      if (record.owner_name) {
-        const parts = record.owner_name.trim().split(' ');
-        firstName = parts[0] || '';
-        lastName = parts.slice(1).join(' ') || '';
-      }
+    for (const record of traceableRecords) {
+      // Split owner_name into first/last.
+      const parts = (record.owner_name || '').trim().split(' ');
+      const firstName = parts[0] || '';
+      const lastName = parts.slice(1).join(' ') || '';
 
       // Use property address as mail fallback
       const mailAddress = record.mailing_address || record.address;
@@ -167,44 +255,29 @@ export async function POST(request: Request) {
       .update({ tracerfy_job_id: submitResult.jobId })
       .eq('id', job.id);
 
-    // Insert pending trace_history rows for each new record
-    const historyRows = newRecords.map((record) => {
-      const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
-      const addressHash = createAddressHash(normalizedAddress);
-      return {
-        user_id: user.id,
-        address_hash: addressHash,
-        normalized_address: normalizedAddress,
-        city: record.city.toUpperCase(),
-        state: record.state.toUpperCase(),
-        zip: (record.zip || '').substring(0, 5),
-        input_owner_name: record.owner_name || null,
+    // Insert pending trace_history rows for each traceable record
+    await insertHistoryRows(
+      traceableRecords.map((record) => ({
+        ...buildHistoryRow(record),
         tracerfy_job_id: submitResult.jobId,
         status: 'processing' as const,
-      };
-    });
-
-    // Insert in batches to avoid payload limits
-    const BATCH_SIZE = 500;
-    for (let i = 0; i < historyRows.length; i += BATCH_SIZE) {
-      const batch = historyRows.slice(i, i + BATCH_SIZE);
-      const { error: insertError } = await adminClient
-        .from('trace_history')
-        .upsert(batch, { onConflict: 'user_id,address_hash' });
-
-      if (insertError) {
-        console.error('Failed to insert trace history batch:', insertError.message);
-      }
-    }
+      }))
+    );
 
     return NextResponse.json({
       success: true,
       job_id: job.id,
       total_records: records.length,
       dedupe_removed: totalDeduped,
-      records_submitted: newRecords.length,
+      records_submitted: traceableRecords.length,
+      records_skipped: skippedRecords.length,
+      skipped_reason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : undefined,
       cached_count: dedupeResult.cachedResults.length,
       estimated_cost: estimatedCost,
+      message:
+        skippedRecords.length > 0
+          ? `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`
+          : undefined,
     });
   } catch (error) {
     console.error('Bulk trace error:', error);

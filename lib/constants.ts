@@ -29,8 +29,9 @@ export const PRICING = {
   // These are NOT:
   //   - CHARGE_PER_SUCCESS / CHARGE_PER_SUCCESS_WALLET, the tier 1 per-success
   //     rates, which are free on a miss.
-  //   - AI_RESEARCH.CHARGE_PER_RECORD (also 0.15), which is the AI research
-  //     line item, a different product on a different ledger entry.
+  //   - AI_RESEARCH.CHARGE_PER_RECORD (also 0.15), which is a RETIRED rate that
+  //     nothing charges. It is kept only so the two sites that refund it on
+  //     historical rows can still reason about it. See its banner below.
   // TIER2_PER_RECORD_SUBMITTED_PRO shares its digits with
   // CHARGE_PER_SUCCESS_WALLET. Same digits, different meaning. Check the name
   // before reusing a number.
@@ -133,16 +134,29 @@ export const HIGHLEVEL = {
 } as const;
 
 // ===================
-// AI Research
+// AI Research (RETIRED 2026-09-17)
 // ===================
 
+/**
+ * HISTORICAL RATE ONLY. Nothing charges this any more.
+ *
+ * The AI Search engine (Brave plus Claude) that this fee paid for was removed on
+ * 2026-09-17, along with its Brave rate limit, Claude batch size, model id and
+ * duration budget. The number survives because 1,301 `trace_history` rows still
+ * carry a real `ai_research_charge`, and the two sites that REFUND that charge
+ * when FastAppend lands late still have to reason about it:
+ *
+ *   app/api/cron/sweep-business-traces/route.ts   (async FastAppend recovery)
+ *   lib/trace/settleBulkJob.ts                    (bulk settlement)
+ *
+ * Deleting it would take their tests with it. Do NOT reintroduce it as a live
+ * price: a record with a company owner now bills the plain tier 1 per-success
+ * rate, and a record with no owner is skipped free.
+ */
 export const AI_RESEARCH = {
+  /** The retired per-record research fee. Historical rows only; nothing books it. */
   CHARGE_PER_RECORD: 0.15,
-  BRAVE_RATE_LIMIT_PER_SEC: 20,
   BULK_CHUNK_SIZE: 200,
-  CLAUDE_BATCH_SIZE: 20,
-  CLAUDE_MODEL: 'claude-opus-4-5-20251101',
-  MAX_DURATION_SEC: 300,
 } as const;
 
 // ===================

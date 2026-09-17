@@ -4,8 +4,9 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
-import { isLikelyBusiness } from '@/lib/ai-research/client';
-import { AI_RESEARCH, getChargePerTrace } from '@/lib/constants';
+import { isLikelyBusiness } from '@/lib/trace/ownerClassification';
+import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
+import { getChargePerTrace } from '@/lib/constants';
 import type { AddressInput } from '@/types';
 
 export const maxDuration = 60;
@@ -88,31 +89,45 @@ export async function POST(request: Request) {
       });
     }
 
-    // Step 3: Split records into person vs. entity buckets.
+    // Step 3: Split records into three buckets.
     // - Person rows (owner_name looks like a human) go straight to Tracerfy in
     //   the bulk CSV submit, preserving the existing fast path.
-    // - Entity rows (empty owner_name, or owner_name that looks like an LLC /
-    //   trust / business) are queued for AI research via the sweep-bulk-research
-    //   cron. Each resolved entity row then gets its own single-trace Tracerfy
-    //   submission with the discovered decision-maker's name.
+    // - Entity rows (owner_name that looks like an LLC / trust / business) are
+    //   queued for the sweep-entity-traces cron, which resolves them through a
+    //   FastAppend business trace and then, if it gets a person's name and no
+    //   contacts, submits its own single Tracerfy trace for that person.
+    // - Blank-owner rows have no route at all. The engine that used to find an
+    //   owner from an address alone is gone, so rather than queue them to a
+    //   cron that cannot resolve them, they are accepted and skipped with a
+    //   reason and nothing is charged. See lib/trace/blankOwnerSkip.ts.
     const personRecords: AddressInput[] = [];
     const entityRecords: AddressInput[] = [];
+    const skippedRecords: AddressInput[] = [];
 
     for (const record of newRecords) {
       const owner = (record.owner_name || '').trim();
-      if (owner && !isLikelyBusiness(owner)) {
-        personRecords.push(record);
-      } else {
+      if (!owner) {
+        skippedRecords.push(record);
+      } else if (isLikelyBusiness(owner)) {
         entityRecords.push(record);
+      } else {
+        personRecords.push(record);
       }
     }
 
-    // Wallet balance covers worst case: trace cost for every record + research
-    // fee for every entity record that resolves to an owner.
+    // The rows a vendor is actually asked about. Used twice, and it has to be
+    // the same number both times: it is what the wallet reserve is quoted on and
+    // what the job row claims was submitted.
+    const traceableCount = personRecords.length + entityRecords.length;
+
+    // Wallet balance covers the worst case, which is now ONE tier 1 charge per
+    // traceable record. The $0.15 research fee that used to be reserved on top
+    // of every entity record is gone with the engine that charged it: a
+    // FastAppend business trace bills the plan's tier 1 rate on success and
+    // nothing on a miss, exactly like a Tracerfy person trace. Skipped rows are
+    // excluded because they can never be charged.
     const perTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
-    const estimatedTraceCost = newRecords.length * perTrace;
-    const estimatedResearchCost = entityRecords.length * AI_RESEARCH.CHARGE_PER_RECORD;
-    const estimatedCost = estimatedTraceCost + estimatedResearchCost;
+    const estimatedCost = traceableCount * perTrace;
 
     if (profile.wallet_balance < estimatedCost) {
       return NextResponse.json(
@@ -142,7 +157,16 @@ export async function POST(request: Request) {
         file_name: 'API bulk upload',
         total_records: records.length,
         dedupe_removed: totalDeduped,
-        records_submitted: newRecords.length,
+        // Only the rows a vendor is actually asked about, which is the same
+        // meaning app/api/trace/bulk/route.ts writes here. This column is the
+        // DENOMINATOR of the match rate: the v1 status route reports it, the
+        // bulk_job.completed webhook carries it, and the history page divides
+        // records_matched by it. Counting a skipped blank-owner row here would
+        // overstate the work and understate the match rate by exactly the
+        // number of rows nobody was ever asked about. The skipped rows are
+        // still visible, as total_records minus this and as recordsSkipped in
+        // the response below.
+        records_submitted: traceableCount,
         records_matched: 0,
         status: 'processing',
       })
@@ -159,10 +183,10 @@ export async function POST(request: Request) {
 
     // Insert pending trace_history rows for ALL records up front, linked to
     // the bulk job via the new trace_job_id column so the status endpoint and
-    // the sweep-bulk-research cron can aggregate per-record state.
+    // the sweep-entity-traces cron can aggregate per-record state.
     const buildHistoryRow = (
       record: AddressInput,
-      opts: { aiResearchStatus: string | null }
+      opts: { aiResearchStatus: string | null; status?: 'processing' | 'no_match' }
     ) => {
       const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
       const addressHash = createAddressHash(normalizedAddress);
@@ -176,13 +200,32 @@ export async function POST(request: Request) {
         zip: (record.zip || '').substring(0, 5),
         input_owner_name: record.owner_name || null,
         ai_research_status: opts.aiResearchStatus,
-        status: 'processing' as const,
+        status: opts.status ?? ('processing' as const),
       };
     };
 
     const BATCH_SIZE = 500;
 
-    // Insert entity rows first with ai_research_status='queued' so the cron
+    // Blank-owner rows land already finished. They are never queued, so the
+    // cron never sees them and they can never sit in 'queued' waiting for an
+    // engine that is gone. Nothing money-shaped is written: no charge, no
+    // ai_research_charge, no tier, because nothing was billed.
+    if (skippedRecords.length > 0) {
+      const skippedHistoryRows = skippedRecords.map((r) =>
+        buildHistoryRow(r, { aiResearchStatus: BLANK_OWNER_SKIP_STATUS, status: 'no_match' })
+      );
+      for (let i = 0; i < skippedHistoryRows.length; i += BATCH_SIZE) {
+        const batch = skippedHistoryRows.slice(i, i + BATCH_SIZE);
+        const { error: insertError } = await adminClient
+          .from('trace_history')
+          .upsert(batch, { onConflict: 'user_id,address_hash' });
+        if (insertError) {
+          console.error('API v1 bulk trace - failed to insert skipped history batch:', insertError.message);
+        }
+      }
+    }
+
+    // Insert entity rows next with ai_research_status='queued' so the cron
     // can start picking them up as soon as this handler returns.
     if (entityRecords.length > 0) {
       const entityHistoryRows = entityRecords.map((r) =>
@@ -274,12 +317,21 @@ export async function POST(request: Request) {
       recordsToProcess: newRecords.length,
       recordsDirectTrace: personRecords.length,
       recordsPendingResearch: entityRecords.length,
+      recordsSkipped: skippedRecords.length,
+      skippedReason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : undefined,
       estimatedCost,
       status: 'processing',
-      message:
+      message: [
+        `Poll /api/v1/trace/bulk/status?job_id=${job.id} for results.`,
         entityRecords.length > 0
-          ? `Poll /api/v1/trace/bulk/status?job_id=${job.id} for results. ${entityRecords.length} entity-owned records queued for AI research.`
-          : `Poll /api/v1/trace/bulk/status?job_id=${job.id} for results.`,
+          ? `${entityRecords.length} entity-owned records are queued for a business trace.`
+          : null,
+        skippedRecords.length > 0
+          ? `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' '),
     });
   } catch (error) {
     console.error('API v1 bulk trace error:', error);

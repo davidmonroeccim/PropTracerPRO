@@ -1021,3 +1021,742 @@ many callers a trigger change would surprise.
 - **The session UI will now bill per record for any trace with no owner name.** That is the
   decided trigger, and phase 4's disclosure requirement ("you are charged whether or not anything
   is found, BEFORE the submit") is what makes it safe to expose. **Do not ship the UI without it.**
+
+---
+
+# PLAN: Phase 4 (2026-09-17) — remove AI Search, ship the UI. APPROVED by David.
+
+## FOUR CORRECTIONS TO THE DELETION LIST ABOVE. It is wrong, and one of them breaks bulk.
+
+Surveyed three ways and checked against the live DB today, not taken from the note.
+
+1. **`app/api/v1/research/status/route.ts` must NOT be deleted.** Despite the path it polls
+   `business_trace_jobs`, the FastAppend async recovery that SURVIVES. It is a documented customer
+   polling endpoint, cross-referenced twice in the API docs (lines 296, 500). It only incidentally
+   reads `ai_research`. Keep the route AND the path: renaming a public path is a breaking change.
+2. **`isLikelyBusiness()` lives inside `lib/ai-research/client.ts`** and is imported by two
+   survivors, `app/api/v1/trace/bulk/route.ts:7` and `lib/suite/mcp-tools.ts:7`. It relocates.
+3. **`AIResearchResult` cannot leave `types/index.ts`.** Five surviving production files import it.
+   It is the storage shape for FastAppend business-trace contacts, not just for the search engine.
+4. **Deleting `sweep-bulk-research` breaks BULK, not just AI Search.** It is the ONLY path that
+   resolves entity-owned bulk rows, and it does it by calling `researchProperty()`.
+
+## LIVE DB, 2026-09-17. Re-derived, because the volume is not where the plan assumed.
+
+| | |
+|---|---|
+| `ai_research_status` queued / processing | **0 / 0**. Nothing in flight; removal strands no work. |
+| AI Search rows from **BULK** | **987 of 1,301** (714 known entity owner, 273 blank owner) |
+| AI Search rows from single trace | 314 (300 blank owner, 11 with an owner) |
+| Bulk jobs to date, last used | 92, **2026-09-14** |
+
+**76% of AI Search volume was bulk.** The written plan treats this as a single-trace feature.
+
+## THREE USER-FACING MONEY STRINGS GO FALSE ON REMOVAL
+
+`NO_MATCH_TERMS` (`app/api/[transport]/route.ts:45`), `PTP_MCP_CAVEAT`
+(`lib/suite/mcp-shared.ts:17`), and the `worstCaseCost` quote (`lib/suite/mcp-tools.ts:112-124`),
+which adds $0.15 per entity record to every MCP quote shown before a wallet spend.
+
+## DAVID'S DECISIONS, 2026-09-17
+
+1. **v1 triggers tier 2 AUTOMATICALLY on an absent owner**, same as the session route.
+2. **The CRM push carries ALL 65 exportable fields**, auto-created in the user's location.
+   **It needs the right Private Integration Token scopes, which existing users will not have**, so
+   it needs a warning telling them to update the PIT. Split into phase 4b so it does not delay the
+   slice David judges. **The webhook needs no such warning**: extra keys in a JSON POST to the
+   customer's own URL need no pre-declaration anywhere. That constraint is the CRM's alone.
+3. **Blank-owner bulk rows: accept the file, skip the row with a reason.** Nothing charged, reason
+   visible in the job summary and the CSV. Not a silent `no_match`. Gap closes in phase 5.
+4. **Export stays in phase 5** with bulk, so the column set is designed once.
+
+## PHASE 4a TASKS. Nothing is deleted until its survivors have somewhere to live.
+
+- [ ] 1. Re-run the queued/processing check immediately before deleting. Anything in flight = STOP.
+- [ ] 2. Relocate `isLikelyBusiness()` to `lib/trace/ownerClassification.ts`, straight move, no
+      behaviour change. Update the two importers. Note that `classifyOwnerName()` in
+      `lib/routing/ownerRoute.ts` is a second classifier; merging them is not this phase.
+- [ ] 3. Rewrite `sweep-bulk-research` as `sweep-entity-traces`, calling `lookupBusinessTrace()`
+      from `lib/tracerfy/client.ts` (built and mutation-tested in 3b) for rows that HAVE an owner.
+      `vercel.json` entry follows. Blank-owner rows skip with a reason.
+- [ ] 4. `v1/trace/bulk/route.ts` drops the $0.15 research fee from `estimatedCost` and stops
+      queueing blank-owner rows to a cron that no longer resolves them.
+- [ ] 5. Delete the engine: `lib/ai-research/client.ts` (minus the relocated function),
+      `lib/brave/client.ts`, the FOUR research routes, `components/trace/AIResearchCard.tsx`.
+      Historical `ai_research*` columns and both refund sites untouched.
+- [ ] 6. `components/trace/PropertyRecordCard.tsx`. Pure/server-renderable like
+      `FullTraceDisclosure`. **6 provably-wrong fields and 15 propensity scores NOT displayed.**
+      Blank means blank: never a 0, never "N/A".
+- [ ] 7. Widen the page result state: `property_record`, `tier`, `owner_type`,
+      `needs_manual_review`, `warnings` already arrive and are silently dropped.
+- [ ] 8. Opt-in toggle sending `full_property_trace: true`. `FullTraceDisclosure` must fire for the
+      opt-in case too, with its own sentence; it only tests the owner name today.
+- [ ] 9. Label `owner_name_2` as the owner of record, and `owner_name` as the contact person.
+- [ ] 10. Strip AI Search UI from both trace pages, including `Free (no owner found)`.
+- [x] 11. v1 tier 2, automatic on absent owner. Needs a RAW twin of `pricePlanFor` (Track B uses
+      the raw `getChargePerTrace`, not the grant-aware one). Gate reserves the tier 2 rate.
+      Fix the unguarded `zip.substring(0, 5)` 500 at line 158. **DONE — see REVIEW below.**
+- [x] 12. Fire `trace.completed` from the tier 2 inline block on BOTH routes, carrying
+      `property_record`, `tier`, `owner_type`. Every completed tier 2 including a billed miss;
+      never on a vendor failure. **DONE — see REVIEW below.**
+- [ ] 13. Copy sweep. Every "AI Search"/"AI research" string, plus the three money strings.
+      No em-dashes, no asterisks, no emoji. Only the four canonical prices.
+
+## PHASE 4b: the CRM push, all 65 fields
+
+Verify the HighLevel custom-field endpoints and the exact PIT scope names against the LIVE docs,
+not memory. Auto-create missing fields. Detect the scope failure explicitly and never silently
+drop fields. The poll route gates the push on `isSuccessful && result`, which is wrong for tier 2:
+a billed record with a property record and no contacts is still a paid answer.
+
+## ARITHMETIC CORRECTION for phase 5
+
+This file says the export carries **64** columns. Counted from the sanitized fixture: 86 keys
+returned, minus **6** blocked (`price_per_sqft` was moved out), minus 15 propensity, = **65**.
+Still "over 60", so no copy change, but the number in this file is one low.
+
+---
+
+# REVIEW: Phase 4 tasks 11 + 12 (2026-09-17) — v1 tier 2 and the completion webhook. Uncommitted.
+
+**A NEW BILLING PATH ON A PUBLIC API.** Characterization tests first, every money decision
+mutation-verified, and the two judgment calls named at the bottom rather than buried.
+
+## Numbers
+
+| | Before | After |
+|---|---|---|
+| `npx vitest run` | 593 passing, 46 files | **663 passing, 47 files, 0 failing** |
+| `npx tsc --noEmit` | 0 errors | **0, unchanged** |
+| `npx eslint app lib components` | 49 problems | **49, unchanged** |
+| `npm run build` | compiles, exit 0 | **compiles, exit 0** |
+| Mutations applied / caught | — | **20 / 20** |
+
+## Tests were written FIRST, and four of them went red
+
+Six characterization tests were added to `app/api/v1/trace/single/__tests__/route.test.ts` against
+the route as it stood, and passed. Wiring tier 2 in turned four red:
+
+| Characterization test | Was | Is |
+|---|---|---|
+| a body with no `ownerName` | tier 1 async submit | tier 2, inline |
+| the balance gate on that body | raw tier 1 rate ($0.15) | tier 2 rate ($0.25 / $0.40) |
+| a billed tier 2 row with no contacts | re-bought | served free from the database |
+| a submit with no `zip` | bare 500 (TypeError) | 200, `zip` stored as null |
+
+Each now asserts the new behaviour and records the old one in a comment. A test authored after the
+implementation, from the same assumption as the implementation, proves nothing (L-008's corollary).
+
+## Track B keeps its own price derivation: `lib/api/pricing.ts`
+
+`rawPricePlanFor()` and `rawChargePerRecord()` are the RAW twins of `pricePlanFor` /
+`chargePerRecord`. They derive from `subscription_tier` and `is_acquisition_pro_member` only, the
+same two columns `getChargePerTrace` reads, and are deliberately blind to a gateway grant. An
+invariant test asserts `PRICE[rawPricePlanFor(p)].tier1PerSuccess === getChargePerTrace(...)` across
+the whole matrix, so the plan derivation and the tier 1 rate cannot drift.
+
+No plan is hardcoded anywhere. An unrecognised or missing tier falls to `wallet`, the DEAREST
+column, for FAILSAFE_PRICE_PLAN's reason: an overcharge is visible on a statement and gets reported;
+an undercharge is invisible to both sides and compounds.
+
+## The charge sequence on v1, in order, and none of it may move
+
+1. Pre-flight gate reserves `rawChargePerRecord(profile)` — the TIER 2 rate.
+2. Cache: a billed tier 2 row is served free, whatever it contains (`isCacheHitRow`).
+3. Row first, vendors second, so the deduct has a `trace_history_id`.
+4. `planRoute(parcelForFullTrace(...), rawPricePlanFor(profile))` — pure, no spend, the real plan.
+5. `executeRoute(...)` with the three synchronous vendor callables.
+6. `if (!execution.success)` → charge NOTHING, row `error`, 502, no webhook.
+7. `deductOrZero(...)` ONCE. **A total dossier miss IS billed.**
+8. Persist what was COLLECTED: `tier`, the raw 86-key `property_record`, real vendor spend in `cost`.
+9. `trace.completed`, then return the finished record inline.
+
+## The webhook: `lib/trace/traceCompletedWebhook.ts`
+
+The poll route's payload key for key, plus `property_record`, `tier` and `owner_type`. Fires for
+EVERY completed tier 2 including a billed miss (the poll route's rule is "send for all completed
+traces", and a billed miss is the case a customer most needs told about). Never on a vendor failure:
+that branch returns before reaching the dispatch, which is a structural guarantee rather than a
+condition that can be edited. Fire-and-forget with a `.catch()`.
+
+`webhook_url` is read off the profile already in hand on both routes, not re-read. Verified rather
+than assumed: v1's `profile` comes from `validateApiKey`'s ADMIN client `select('*')`, and the
+session route's comes from an RLS-scoped `select('*')` on the caller's own row — migration
+20260716 revoked UPDATE only and there is no column-level SELECT restriction on `user_profiles`
+anywhere in `supabase/`.
+
+**The HighLevel CRM push is NOT wired.** Phase 4b, as specified.
+
+## Mutation table. 20 applied in isolation, full suite re-run each time, tree restored.
+
+| # | Mutation | Tests red |
+|---|---|---|
+| M1 | gate on `ownerFound` instead of `success` (both routes) | 27 |
+| M1a | ...v1 only | 12 |
+| M2 | drop the vendor-failure gate entirely (both routes) | 8 |
+| M2a | ...v1 only | 4 |
+| M3 | skip the deduct when the dossier missed (v1) | 8 |
+| M4 | reserve the tier 1 rate instead of tier 2 (v1) | 4 |
+| M5 | hardcode `'pro'` as the plan (v1) | 2 |
+| M5a | use the grant-aware TRACK A helpers on v1 | 2 |
+| M5b | Track A for the GATE only | 1 |
+| M5c | Track A for the CHARGE only | 1 |
+| M6 | drop the v1 tier-2 cache arm, so a paid row re-buys | 2 |
+| M7 | fire the webhook on a vendor failure (both routes) | 2 |
+| M8 | gate the webhook on `isSuccessful`, so a billed miss is silent (both) | 5 |
+| M9 | drop the webhook dispatch entirely (both routes) | 8 |
+| M10 | revert the v1 zip guard to the unguarded substring | 4 |
+| M11 | drop the automatic arm of the v1 trigger (opt-in only) | 35 |
+| M12 | drop the opt-in arm of the v1 trigger (automatic only) | 2 |
+| M13 | persist `attemptedCharge` instead of what was collected (v1) | 1 |
+| M14 | subset the v1 `property_record` to populated keys | 1 |
+
+**One mutation initially SURVIVED, and it is the one this phase was warned about.** M5a — swapping
+`rawPricePlanFor`/`rawChargePerRecord` for the Track A `pricePlanFor`/`chargePerRecord` — turned
+**zero** tests red on the first pass. The reason: `hasSuiteAccess()` is gated on
+`NEXT_PUBLIC_SUITE_SIGNIN_ENABLED`, which is off in the test environment, so with no grant in play
+the two tracks return the same answer and the test passed under both implementations. The test now
+sets the flag explicitly, and a second test covers the balance gate on the same profile. M5a, M5b
+and M5c all bite now. **The general form: a test for a distinction that only exists when a feature
+flag is ON proves nothing while the flag is off. Set the flag in the test.**
+
+## Judgment calls, named rather than buried
+
+1. **The v1 tier 2 response is camelCase** (`traceId`, `propertyRecord`, `ownerName`, `ownerType`,
+   `needsManualReview`), matching this route's own `traceId` / `tracerfyJobId`. v1 is NOT uniformly
+   camelCase — `app/api/v1/trace/status` returns `trace_id` and `is_cached` — so there was a real
+   choice. Per-route consistency won. Nothing in `docs/` or the api-keys docs page published a tier
+   2 v1 shape, so no existing contract was broken. **The copy sweep (task 13) owns documenting it.**
+2. **v1 honours BOTH `fullPropertyTrace` and `full_property_trace`** as the opt-in. camelCase is
+   v1's convention, but a caller who sends the session route's spelling has unambiguously asked for
+   a full property trace, and silently giving them a cheaper tier 1 is the wrong answer rather than
+   a kindness.
+
+## Gaps, flagged not hidden
+
+- **Nothing verifies this against the live v1 surface.** `api_logs` holds 0 rows, so there is still
+  no usage visibility on v1 and no way to say how many callers the automatic trigger will surprise.
+  Every assertion here is against mocked vendors.
+- **A pay-as-you-go caller cannot actually reach v1 today.** `validateApiKey` 403s anything that is
+  not pro or AcquisitionPRO, so the $0.40 column is unreachable in production. It is implemented and
+  tested anyway: the route must derive its own price rather than lean on an access gate two files
+  away, which is precisely how the 40% shortfall FAILSAFE_PRICE_PLAN documents happened.
+- **The zip backfill on v1 is covered only through `executeRoute`.** The session route has a
+  dedicated test asserting the SITUS zip and not the mailing zip; v1's tests assert a 5-character
+  string lands in the row. The distinction is enforced one layer down and not re-proved here.
+- **`research: null` is carried in the tier 2 webhook payload** purely for shape parity with the two
+  poll routes, which still send it. If the copy sweep removes `research` from those, remove it here
+  in the same pass.
+- **Re-tracing an address still OVERWRITES `charge` on the reused row** on v1 as on the session
+  route. Inherited from the phase 2 reuse design, unchanged here, still worth a decision.
+
+# REVIEW: Phase 4 review fixes (2026-09-17)
+
+Six defects the phase 4 review found, all fixed. Files another workstream owns
+(`app/api/v1/trace/single/route.ts`, `app/api/trace/single/route.ts`, `lib/suite/pricing.ts`,
+`docs/`, the API docs page) were not touched.
+
+- [x] **1. MONEY. `app/api/trace/bulk/route.ts` charged for blank-owner rows.** Splits the batch
+      the way the v1 route does, reusing `lib/trace/blankOwnerSkip.ts`. Skipped rows are written
+      terminal with no charge, no tier, no `ai_research_charge`, never enter the Tracerfy CSV, and
+      are excluded from the wallet reserve. A wholly blank-owner upload completes its job rather
+      than polling forever. Rows now carry `trace_job_id`; `bulk/download` finds rows by either
+      that or `tracerfy_job_id` and emits `skip_reason`. The bulk page counts blank-owner rows
+      before submit and says they will be skipped and not charged, with no price figure beyond the
+      caller's own profile rate.
+- [x] **2. AVAILABILITY. `sweep-entity-traces` looped on a poisoned row forever.** New
+      `lib/trace/entityTraceAttempts.ts` puts the attempt number in `ai_research_status`
+      (`queued`/`queued_2`/... and `processing_N`), so it needs no migration and no new column, and
+      a pre-ladder row reads as attempt 1 with no backfill. Five attempts, then terminal
+      `entity_trace_failed` with a reason and nothing charged. The stale-claim sweep steps the same
+      ladder. `isEntityTracePending()` replaced the two-literal check in the v1 bulk status route
+      and in `lib/suite/mcp-tools.ts`, so a retried row is still pending and a retired one is not.
+- [x] **3. Both status routes now return `property_record` and `tier`,** read off the existing
+      `trace_history` row. No vendor call and no second charge.
+- [x] **4. Narration fixed** in `lib/trace/settleBulkJob.ts` (the refund services the 1,301
+      historical rows only) and `lib/constants.ts` (the retired-rate note now agrees with the
+      RETIRED banner below it).
+- [x] **5. Two copy defects** on `app/(dashboard)/trace/single/page.tsx`: the clear-cache confirm
+      now says a paid record is kept and served back free, and one derived
+      `willPullPropertyRecord` drives the checkbox, the request body and the disclosure.
+- [x] **6. `PropertyRecordCard`:** `total_portfolio_value` relabelled "Portfolio assessed value"
+      with a not-a-market-valuation note, not blocked. `date()` returns blank for a vendor
+      `0000-00-00`.
+
+## Mutation verification, ten mutations, all red
+
+| Mutation | Result |
+|---|---|
+| Blank-owner split deleted in the dashboard bulk route | 6 failed / 4 passed |
+| Reserve counts skipped rows again | 2 failed / 8 passed |
+| Download reverted to filtering on `tracerfy_job_id` alone | 2 failed / 3 passed |
+| `nextAfterFailedAttempt` exhausted branch deleted | 2 failed / 20 passed |
+| Claim hardcoded back to `.eq('ai_research_status','queued')` | 1 failed / 21 passed |
+| Terminal entity row given a charge | 1 failed / 21 passed |
+| `property_record` + `tier` dropped from the session status route | 2 failed / 6 passed |
+| `property_record` + `tier` dropped from the v1 status route | 2 failed / 5 passed |
+| `date()` prints the vendor empty date again | 2 failed / 72 passed |
+| Portfolio relabelled as a bare value | 1 failed / 73 passed |
+
+## Baselines
+
+`npx vitest run` 699 passed / 49 files / 0 failing (was 651 / 47 at the start of this pass).
+`npx tsc --noEmit` 0 errors. `npx eslint app lib components` 48 problems (was 49; an unused
+`PRICING` import went with the rewrite). `npm run build` compiles.
+
+## Open, not fixed here
+
+- **The partial index `WHERE ai_research_status = 'queued'`** (migration 20260411) no longer covers
+  the claim query, which is now `.in(...)` over the five queued rungs. Correctness is unaffected;
+  a broader index on `(ai_research_status, created_at)` would restore the plan. Not added because
+  it is a live schema change and this pass was asked to avoid migrations.
+- **`MAX_ENTITY_TRACE_ATTEMPTS = 5`** against a one-minute cron is about five minutes of
+  consecutive vendor failure before a row is retired. A longer outage retires rows that would have
+  succeeded later. The number is one constant if David wants it longer.
+- **The tier 2 toggle flip** still unticks when the user types an owner name, because keeping the
+  tick would opt them into the per-record rate they never chose. What was fixed is the divergence
+  between what the control showed and what it submitted.
+
+---
+
+# REVIEW: Phase 4 — the 21 blocked fields are withheld from EVERY egress (2026-09-17). Uncommitted.
+
+David's decision, implemented: the 6 provably-wrong fields and the 15 propensity scores are blocked
+from the v1 API response, the session API response, both poll routes and the `trace.completed`
+webhook, on the project's existing reasoning for blocking them from the CSV export.
+
+## THE BOUNDARY, WHICH IS THE WHOLE JOB
+
+**Storage stays raw.** `trace_history.property_record` holds all 86 keys, verbatim, unfiltered and
+unrenamed. No migration, no backfill, nothing filtered on the way in. A field empty in OH, CA and
+UT may be populated in another county and the $0.20 was already spent to fetch it.
+
+**Only egress is filtered.** 65 keys leave; 86 keys are stored. The two numbers are asserted
+against each other in the same test on both submit routes.
+
+## ONE LIST, AND HOW THE SECOND ONE WAS PREVENTED
+
+`lib/trace/publicPropertyRecord.ts` exports `BLOCKED_PROPERTY_RECORD_KEYS` (21) and a pure
+`toPublicPropertyRecord()` that returns a COPY.
+
+`PropertyRecordCard` gated the same fields by enumerating the 65 it renders, which is a second list
+in disguise. It now runs its input through `toPublicPropertyRecord()` before a single accessor
+touches it, so the two cannot drift: adding an "Estimated value" row to the panel renders nothing,
+because the key is not there. Both were done, structure first and tests behind it, because the
+structural share alone is invisible to a renderer test (the panel renders no blocked field either
+way) and a test alone would not stop the panel from quietly keeping its own copy.
+
+## THE ELEVEN EGRESS SITES
+
+| Surface | Sites |
+|---|---|
+| `app/api/v1/trace/single/route.ts` | 3: cached-with-contacts, billed tier 2 cache hit, tier 2 inline response |
+| `app/api/trace/single/route.ts` | 3: the same three |
+| `app/api/trace/status/route.ts` | 2: completed branch, settled-poll branch |
+| `app/api/v1/trace/status/route.ts` | 2: the same two |
+| `lib/trace/traceCompletedWebhook.ts` | 1: the payload, filtered at the dispatch itself |
+
+The webhook filters inside `dispatchTraceCompleted`, so both call sites hand it the RAW record and
+there is exactly one place to get that egress wrong. The two persists and those two call-site
+arguments are the only raw sites left, and each is named with a reason and an exact count in the
+scan test's allowlist.
+
+**Checked and cleared, not egresses:** the bulk CSV download (no dossier columns yet; phase 5), both
+bulk status routes and the MCP twin (`buildPerRecordResult` carries no property record), the
+HighLevel push (phase 4b, not wired), and the history and dashboard pages, which `select('*')`
+server-side but pass only `trace.id` into a client component, so the record is never serialized to
+the browser.
+
+## THE SCAN THAT CATCHES THE FIFTH EGRESS
+
+`lib/trace/__tests__/propertyRecordEgress.test.ts` reads every committed `.ts`/`.tsx` under `app/`,
+`lib/` and `components/` and classifies every place a `property_record` / `propertyRecord` key is
+written into an object: `null` is fine, `toPublicPropertyRecord(...)` is fine, anything else must be
+in an allowlist with a reason and an exact count. A second raw emission in a file that legitimately
+has one -- the precise way this leaks -- fails rather than inheriting its neighbour's permission. A
+canary test asserts the scan finds sites at all, so a broken regex cannot pass vacuously.
+
+`publicPropertyRecord.test.ts` holds the other end: every blocked key must exist in the vendor
+fixture (a typo blocks nothing and looks identical to a key doing its job, and a vendor RENAME shows
+up here), and the whole `propensity|renovate` family must be on the list, so a new vendor score is a
+decision somebody makes rather than a default.
+
+## NUMBERS
+
+| | Before | After |
+|---|---|---|
+| `npx vitest run` | 699 passing, 49 files | **761 passing, 52 files, 0 failing** |
+| `npx tsc --noEmit` | 0 errors | **0, unchanged** |
+| `npx eslint app lib components` | 47 problems | **47, unchanged** |
+| `npm run build` | compiles | **compiles** |
+| Mutations applied / caught | — | **14 / 14** |
+| Keys a caller receives | 86 | **65** |
+
+**40 of the new tests are this change.** The rest are a concurrent agent's, landing during the same
+session in `app/api/trace/bulk/`, `app/api/v1/trace/bulk/`, `app/api/cron/` and
+`app/(dashboard)/trace/bulk/`, none of which this pass touched. The total moves while they work;
+the 40 do not. Measured per file: 13 + 6 new, and +6, +6, +3, +3, +3 added to five existing files.
+
+## MUTATIONS. Each applied alone, full suite re-run, tree restored.
+
+| # | Mutation | Tests red |
+|---|---|---|
+| M1 | v1 single: cached-with-contacts branch unfiltered | 3 |
+| M2 | v1 single: billed tier 2 cache branch unfiltered | 2 |
+| M3 | v1 single: tier 2 inline response unfiltered | 4 |
+| M4 | session single: cached-with-contacts branch unfiltered | 3 |
+| M5 | session single: billed tier 2 cache branch unfiltered | 2 |
+| M6 | session single: tier 2 inline response unfiltered | 4 |
+| M7 | session status: completed branch unfiltered | 2 |
+| M8 | session status: settled-poll branch unfiltered | 2 |
+| M9 | v1 status: completed branch unfiltered | 2 |
+| M10 | v1 status: settled-poll branch unfiltered | 2 |
+| M11 | trace.completed webhook payload unfiltered | 3 |
+| M12 | card stops sharing the list and casts the raw record | 1 |
+| M13 | filter DELETES FROM ITS ARGUMENT instead of copying | 11 |
+| M14 | filter returns the record unfiltered | 18 |
+
+M12 was caught by NOTHING on the first sweep, and that is the finding worth keeping. Deleting the
+shared filter from the panel changes no pixel today, because the panel gates by enumeration anyway;
+it just silently restores the second list. A source assertion was added for it, and it is the only
+test in the suite that goes red on that mutation.
+
+## OPEN
+
+- **The export and the CRM push are not written yet** (phases 5 and 4b). Both must call
+  `toPublicPropertyRecord()`. The scan test will catch a raw emission in either, but only if the
+  record is written into a key named `property_record` / `propertyRecord`; a CSV column loop or a
+  HighLevel custom-field map would name the fields individually and slip past it.
+- **`docs/` and the two settings pages were not touched**, as instructed. Their "over 60 fields"
+  claim is still exact: a caller now receives 65.
+
+---
+
+# REVIEW: Phase 4 second-review fixes, bulk surfaces (2026-09-17)
+
+Five findings from the second review of phase 4. Scope was the bulk surfaces:
+`app/api/v1/trace/bulk/route.ts`, `app/api/trace/bulk/status/route.ts`,
+`app/(dashboard)/trace/bulk/page.tsx`, `app/api/cron/sweep-entity-traces/route.ts`,
+`lib/trace/entityTraceAttempts.ts`. The single-trace routes, the webhook lib,
+`lib/utils/deduplication.ts`, `docs/` and the settings pages belong to other
+workstreams and were not touched.
+
+- [x] **1. FALSE STATEMENT. v1 claimed skipped rows as submitted work.**
+      `records_submitted` on the `trace_jobs` row was `newRecords.length`, which
+      includes blank-owner rows no vendor is ever asked about. It is now the
+      traceable count, the same meaning `app/api/trace/bulk/route.ts:125` writes.
+      A 100-row upload with 40 blank owners used to report 100 submitted against
+      the matches from 60, understating the customer's match rate by 40 percent
+      in the status route, the `bulk_job.completed` webhook and the history page.
+      Checked before changing it: nothing divides by or otherwise computes on
+      this column. `lib/trace/settleBulkJob.ts` never reads it; the v1 status
+      route passes it through in five places with no arithmetic;
+      `sweep-stale-traces` only copies it into a webhook. It is a reported
+      number, so correcting the meaning corrects every reader at once.
+- [x] **2. David's blank-owner decision, the missing dashboard half.** The rule
+      is accepted, skipped with a reason, charged nothing, reason visible in the
+      job summary AND the CSV. Only the CSV had it.
+      `app/api/trace/bulk/status/route.ts` now returns `records_skipped` and
+      `skip_reason` on both terminal branches, derived through `skipReasonFor()`
+      so the wording cannot drift from the v1 payload, the MCP payload or the
+      CSV. The page reads them back off the status response and falls back to
+      what the submit already said. The block itself is
+      `components/trace/BulkSkipSummary.tsx`, rendered in both the processing
+      and complete phases. The pre-submit line now counts the rows that will
+      actually be traced instead of every mapped row.
+- [x] **3. MONEY. The cron could charge a row twice.** Anything throwing between
+      the `deductOrZero` and the row write left the money moved with nothing on
+      the row, and the catch requeued it for another claim, another FastAppend
+      call and another deduct. The guard is the `wallet_transactions` debit
+      `deduct_wallet_balance` already writes carrying `trace_history_id`: durable,
+      written in the same transaction as the balance change, keyed on exactly
+      the right thing, and needing NO new column. When one exists the cron
+      persists the amount that already moved rather than deducting again or
+      writing a zero. A short wallet leaves no ledger row, so an unpaid first
+      attempt is still chargeable.
+- [x] **4. A row could become permanently invisible.** The stale sweep used
+      `.lt('ai_research_claimed_at', ...)`, and SQL `<` never matches NULL, so a
+      row in `processing_N` with a null claim timestamp was reachable by neither
+      the sweep nor the claim query and held its bulk job open forever. Now
+      `.or('ai_research_claimed_at.is.null,...lt....')`. Latent and inherited:
+      no current writer produces that pair.
+- [x] **5. A comment that invented a database field.** It documented
+      `normalized_address` as `"160 MINE LAKE CT|RALEIGH|NC|27615"`.
+      `normalizeAddress()` returns three fields, `STREET|CITY|STATE`, zip-free on
+      purpose since migration 20260904. Corrected, with the reason, so the next
+      reader does not go looking for a zip that was never there.
+
+## Mutation verification. 15 mutations, all caught, tree restored each time.
+
+| # | Mutation | Tests red |
+|---|---|---|
+| M1 | v1 counts skipped rows as submitted again | 3 |
+| M2 | stored-stats branch stops reporting skips | 1 |
+| M3 | finalization stops reporting skips | 4 |
+| M4 | skip summary counts every row, not just skipped ones | 3 |
+| M5 | complete-phase summary fed a literal 0 | 1 |
+| M6 | pre-submit count back to every mapped row | 1 |
+| M7 | page stops reading the skip fields off the status response | 1 |
+| M8 | ledger probe deleted, cron deducts unconditionally | 3 |
+| M9 | probe keyed on user_id instead of trace_history_id | 1 |
+| M10 | already-charged row persists 0 instead of what moved | 1 |
+| M11 | stale sweep back to a bare `.lt()` | 3 |
+| M12 | skip block renders on a job with nothing skipped | 2 |
+| M13 | skip block shows the count with no reason | 3 |
+| M14 | skip block invents a reason when none came back | 1 |
+| M15 | processing-phase summary fed a literal 0 | 1 |
+
+**M5 initially SURVIVED, twice, and the reason is worth keeping.** The page's
+complete phase lives behind a `useState` machine that starts at 'upload' and
+needs a submit, a fetch and a poll to reach, and this project has no jsdom and
+no testing-library, so a static render cannot get there. The first attempt was a
+source-level test, which a mutation that leaves the JSX in place and makes it
+unreachable walks straight past. The fix was structural rather than another
+assertion: the block moved into `components/trace/BulkSkipSummary.tsx`, which
+IS render-tested and which owns the decision about whether to show anything, so
+the page has no condition left for a source test to be blind to. The second
+survival was narrower: the assertion matched a bare field name that also appears
+elsewhere in the file, so it now matches whole props.
+
+## Baselines
+
+`npx vitest run` 772 passed / 53 files / 0 failing (was 737 / 51 at the start of
+this pass). `npx tsc --noEmit` 0 errors. `npx eslint app lib components` 47
+problems, unchanged. `npm run build` compiles.
+
+## Open, not fixed here
+
+- **`lib/suite/mcp-tools.ts:298` has the identical `records_submitted` defect**
+  (`newRecords.length`, blank-owner rows included) and already splits them out
+  as `skippedRecords`. Not touched: the file was outside this pass's scope. It
+  is a one-word fix to `personRecords.length + entityRecords.length`.
+- **`settleBulkJob` can still charge a row the cron already charged** in one
+  narrow sequence: the cron deducts on a FastAppend hit, throws, requeues, and
+  on the retry FastAppend returns nothing so the row goes down the Tracerfy path
+  instead. The cron's own guard cannot reach that second charge, which happens
+  in a shared file this pass did not own.
+- **The submit responses and the status responses spell the reason differently**
+  (`skippedReason` on v1, `skipped_reason` on the dashboard submit, `skip_reason`
+  on both status routes and the MCP). Each surface's existing key was matched
+  rather than a fourth one invented, but it is one name too many.
+- **The dashboard `bulk_job.completed` webhook carries no skip fields.** The v1
+  webhook carries `skip_reason` per record; this one sends only successful
+  results, so a skipped row is invisible to a webhook consumer on that path.
+
+---
+
+# REVIEW: Phase 4 billing fixes (2026-09-17) — the repeat-billing defect and three more. Uncommitted.
+
+Four money defects the review found on the single-trace path. Characterization tests first, all 20
+mutations verified red, and the two judgment calls named at the bottom.
+
+## Numbers
+
+| | Before | After |
+|---|---|---|
+| `npx vitest run` | 772 passing, 53 files | **844 passing, 55 files, 0 failing** |
+| `npx tsc --noEmit` | 0 errors | **0, unchanged** |
+| `npx eslint app lib components` | 47 problems | **47, unchanged** |
+| `npm run build` | compiles | **compiles** |
+| Mutations applied / caught | — | **20 / 20** |
+
+## FIX 1. The cache could never fire on the public API, so every repeat call re-bought.
+
+`checkSingleDuplicate` built the COOKIE-BACKED ANON client. `trace_history` carries RLS
+`USING (auth.uid() = user_id)`, and an `/api/v1/*` request authenticates by API key with no Supabase
+session cookie, so `auth.uid()` was NULL and the select matched zero rows. Both cache branches in
+`app/api/v1/trace/single/route.ts` were unreachable code. It now builds the service-role client.
+
+**The cross-user fence.** Moving off the anon client removes RLS as the backstop, so
+`.eq('user_id', userId)` is the only thing separating two customers. It is unconditional, and its
+deletion is mutation-tested in three files (M2, 5 red).
+
+`checkDuplicates` was deliberately NOT moved. It has the identical blindness on v1 bulk and on the
+MCP surface, but the move is not purely a billing fix there: it counts ANY row in the window as a
+duplicate, including a plain failure, so it would also start blocking retries of failed addresses on
+a public API. That is a product call and the bulk routes are another workstream's. Documented at the
+function and pinned by a test so the asymmetry is deliberate rather than forgotten.
+
+## FIX 2. `trace.completed` fired twice for one `trace_id`.
+
+A consequence of Fix 1: the surviving row is REUSED rather than re-inserted, so `traceRecord.id` was
+identical on the second submit. Closed by Fix 1 and asserted end to end on both surfaces with the
+real lookup running.
+
+Three paths can still emit two events for one `trace_id`, and each is a genuine SECOND PURCHASE
+rather than a re-charge for the same work: `skip_cache` (clear cache and re-run, which David decided
+correctly charges), a resubmit WITH an owner name against a billed tier 2 row (tier 1 is a different
+purchase), and a re-attempt after a run that collected nothing.
+
+## FIX 3. A billed row could be written back to unbilled, then became permanently un-traceable.
+
+Two halves, and the second is what frees the rows already damaged in production.
+
+- **Receipts are monotonic.** `foldBillingWrite` in `lib/trace/billedRows.ts`: `charge` accumulates
+  and `tier` never downgrades. Wired into both status settles and both tier 2 persists.
+- **A row a ledger row points at is never a delete candidate.** `hasLedgerReceipt` asks
+  `wallet_transactions` and `usage_records` directly, and `runDelete` on both submit routes is a
+  no-op when it answers yes. It FAILS CLOSED. This is what unlocks an address whose receipt columns
+  were already zeroed, because for those rows the columns say unbilled and only the FK knows better.
+
+**What this means for the dashboard's SUM(charge):** it now reports the TOTAL collected against an
+address rather than the most recent collection, which is what keeps it in agreement with
+`wallet_transactions`. Replacing under-reported every second purchase.
+
+## FIX 4. "The wallet did not cover this record" was said when the RPC itself had failed.
+
+`deductWallet` reports `charged` / `insufficient_balance` / `error`. The customer is told something
+true, and an RPC failure is logged as ours.
+
+**The spent-but-not-collected case, named:** the customer is NOT billed and KEEPS the record. We
+absorb the vendor cost. Billing them later for a record already delivered is exactly the surprise
+charge this phase exists to remove. Those rows are findable as `cost > 0 AND charge = 0`.
+
+## Mutation table. Each applied alone, full suite re-run, tree restored.
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | cache lookup back on the cookie-backed anon client | 23 |
+| M2 | drop `.eq('user_id')` from the single lookup | 5 |
+| M3 | drop `.eq('user_id')` from the bulk lookup | 1 |
+| M4 | `foldBillingWrite` replaces instead of folding | 17 |
+| M5 | ...charge only | 12 |
+| M6 | ...tier only | 5 |
+| M7 | drop the ledger guard from the session route's deletes | 5 |
+| M8 | ...from v1's | 3 |
+| M9 | `hasLedgerReceipt` fails OPEN on a read error | 3 |
+| M10 | collapse an RPC error back into insufficient balance | 3 |
+| M11 | drop the v1 tier 2 cache arm | 6 |
+| M12 | `hasLedgerReceipt` ignores a referencing row | 6 |
+| M13 | session settle writes the raw charge again | 3 |
+| M14 | v1 settle writes the raw tier again | 1 |
+| M15 | session warning back on `charge === 0` | 1 |
+| M16 | v1 warning back on `charge === 0` | 1 |
+| M17 | session tier 2 persist replaces the receipt | 1 |
+| M18 | v1 tier 2 persist replaces the receipt | 1 |
+| M19 | drop `usage_records` from the ledger probe | 2 |
+| M20 | drop the cent rounding from the fold | 1 |
+
+Four of these survived the first sweep (M8, M16, M17, M18) and one more (M20) survived the second.
+Per L-009 each was checked for whether the two sides CAN differ here before being trusted: all five
+could, the tests simply did not exist. The v1 harness had no deduct-error knob at all, and no test
+ran a tier 2 persist against a row that already carried a charge. M20 needed a THIRD accumulation,
+because no pair of the four real rates is inexact in IEEE 754 while `0.15 + 0.15 + 0.15` is
+`0.44999999999999996`.
+
+## The test that proved a behaviour that could not occur
+
+`app/api/v1/trace/single/__tests__/route.test.ts` mocked `checkSingleDuplicate` outright, so its
+cache assertions were statements about the mock while the real lookup could not see a row. That is
+L-009's exact shape for the second time this phase. Deduplication is no longer mocked in either
+single-trace suite: the real lookup runs against a service-role client that sees rows and an anon
+client wired blind, so pointing it back at the anon client turns 23 tests red.
+
+## Open, not fixed here
+
+- **`app/api/cron/sweep-stale-traces/route.ts:120-131` still overwrites `charge` and `tier`.** It is
+  the cron twin of the session status settle and reaches the same reused rows. The permanent lockout
+  is closed anyway by the ledger probe, but that cron can still under-report a receipt and break
+  `isCacheHitRow`'s tier 2 arm. The fix is three lines: `foldBillingWrite(trace, {...})` and the two
+  payload keys. Not applied because the file is outside this pass's ownership.
+- **`lib/trace/settleBulkJob.ts` and `app/api/trace/bulk/status/route.ts`** write `charge` on the
+  same table and were not reviewed here.
+- **The status routes and `sweep-stale-traces` can both claim a row in `processing`** with no atomic
+  claim, which is a pre-existing double-settle race that the accumulating fold now reports honestly
+  rather than hiding.
+- **A tier 1 cache hit that carries contacts swallows a `fullPropertyTrace` opt-in.** The caller asks
+  for the property record, the contacts branch returns first, and they get a cache hit with no
+  record and no charge. Pre-existing, not touched.
+
+---
+
+# REVIEW: Phase 4a COMPLETE (2026-09-17). Consolidated. Uncommitted, not pushed.
+
+Six implementer passes and two adversarial reviews. The sections above are each pass's own record;
+this is the one to read first.
+
+## BASELINES, all four, re-run by me rather than taken from a report
+
+| | Baseline `4fe3929` | Now |
+|---|---|---|
+| `npx vitest run` | 497 / 41 files | **848 passing / 56 files / 0 failing** |
+| `npx tsc --noEmit` | 0 errors | **0 errors** |
+| `npx eslint app lib components` | 54 problems | **47** |
+| `npm run build` | compiles | **Compiled successfully** |
+
+eslint FELL because the deleted AI Search files took their warnings with them. 56 files changed,
+6,810 insertions, 3,381 deletions.
+
+## WHAT THE TWO REVIEWS CAUGHT THAT THE IMPLEMENTERS DID NOT
+
+Both were money. Neither would have been visible in a green suite.
+
+1. **The v1 cache could never fire, so every repeat call re-bought and re-charged.**
+   `checkSingleDuplicate` built a cookie-backed anon client; `/api/v1/*` authenticates by API key and
+   carries no session cookie, so `auth.uid()` was NULL under RLS and both cache arms were unreachable
+   code. Tier 1 largely escaped it (it charges on success from the poll route); tier 2 charges per
+   record in the SUBMIT route, so ten calls for one address was ten charges.
+2. **A billed row could be written back to unbilled and then became permanently un-traceable.**
+   Trace with no owner (tier 2 collects, county has no parcel), trace again WITH an owner (tier 1
+   settle writes `charge: 0, tier: 1` flat). The receipt is gone while `wallet_transactions` still
+   FK-references the row, so the next submit tries to delete it, Postgres raises 23503, and that
+   address returns 500 forever. No error required to reach it.
+
+## THE LESSON THAT REPEATED INSIDE ONE PHASE
+
+**L-009 was earned twice.** A guard that reads correctly, with a correctly-named test, can still be
+worthless if the two paths it distinguishes are identical in the test environment. First time: the
+Track A / Track B price split collapsed because `hasSuiteAccess()` is behind an env flag that is off
+in tests, so the mutation swapping the tracks turned NOTHING red. Second time: the v1 cache test
+mocked the very function whose real-world blindness was the bug.
+
+**Only the mutation run exposed either.** Both were invisible to reading.
+
+## RECEIPTS ARE NOW MONOTONIC, AND FENCED
+
+`foldBillingWrite` accumulates `charge` and never downgrades `tier`; `hasLedgerReceipt` and
+`collectedChargeFor` ask `wallet_transactions` directly and fail CLOSED.
+
+**A consequence to know about: the dashboard's charge column now reports the TOTAL collected against
+an address rather than the most recent collection.** That is what keeps `SUM(trace_history.charge)`
+in agreement with `wallet_transactions`, which it was not before.
+
+`lib/trace/__tests__/chargeReceipt.test.ts` is a source-level fence over every
+`trace_history.update` that writes `charge`. Each must fold, or resolve from the ledger first, or be
+named in `ALLOWED_RAW_WRITES` with a reason. **Four files are exempt today and every one is marked
+PHASE 5 LIABILITY**: they are safe only because bulk is tier 1 only, and bulk tier 2 is what puts a
+real receipt on those rows. Phase 5 should work that list rather than rediscover it.
+
+## THE DELETION LIST IN THIS FILE WAS WRONG IN FOUR PLACES
+
+Recorded so the next reader trusts the code over the plan: `app/api/v1/research/status/route.ts` had
+to SURVIVE (it polls `business_trace_jobs`, not AI research, and is a documented customer endpoint);
+`isLikelyBusiness()` had to be relocated, not deleted; `AIResearchResult` could not leave `types/`;
+and deleting `sweep-bulk-research` would have broken BULK for 987 of the 1,301 rows, not just AI
+Search.
+
+## DECISIONS DAVID MADE DURING THE BUILD
+
+1. v1 triggers tier 2 AUTOMATICALLY on an absent owner, same as the session route.
+2. The CRM push carries all 65 exportable fields, auto-created, and needs a Private Integration
+   Token scope warning because existing users' tokens will not have it. **Phase 4b, not 4a.**
+3. Blank-owner bulk rows are accepted, skipped with a reason, and charged nothing.
+4. Export stays in phase 5.
+5. **The API withholds the 21 wrong fields too**, not just the screen and the CSV. A caller receives
+   65 keys on every surface; the database still stores all 86.
+
+## STILL OPEN, NOT FIXED, NOT HIDDEN
+
+- **A grant holder is billed BY OWNER TYPE on the v1 bulk surface.** Person rows settle at the
+  non-grant rate, entity rows at the grant-aware rate, so one batch bills $0.25 and $0.15 for the
+  same work. Pre-existing, and it violates L-005's rule that owner type selects the vendor and never
+  the price. Deliberately left out of this diff. **David's call.**
+- `MAX_ENTITY_TRACE_ATTEMPTS = 5` against a one-minute cron retires a row after ~5 minutes of
+  consecutive FastAppend failure. One constant if that is too short.
+- The partial index from migration 20260411 is `WHERE ai_research_status = 'queued'` and no longer
+  covers the five-rung claim query. ~3,800 rows today, so it is plan quality, not correctness.
+- A tier 1 cache hit carrying contacts swallows a `full_property_trace` opt-in: the contacts branch
+  returns first, so the caller gets no record and no charge. Pre-existing.
+- `research_jobs` and `ai_research_claimed_at` are orphaned database objects. Safe to leave.
+- Nothing is verified against the live v1 surface. `api_logs` still holds 0 rows, so there is still
+  no usage visibility on the public API.

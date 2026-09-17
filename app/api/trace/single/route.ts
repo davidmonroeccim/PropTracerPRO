@@ -5,9 +5,12 @@ import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
 import {
   excludeBilledRows,
+  foldBillingWrite,
+  hasLedgerReceipt,
   isBilledRow,
   isCacheHitRow,
   TRACE_TIER,
+  type CacheHitRow,
 } from '@/lib/trace/billedRows';
 import {
   submitSingleTrace,
@@ -23,12 +26,16 @@ import {
   isFullPropertyTrace,
   parcelForFullTrace,
   traceResultFor,
+  WALLET_NOT_COLLECTED_WARNING,
+  WALLET_SHORT_WARNING,
 } from '@/lib/trace/fullPropertyTrace';
-import { deductOrZero } from '@/lib/wallet/deduct';
+import { dispatchTraceCompleted } from '@/lib/trace/traceCompletedWebhook';
+import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
+import { deductWallet } from '@/lib/wallet/deduct';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING } from '@/lib/constants';
 import { chargePerRecord, chargePerTrace, pricePlanFor } from '@/lib/suite/pricing';
-import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
+import type { SingleTraceRequest, TraceResult } from '@/types';
 
 /**
  * Tier 2 runs the whole route SYNCHRONOUSLY: a dossier lookup (sometimes two,
@@ -56,16 +63,20 @@ export async function POST(request: Request) {
 
     // Parse request body
     const body = await request.json();
-    const { address, city, state, zip, owner_name, ai_research, skip_cache, full_property_trace } =
+    // `ai_research` used to be accepted here: the page ran AI Search first and posted the
+    // result back so it could be stored alongside the trace. That engine was removed on
+    // 2026-09-17 and the field is no longer read. A stale client still sending it is
+    // ignored rather than rejected, and nothing it sent is written to the row: an inbound
+    // request can no longer put words into `trace_history.ai_research`.
+    const { address, city, state, zip, owner_name, skip_cache, full_property_trace } =
       body as SingleTraceRequest & {
-        ai_research?: AIResearchResult;
         skip_cache?: boolean;
         /**
          * Full Property Trace opt-in, for a caller who already HAS the owner of
          * record and wants the county property record anyway. Absent owner_name
          * triggers tier 2 on its own; this flag is the other half of the
-         * trigger. Its own flag, deliberately: `ai_research` belongs to a
-         * feature that is being removed.
+         * trigger. Its own flag, deliberately: it was never the removed
+         * `ai_research` flag and must not be folded into one.
          */
         full_property_trace?: boolean;
       };
@@ -118,6 +129,33 @@ export async function POST(request: Request) {
 
     const adminClient = createAdminClient();
 
+    // A ROW A LEDGER ROW POINTS AT IS NEVER A DELETE CANDIDATE.
+    //
+    // UNIQUE(user_id, address_hash) means there is at most ONE row here and
+    // every delete below is confined to it, so one probe answers for all of
+    // them, including the skip_cache sweep. excludeBilledRows() derives
+    // billed-ness from trace_history's own columns; this asks the LEDGER, which
+    // is the only question that stays right for a row whose receipt columns
+    // were already zeroed by the settle bug fixed alongside this. Those rows
+    // exist and are currently locked out of every retrace with a 500 that names
+    // nothing.
+    const { data: existingRow, error: existingRowError } = await adminClient
+      .from('trace_history')
+      .select('id, charge, ai_research_charge, property_record, tier')
+      .eq('user_id', user.id)
+      .eq('address_hash', addressHash)
+      .maybeSingle();
+
+    // Fails CLOSED. Not knowing whether a row exists is not permission to
+    // delete one: a refused delete is a 500 the customer cannot get past, while
+    // a skipped delete just reuses the row in place, which is what a billed row
+    // does anyway.
+    const ledgerProtected = existingRowError
+      ? true
+      : existingRow
+        ? isBilledRow(existingRow) || (await hasLedgerReceipt(adminClient, existingRow.id))
+        : false;
+
     // Every delete below is narrowed by excludeBilledRows() and its error is
     // checked. A refused delete used to be invisible: the row survived, this
     // route carried on as though it had not, and the INSERT at the bottom died
@@ -128,6 +166,7 @@ export async function POST(request: Request) {
       label: string,
       build: () => PromiseLike<{ error: { message: string } | null }>
     ) => {
+      if (ledgerProtected) return;
       const { error } = await build();
       if (error) {
         console.error(`Single trace - ${label} delete failed:`, error.message);
@@ -163,12 +202,17 @@ export async function POST(request: Request) {
           // property_record rides along: on a tier 2 row it is the thing the
           // customer paid for, and dropping it here would serve them a cache
           // hit poorer than the response they originally got.
+          //
+          // The STORED row is raw (86 keys) and the RESPONSE is filtered (65).
+          // A cache hit is an egress like any other, and the easiest one to
+          // miss: the record comes from our own database rather than from a
+          // vendor call, so it does not look like it is leaving.
           return NextResponse.json({
             success: true,
             is_cached: true,
             trace_id: cachedResult.id,
             result: cached,
-            property_record: cachedResult.property_record ?? null,
+            property_record: toPublicPropertyRecord(cachedResult.property_record),
             tier: cachedResult.tier ?? null,
             charge: 0,
           });
@@ -189,7 +233,7 @@ export async function POST(request: Request) {
             trace_id: cachedResult.id,
             status: cachedResult.status,
             result: cached,
-            property_record: cachedResult.property_record ?? null,
+            property_record: toPublicPropertyRecord(cachedResult.property_record),
             tier: cachedResult.tier ?? null,
             charge: 0,
           });
@@ -235,7 +279,7 @@ export async function POST(request: Request) {
       );
 
       // If a different owner name is provided, delete any existing trace for this address.
-      // This allows re-tracing when AI research resolves a person name from an LLC.
+      // This allows re-tracing once the caller has resolved a person name behind an LLC.
       if (owner_name) {
         await runDelete('owner-changed', () =>
           excludeBilledRows(
@@ -259,7 +303,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Insert pending trace record (include AI research data if provided)
+    // Insert pending trace record.
     const insertData: Record<string, unknown> = {
       user_id: user.id,
       address_hash: addressHash,
@@ -274,11 +318,6 @@ export async function POST(request: Request) {
       input_owner_name: owner_name || null,
       status: 'processing',
     };
-
-    if (ai_research) {
-      insertData.ai_research = ai_research;
-      insertData.ai_research_status = ai_research.owner_name ? 'found' : 'not_found';
-    }
 
     // UNIQUE(user_id, address_hash) means ONE row per address per user. A row
     // that survived the guarded deletes above is a billed row, so this submit
@@ -300,7 +339,10 @@ export async function POST(request: Request) {
       );
     }
 
-    let traceRecord: { id: string } | null = null;
+    // The FULL row, not just its id: a reused row still carries the `charge`
+    // and `tier` it was billed under, and the tier 2 persist below folds this
+    // attempt into them rather than writing over them.
+    let traceRecord: ({ id: string } & CacheHitRow) | null = null;
     let insertError: { message: string } | null = null;
 
     if (surviving) {
@@ -424,31 +466,61 @@ export async function POST(request: Request) {
       //    answer the customer pays for. deductOrZero returns what actually
       //    moved -- 0 when the wallet came up short between the gate above and
       //    now -- and that is the only number that may be persisted or shown.
+      //    It also says WHICH of the two zero outcomes happened, because one of
+      //    them is the customer's balance and the other one is ours to own.
       const attemptedCharge = plan.billing.amount;
-      const charge = await deductOrZero(adminClient, {
+      const deduction = await deductWallet(adminClient, {
         p_user_id: user.id,
         p_amount: attemptedCharge,
         p_trace_history_id: traceRecord.id,
         p_description: FULL_PROPERTY_TRACE_DESCRIPTION,
       });
+      const charge = deduction.collected;
+
+      if (deduction.outcome === 'error') {
+        // WE SPENT AT THE VENDOR AND FAILED TO COLLECT. The customer is not
+        // billed and keeps the record, which is the same outcome as before and
+        // is the right one: billing them later for a record already delivered
+        // is exactly the surprise charge this phase exists to remove. Logged so
+        // the shortfall is findable rather than silent; the row that results
+        // carries cost > 0 with charge = 0, which is the query for it.
+        console.error(
+          'Full Property Trace - wallet deduct failed, record delivered uncharged:',
+          traceRecord.id,
+          deduction.message
+        );
+      }
 
       // 5. Persist. property_record is the vendor's object BY REFERENCE, all
       //    86 keys, unfiltered and unrenamed: the raw dump is the product, and
       //    a key that is empty in OH, CA and UT may be populated elsewhere.
       const result = traceResultFor(execution);
       const isSuccessful = hasContactData(result);
+      const status = isSuccessful ? 'success' : 'no_match';
+      const persistedZip = execution.learnedZip ?? (zip ? zip.substring(0, 5) : null);
+
+      // RECEIPTS ARE MONOTONIC. `traceRecord` is the row this submit reused or
+      // inserted, still carrying whatever it had been charged before, so the
+      // amount collected NOW is folded into it rather than replacing it. This
+      // is the path a "clear cache and re-run" takes: that re-run correctly
+      // charges again, and the row must then read as the sum of both, not the
+      // last one. A row that was billed can never come out of here unbilled.
+      const billing = foldBillingWrite(traceRecord, {
+        charge,
+        tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      });
 
       const { error: persistError } = await adminClient
         .from('trace_history')
         .update({
-          status: isSuccessful ? 'success' : 'no_match',
+          status,
           trace_result: result,
           phone_count: result?.phones?.length || 0,
           email_count: result?.emails?.length || 0,
           is_successful: isSuccessful,
           property_record: execution.property,
-          tier: TRACE_TIER.PER_RECORD_SUBMITTED,
-          charge,
+          tier: billing.tier,
+          charge: billing.charge,
           // What the vendors actually took, read from their own credit
           // counters rather than assumed from a price list.
           cost: execution.vendorSpend,
@@ -474,21 +546,58 @@ export async function POST(request: Request) {
       // fires when the deduct failed -- that is exactly the wallet that needs it.
       triggerAutoRebillIfNeeded(user.id).catch(() => {});
 
+      // trace.completed. Tier 2 completes INLINE and never reaches
+      // app/api/trace/status, which is where every other trace.completed is
+      // sent from, so without this a webhook customer silently stops receiving
+      // events. Fires for EVERY completed tier 2 INCLUDING a billed miss (the
+      // poll route's rule is "send for all completed traces", and a billed miss
+      // is precisely the case a customer most needs told about), and never on
+      // the vendor failure above, which returned already and charged nothing.
+      //
+      // `profile` is the RLS-scoped select('*') at the top of this route.
+      // user_profiles has no column-level SELECT restriction -- migration
+      // 20260716 revoked UPDATE only and granted back seven writable columns --
+      // and the row is the caller's own, so webhook_url is present. No admin
+      // re-read is needed here; the poll route does one only because it has no
+      // profile in hand.
+      dispatchTraceCompleted({
+        webhookUrl: profile.webhook_url,
+        traceId: traceRecord.id,
+        status,
+        address: normalizedAddress,
+        city: city.toUpperCase(),
+        state: state.toUpperCase(),
+        zip: persistedZip,
+        result,
+        charge,
+        propertyRecord: execution.property,
+        ownerType: execution.ownerType,
+      });
+
+      // Two different zeros, two different sentences. Saying "your wallet did
+      // not cover this" to a customer whose wallet is full, because OUR RPC
+      // fell over, is a false statement about their money.
       const warnings = [...execution.warnings];
-      if (charge === 0) {
-        warnings.push(
-          'The wallet did not cover this record, so nothing was charged for it.'
-        );
+      if (deduction.outcome === 'insufficient_balance') {
+        warnings.push(WALLET_SHORT_WARNING);
+      } else if (deduction.outcome === 'error') {
+        warnings.push(WALLET_NOT_COLLECTED_WARNING);
       }
 
       return NextResponse.json({
         success: true,
-        status: isSuccessful ? 'success' : 'no_match',
+        status,
         trace_id: traceRecord.id,
         tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+        // What THIS request cost. The row carries the running total for the
+        // address; a customer is told what they were just charged.
         charge,
         result,
-        property_record: execution.property,
+        // THE SAME VARIABLE THAT WAS JUST PERSISTED RAW. toPublicPropertyRecord
+        // returns a copy and never touches its argument -- an in-place delete
+        // here would have written a 65-key row to trace_history and destroyed
+        // the raw dump. 65 keys out, 86 keys stored.
+        property_record: toPublicPropertyRecord(execution.property),
         owner_name: execution.ownerName,
         owner_type: execution.ownerType,
         needs_manual_review: execution.needsManualReview,

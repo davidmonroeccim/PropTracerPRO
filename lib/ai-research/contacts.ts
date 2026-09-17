@@ -28,11 +28,13 @@ import type { AIResearchResult, TraceResult } from '@/types';
 // exactly one self-describing name so the payload no longer needs to be
 // explained to be used.
 //
-// Precedence is the chain that previously lived inline in
-// app/api/cron/sweep-bulk-research/route.ts, most authoritative first:
+// Precedence is the chain that previously lived inline in the bulk entity cron
+// (now app/api/cron/sweep-entity-traces/route.ts), most authoritative first:
 //   1. business_trace_contacts.owner_name -- FastAppend's commercial DB
 //   2. trace_result.owner_name            -- the delivered skip-trace result
-//   3. individual_behind_business         -- AI research (LLM + web)
+//   3. individual_behind_business         -- the principal behind the entity, which
+//      on a row written since 2026-09-17 is also FastAppend's, and on an older row
+//      is the removed AI Search engine's
 //   4. owner_name, ONLY when owner_type is 'individual'
 // A company name is NEVER a contact person: an entity with no resolved human
 // returns null, never a fallback to the LLC. No fabricated values.

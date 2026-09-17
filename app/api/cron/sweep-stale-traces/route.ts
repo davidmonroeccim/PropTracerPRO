@@ -4,7 +4,7 @@ import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
-import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult, TracerfyResult } from '@/types';
@@ -33,7 +33,10 @@ export async function GET(request: Request) {
     // ── 1. Sweep stale single traces ──
     const { data: staleTraces } = await adminClient
       .from('trace_history')
-      .select('id, user_id, tracerfy_job_id, normalized_address, city, state, zip')
+      // charge and tier are selected so the settle below can FOLD rather than
+      // overwrite. They are receipts: this cron reaches reused rows, and a row
+      // that was billed tier 2 must not be rewritten as an unbilled tier 1.
+      .select('id, user_id, tracerfy_job_id, normalized_address, city, state, zip, charge, tier')
       .eq('status', 'processing')
       .lt('created_at', cutoff.toISOString())
       .limit(50);
@@ -117,7 +120,19 @@ export async function GET(request: Request) {
               })
             : 0;
 
-        // Update trace record
+        // Update trace record.
+        //
+        // FOLD, NEVER OVERWRITE. This cron is the twin of the status-route
+        // settle and reaches the same reused rows. Writing `charge` and `tier`
+        // flat would take a row already billed $0.25 at tier 2 and rewrite it as
+        // charge 0, tier 1: the receipt disappears while the wallet_transactions
+        // row still points at it, isCacheHitRow's tier 2 arm stops matching, and
+        // the customer re-buys a record they already own.
+        const billing = foldBillingWrite(trace, {
+          charge,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+        });
+
         await adminClient
           .from('trace_history')
           .update({
@@ -127,8 +142,8 @@ export async function GET(request: Request) {
             email_count: result.emails?.length || 0,
             is_successful: isSuccessful,
             cost: PRICING.COST_PER_RECORD,
-            charge,
-            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+            charge: billing.charge,
+            tier: billing.tier,
           })
           .eq('id', trace.id);
 
@@ -254,8 +269,10 @@ export async function GET(request: Request) {
           const inputState = (rawResult.state || '').toUpperCase().trim();
 
           const { data: historyRows } = await adminClient
+            // charge and tier come back so the settle below folds instead of
+            // overwriting. Same reason as the single-trace half above.
             .from('trace_history')
-            .select('id')
+            .select('id, charge, tier')
             .eq('user_id', job.user_id)
             .eq('tracerfy_job_id', job.tracerfy_job_id)
             .eq('status', 'processing')
@@ -263,7 +280,8 @@ export async function GET(request: Request) {
             .ilike('state', inputState)
             .limit(1);
 
-          const historyId = historyRows?.[0]?.id;
+          const historyRow = historyRows?.[0];
+          const historyId = historyRow?.id;
           if (historyId) {
             // Deduct FIRST, then persist the amount that actually moved.
             const charge =
@@ -276,6 +294,12 @@ export async function GET(request: Request) {
                   })
                 : 0;
 
+            // Fold, never overwrite. Same receipt rule as the single-trace half.
+            const billing = foldBillingWrite(historyRow, {
+              charge,
+              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+            });
+
             await adminClient
               .from('trace_history')
               .update({
@@ -285,26 +309,38 @@ export async function GET(request: Request) {
                 email_count: parsed.emails?.length || 0,
                 is_successful: isSuccessful,
                 cost: PRICING.COST_PER_RECORD,
-                charge,
-                tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+                charge: billing.charge,
+                tier: billing.tier,
               })
               .eq('id', historyId);
           }
         }
 
-        // Mark remaining processing rows as no_match
-        await adminClient
-          .from('trace_history')
-          .update({
-            status: 'no_match',
-            is_successful: false,
-            cost: PRICING.COST_PER_RECORD,
-            charge: 0,
-            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
-          })
-          .eq('user_id', job.user_id)
-          .eq('tracerfy_job_id', job.tracerfy_job_id)
-          .eq('status', 'processing');
+        // Mark remaining processing rows as no_match.
+        //
+        // NOTE THE GUARD, AND DO NOT REMOVE IT. This is a BLANKET update over
+        // every row still processing on this job, and it used to write
+        // `charge: 0, tier: 1` flat. On a row that had been billed, that erases
+        // the receipt wholesale while the wallet_transactions row still points
+        // at it. Bulk rows are all tier 1 today so nothing is known to hit it,
+        // but bulk tier 2 lands in phase 5 and this would be waiting for it.
+        //
+        // `charge` and `tier` are no longer written here at all. A row that was
+        // never charged already reads as unbilled, so writing a 0 over it buys
+        // nothing; a row that WAS charged must keep what it collected.
+        // excludeBilledRows is the same guard every delete site uses.
+        await excludeBilledRows(
+          adminClient
+            .from('trace_history')
+            .update({
+              status: 'no_match',
+              is_successful: false,
+              cost: PRICING.COST_PER_RECORD,
+            })
+            .eq('user_id', job.user_id)
+            .eq('tracerfy_job_id', job.tracerfy_job_id)
+            .eq('status', 'processing')
+        );
 
         // Mark job as completed
         await adminClient

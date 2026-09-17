@@ -25,7 +25,7 @@ vi.mock("@/lib/tracerfy/client", async (orig) => ({
  * can simulate an insufficient-balance wallet (`{ data: false }`) while
  * credit_wallet_balance still succeeds.
  */
-function makeAdmin(opts: { deductResult?: unknown } = {}) {
+function makeAdmin(opts: { deductResult?: unknown; priorDebit?: number } = {}) {
   const updates: Array<{ table: string; payload: Record<string, unknown> }> = [];
   const rpc = vi.fn().mockImplementation((fn: string) =>
     Promise.resolve(
@@ -34,6 +34,11 @@ function makeAdmin(opts: { deductResult?: unknown } = {}) {
         : { data: true, error: null }
     )
   );
+  // `priorDebit` stands in for a wallet_transactions debit already booked
+  // against this row, which is what collectedChargeFor() reads to decide the
+  // row has already been paid for. Absent = no prior debit = still chargeable.
+  const ledgerRows =
+    opts.priorDebit === undefined ? [] : [{ amount: opts.priorDebit }];
   const from = vi.fn((table: string) => ({
     update: vi.fn((payload: Record<string, unknown>) => {
       updates.push({ table, payload });
@@ -42,6 +47,16 @@ function makeAdmin(opts: { deductResult?: unknown } = {}) {
         in: vi.fn().mockResolvedValue({ error: null }),
       };
     }),
+    select: vi.fn(() => ({
+      eq: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          limit: vi.fn().mockResolvedValue({
+            data: table === "wallet_transactions" ? ledgerRows : [],
+            error: null,
+          }),
+        })),
+      })),
+    })),
   }));
   return { rpc, from, updates };
 }
@@ -203,6 +218,107 @@ describe("settleBulkJob money contract", () => {
     expect(calls[creditIdx][1].p_user_id).toBe(USER_ID);
     expect(calls[deductIdx][1].p_user_id).toBe(USER_ID);
     // And the row records exactly what the wallet moved.
+    expect(row.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(row.ai_research_charge).toBe(0);
+  });
+
+  /**
+   * THE CROSS-FILE DOUBLE CHARGE, found in review 2026-09-17.
+   *
+   * sweep-entity-traces deducts on a FastAppend hit and then throws, so the row
+   * is requeued. On the retry FastAppend returns nothing, the row settles down
+   * the Tracerfy path HERE, and is charged a second time for the same answer.
+   * Two files, one row, two debits, and it needs no unusual failure to reach.
+   *
+   * The ledger is the guard because deduct_wallet_balance writes the debit in
+   * the SAME transaction as the balance change, so it cannot disagree with the
+   * money the way a `charged_at` column could.
+   */
+  it("never charges a row the wallet has already paid for, on the Tracerfy branch", async () => {
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: "1 Main St",
+          phones: [{ number: "5125551234", type: "mobile" }],
+          emails: [],
+        },
+      ],
+    });
+    // A debit for $0.25 is already on the ledger against this row.
+    const admin = makeAdmin({ priorDebit: PRICING.CHARGE_PER_SUCCESS_WALLET });
+    const row = mkRow({ id: "row-already-paid" });
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: "tj-paid",
+      bucketRows: [row],
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    });
+
+    // No second deduct, at any amount.
+    expect(
+      admin.rpc.mock.calls.filter((c) => c[0] === "deduct_wallet_balance")
+    ).toHaveLength(0);
+    // The row still reports what the customer actually paid, not zero. Writing
+    // 0 here would make a paid row look unbilled to excludeBilledRows, and an
+    // unbilled row is a deletable one.
+    expect(row.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    const persisted = admin.updates.filter(
+      (u) => u.table === "trace_history" && "charge" in u.payload
+    );
+    expect(persisted[0].payload.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
+
+  it("never charges twice on the FastAppend branch, but still owes the historical refund", async () => {
+    // This is the arm the cron books its charge on, so it is the one most
+    // likely to be settling a row that has already paid. The refund is keyed on
+    // ai_research_charge, which the cron never hands back, so it must STILL run
+    // even though the charge is skipped.
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [{ address: "1 Main St", phones: [], emails: [] }],
+    });
+    const admin = makeAdmin({ priorDebit: PRICING.CHARGE_PER_SUCCESS_WALLET });
+    const row = mkRow({
+      id: "row-entity-paid",
+      ai_research_charge: AI_RESEARCH.CHARGE_PER_RECORD,
+      ai_research: {
+        owner_name: "Jane Principal",
+        owner_type: "business",
+        business_name: "Acme LLC",
+        individual_behind_business: "Jane Principal",
+        is_deceased: null,
+        deceased_details: null,
+        relatives: [],
+        decision_makers: [],
+        property_type: "commercial",
+        confidence: 80,
+        confidence_reasoning: null,
+        sources: [],
+        business_trace_contacts: {
+          owner_name: "Jane Principal",
+          phones: [{ number: "5125550000", type: "mobile" }],
+          emails: ["jane@acme.com"],
+          address: "1 Main St",
+        },
+      },
+    });
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: "tj-entity-paid",
+      bucketRows: [row],
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    });
+
+    const calls = admin.rpc.mock.calls;
+    expect(calls.filter((c) => c[0] === "deduct_wallet_balance")).toHaveLength(0);
+    // The refund is NOT suppressed by the already-paid guard.
+    const credit = calls.find((c) => c[0] === "credit_wallet_balance");
+    expect(credit?.[1].p_amount).toBe(AI_RESEARCH.CHARGE_PER_RECORD);
     expect(row.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
     expect(row.ai_research_charge).toBe(0);
   });

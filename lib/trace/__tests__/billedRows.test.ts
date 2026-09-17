@@ -3,6 +3,8 @@ import {
   CACHE_HIT_FILTER,
   TRACE_TIER,
   excludeBilledRows,
+  foldBillingWrite,
+  hasLedgerReceipt,
   isBilledRow,
   isCacheHitRow,
 } from "@/lib/trace/billedRows";
@@ -308,5 +310,139 @@ describe("TRACE_TIER", () => {
     // This is the whole reason the column exists. If this ever stops being
     // true, re-read lib/constants.ts:34-36 before deleting anything.
     expect(PRICING.CHARGE_PER_SUCCESS_WALLET).toBe(PRICING.TIER2_PER_RECORD_SUBMITTED_PRO);
+  });
+});
+
+/* ====================================================================
+ * RECEIPTS ARE MONOTONIC.
+ *
+ * `charge` and `tier` are receipts, and two settle paths used to write
+ * over them. A tier 2 row reused by a later tier 1 trace came out
+ * reading UNBILLED while a wallet_transactions row still referenced it
+ * by FK, which turned the next submit into a permanent 500 for that
+ * address, and it broke isCacheHitRow's `tier = 2 AND charge > 0` arm so
+ * a billed tier 2 miss silently re-bought.
+ * ==================================================================== */
+describe("foldBillingWrite", () => {
+  it("leaves a row with no receipt exactly as this settle collected it", () => {
+    expect(foldBillingWrite(null, { charge: 0.25, tier: 1 })).toEqual({
+      charge: 0.25,
+      tier: 1,
+    });
+    expect(foldBillingWrite({}, { charge: 0, tier: 1 })).toEqual({ charge: 0, tier: 1 });
+  });
+
+  it("never writes a paid charge back to zero", () => {
+    // The lockout in one assertion: a tier 1 settle that collects nothing must
+    // not erase the tier 2 charge the row already carries.
+    expect(foldBillingWrite({ charge: 0.25, tier: 2 }, { charge: 0, tier: 1 }).charge).toBe(
+      0.25
+    );
+  });
+
+  it("never downgrades tier 2 to tier 1", () => {
+    expect(foldBillingWrite({ charge: 0.25, tier: 2 }, { charge: 0, tier: 1 }).tier).toBe(2);
+  });
+
+  it("still accepts an upgrade from tier 1 to tier 2", () => {
+    // Monotonic, not frozen. A tier 1 row that later buys a property record is
+    // a tier 2 row.
+    expect(foldBillingWrite({ charge: 0.15, tier: 1 }, { charge: 0.25, tier: 2 }).tier).toBe(2);
+  });
+
+  it("adds a second real collection to the first", () => {
+    // Two genuine debits against one address are two rows in
+    // wallet_transactions, and the dashboard SUMs trace_history.charge.
+    expect(foldBillingWrite({ charge: 0.4, tier: 2 }, { charge: 0.4, tier: 2 }).charge).toBe(
+      0.8
+    );
+  });
+
+  it("keeps the running total to the cent across three collections", () => {
+    // 0.15 + 0.15 + 0.15 is 0.44999999999999996 in IEEE 754, and this value is
+    // written to a DECIMAL column, summed on the dashboard and shown as money.
+    // MUTATION: drop the rounding and this goes red.
+    const once = foldBillingWrite(null, { charge: 0.15, tier: 1 });
+    const twice = foldBillingWrite(once, { charge: 0.15, tier: 1 });
+    const thrice = foldBillingWrite(twice, { charge: 0.15, tier: 1 });
+
+    expect(thrice.charge).toBe(0.45);
+  });
+
+  it("reads a DECIMAL that arrived from PostgREST as a string", () => {
+    // Postgres DECIMAL comes back as a string in some client configurations.
+    // Without coercion this concatenates and the row's receipt becomes "0.250.25".
+    expect(
+      foldBillingWrite({ charge: "0.25" as unknown as number, tier: 2 }, { charge: 0.25, tier: 2 })
+        .charge
+    ).toBe(0.5);
+  });
+
+  it("treats a null tier as no claim rather than as tier 0", () => {
+    expect(foldBillingWrite({ charge: 0, tier: null }, { charge: 0.15, tier: 1 })).toEqual({
+      charge: 0.15,
+      tier: 1,
+    });
+  });
+});
+
+/* ====================================================================
+ * A ROW A LEDGER ROW POINTS AT IS NEVER A DELETE CANDIDATE.
+ *
+ * excludeBilledRows derives billed-ness from trace_history's own columns,
+ * which is exactly what failed when a settle zeroed them. This asks the
+ * ledger instead, and it is the only thing that can free a row whose
+ * receipt columns were ALREADY zeroed before the monotonic rule landed.
+ * ==================================================================== */
+describe("hasLedgerReceipt", () => {
+  function clientFor(
+    rows: Record<string, Array<Record<string, unknown>>>,
+    error: unknown = null
+  ) {
+    const asked: string[] = [];
+    const client = {
+      from: (table: string) => {
+        asked.push(table);
+        return {
+          select: () => ({
+            eq: () => ({
+              limit: async () => ({ data: rows[table] ?? [], error }),
+            }),
+          }),
+        };
+      },
+    };
+    return { client, asked };
+  }
+
+  it("is true when wallet_transactions references the row", async () => {
+    const { client } = clientFor({ wallet_transactions: [{ id: "wt-1" }] });
+    expect(await hasLedgerReceipt(client, "trace-1")).toBe(true);
+  });
+
+  it("is true when only usage_records references it", async () => {
+    // A SECOND `REFERENCES trace_history(id)` with no ON DELETE clause. Nothing
+    // writes it today, which is exactly why it would be the branch nobody
+    // noticed was missing.
+    const { client } = clientFor({ usage_records: [{ id: "ur-1" }] });
+    expect(await hasLedgerReceipt(client, "trace-1")).toBe(true);
+  });
+
+  it("is false when nothing references it", async () => {
+    const { client } = clientFor({});
+    expect(await hasLedgerReceipt(client, "trace-1")).toBe(false);
+  });
+
+  it("stops asking once it has an answer", async () => {
+    const { client, asked } = clientFor({ wallet_transactions: [{ id: "wt-1" }] });
+    await hasLedgerReceipt(client, "trace-1");
+    expect(asked).toEqual(["wallet_transactions"]);
+  });
+
+  it("FAILS CLOSED when the ledger cannot be read", async () => {
+    // Not knowing whether a row is referenced is not permission to delete it.
+    // MUTATION: return false on error and this goes red.
+    const { client } = clientFor({}, { message: "statement timeout" });
+    expect(await hasLedgerReceipt(client, "trace-1")).toBe(true);
   });
 });

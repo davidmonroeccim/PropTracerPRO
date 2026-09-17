@@ -7,31 +7,47 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TraceResultCard } from '@/components/trace/TraceResultCard';
-import { AIResearchCard } from '@/components/trace/AIResearchCard';
+import { PropertyRecordCard } from '@/components/trace/PropertyRecordCard';
 import { FullTraceDisclosure } from '@/components/trace/FullTraceDisclosure';
 import { US_STATES } from '@/lib/constants';
 import type { EntitlementProfile } from '@/lib/suite/entitlements';
-import type { TraceResult, AIResearchResult } from '@/types';
-import { Search, Trash2 } from 'lucide-react';
+import type { TraceResult } from '@/types';
+
+/**
+ * Everything the trace routes actually return, which is more than this page
+ * used to keep.
+ *
+ * The old shape named five keys, so `property_record` -- the thing a tier 2
+ * customer paid for -- was dropped on the floor by the state setter on every
+ * path: the inline tier 2 response, both cached branches, and the poll. The
+ * warnings were dropped with it, including the one that says the wallet did not
+ * cover the record.
+ *
+ * Declared here rather than imported: `types/index.ts` belongs to another
+ * workstream this phase. `property_record` is deliberately `unknown`, because it
+ * is the raw 86-key vendor dossier and PropertyRecordCard validates it at the
+ * point of use.
+ */
+interface TraceResponse {
+  success: boolean;
+  is_cached?: boolean;
+  status?: string;
+  trace_id: string;
+  tier?: number | null;
+  result: TraceResult | null;
+  property_record?: unknown;
+  owner_name?: string | null;
+  owner_type?: string | null;
+  needs_manual_review?: boolean;
+  warnings?: string[];
+  charge: number;
+}
 
 export default function SingleTracePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{
-    success: boolean;
-    is_cached: boolean;
-    trace_id: string;
-    result: TraceResult | null;
-    charge: number;
-  } | null>(null);
+  const [result, setResult] = useState<TraceResponse | null>(null);
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
-
-  // AI Research state
-  const [researchLoading, setResearchLoading] = useState(false);
-  const [researchResult, setResearchResult] = useState<AIResearchResult | null>(null);
-  const [researchCharge, setResearchCharge] = useState(0);
-  const [researchCached, setResearchCached] = useState(false);
-  const [researchError, setResearchError] = useState<string | null>(null);
 
   // Form state
   const [address, setAddress] = useState('');
@@ -39,6 +55,28 @@ export default function SingleTracePage() {
   const [state, setState] = useState('');
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
+
+  /**
+   * The opt-in: the caller has the owner name and wants the county property
+   * record anyway. It is the second of the two triggers the route bills tier 2
+   * on, so FullTraceDisclosure below is handed the same value.
+   */
+  const [wantsPropertyRecord, setWantsPropertyRecord] = useState(false);
+  const hasOwnerName = Boolean(ownerName.trim());
+
+  /**
+   * ONE value for "this search pulls the property record", used by the
+   * checkbox, by the request body and by the disclosure.
+   *
+   * The checkbox used to render `wantsPropertyRecord || !hasOwnerName` while
+   * the body sent `wantsPropertyRecord` alone, so with the owner name blank the
+   * control showed a tick beside a flag that went out false. The tier came out
+   * right anyway, because the route reaches the same answer from the blank
+   * owner name on its own, but a control that displays one thing and submits
+   * another is a control nobody can trust. Derive it once and there is nothing
+   * left to diverge.
+   */
+  const willPullPropertyRecord = wantsPropertyRecord || !hasOwnerName;
 
   /**
    * The caller's own profile, for the Full Property Trace rate.
@@ -71,54 +109,6 @@ export default function SingleTracePage() {
 
   const abortRef = useRef(false);
 
-  const handleAISearch = async () => {
-    if (!address || !city || !state || !zip) {
-      setResearchError('Please fill in the address fields first');
-      return;
-    }
-
-    setResearchLoading(true);
-    setResearchError(null);
-    setResearchResult(null);
-
-    try {
-      const response = await fetch('/api/research/single', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address,
-          city,
-          state,
-          zip,
-          owner_name: ownerName || undefined,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setResearchError(data.error || 'AI research failed');
-        setResearchLoading(false);
-        return;
-      }
-
-      setResearchResult(data.research);
-      setResearchCharge(data.charge || 0);
-      setResearchCached(data.is_cached || false);
-
-      // Auto-populate owner name if found and field is empty
-      if (data.research?.owner_name && !ownerName) {
-        // Use the individual behind business if available, otherwise owner name
-        const bestName = data.research.individual_behind_business || data.research.owner_name;
-        setOwnerName(bestName);
-      }
-    } catch {
-      setResearchError('Failed to connect to server');
-    } finally {
-      setResearchLoading(false);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -141,6 +131,11 @@ export default function SingleTracePage() {
           state,
           zip,
           owner_name: ownerName || undefined,
+          // Sent whenever the box shows a tick, which is what the user is
+          // looking at when they click Search. A blank owner name would route to
+          // tier 2 on the route's own predicate regardless, so this changes no
+          // price; it just stops the flag contradicting the checkbox.
+          full_property_trace: willPullPropertyRecord || undefined,
           skip_cache: shouldSkipCache || undefined,
         }),
       });
@@ -195,7 +190,12 @@ export default function SingleTracePage() {
             success: true,
             is_cached: statusData.is_cached || false,
             trace_id: statusData.trace_id,
+            tier: statusData.tier ?? null,
             result: statusData.result,
+            property_record: statusData.property_record ?? null,
+            owner_type: statusData.owner_type ?? null,
+            needs_manual_review: statusData.needs_manual_review ?? false,
+            warnings: statusData.warnings ?? [],
             charge: statusData.charge || 0,
           });
           setLoading(false);
@@ -219,7 +219,7 @@ export default function SingleTracePage() {
 
   const [clearingCache, setClearingCache] = useState(false);
 
-  const clearCacheFromDB = async (type: 'ai_research' | 'trace' | 'all') => {
+  const clearCacheFromDB = async (type: 'trace' | 'all') => {
     if (!address || !city || !state || !zip) return;
     try {
       await fetch('/api/cache/clear', {
@@ -228,14 +228,20 @@ export default function SingleTracePage() {
         body: JSON.stringify({ address, city, state, zip, type }),
       });
     } catch {
-      // Silent — cache clear is best-effort
+      // Silent, cache clear is best-effort
     }
   };
 
   const handleClear = async () => {
-    if ((result || researchResult) && address && city && state && zip) {
+    if (result && address && city && state && zip) {
+      // What this actually does. excludeBilledRows() in lib/trace/billedRows.ts
+      // keeps a DELETE off any row the customer has paid for, and the cache
+      // serves that row back on the next search, so the old wording promising a
+      // permanent delete and a fresh search was false for exactly the rows that
+      // cost money. It is good news rather than a caveat: a paid record is the
+      // customer's, and they do not get billed for it twice.
       const confirmed = window.confirm(
-        'This will permanently delete the cached results for this address from the database. Future searches will run fresh.\n\nContinue?'
+        'This clears the free cached result for this address, so the next search runs fresh.\n\nAnything you have already paid for is kept. A property record you bought, or a trace your wallet was charged for, stays in your history and comes back on the next search at no extra charge.\n\nContinue?'
       );
       if (!confirmed) return;
 
@@ -251,72 +257,11 @@ export default function SingleTracePage() {
     setState('');
     setZip('');
     setOwnerName('');
+    setWantsPropertyRecord(false);
     setResult(null);
     setError(null);
     setDebugInfo(null);
     setLoading(false);
-    setResearchResult(null);
-    setResearchCharge(0);
-    setResearchCached(false);
-    setResearchError(null);
-    setResearchLoading(false);
-  };
-
-  const handleClearResearch = async () => {
-    const confirmed = window.confirm(
-      'This will permanently delete the cached AI research for this address from the database and re-run a fresh search.\n\nYou will be charged $0.15 if an owner is found.\n\nContinue?'
-    );
-    if (!confirmed) return;
-
-    // Clear UI immediately
-    setResearchResult(null);
-    setResearchCharge(0);
-    setResearchError(null);
-    setOwnerName('');
-    setResearchLoading(true);
-
-    try {
-      // Step 1: Delete cached rows from DB
-      await fetch('/api/cache/clear', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address, city, state, zip, type: 'ai_research' }),
-      });
-
-      // Step 2: Immediately re-run search with skip_cache (belt and suspenders)
-      const response = await fetch('/api/research/single', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address,
-          city,
-          state,
-          zip,
-          owner_name: ownerName || undefined,
-          skip_cache: true,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setResearchError(data.error || 'AI research failed');
-        return;
-      }
-
-      setResearchResult(data.research);
-      setResearchCharge(data.charge || 0);
-      setResearchCached(data.is_cached || false);
-
-      if (data.research?.owner_name && !ownerName) {
-        const bestName = data.research.individual_behind_business || data.research.owner_name;
-        setOwnerName(bestName);
-      }
-    } catch {
-      setResearchError('Failed to connect to server');
-    } finally {
-      setResearchLoading(false);
-    }
   };
 
   return (
@@ -392,53 +337,63 @@ export default function SingleTracePage() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="owner">Owner Name</Label>
-                  <div className="flex gap-2">
-                    {/*
-                      NOT `required`. A blank owner name is a supported submit: it
-                      is what routes the request to Full Property Trace, which the
-                      API bills per record submitted. The browser used to refuse
-                      that submit outright, so the tier the API charges for could
-                      not be reached from this page at all. It is reachable now,
-                      which is exactly why FullTraceDisclosure below is not
-                      optional -- the price has to be on screen before the click.
-                    */}
-                    <Input
-                      id="owner"
-                      placeholder="John Smith"
-                      value={ownerName}
-                      onChange={(e) => setOwnerName(e.target.value)}
-                      className="flex-1"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={handleAISearch}
-                      disabled={researchLoading || !address || !city || !state || !zip}
-                      className="shrink-0 h-10 px-3"
-                      title="AI Search - Find owner name ($0.15)"
-                    >
-                      {researchLoading ? (
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600" />
-                      ) : (
-                        <>
-                          <Search className="h-4 w-4 mr-1" />
-                          AI Search
-                        </>
-                      )}
-                    </Button>
-                  </div>
+                  {/*
+                    NOT `required`. A blank owner name is a supported submit: it
+                    is what routes the request to Full Property Trace, which the
+                    API bills per record submitted. The browser used to refuse
+                    that submit outright, so the tier the API charges for could
+                    not be reached from this page at all. It is reachable now,
+                    which is exactly why FullTraceDisclosure below is not
+                    optional -- the price has to be on screen before the click.
+                  */}
+                  <Input
+                    id="owner"
+                    placeholder="John Smith"
+                    value={ownerName}
+                    onChange={(e) => setOwnerName(e.target.value)}
+                  />
                   <p className="text-xs text-gray-500">
-                    Use AI Search ($0.15 per name found) to find the owner, or type it in yourself.
+                    Leave this blank and we find the owner of record for you.
                   </p>
                 </div>
               </div>
 
-              <FullTraceDisclosure ownerName={ownerName} profile={profile} />
+              {/*
+                The opt-in. Amber, like the disclosure, because ticking it moves
+                the request to the tier that bills per record submitted. It is
+                ticked and locked when the owner name is blank: that request is
+                already a Full Property Trace on the route's own predicate, and a
+                box the user could untick would be telling them otherwise. The
+                tick is willPullPropertyRecord, the same value the submit sends,
+                so what is on screen is what goes out.
+              */}
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                <label htmlFor="full-property-trace" className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    id="full-property-trace"
+                    data-testid="full-property-trace-toggle"
+                    checked={willPullPropertyRecord}
+                    disabled={!hasOwnerName}
+                    onChange={(e) => setWantsPropertyRecord(e.target.checked)}
+                    className="mt-1"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-amber-900">Pull the full property record</span>
+                    <span className="block text-amber-800 mt-1">
+                      {hasOwnerName
+                        ? 'You already have the owner name. Check this box to buy the county property record for this address as well.'
+                        : 'Included on this search. With no owner name we buy the county property record to find the owner of record.'}
+                    </span>
+                  </span>
+                </label>
+              </div>
 
-              {researchError && (
-                <p className="text-sm text-red-600">{researchError}</p>
-              )}
+              <FullTraceDisclosure
+                ownerName={ownerName}
+                profile={profile}
+                fullPropertyTrace={willPullPropertyRecord}
+              />
 
               {error && (
                 <p className="text-sm text-red-600">{error}</p>
@@ -458,32 +413,36 @@ export default function SingleTracePage() {
 
         {/* Results */}
         <div className="space-y-4">
-          {/* AI Research Card */}
-          {researchResult && (
-            <div className="space-y-2">
-              <AIResearchCard research={researchResult} charge={researchCharge} isCached={researchCached} />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleClearResearch}
-                disabled={researchLoading}
-                className="w-full text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
-              >
-                <Trash2 className="h-4 w-4 mr-1" />
-                Clear Cache &amp; Re-run AI Search
-              </Button>
-            </div>
-          )}
-
-          {/* Trace Result Card */}
+          {/* Contacts first, then the county record the tier 2 charge bought. */}
           {result ? (
-            <TraceResultCard
-              result={result.result}
-              isCached={result.is_cached}
-              charge={result.charge}
-              address={`${address}, ${city}, ${state} ${zip}`}
-              traceId={result.trace_id}
-            />
+            <>
+              <TraceResultCard
+                result={result.result}
+                isCached={result.is_cached ?? false}
+                charge={result.charge}
+                address={`${address}, ${city}, ${state} ${zip}`}
+                traceId={result.trace_id}
+              />
+
+              {(result.warnings?.length || result.needs_manual_review) && (
+                <div
+                  role="note"
+                  className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 space-y-1"
+                >
+                  {result.warnings?.map((warning, index) => (
+                    <p key={index}>{warning}</p>
+                  ))}
+                  {result.needs_manual_review && (
+                    <p>
+                      We could not confirm a contact person behind this owner, so it is worth a
+                      look by hand.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <PropertyRecordCard record={result.property_record} />
+            </>
           ) : loading ? (
             <Card className="flex items-center justify-center">
               <CardContent className="text-center py-12">
@@ -492,7 +451,7 @@ export default function SingleTracePage() {
                 <p className="text-gray-500 text-sm mt-1">This may take 10-30 seconds</p>
               </CardContent>
             </Card>
-          ) : !researchResult ? (
+          ) : (
             <Card className="flex items-center justify-center">
               <CardContent className="text-center py-12">
                 <p className="text-gray-500">
@@ -500,7 +459,7 @@ export default function SingleTracePage() {
                 </p>
               </CardContent>
             </Card>
-          ) : null}
+          )}
         </div>
       </div>
 

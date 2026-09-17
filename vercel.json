@@ -9,7 +9,7 @@
       "schedule": "*/5 * * * *"
     },
     {
-      "path": "/api/cron/sweep-bulk-research",
+      "path": "/api/cron/sweep-entity-traces",
       "schedule": "* * * * *"
     }
   ]

@@ -28,15 +28,34 @@ export interface TraceAddressInput {
 export const FULL_PROPERTY_TRACE_DESCRIPTION = 'Full Property Trace - per record submitted'
 
 /**
+ * WHAT WE TELL A CUSTOMER WHEN NOTHING WAS COLLECTED, and why there are two
+ * sentences rather than one.
+ *
+ * Both routes used to say the first one for both outcomes, because the wallet
+ * helper answered 0 for a short balance AND for an RPC that never ran. A
+ * customer with a full wallet was told they were short, which is a false
+ * statement about their money and blames them for our failure.
+ *
+ * Neither sentence quotes a rate. Four prices exist and each caller has exactly
+ * one of them; naming a number here would name the wrong one for somebody.
+ */
+export const WALLET_SHORT_WARNING =
+  'The wallet did not cover this record, so nothing was charged for it.'
+
+export const WALLET_NOT_COLLECTED_WARNING =
+  'We could not charge your wallet for this record because of an error on our side, so nothing was taken from your balance. The record is yours to keep.'
+
+/**
  * Should this request run tier 2?
  *
  * TWO triggers, and they are NOT the same thing:
  *   - the owner of record is absent, so we cannot route contacts without buying it
  *   - the caller HAS the owner and wants the property record anyway (opt-in)
  *
- * The opt-in flag is deliberately its own flag and not `ai_research`. AI Search
- * is being removed, and overloading its flag would couple a feature that is
- * shipping to one that is being deleted.
+ * The opt-in flag is deliberately its own flag and was never `ai_research`. AI
+ * Search was removed on 2026-09-17; overloading its flag would have coupled a
+ * feature that is shipping to one that was being deleted. Nothing reads
+ * `ai_research` off a request body any more, so do not fold the two.
  */
 export function isFullPropertyTrace(input: {
   owner_name?: string | null

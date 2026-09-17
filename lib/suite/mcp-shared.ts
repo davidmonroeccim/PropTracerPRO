@@ -1,23 +1,28 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { AI_RESEARCH, PRICING } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
 
-/** Rates quoted here are the TIER 1 per-successful-trace rates, which is what these MCP tools
- *  bill. Owner type selects the vendor, not the price, so there is ONE rate per plan and no entity
- *  carve-out. Read from the constants so the caveat can never drift from the ledger. Tier 2
- *  per-record pricing is deliberately absent: no MCP tool routes to it yet.
+/** Rates quoted here are the TIER 1 per-successful-trace rates, which is all these MCP tools bill.
+ *  Owner type selects the vendor, not the price, so there is ONE rate per plan and no entity
+ *  carve-out. BOTH plan rates are named, never one of them: quoting a single figure is how a
+ *  Pay-As-You-Go caller gets told a Pro price. Read from the constants so the caveat can never
+ *  drift from the ledger. Tier 2 per-record pricing is deliberately absent, because no MCP tool
+ *  routes to it yet.
  *
  *  THE NO-MATCH SENTENCE IS A MONEY PROMISE. Claude quotes this before spending a user's wallet,
- *  so it must match lib/trace/settleBulkJob.ts and the two cron sweeps exactly. It is scoped to
- *  the case that is genuinely free: a record submitted with an INDIVIDUAL owner name that comes
- *  back empty. A record whose owner is blank or a company goes through owner research first
- *  (isEntityRecord in mcp-tools.ts), and app/api/cron/sweep-bulk-research/route.ts books that
- *  research charge the moment it finds an owner. settleBulkJob.ts then leaves that charge in place
- *  on a no_match. Do not widen this sentence back into "a record that comes back with no match is
- *  not charged". It is false. */
+ *  so it must match lib/trace/settleBulkJob.ts and the two cron sweeps exactly.
+ *
+ *  It became SIMPLER on 2026-09-17, and the reason matters. The old sentence carved out the blank
+ *  or company owner case, because those records went through a $0.15 AI research step that was
+ *  charged the moment an owner was identified, contacts or not. That engine is gone. A company
+ *  owner now goes to a FastAppend business trace that bills the same tier 1 rate on success and
+ *  nothing on a miss, so the carve-out is no longer true and would over-quote every entity record.
+ *  A record with no owner name has no route here at all, so it is skipped and free. Do not add a
+ *  research fee back into this sentence; nothing charges one. */
 export const PTP_MCP_CAVEAT =
   "PropTracerPRO resolves contact info (phones, emails) from third-party data and can be incomplete or out of date. Verify before outreach, and use it only for lawful, permission-based contact. " +
-  `Each successful trace costs $${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} on Pro or AcquisitionPRO and $${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go, drawn from your wallet. ` +
-  `Give us an individual owner's name and a trace that finds nothing is not charged. When the owner is blank or a company, we research the owner first, and that research step costs $${AI_RESEARCH.CHARGE_PER_RECORD.toFixed(2)} once we identify them, even if no contacts follow.`;
+  `Give us the owner of record and you are charged per successful trace, $${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} on Pro or AcquisitionPRO and $${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go, drawn from your wallet. ` +
+  "A trace that finds nothing is free, whether the owner is a person or a company. " +
+  "A record with no owner name is not traced on this surface yet, so it comes back skipped with a reason and costs nothing.";
 
 type Extra = { authInfo?: { scopes: string[]; extra?: { userId?: string } } };
 

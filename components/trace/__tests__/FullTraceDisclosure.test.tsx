@@ -46,6 +46,15 @@ function render(ownerName: string, profile: EntitlementProfile | null): string {
   );
 }
 
+/** The opt-in path: the caller has the owner and ticked the property record box. */
+function renderOptIn(ownerName: string, profile: EntitlementProfile | null): string {
+  return visibleText(
+    renderToStaticMarkup(
+      <FullTraceDisclosure ownerName={ownerName} profile={profile} fullPropertyTrace />
+    )
+  );
+}
+
 /** The dollar figure the customer actually reads, or null if the copy quotes none. */
 function quotedRate(text: string): string | null {
   const match = text.match(/\$(\d+\.\d{2})/);
@@ -77,6 +86,26 @@ describe('when the disclosure appears', () => {
     expect(
       renderToStaticMarkup(<FullTraceDisclosure ownerName="Bhf L L C" profile={PAYG} />)
     ).toBe('');
+  });
+
+  // THE OPT-IN TRIGGER. isFullPropertyTrace() bills tier 2 on EITHER a blank
+  // owner name or full_property_trace: true, so a disclosure that only watches
+  // the owner name lets the second trigger charge the customer in silence.
+  test('appears when the owner name is filled in but the property record was asked for', () => {
+    expect(renderOptIn('John Smith', PAYG)).toContain('Full Property Trace');
+  });
+
+  test('appears on the opt-in for an entity owner name too', () => {
+    expect(renderOptIn('Storage Trust Properties, L.P.', PAYG)).toContain('Full Property Trace');
+  });
+
+  test('the opt-in quotes the same tier 2 rate as the blank-owner case', () => {
+    expect(quotedRate(renderOptIn('John Smith', PAYG))).toBe(
+      PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET.toFixed(2)
+    );
+    expect(quotedRate(renderOptIn('John Smith', NATIVE_PRO))).toBe(
+      PRICING.TIER2_PER_RECORD_SUBMITTED_PRO.toFixed(2)
+    );
   });
 });
 
@@ -169,9 +198,42 @@ describe('the copy', () => {
     );
   });
 
+  test('the opt-in case opens with its own sentence, not the no-owner one', () => {
+    const text = renderOptIn('John Smith', PAYG);
+    // Telling a customer who just typed an owner name that there is no owner
+    // name reads as a bug and undermines the price that follows it.
+    expect(text).not.toContain('No owner name');
+    expect(text).toBe(
+      'You asked for the property record, so this runs as a Full Property Trace. We pull the ' +
+        'full property record for this address and find contacts for the owner of record. Your ' +
+        'rate is $0.40 per record, and you are charged whether or not we come back with contacts.'
+    );
+  });
+
+  test('both cases carry the charge-on-a-miss rule, and only one price sentence', () => {
+    for (const text of [render('', PAYG), renderOptIn('John Smith', PAYG)]) {
+      expect(text).toContain('charged whether or not we come back with contacts');
+      expect(text.match(/\$\d+\.\d{2}/g)).toHaveLength(1);
+    }
+  });
+
+  test('both cases still derive the figure from the profile, not a literal', () => {
+    for (const profile of [PAYG, NATIVE_PRO, ACQ_PRO]) {
+      const expected = chargePerRecord(profile).toFixed(2);
+      expect(quotedRate(render('', profile))).toBe(expected);
+      expect(quotedRate(renderOptIn('John Smith', profile))).toBe(expected);
+    }
+    expect(quotedRate(renderOptIn('John Smith', null))).toBeNull();
+  });
+
+  // Escaped rather than literal so an editor that helpfully curls a quote
+  // cannot quietly change which characters this test bans.
+  const SLOP = /[\u2010-\u2015\u2018\u2019\u201C\u201D*]/;
+
   test('carries no em-dashes, en-dashes, asterisks or smart quotes', () => {
     for (const profile of [PAYG, NATIVE_PRO, null]) {
-      expect(render('', profile)).not.toMatch(/[‐-―‘’“”*]/);
+      expect(render('', profile)).not.toMatch(SLOP);
+      expect(renderOptIn('John Smith', profile)).not.toMatch(SLOP);
     }
   });
 });

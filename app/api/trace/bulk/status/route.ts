@@ -8,7 +8,47 @@ import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
+
+/** A trace_history row, read down to the two columns this summary needs. */
+type SkipRow = { ai_research_status?: string | null };
+
+/**
+ * How many rows of this job were accepted but never traced, and why.
+ *
+ * David's rule for a blank-owner bulk row: accept the file, skip the row with a
+ * reason, charge nothing, and make the reason visible in the job summary AND
+ * the CSV. `bulk/download` does the CSV half. This is the job summary half, and
+ * without it the dashboard shows those rows as a bare `no_match`, which reads
+ * to a customer as "we looked and found nobody" when no vendor was ever asked.
+ *
+ * The reason comes from skipReasonFor(), the SAME accessor the v1 status route
+ * and the MCP tool serve per record, so the wording cannot drift between the
+ * three surfaces and the CSV. A skipped row is free, and the reason says so.
+ *
+ * Only rows with a skip reason are counted. A row a vendor was actually asked
+ * about returns null from skipReasonFor() and is never in this number, however
+ * empty it came back.
+ */
+function summarizeSkips(rows: SkipRow[]): {
+  records_skipped: number;
+  skip_reason: string | null;
+} {
+  const reasons: string[] = [];
+  let count = 0;
+  for (const row of rows) {
+    const reason = skipReasonFor(row.ai_research_status);
+    if (!reason) continue;
+    count++;
+    // Two different things land here: a blank owner the customer can fix by
+    // resending the row, and an entity trace that ran out of attempts, which is
+    // our side failing to reach a vendor. Both are free and they are not the
+    // same thing to read, so a job carrying both says both.
+    if (!reasons.includes(reason)) reasons.push(reason);
+  }
+  return { records_skipped: count, skip_reason: reasons.length > 0 ? reasons.join(' ') : null };
+}
 
 export async function GET(request: Request) {
   try {
@@ -60,14 +100,13 @@ export async function GET(request: Request) {
     if (traceJob.status === 'completed' || traceJob.status === 'failed') {
       const { data: doneRows } = await adminClient
         .from('trace_history')
-        .select('charge')
+        .select('charge, ai_research_status')
         .eq('user_id', user.id)
         .eq('trace_job_id', traceJob.id);
 
-      const doneTotal = (doneRows || []).reduce(
-        (sum: number, r: { charge: number | null }) => sum + (r.charge || 0),
-        0
-      );
+      const rows = (doneRows || []) as Array<{ charge: number | null } & SkipRow>;
+
+      const doneTotal = rows.reduce((sum, r) => sum + (r.charge || 0), 0);
 
       return NextResponse.json({
         success: true,
@@ -76,6 +115,10 @@ export async function GET(request: Request) {
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
         total_charge: Number(doneTotal.toFixed(4)),
+        // This is the branch every poll after the first one hits, and the one a
+        // user who reloads the page lands on, so it has to carry the skip
+        // summary too.
+        ...summarizeSkips(rows),
         error_message: traceJob.error_message,
       });
     }
@@ -273,6 +316,18 @@ export async function GET(request: Request) {
       })
       .eq('id', traceJob.id);
 
+    // The rows accepted but never traced. They are invisible to the loop above
+    // because a skipped row never gets a tracerfy_job_id, so they have to be
+    // read off the job. One query, once, on the poll that finalizes the job;
+    // every later poll gets the same numbers out of the branch at the top.
+    const { data: jobRows } = await adminClient
+      .from('trace_history')
+      .select('ai_research_status')
+      .eq('user_id', user.id)
+      .eq('trace_job_id', traceJob.id);
+
+    const skips = summarizeSkips((jobRows || []) as SkipRow[]);
+
     // Fire-and-forget: auto-rebill if balance dropped below threshold.
     // Gated on what we ATTEMPTED, not what we collected: if every deduct failed
     // the wallet is empty, which is exactly when a rebill is needed.
@@ -326,6 +381,7 @@ export async function GET(request: Request) {
       records_submitted: traceJob.records_submitted,
       records_matched: recordsMatched,
       total_charge: totalCharge,
+      ...skips,
     });
   } catch (error) {
     console.error('Bulk status error:', error);

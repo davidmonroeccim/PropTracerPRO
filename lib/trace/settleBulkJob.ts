@@ -17,6 +17,7 @@ import type { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
+import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
 import { TRACE_TIER } from '@/lib/trace/billedRows';
 import { PRICING } from '@/lib/constants';
 import type { TraceResult, AIResearchResult } from '@/types';
@@ -106,24 +107,41 @@ export async function settleBulkJob(
     // FastAppend fallback: if Tracerfy returned nothing for this entity row,
     // check whether FastAppend lent its async business-trace results between
     // cron and now (sweep-business-traces merges contacts into ai_research).
-    // When it has, refund the AI research charge the cron already booked and
-    // apply ONE tier 1 per-success charge at the caller's plan rate -- the
-    // user paid for one credited row, not research-plus-trace separately.
+    // When it has, apply ONE tier 1 per-success charge at the caller's plan
+    // rate, and refund any AI research charge the row is still carrying.
+    //
+    // THAT REFUND SERVICES HISTORICAL ROWS ONLY. The $0.15 research fee was
+    // retired with the AI Search engine on 2026-09-17 and sweep-entity-traces
+    // now writes ai_research_charge: 0 on every row it touches, so a row
+    // created since then has nothing to refund and the refund arm is skipped by
+    // its own `> 0` test. It stays because 1,301 rows written before that date
+    // do carry a real charge, and they still settle through here.
     const fastAppendCredit = tracerfyHasContacts
       ? null
       : traceCreditFromFastAppend(row.ai_research);
 
     if (tracerfyHasContacts) {
-      // Tracerfy delivered contacts -- charge tier-aware trace fee on top
-      // of the AI research charge already booked by the cron. Deduct FIRST so
-      // the row records what the wallet actually gave up (0 if it was short),
-      // never the intended amount.
-      const charge = await deductOrZero(admin, {
-        p_user_id: userId,
-        p_amount: personRate,
-        p_trace_history_id: row.id,
-        p_description: 'Bulk skip trace - entity row (post-research)',
-      });
+      // Tracerfy delivered contacts -- charge the tier 1 per-success fee at the
+      // caller's plan rate. That is the WHOLE charge for this row: nothing books
+      // a research fee any more, so there is no second line item under it.
+      // Deduct FIRST so the row records what the wallet actually gave up (0 if
+      // it was short), never the intended amount.
+      // NEVER CHARGE A ROW THE WALLET HAS ALREADY PAID FOR. sweep-entity-traces
+      // can deduct on a FastAppend hit and then throw, which requeues the row;
+      // on the retry FastAppend may return nothing, so the row arrives HERE and
+      // is charged a second time for the same answer. Two files, one row, two
+      // debits, and no unusual failure required. The ledger is the check because
+      // it is written in the same transaction as the money.
+      const alreadyCollected = await collectedChargeFor(admin, row.id);
+      const charge =
+        alreadyCollected !== null
+          ? alreadyCollected
+          : await deductOrZero(admin, {
+              p_user_id: userId,
+              p_amount: personRate,
+              p_trace_history_id: row.id,
+              p_description: 'Bulk skip trace - entity row (post-research)',
+            });
 
       await admin
         .from('trace_history')
@@ -146,10 +164,16 @@ export async function settleBulkJob(
       row.is_successful = true;
       row.charge = charge;
     } else if (fastAppendCredit) {
-      // Tracerfy whiffed but FastAppend has contacts now. Refund the research
-      // charge the cron booked, then bill ONE tier 1 per-success charge at the
-      // caller's plan rate. Owner type picks the vendor, never the price, so
-      // this is the SAME personRate the Tracerfy branch above uses.
+      // Tracerfy whiffed but FastAppend has contacts now. Bill ONE tier 1
+      // per-success charge at the caller's plan rate. Owner type picks the
+      // vendor, never the price, so this is the SAME personRate the Tracerfy
+      // branch above uses.
+      //
+      // The refund below is for HISTORICAL rows. On a row written since
+      // 2026-09-17 ai_research_charge is 0 and the arm does not run; on one of
+      // the 1,301 older rows it hands back a research fee the retired engine
+      // booked, so the customer pays for one credited row rather than research
+      // plus trace.
       const priorResearchCharge = row.ai_research_charge || 0;
       if (priorResearchCharge > 0) {
         await admin.rpc('credit_wallet_balance', {
@@ -159,12 +183,24 @@ export async function settleBulkJob(
             'Refund: AI research folded into the successful trace charge',
         });
       }
-      const charge = await deductOrZero(admin, {
-        p_user_id: userId,
-        p_amount: personRate,
-        p_trace_history_id: row.id,
-        p_description: 'FastAppend business-trace contacts (successful trace)',
-      });
+      // Same guard as the Tracerfy branch, and it has to be here too: the cron
+      // books its charge on exactly this FastAppend hit, so this is the arm most
+      // likely to be settling a row that has already paid.
+      //
+      // The refund above is deliberately NOT inside the guard. It is keyed on
+      // the row still carrying ai_research_charge > 0, which zeroes itself once
+      // it runs, and the cron never refunds. A row the cron charged can still be
+      // owed that refund.
+      const alreadyCollected = await collectedChargeFor(admin, row.id);
+      const charge =
+        alreadyCollected !== null
+          ? alreadyCollected
+          : await deductOrZero(admin, {
+              p_user_id: userId,
+              p_amount: personRate,
+              p_trace_history_id: row.id,
+              p_description: 'FastAppend business-trace contacts (successful trace)',
+            });
 
       await admin
         .from('trace_history')
@@ -189,10 +225,16 @@ export async function settleBulkJob(
       row.charge = charge;
       row.ai_research_charge = 0;
     } else {
-      // No contacts from either provider -- no_match. The AI research charge
-      // already booked STAYS PUT: this row is not free. If FastAppend lands
-      // later via sweep-business-traces, that cron refunds the research charge
-      // and applies the tier 1 per-success charge instead.
+      // No contacts from either provider -- no_match, and under tier 1 a miss
+      // is FREE. A row written since 2026-09-17 leaves here having been charged
+      // nothing at all, because nothing books a research fee any more.
+      //
+      // One of the 1,301 historical rows can still be sitting on an
+      // ai_research_charge the retired engine booked. That amount is left
+      // alone here rather than refunded, because it was charged for work that
+      // really was done. If FastAppend lands later via sweep-business-traces,
+      // that cron hands it back and applies the tier 1 per-success charge
+      // instead.
       await admin
         .from('trace_history')
         .update({

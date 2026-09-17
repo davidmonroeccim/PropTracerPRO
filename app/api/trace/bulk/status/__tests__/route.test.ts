@@ -1,5 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
+import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
+import { ENTITY_TRACE_FAILED_STATUS } from "@/lib/trace/entityTraceAttempts";
 
 /**
  * Money fence for the session-side BULK status route.
@@ -17,6 +19,11 @@ const H = vi.hoisted(() => ({
   job: null as unknown as Record<string, unknown>,
   profile: null as unknown as Record<string, unknown>,
   historyRows: [] as Array<Record<string, unknown>>,
+  // Every trace_history row belonging to the JOB, which is a different read
+  // from the per-result `id` lookup above: it is scoped by trace_job_id and is
+  // the only read that can see a skipped row (a skipped row never gets a
+  // tracerfy_job_id, so the result loop cannot reach it).
+  jobRows: [] as Array<Record<string, unknown>>,
   jobStatus: null as unknown as Record<string, unknown>,
   updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
@@ -43,13 +50,15 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from: (table: string) => ({
-      select: () =>
+      select: (cols?: string) =>
         chainTo(
           table === "trace_jobs"
             ? H.job
             : table === "user_profiles"
               ? H.profile
-              : H.historyRows
+              : typeof cols === "string" && cols.includes("ai_research_status")
+                ? H.jobRows
+                : H.historyRows
         ),
       update: (payload: Record<string, unknown>) => {
         H.updates.push({ table, payload });
@@ -108,6 +117,12 @@ beforeEach(() => {
   // Every address resolves to a real trace_history row, so the billing branch
   // is reached for both results.
   H.historyRows = [{ id: "hist-1" }];
+
+  // Two traced rows, nothing skipped, unless a test says otherwise.
+  H.jobRows = [
+    { charge: null, ai_research_status: null },
+    { charge: null, ai_research_status: null },
+  ];
 
   // Two contact-bearing rows => two billable matches.
   H.jobStatus = {
@@ -202,5 +217,88 @@ describe("bulk/status route totals only the wallet amount actually collected", (
     }
     expect(body.total_charge).toBeCloseTo(rate * 2, 10);
     expect(webhookBody().total_charge).toBeCloseTo(rate * 2, 10);
+  });
+});
+
+/**
+ * David's rule for a bulk row that arrived with no owner name: accept the file,
+ * skip the row with a reason, charge nothing, and put the reason in the job
+ * summary AND the CSV. The CSV half shipped; this is the job summary half.
+ *
+ * Without it the dashboard shows a finished job whose skipped rows read as a
+ * bare no_match, which tells the customer we looked and found nobody when no
+ * vendor was ever asked. The v1 status route and the MCP tool already serve
+ * skipReasonFor() on every record; this route serves the same accessor, so the
+ * three surfaces cannot drift on the wording.
+ */
+describe("the job summary says how many rows were skipped and why", () => {
+  const GET = async () => {
+    const mod = await import("@/app/api/trace/bulk/status/route");
+    return mod.GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+  };
+
+  it("reports the skipped count and reason on a job that finishes this poll", async () => {
+    // MUTATION: drop records_skipped / skip_reason from the completed response
+    // and this goes red -- the user is back to downloading the CSV to find out
+    // why rows came back empty.
+    H.jobRows = [
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+    ];
+
+    const body = await (await GET()).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_skipped).toBe(2);
+    expect(body.skip_reason).toContain("No owner name came in");
+  });
+
+  it("tells the user in the same sentence that they were not charged", async () => {
+    // The row is free. A reason that does not say so leaves the customer
+    // checking their wallet against a job summary that never mentions it.
+    H.jobRows = [{ charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS }];
+    const body = await (await GET()).json();
+    expect(body.skip_reason).toContain("not charged");
+  });
+
+  it("reports them on a job that was already finished before this poll", async () => {
+    // The stored-stats branch is what every poll after the first one hits, and
+    // what a user who reloads the page sees. It must say the same thing.
+    H.job = { ...H.job, status: "completed", records_matched: 1 };
+    H.jobRows = [
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+    ];
+
+    const body = await (await GET()).json();
+
+    expect(body.records_skipped).toBe(1);
+    expect(body.skip_reason).toContain("not charged");
+    // The skipped row contributes nothing to the money, which is the claim the
+    // reason is making.
+    expect(body.total_charge).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET, 10);
+  });
+
+  it("says nothing was skipped when nothing was", async () => {
+    // A reason on a job where every row was traced would be a false statement
+    // in the other direction.
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(0);
+    expect(body.skip_reason).toBeNull();
+  });
+
+  it("carries a vendor-exhausted row's own reason, not the blank-owner one", async () => {
+    // Two different things end up as an untraced row and they are not the same
+    // to a customer: a blank owner is something they can fix by resending the
+    // row, an exhausted entity trace is our side failing to reach a vendor.
+    // Both are free. skipReasonFor() is what keeps them distinct.
+    H.jobRows = [{ charge: null, ai_research_status: ENTITY_TRACE_FAILED_STATUS }];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(1);
+    expect(body.skip_reason).toContain("business records service");
+    expect(body.skip_reason).not.toContain("No owner name came in");
   });
 });

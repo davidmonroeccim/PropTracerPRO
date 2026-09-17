@@ -24,13 +24,37 @@ type RpcClient = {
 };
 
 /**
- * Runs `deduct_wallet_balance` and returns the amount ACTUALLY charged:
- * `p_amount` when the wallet covered it, `0` when it did not.
+ * WHY THERE ARE THREE OUTCOMES AND NOT TWO.
+ *
+ * Until 2026-09-17 this helper answered a single number, and 0 meant two
+ * entirely different things: the wallet genuinely came up short, and the RPC
+ * itself never ran (transport, Postgres, a bad envelope). Both call sites then
+ * told the customer "the wallet did not cover this record", so a customer with
+ * a full wallet was told they were short. That is a false statement about
+ * money, and it points the blame at them for our failure.
+ *
+ * - `charged`: the money moved. `collected` is the amount.
+ * - `insufficient_balance`: the function returned FALSE and moved nothing.
+ *   This is a fact about the customer's balance and it is safe to say so.
+ * - `error`: we could not ask. OUR failure, never theirs, and nothing moved.
+ */
+export type DeductOutcome = 'charged' | 'insufficient_balance' | 'error';
+
+export interface DeductResult {
+  /** The amount that ACTUALLY moved. 0 for both failure outcomes. */
+  collected: number;
+  outcome: DeductOutcome;
+  /** Present only on `error`, for the log. Never shown to the customer. */
+  message?: string;
+}
+
+/**
+ * Runs `deduct_wallet_balance` and reports what happened as well as how much.
  *
  * Envelope handling -- deliberate choice: only two things PROVE the money did
  * not move, an explicit `false` from the function (insufficient balance) and a
- * transport/Postgres `error`. Those return 0. Everything else, including a
- * missing envelope or a missing `data` key, is treated as success.
+ * transport/Postgres `error`. Everything else, including a missing envelope or
+ * a missing `data` key, is treated as success.
  *
  * Why not fail closed on `undefined`? Production supabase-js always resolves
  * `{ data, error }`, and for a `RETURNS BOOLEAN` function `data` is always the
@@ -41,15 +65,42 @@ type RpcClient = {
  * masked; and a genuine `false` is never swallowed, which is the bug this
  * exists to kill.
  */
-export async function deductOrZero(
+export async function deductWallet(
   client: RpcClient,
   args: DeductWalletArgs
-): Promise<number> {
+): Promise<DeductResult> {
   const envelope = (await client.rpc('deduct_wallet_balance', args)) as
     | { data?: unknown; error?: unknown }
     | null
     | undefined;
 
-  const failed = envelope?.data === false || Boolean(envelope?.error);
-  return failed ? 0 : args.p_amount;
+  if (envelope?.error) {
+    const err = envelope.error as { message?: string };
+    return {
+      collected: 0,
+      outcome: 'error',
+      message: typeof err?.message === 'string' ? err.message : String(envelope.error),
+    };
+  }
+
+  if (envelope?.data === false) {
+    return { collected: 0, outcome: 'insufficient_balance' };
+  }
+
+  return { collected: args.p_amount, outcome: 'charged' };
+}
+
+/**
+ * The amount ACTUALLY charged, and nothing about why it was not.
+ *
+ * Kept as the narrow answer for the call sites that only ever write the number
+ * into a row. Anywhere the customer is TOLD something about the failure, call
+ * `deductWallet` instead: this signature cannot tell a short wallet from a
+ * broken RPC, and saying the wrong one is the defect it was split to fix.
+ */
+export async function deductOrZero(
+  client: RpcClient,
+  args: DeductWalletArgs
+): Promise<number> {
+  return (await deductWallet(client, args)).collected;
 }

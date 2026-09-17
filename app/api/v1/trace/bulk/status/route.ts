@@ -7,6 +7,8 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
+import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
+import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -178,11 +180,15 @@ export async function GET(request: Request) {
 
     // --- Decide overall bulk job state ------------------------------------
 
-    // A bulk job is not finished while any row is still awaiting research or
-    // its Tracerfy result.
-    const anyPendingResearch = rows.some(
-      (r) => r.ai_research_status === 'queued' || r.ai_research_status === 'processing'
-    );
+    // A bulk job is not finished while any row is still awaiting its business
+    // trace or its Tracerfy result. `ai_research_status` is still the entity
+    // state machine (sweep-entity-traces drives it); only the engine behind it
+    // changed. Pendingness is asked of lib/trace/entityTraceAttempts.ts rather
+    // than compared against two literals, because a retried row carries its
+    // attempt number in that column. A row skipped for having no owner name,
+    // and a row whose attempts ran out, are NOT pending: both carry a terminal
+    // status, which is what stops them holding a job open forever.
+    const anyPendingResearch = rows.some((r) => isEntityTracePending(r.ai_research_status));
     const anyPendingTrace = rows.some((r) => r.status === 'processing');
 
     if (anyPendingResearch || anyPendingTrace) {
@@ -191,8 +197,8 @@ export async function GET(request: Request) {
         status: 'processing',
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
-        records_pending_research: rows.filter(
-          (r) => r.ai_research_status === 'queued' || r.ai_research_status === 'processing'
+        records_pending_research: rows.filter((r) =>
+          isEntityTracePending(r.ai_research_status)
         ).length,
         records_pending_trace: rows.filter((r) => r.status === 'processing').length,
         // Surface stall diagnostics so callers know Tracerfy is the bottleneck
@@ -332,6 +338,10 @@ export async function GET(request: Request) {
 
 // Build the per-record payload that matches docs/AGENT_INTEGRATION.md:
 // research + contacts (FastAppend sidecar) + trace_result, per row.
+// `research` still carries whatever is stored on the row. For a row written
+// before 2026-09-17 that is AI Search output the customer paid for, and it is
+// served unchanged; for a row written since it is the FastAppend business-trace
+// record. Either way it is read here and never written.
 function buildPerRecordResult(row: TraceHistoryRow) {
   const contacts = row.ai_research?.business_trace_contacts || null;
   // owner_contact_name is the resolved HUMAN behind input_owner_name (the entity asked about).
@@ -350,6 +360,9 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     result: row.trace_result,
     research: row.ai_research,
     contacts,
+    // Why a row came back empty without being traced. Null on every row a vendor
+    // was actually asked about, so a no_match never has to speak for itself.
+    skip_reason: skipReasonFor(row.ai_research_status),
     charge: row.charge || 0,
     ai_research_charge: row.ai_research_charge || 0,
   };

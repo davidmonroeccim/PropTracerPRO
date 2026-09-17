@@ -268,9 +268,30 @@ export interface TracerfyResult {
 }
 
 // ===================
-// AI Research Types
+// Owner Research Record (trace_history.ai_research)
 // ===================
 
+/**
+ * What is stored in `trace_history.ai_research`.
+ *
+ * TWO GENERATIONS OF DATA LIVE IN THIS ONE SHAPE, and the name is historical.
+ *
+ * Before 2026-09-17 it held the output of the AI Search engine, Brave plus
+ * Claude: an owner read off the open web, relatives, a deceased check, a
+ * confidence score and the source URLs behind them. 1,301 rows carry that, the
+ * customer paid for it, and it is still served by the status routes, the bulk
+ * download and the MCP. Nothing writes it any more.
+ *
+ * Since then it is the storage shape for a FastAppend BUSINESS TRACE: the
+ * company we asked about, the principal behind it, and the phones, emails and
+ * mailing address that came back, in `business_trace_contacts`. That sidecar is
+ * what resolveOwnerContact() and traceCreditFromFastAppend() read, which is why
+ * the type could not leave with the engine. The fields only an LLM could ever
+ * have produced (relatives, is_deceased, sources, confidence) are written at
+ * their "we do not know" values on this path rather than invented.
+ *
+ * Five surviving production files import this. It is not an AI Search type.
+ */
 export interface AIResearchResult {
   owner_name: string | null;
   owner_type: 'individual' | 'business' | 'trust' | 'unknown';
