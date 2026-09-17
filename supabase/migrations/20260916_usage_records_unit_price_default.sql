@@ -1,6 +1,11 @@
 -- 2026-09-16 pricing change: usage_records.unit_price default 0.07 -> 0.15
 --
--- DO NOT APPLY THIS BEFORE THE CODE IS PUSHED.
+-- APPLIED 2026-09-17 to rmmwkjmjchpfebxroyoo. Verified: the default is now 0.15.
+--
+-- The original warning below was written on the assumption that a stale default could
+-- disagree with running code. It cannot here: `usage_records` has ZERO writers anywhere
+-- in the codebase, so this column default is unreachable and the change is inert either
+-- way. Applied ahead of the deploy on that basis.
 -- The old default (0.07) is baked into the LIVE database. Applying this migration
 -- while production still runs the old code makes new prod rows disagree with the
 -- code that wrote them. Apply it in the same window as the deploy, not before.

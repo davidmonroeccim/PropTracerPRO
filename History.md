@@ -60,6 +60,39 @@ anything can create it. Nothing is wired; no user-facing behaviour is added.
 
 ## 2026-09-17
 
+### Both migrations APPLIED to production, verified against a before-snapshot
+
+- `20260917_trace_history_property_record_tier.sql` and
+  `20260916_usage_records_unit_price_default.sql` applied to `rmmwkjmjchpfebxroyoo`.
+- **Verified independently afterward, not trusted from the migration output:** `trace_history`
+  3,836 rows unchanged, `wallet_transactions` 2,919 unchanged, `ai_research` 1,301 unchanged,
+  `property_record` present as nullable `jsonb`, `tier` present as `smallint`, **0 rows
+  backfilled**, **0 orphaned wallet references**, `usage_records.unit_price` default now 0.15.
+- **Applied AHEAD of the deploy deliberately**, which is the safe direction for 20260917: old code
+  ignores unknown columns, but the new code REQUIRES them and would 500 on every single-trace
+  submit without them. The reverse order is the dangerous one.
+- 20260916 is inert either way: `usage_records` has zero writers anywhere in the codebase.
+
+### Full Property Trace, phase 2: nothing deletes a billed row
+
+- **Found a LIVE bug, not just a tier 2 risk.** `wallet_transactions` and `usage_records` both
+  reference `trace_history(id)` with no `ON DELETE` clause, so a delete on a billed row fails
+  with 23503 rather than cascading, and none of the ten delete sites checked its error. The
+  refusal looked like success: the row survived, the following INSERT died on
+  `UNIQUE(user_id, address_hash)`, and the customer got a generic 500 that named nothing. The
+  address became **permanently un-retraceable**, because `skip_cache` and `/api/cache/clear` fail
+  the same way, and `cache/clear` returned `{success:true}` regardless.
+- `lib/trace/billedRows.ts` holds one definition of "paid for", pushed into SQL so there is no
+  read-then-delete race. Delete-then-insert became **reuse**: the unique constraint already means
+  one row per address per user, so a surviving billed row is updated in place.
+- The cache now treats `property_record IS NOT NULL` as a hit, so a paid tier 2 record with no
+  contacts is never re-billed. `tier` is stamped at all 16 charge-writing sites, with a
+  source-level invariant test that fails if a new one is added without it.
+- **Tests were written FIRST.** 45 characterization tests pinned current behaviour green (265 to
+  310) against unmodified code before anything changed. 19 mutations run, 19 caught; re-verified
+  independently that killing the delete guard turns 9 red and killing the cache guard turns 2 red.
+- 337 tests passing, `tsc` unchanged, eslint 54.
+
 ### Full Property Trace, phase 1: the dossier client
 
 - **`lib/tracerfy/dossier.ts`** plus 34 tests, 6 sanitized fixtures and a dry-run script. Nothing

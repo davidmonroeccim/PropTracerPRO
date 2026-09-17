@@ -3,7 +3,11 @@
 -- lib/trace/billedRows.ts, app/api/trace/single/route.ts,
 -- app/api/v1/trace/single/route.ts and app/api/cache/clear/route.ts.
 --
--- ⚠️ DO NOT APPLY UNTIL PUSH. Nothing in this branch is pushed yet.
+-- APPLIED 2026-09-17 to rmmwkjmjchpfebxroyoo, ahead of the deploy, which is the safe
+-- direction for this one. Verified independently afterward against a before-snapshot:
+-- trace_history 3,836 rows unchanged, wallet_transactions 2,919 unchanged, ai_research
+-- 1,301 unchanged, both columns present and nullable, 0 rows backfilled, 0 orphaned
+-- wallet references. Idempotent (ADD COLUMN IF NOT EXISTS) but do not re-run casually.
 --
 -- ORDERING, AND IT IS THE OPPOSITE OF 20260916. That migration must not land
 -- BEFORE its deploy, because it changes a value the running code disagrees
