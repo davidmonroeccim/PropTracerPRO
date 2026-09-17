@@ -231,6 +231,86 @@ prefer these, because they are reproducible from the saved files.
 
 ---
 
+### DECIDED 2026-09-16: STORE PER-USER IN PTP. NEVER PROPAGATE TO THE PROPERTY-REGISTRY.
+
+David: *"PTP has a supabase database, so I see the new fields being added and saved for the user.
+What I don't want it to do is update the property-registry from the results."*
+
+So the original line below is correct and stands. **The boundary is not storage, it is direction:**
+
+- **ALLOWED:** dossier fields persisted in PTP's own Supabase (`rmmwkjmjchpfebxroyoo`), scoped to
+  the user who paid for them. They bought it, it is theirs, it shows up in their account.
+- **FORBIDDEN:** any write from PTP results into the shared **property-registry**. Not a backfill,
+  not an enrichment job, not "while we're here". Purchased per-user data must not become a shared
+  asset.
+
+**Why, so nobody helpfully reverses it later.** Two reasons and both matter. It is the paying
+user's data, not PTP's inventory to resell. And the registry's whole value is that it is
+county-sourced with provenance; injecting vendor dossier fields would break that claim silently,
+and a registry row whose origin is "a customer's Tracerfy purchase" cannot be told apart from a
+county-sourced one after the fact.
+
+**Verified 2026-09-16: no such path exists today.** PTP constructs exactly one Supabase client
+(`lib/supabase/admin.ts`), pointed at its own project. The only `property-registry` mentions in the
+codebase are prose comments in `lib/utils/address-normalizer.ts:75` and `lib/suite/mcp-tools.ts:85`
+explaining why ZIP became optional. The `SUITE_GATEWAY_*` env vars are for reading entitlements,
+not for writing parcels. **If this ever gets built it will be built in the gateway or in a
+registry-side job, not here, so the guard has to live there too.**
+
+### OPEN ITEM 8 IS CLOSED. Read 2026-09-17 from the actual terms, not inferred.
+
+Source: `https://tracerfy.com/privacy-policy`, sections 4.7 and 4.8. **Storing results per-user is
+permitted. Do not raise it again.**
+
+- **4.7, ownership:** *"You retain all ownership rights to data you upload to Tracerfy. We claim no
+  ownership or intellectual property rights over your uploaded data."*
+- **4.8, the actual restriction:** *"Service results may not be resold or redistributed as a
+  standalone data feed, database, directory, or sublicensed product."* Permitted uses are
+  *"lawful skip-tracing, contact-enrichment, direct mail, real estate, debt collection,
+  business-to-business enrichment, and related internal business workflows only."*
+
+PTP storing a user's purchased record for that user's own workflow is contact-enrichment and an
+internal business workflow. Explicitly allowed. **What 4.8 prohibits is exactly what David ruled
+out on his own: turning results into a standalone database.** That is the property-registry
+propagation banned above. The instinct and the contract agree.
+
+### THE REAL EXPOSURE, and it is not storage: FCRA PERMISSIBLE USE IS NOT PASSED THROUGH.
+
+**4.8 also states:** *"Service results may not be used for employment, tenant screening, credit,
+insurance, eligibility, adverse-action, harassment, stalking, or any FCRA-regulated purpose."*
+
+Tracerfy binds PTP to that. **PTP does not bind its own users to it.** Verified 2026-09-17: no FCRA
+language, no permissible-use notice, and no acceptable-use or terms route anywhere in `app/`,
+`components/`, `lib/` or `docs/`. Zero matches.
+
+PTP resells access to this data to real-estate customers, and **tenant screening is a thing a
+landlord will plausibly try**, so the prohibited use sits directly adjacent to the customer base.
+The obligation does not stop at PTP; it has to reach the end user running the search.
+
+**Not a blocker for tier 2 and not a technical fix.** It is a terms-and-surface question: whether
+the restriction appears at signup, in the API docs, in the MCP caveat, or on a terms page that does
+not currently exist.
+
+### RATE LIMIT CORRECTION, same source, read 2026-09-17.
+
+The handoff's **500/min for the dossier is CORRECT**, but incomplete in a way that matters for
+tier 2 bulk design. Verbatim from `https://www.tracerfy.com/skip-tracing-api-documentation/`:
+
+> *"Instant Trace, Enhanced Trace, Phone Verification, APN Instant Lookup & Property Lookup — 500
+> lookups per minute (shared counter)"*
+
+**It is a SHARED counter.** `property-search/lookup/` (the dossier) and the instant person trace
+draw from the same 500/min pool. A tier 2 bulk run does a dossier call AND then a contact call per
+parcel, so a 150-parcel run consumes roughly 300 of that shared budget, not 150. Size the loop
+against the shared pool.
+
+Also note the batch endpoints are far tighter and are a different limit entirely:
+*"Batch Trace & APN Batch Trace — 10 submissions per 5 minutes"*. A generic abuse-policy line on
+the same page ("Maximum rate limit is 10 POST trace requests per 5-minute window") refers to those
+batch submissions, NOT to the instant endpoints. Do not read it as a 2/min global cap.
+
+---
+
 Worth capturing per-user (the user bought it, for their own use — this is NOT a shared registry).
 Fill rates below treat **0 as absent**, measured over 23 hits.
 
