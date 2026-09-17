@@ -411,10 +411,31 @@ caller stops at first hit. Tested against the 24 real saved vendor payloads in
 eating paid rows. Mutation-tested. **Visible: nothing. Flagged bluntly rather than dressed up.**
 This is also where the missing tests get written, BEFORE behaviour changes.
 
-**Phase 3 — execute the plan.** B5, B6, then the caller that runs `planRoute()`: dossier, re-enter
-with the discovered owner, route to the contact vendor. Charge immediately after the dossier
-returns, in the same request, because the dossier call is synchronous.
+**Phase 3 — execute the plan.** Split in two because 3b was blocked on a pricing decision.
+
+*3a (in flight):* B5 (plan-aware `planRoute`, and the default must NOT stay `pro`), B6
+(`ParcelInput` accepts an address-only parcel), and `executeRoute()` — runs a plan, stops at the
+first hit, re-enters `planRoute` with the discovered owner, distinguishes a vendor FAILURE from a
+MISS. No billing, no persistence, no routes.
+
+*3b:* wire it into the single-trace API with per-record billing and persistence.
+
+**Billing rules, settled 2026-09-17, both by David:**
+- **Every record submitted is billed, including a total dossier miss.** "Per record" is literal.
+  A customer can receive nothing and still be charged. Legitimate, but see the UI requirement.
+- **The miss is CACHED.** A re-submit inside 90 days is free. A billed tier-2 miss row is
+  `tier = 2`, `charge > 0`, `property_record IS NULL`, `status = 'no_match'`, and
+  **`CACHE_HIT_FILTER` needs a third arm for it** or it re-buys. The delete guard already covers
+  it, because `isBilledRow` is true on `charge > 0`.
+- Deduct fires AFTER the dossier call returns, in the same request, because the dossier is a
+  synchronous POST. Never on submission: a record that dies on validation before any vendor call
+  must not be billed.
+
 **Visible:** Full Property Trace works end to end on one address via the API.
+
+**PHASE 4 REQUIREMENT this creates, not optional:** the UI must disclose that a charge applies
+whether or not anything is found, BEFORE the submit. The existing AI Search dialog says "You will
+be charged $0.15 if an owner is found"; tier 2 needs the inverse sentence.
 
 **Phase 4 — remove AI Search and ship the UI.** The deletion list above, plus the Full Property
 Trace panel, the opt-in toggle, and every string that currently says AI Search. Kill
@@ -757,3 +778,46 @@ test red (1 to 8 failures each). Includes the `tier` stamps, the `property_recor
   the surviving row instead of colliding with it.
 
 ---
+
+# REVIEW: Phase 3a (2026-09-17) — B5, B6 and the executor. In the tree, uncommitted.
+
+Scope was 3a only: the two `ownerRoute` defects plus a route EXECUTOR. **No billing, no
+persistence, no API route, no UI**, and no file under `app/` was touched. 3b still waits on the
+pricing decision.
+
+## What changed
+
+- [x] **B5 — `planRoute(parcel, pricePlan)`.** Plan is a **required** parameter.
+      `DEFAULT_PRICE_PLAN` is deleted; `FAILSAFE_PRICE_PLAN = 'wallet'` replaces it and is used
+      only when a value escapes the compiler (a JS caller, a NULL plan column). Required beats a
+      safe default because the compiler then blocks the mis-wire before a customer sees it; the
+      failsafe points at the **dearest** column so anything that still slips through overcharges
+      visibly instead of undercharging silently.
+- [x] **B6 — `parcelIdLocal` and `county` are optional.** The existing no-APN path was verified,
+      not rewritten. The one branch that genuinely broke was the tier 1 `TRACERFY_PARCEL_APN`
+      fallback, which would have sent `parcel_id: undefined`; it now routes to manual review.
+- [x] **`RoutePlan` echoes `pricePlan` and `parcel`** so the two-pass re-entry is faithful.
+- [x] **`lib/routing/executeRoute.ts`.** `executeRoute(plan, deps)`. Stop at first hit; two-pass
+      re-entry classified by NAME; per-step spend read from `credits_deducted`; raw 86-key record
+      passed by reference; a vendor failure is never a miss; never throws.
+- [x] 43 tests added, written first. Six mutations applied and reverted; all killed.
+
+## Numbers
+
+| | Before | After |
+|---|---|---|
+| `npx vitest run` | 337 passing, 36 files | **380 passing, 37 files, 0 failing** |
+| `npx tsc --noEmit` | 9 errors (all dotenv, research-scripts) | **9, unchanged** |
+| `npx eslint app lib components` | 54 problems | **54, unchanged** (`lib/routing` is clean) |
+
+## What 3b inherits, and the one thing it must not get wrong
+
+`ExecutionResult.success` is the billing gate, **not** `ownerFound`. Under the 2026-09-17
+per-record decision a dossier MISS is billed and returns `success: true, ownerFound: false,
+vendorSpend: 0`. A vendor FAILURE returns `success: false` with `error` set and must not be
+billed at all. The two are indistinguishable by `ownerFound` alone, which is exactly the
+mistake that would bill customers for an outage.
+
+Still open for 3b: `executeRoute` does not backfill a missing zip from the dossier record before
+the contact call, though the address-mode step's own `why` notes the dossier returns one. It is a
+possible match-rate improvement for the named Tracerfy lookup, not a defect.

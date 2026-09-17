@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  classifyOwnerName, splitPersonName, assessLoan, planRoute, PRICE, DEFAULT_PRICE_PLAN, VENDOR_COST,
-  type ParcelInput,
+  classifyOwnerName, splitPersonName, assessLoan, planRoute, PRICE, FAILSAFE_PRICE_PLAN, VENDOR_COST,
+  type ParcelInput, type PricePlan, type RoutePlan,
 } from '../ownerRoute'
 
 /**
@@ -157,6 +157,12 @@ const parcel = (over: Partial<ParcelInput> = {}): ParcelInput => ({
   ownerName: null, ...over,
 })
 
+/**
+ * planRoute now REQUIRES a plan. The routing tests below are about which vendor runs, not
+ * about price, so they name one plan here once. The pricing tests pass the plan explicitly.
+ */
+const routeFor = (p: ParcelInput): RoutePlan => planRoute(p, 'wallet')
+
 describe('PRICE', () => {
   // The old shape held TIER_1_PER_SUCCESS 0.15 + TIER_2_PER_RECORD 0.40, which mixed the
   // pro tier-1 rate with the pay-as-you-go tier-2 rate and so described no real customer.
@@ -185,17 +191,138 @@ describe('PRICE', () => {
   })
 })
 
+describe('planRoute pricing by plan (B5)', () => {
+  const PLANS: PricePlan[] = ['pro', 'acqPro', 'wallet']
+
+  it.each(PLANS)('prices both tiers from the %s column, not a hardcoded one', (plan) => {
+    expect(planRoute(parcel({ ownerName: 'Abc Rentals Llc' }), plan).billing)
+      .toEqual({ model: 'per_successful_trace', amount: PRICE[plan].tier1PerSuccess })
+    expect(planRoute(parcel(), plan).billing)
+      .toEqual({ model: 'per_record', amount: PRICE[plan].tier2PerRecord })
+  })
+
+  it('bills pay-as-you-go at the wallet rate, not the pro rate', () => {
+    // THE DEFECT. The old planRoute reported $0.25 here, 40% under rate, on every
+    // pay-as-you-go tier 2 record, and $0.15 instead of $0.25 on tier 1.
+    expect(planRoute(parcel(), 'wallet').billing.amount).toBe(0.40)
+    expect(planRoute(parcel({ ownerName: 'Abc Rentals Llc' }), 'wallet').billing.amount).toBe(0.25)
+  })
+
+  it('never prices one plan at another plans rate', () => {
+    for (const plan of PLANS) {
+      const tier2 = planRoute(parcel(), plan).billing.amount
+      const tier1 = planRoute(parcel({ ownerName: 'Abc Rentals Llc' }), plan).billing.amount
+      expect(tier2).toBe(PRICE[plan].tier2PerRecord)
+      expect(tier1).toBe(PRICE[plan].tier1PerSuccess)
+    }
+  })
+
+  // THE TRAP TEST. planRoute has no default plan: the parameter is required, so a caller
+  // that forgets one does not compile. A value that only goes wrong at runtime (a JS caller,
+  // or a plan column that came back NULL) falls through to the MOST EXPENSIVE column, so a
+  // mis-wire overcharges and gets reported rather than undercharging silently and invisibly.
+  // If anyone ever restores a cheap default, these go red.
+  it('fails safe to the dearest column when no plan reaches it at runtime', () => {
+    const noPlan = planRoute as unknown as (p: ParcelInput) => RoutePlan
+    expect(noPlan(parcel()).billing.amount).toBe(PRICE.wallet.tier2PerRecord)
+    expect(noPlan(parcel()).billing.amount).not.toBe(PRICE.pro.tier2PerRecord)
+    expect(noPlan(parcel({ ownerName: 'Abc Rentals Llc' })).billing.amount)
+      .toBe(PRICE.wallet.tier1PerSuccess)
+  })
+
+  it('fails safe to the dearest column on an unrecognised plan name', () => {
+    const dearestTier2 = Math.max(...Object.values(PRICE).map(p => p.tier2PerRecord))
+    const dearestTier1 = Math.max(...Object.values(PRICE).map(p => p.tier1PerSuccess))
+    const bogus = 'enterprise' as PricePlan
+    expect(planRoute(parcel(), bogus).billing.amount).toBe(dearestTier2)
+    expect(planRoute(parcel({ ownerName: 'Abc Rentals Llc' }), bogus).billing.amount).toBe(dearestTier1)
+  })
+
+  it('names the dearest plan as the failsafe, never the cheapest', () => {
+    for (const plan of PLANS) {
+      expect(PRICE[FAILSAFE_PRICE_PLAN].tier1PerSuccess).toBeGreaterThanOrEqual(PRICE[plan].tier1PerSuccess)
+      expect(PRICE[FAILSAFE_PRICE_PLAN].tier2PerRecord).toBeGreaterThanOrEqual(PRICE[plan].tier2PerRecord)
+    }
+  })
+
+  it('echoes the plan and the parcel it planned from, so a re-entry can be faithful', () => {
+    // The tier 2 two-pass re-enters planRoute with the discovered owner. It can only do
+    // that at the same rate, for the same parcel, if the plan carries both.
+    const p = parcel()
+    const r = planRoute(p, 'acqPro')
+    expect(r.pricePlan).toBe('acqPro')
+    expect(r.parcel).toEqual(p)
+  })
+})
+
+describe('planRoute with an address-only parcel (B6)', () => {
+  /** What every entry point in PTP actually produces: no parcel id, no county. */
+  const addressOnly = (over: Partial<ParcelInput> = {}): ParcelInput => ({
+    state: 'UT',
+    situsAddress: '1815 S State St', situsCity: 'Salt Lake City', situsState: 'UT', situsZip: null,
+    ownerName: null, ...over,
+  })
+
+  it('accepts a parcel with no parcelIdLocal and no county at all', () => {
+    // Not '' placeholders: the keys are ABSENT, which is the shape the app produces.
+    const r = planRoute(addressOnly(), 'wallet')
+    expect(r.tier).toBe(2)
+    expect(r.needsOwnerDiscovery).toBe(true)
+    expect(r.steps).toHaveLength(1)
+    expect(r.steps[0].kind).toBe('DOSSIER_ADDRESS')
+  })
+
+  it('sends only the address key, never a half-built APN key', () => {
+    const r = planRoute(addressOnly({ situsZip: '84115' }), 'wallet')
+    expect(r.steps[0].request).toEqual({
+      address: '1815 S State St', city: 'Salt Lake City', state: 'UT', zip_code: '84115',
+    })
+    expect(r.steps[0].request).not.toHaveProperty('apn')
+    expect(r.steps[0].request).not.toHaveProperty('county')
+  })
+
+  it('still prices, warns and costs correctly with one step', () => {
+    const r = planRoute(addressOnly(), 'wallet')
+    expect(r.billing).toEqual({ model: 'per_record', amount: PRICE.wallet.tier2PerRecord })
+    expect(r.steps[0].costOnHit).toBe(VENDOR_COST.DOSSIER)
+    expect(r.steps[0].freeOnMiss).toBe(true)
+    expect(r.warnings.join(' ')).toMatch(/Re-enter planRoute/)
+    expect(r.warnings.join(' ')).not.toMatch(/Neither dossier key/)
+  })
+
+  it('warns about the missing zip rather than silently sending none', () => {
+    expect(planRoute(addressOnly(), 'wallet').warnings.join(' ')).toMatch(/No zip sent/)
+  })
+
+  it('reaches the no-key warning when an address-only parcel has no situs either', () => {
+    const r = planRoute(addressOnly({ situsAddress: null, situsCity: null, situsState: null }), 'wallet')
+    expect(r.steps).toHaveLength(0)
+    expect(r.warnings.join(' ')).toMatch(/Neither dossier key/)
+  })
+
+  it('never emits an APN-keyed contact step for an address-only individual with no situs', () => {
+    // Making the APN optional exposes this: the tier 1 APN fallback would otherwise be
+    // built with parcel_id undefined and county undefined, a request that cannot match.
+    const r = planRoute(
+      addressOnly({ ownerName: 'Marcus T Halloway', situsAddress: null, situsCity: null, situsState: null }),
+      'wallet',
+    )
+    expect(r.steps).toHaveLength(0)
+    expect(r.warnings.join(' ')).toMatch(/manual review/)
+  })
+})
+
 describe('planRoute', () => {
   it('bills tier 1 per successful trace and tier 2 per record', () => {
-    expect(planRoute(parcel({ ownerName: 'Abc Rentals Llc' })).billing)
-      .toEqual({ model: 'per_successful_trace', amount: PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess })
-    expect(planRoute(parcel()).billing)
-      .toEqual({ model: 'per_record', amount: PRICE[DEFAULT_PRICE_PLAN].tier2PerRecord })
+    expect(routeFor(parcel({ ownerName: 'Abc Rentals Llc' })).billing)
+      .toEqual({ model: 'per_successful_trace', amount: PRICE.wallet.tier1PerSuccess })
+    expect(routeFor(parcel()).billing)
+      .toEqual({ model: 'per_record', amount: PRICE.wallet.tier2PerRecord })
   })
 
   it('bills an entity and an individual the SAME tier 1 amount, differing only in vendor', () => {
-    const entity = planRoute(parcel({ ownerName: 'Abc Rentals Llc' }))
-    const person = planRoute(parcel({ ownerName: 'Marcus T Halloway' }))
+    const entity = routeFor(parcel({ ownerName: 'Abc Rentals Llc' }))
+    const person = routeFor(parcel({ ownerName: 'Marcus T Halloway' }))
     expect(entity.ownerType).toBe('entity')
     expect(person.ownerType).toBe('individual')
     // Different vendor...
@@ -203,11 +330,11 @@ describe('planRoute', () => {
     expect(person.steps[0].kind).toBe('TRACERFY_INSTANT_NAMED')
     // ...same price. There is no entity rate, surcharge or discount in the model.
     expect(entity.billing).toEqual(person.billing)
-    expect(entity.billing.amount).toBe(PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess)
+    expect(entity.billing.amount).toBe(PRICE.wallet.tier1PerSuccess)
   })
 
   it('routes a known entity to FastAppend with no address', () => {
-    const r = planRoute(parcel({ ownerName: 'Storage Trust Properties', state: 'OH' }))
+    const r = routeFor(parcel({ ownerName: 'Storage Trust Properties', state: 'OH' }))
     expect(r.steps).toHaveLength(1)
     expect(r.steps[0].kind).toBe('FASTAPPEND_ENTITY')
     expect(r.steps[0].request).not.toHaveProperty('address')
@@ -215,19 +342,19 @@ describe('planRoute', () => {
   })
 
   it('warns that the property state is standing in for the registration state', () => {
-    const r = planRoute(parcel({ ownerName: 'Storage Trust Properties', state: 'OH' }))
+    const r = routeFor(parcel({ ownerName: 'Storage Trust Properties', state: 'OH' }))
     expect(r.warnings.join(' ')).toMatch(/STATE OF REGISTRATION/)
     expect(r.steps[0].request.state).toBe('OH')
   })
 
   it('uses a known registration state over the property state', () => {
-    const r = planRoute(parcel({ ownerName: 'Storage Trust Properties', state: 'OH', registrationState: 'DE' }))
+    const r = routeFor(parcel({ ownerName: 'Storage Trust Properties', state: 'OH', registrationState: 'DE' }))
     expect(r.steps[0].request.state).toBe('DE')
     expect(r.warnings.join(' ')).not.toMatch(/STATE OF REGISTRATION/)
   })
 
   it('routes a known individual with situs to a named lookup, not find_owner', () => {
-    const r = planRoute(parcel({ ownerName: 'Marcus T Halloway | Halloway Living Trust' }))
+    const r = routeFor(parcel({ ownerName: 'Marcus T Halloway | Halloway Living Trust' }))
     expect(r.steps[0].kind).toBe('TRACERFY_INSTANT_NAMED')
     // find_owner true missed on this absentee-owned parcel; the named lookup hit.
     expect(r.steps[0].request.find_owner).toBe(false)
@@ -235,55 +362,55 @@ describe('planRoute', () => {
   })
 
   it('warns never to filter on property_owner once the name is known', () => {
-    const r = planRoute(parcel({ ownerName: 'Marcus T Halloway' }))
+    const r = routeFor(parcel({ ownerName: 'Marcus T Halloway' }))
     expect(r.warnings.join(' ')).toMatch(/property_owner/)
   })
 
   it('falls back to the APN key for an individual with incomplete situs', () => {
-    const r = planRoute(parcel({ ownerName: 'Marcus T Halloway', situsAddress: null, situsCity: null, situsState: null }))
+    const r = routeFor(parcel({ ownerName: 'Marcus T Halloway', situsAddress: null, situsCity: null, situsState: null }))
     expect(r.steps[0].kind).toBe('TRACERFY_PARCEL_APN')
   })
 
   it('emits both dossier keys when both are available, because they fail independently', () => {
     // Salt Lake missed on APN and hit on address. Napa did the reverse.
-    const r = planRoute(parcel())
+    const r = routeFor(parcel())
     expect(r.steps.map(s => s.kind)).toEqual(['DOSSIER_APN', 'DOSSIER_ADDRESS'])
     expect(r.needsOwnerDiscovery).toBe(true)
   })
 
   it('plans an address only prospect with no parcel id', () => {
-    const r = planRoute(parcel({ parcelIdLocal: '', county: '' }))
+    const r = routeFor(parcel({ parcelIdLocal: '', county: '' }))
     expect(r.steps.map(s => s.kind)).toEqual(['DOSSIER_ADDRESS'])
     expect(r.steps[0].request).toMatchObject({ address: '1815 S State St', city: 'Salt Lake City', state: 'UT' })
   })
 
   it('plans an APN only parcel with no situs', () => {
-    const r = planRoute(parcel({ situsAddress: null, situsCity: null, situsState: null }))
+    const r = routeFor(parcel({ situsAddress: null, situsCity: null, situsState: null }))
     expect(r.steps.map(s => s.kind)).toEqual(['DOSSIER_APN'])
   })
 
   it('emits no steps and says so when neither key is available', () => {
-    const r = planRoute(parcel({ parcelIdLocal: '', county: '', situsAddress: null, situsCity: null, situsState: null }))
+    const r = routeFor(parcel({ parcelIdLocal: '', county: '', situsAddress: null, situsCity: null, situsState: null }))
     expect(r.steps).toHaveLength(0)
     expect(r.warnings.join(' ')).toMatch(/Neither dossier key/)
   })
 
   it('sends a trust-only owner to manual review rather than guessing a vendor', () => {
-    const r = planRoute(parcel({ ownerName: 'Halloway Living Trust' }))
+    const r = routeFor(parcel({ ownerName: 'Halloway Living Trust' }))
     expect(r.ownerType).toBe('trust')
     expect(r.steps).toHaveLength(0)
     expect(r.warnings.join(' ')).toMatch(/manual review/)
   })
 
   it('never invents a vendor for an unclassifiable owner', () => {
-    const r = planRoute(parcel({ ownerName: '???' }))
+    const r = routeFor(parcel({ ownerName: '???' }))
     expect(r.steps).toHaveLength(0)
     expect(r.warnings.join(' ')).toMatch(/manual review/)
   })
 
   it('every step is free on a miss, so a fallback only costs money when it works', () => {
     for (const p of [parcel(), parcel({ ownerName: 'Abc Rentals Llc' }), parcel({ ownerName: 'Marcus T Halloway' })]) {
-      for (const s of planRoute(p).steps) expect(s.freeOnMiss).toBe(true)
+      for (const s of routeFor(p).steps) expect(s.freeOnMiss).toBe(true)
     }
   })
 })

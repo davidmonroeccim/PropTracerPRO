@@ -6,6 +6,43 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 3a: plan-aware pricing, address-only parcels, and the executor
+
+**Scope was deliberately half of phase 3.** B5, B6 and `executeRoute()`. No billing, no
+persistence, no API route, no UI: 3b depends on a pricing decision still with David.
+
+- **B5 — `planRoute()` prices by PLAN.** It hardcoded the `pro` column, billing a
+  pay-as-you-go customer $0.25 instead of $0.40 on tier 2 and $0.15 instead of $0.25 on tier 1,
+  a 40% shortfall that produced no error and no complaint. The plan is now a **required**
+  parameter: TypeScript refuses to compile a caller that has not thought about it, so the
+  mis-wire cannot reach a customer. `DEFAULT_PRICE_PLAN` is **gone**, replaced by
+  `FAILSAFE_PRICE_PLAN = 'wallet'`, which covers only what the compiler cannot (a JS caller, a
+  NULL plan column) and prices the **dearest** column so a mis-wire overcharges and gets
+  reported rather than undercharging invisibly.
+- **B6 — `ParcelInput` accepts an address-only parcel.** `parcelIdLocal` and `county` are now
+  optional, because nothing in PTP produces either and address mode is proven. The existing
+  no-APN path was correct and was left alone. One latent defect it exposed WAS fixed: the tier 1
+  `TRACERFY_PARCEL_APN` fallback would have been built with `parcel_id` and `county` undefined.
+  It now routes to manual review instead of sending a request that cannot match.
+- **`RoutePlan` now echoes `pricePlan` and `parcel`.** The tier 2 two-pass re-enters
+  `planRoute()`, and it can only do so faithfully if the plan carries what it was planned from.
+- **`lib/routing/executeRoute.ts` — the executor.** Pure of I/O except through injected vendor
+  callables, so the whole spend path is testable without a network. Stops at the first hit
+  (a second dossier key after a hit is $0.20 wasted per record). Two passes: the discovered owner
+  is classified by NAME via `classifyOwnerName`, never by the vendor's `corporate_owned` flag,
+  which returns FALSE for a Delaware LP. Reports spend per step from the vendor's own
+  `credits_deducted`. Hands the 86-key property record through **by reference**. Never throws.
+- **A vendor FAILURE is not a MISS.** A miss is free, final, and billable under the per-record
+  model. A failure is free, not final, and not billable: it returns `success: false` with the
+  error, and stops the remaining steps rather than compounding an outage against a rate limit
+  shared across Tracerfy's endpoints. The caller gates the charge on `success`, never on
+  `ownerFound`.
+- **Tests: 337 → 380 passing, 36 → 37 files, 0 failing.** 43 added, written before the code.
+  Six mutations verified the guards, each reverted after measuring: removing stop-at-first-hit
+  kills 3, collapsing failure into miss kills 4, pointing the failsafe back at the cheap column
+  kills 3, subsetting the raw record kills 2, assuming the dossier rate instead of reading
+  `credits_deducted` kills 1, trusting `corporate_owned` kills 2.
+
 ### Full Property Trace, phase 2: the fixes that prevent double-billing
 
 **Visible output: none. That is the phase, not a shortfall.** Phase 2 makes a row shape safe before

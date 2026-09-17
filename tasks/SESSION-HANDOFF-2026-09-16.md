@@ -360,6 +360,47 @@ Either name is workable. **The decision is David's; this is a recommendation onl
 chosen must be used consistently in the UI, the API docs, the MCP tool descriptions, the pricing
 page and the user notification, all of which currently say "AI Search" or "AI research".
 
+### DECIDED 2026-09-17: A DOSSIER MISS IS STILL BILLED. "Per record submitted" is literal.
+
+Two different misses had been conflated and only one had ever been decided:
+
+| Case | We spend | Customer receives | Billed? |
+|---|---|---|---|
+| Dossier HITS, contact step finds nothing | $0.20 | the 86-field property record | **YES**, always was |
+| Dossier MISSES, no parcel found at all | **$0.00** (misses are free) | **nothing** | **YES** — David, 2026-09-17 |
+
+David chose to bill the second case too. It matches the handoff's margin table, which bills 100
+records against 96 dossier hits, and it matches the notification copy he has already approved:
+*"you are charged per record you send us, whether or not contacts come back."*
+
+**The consequence to design around: a customer can submit a record, receive literally nothing, and
+be charged.** That is legitimate under this model but it MUST be disclosed BEFORE the charge, not
+discovered after. The existing AI Search confirm dialog says *"You will be charged $0.15 if an
+owner is found"* — tier 2 needs the inverse sentence. **Phase 4 UI requirement, not optional.**
+
+**OPEN, and it follows mechanically from this decision: is a repeated miss charged every time?**
+David's rule is *"if a rerun pulls from Tracerfy and not the database, they get charged."* A
+re-submit after a miss has no stored record to serve, so it does pull from Tracerfy, so by that
+rule it charges again. A customer with a bad address could pay four times for four nothings.
+
+**AGREED by David 2026-09-17: the MISS IS CACHED.** A re-submit inside the 90-day window is free.
+It costs nothing (the vendor charges us nothing for a miss either way), it closes the only path
+where a customer can be billed repeatedly for the same absence, and it stays inside David's rule
+because the answer is then served from the database rather than from Tracerfy.
+
+**Implementation, and it is smaller than it sounds.** A billed tier-2 miss is a row with
+`tier = 2`, `charge > 0`, `property_record IS NULL`, `status = 'no_match'`. Two consequences:
+
+- **`CACHE_HIT_FILTER` in `lib/trace/billedRows.ts` must gain a third arm.** Today it is
+  `is_successful.eq.true,property_record.not.is.null`, and a tier-2 miss row matches NEITHER, so
+  it would re-buy. It needs the equivalent of `(tier = 2 AND charge > 0)`: **a billed tier-2 row
+  is served from the database whatever it contains.** That IS David's rule stated exactly.
+- **The delete guard already covers it, no change needed.** `isBilledRow` returns true on
+  `charge > 0`, so a billed miss row is already protected from all ten delete sites.
+
+**After 90 days it re-buys, which is correct**, not a loophole: county records change, and an
+address with no parcel today may have one next year.
+
 ### RATE LIMIT CORRECTION, same source, read 2026-09-17.
 
 The handoff's **500/min for the dossier is CORRECT**, but incomplete in a way that matters for

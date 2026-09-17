@@ -41,9 +41,7 @@ export const VENDOR_COST = {
  * cost-side only; do not let them leak into this table. Anyone adding an entity rate here is
  * restoring a model David has now corrected three times.
  *
- * NOTE: planRoute() does not yet select by plan. It still reports the `pro` column, which is
- * what the previous shape's TIER_1 number was. Wiring the plan through is the next session's
- * job and changes planRoute's signature; see tasks/todo.md section A.
+ * planRoute() selects by plan. The plan is a REQUIRED parameter — see FAILSAFE_PRICE_PLAN.
  */
 export type PricePlan = 'pro' | 'acqPro' | 'wallet'
 
@@ -53,13 +51,39 @@ export const PRICE: Record<PricePlan, { tier1PerSuccess: number; tier2PerRecord:
   wallet: { tier1PerSuccess: 0.25, tier2PerRecord: 0.40 },
 } as const
 
-/** The plan planRoute() prices against until the caller passes one. See the note on PRICE. */
-export const DEFAULT_PRICE_PLAN: PricePlan = 'pro'
+/**
+ * DESIGN DECISION, 2026-09-17: planRoute takes a REQUIRED plan, and the only fallback is the
+ * DEAREST column. There is deliberately no default plan.
+ *
+ * The bug this replaces was a default of 'pro'. It cost a pay-as-you-go customer's invoice
+ * $0.15 instead of $0.25 on tier 1 and $0.25 instead of $0.40 on tier 2 — a 40% shortfall
+ * that produced no error, no log line and no complaint, because nobody reports being
+ * undercharged. It was found by reading the code, which is the only way it could be found.
+ *
+ * REQUIRED beats a safer default because TypeScript then refuses to compile a caller that
+ * has not thought about the plan, so the mis-wire never reaches a customer at all. The
+ * signature change is the point: it forces every call site to be read once.
+ *
+ * FAILSAFE_PRICE_PLAN covers only what the compiler cannot: a JS caller, or a plan column
+ * that came back NULL from the database and was cast. In that case we price the most
+ * expensive column of every plan, so a mis-wire OVERCHARGES. An overcharge is visible on a
+ * customer's statement and gets reported and refunded within a billing cycle; an undercharge
+ * is invisible to both sides and compounds silently. Never point this at the cheap column.
+ */
+export const FAILSAFE_PRICE_PLAN: PricePlan = 'wallet'
+
+const priceFor = (plan: PricePlan) => PRICE[plan] ?? PRICE[FAILSAFE_PRICE_PLAN]
 
 export interface ParcelInput {
-  parcelIdLocal: string
-  /** Bare county name. Tracerfy wants "Stark", never "Stark County". */
-  county: string
+  /**
+   * OPTIONAL. Nothing in PTP produces a parcel id today: every entry point is address
+   * shaped. Address mode is proven — Salt Lake 16183060290000 missed on APN and hit on
+   * address, returning the owner the county recorder confirms — so requiring an APN here
+   * would have locked the whole app out of tier 2.
+   */
+  parcelIdLocal?: string | null
+  /** Bare county name, and OPTIONAL for the same reason. Tracerfy wants "Stark", never "Stark County". */
+  county?: string | null
   /** 2-letter property state. */
   state: string
   situsAddress?: string | null
@@ -92,6 +116,16 @@ export interface RouteStep {
 export interface RoutePlan {
   tier: BillingTier
   billing: { model: 'per_record' | 'per_successful_trace'; amount: number }
+  /**
+   * The plan and the parcel this route was planned from, echoed back.
+   *
+   * The tier 2 two-pass RE-ENTERS planRoute with the discovered owner name (see the warning
+   * emitted below). It can only do that for the same parcel and at the same rate if the plan
+   * carries both, and an executor that has to be handed them separately can be handed the
+   * wrong ones.
+   */
+  pricePlan: PricePlan
+  parcel: ParcelInput
   ownerName: string | null
   ownerType: OwnerType
   /** True when the owner must be purchased before routing can be decided. */
@@ -277,7 +311,11 @@ function saleIsFresh(date?: string | null): boolean {
 const hasSitus = (p: ParcelInput): boolean =>
   Boolean(p.situsAddress?.trim() && p.situsCity?.trim() && p.situsState?.trim())
 
-export function planRoute(parcel: ParcelInput): RoutePlan {
+/** Both halves or neither: the APN-keyed endpoints reject an apn without its county. */
+const hasApn = (p: ParcelInput): boolean =>
+  Boolean(p.parcelIdLocal?.trim() && p.county?.trim())
+
+export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan {
   const warnings: string[] = []
   const ownerKnown = Boolean(parcel.ownerName?.trim())
   const tier: BillingTier = ownerKnown ? 1 : 2
@@ -311,8 +349,7 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
       why: 'address-keyed dossier; independent coverage from the APN key, and it backfills zip',
     }
 
-    const hasApn = Boolean(parcel.parcelIdLocal?.trim() && parcel.county?.trim())
-    if (hasApn) steps.push(apnStep)
+    if (hasApn(parcel)) steps.push(apnStep)
     if (hasSitus(parcel)) steps.push(addressStep)
 
     if (!steps.length) {
@@ -327,7 +364,8 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
     }
 
     return {
-      tier, billing: { model: 'per_record', amount: PRICE[DEFAULT_PRICE_PLAN].tier2PerRecord },
+      tier, billing: { model: 'per_record', amount: priceFor(pricePlan).tier2PerRecord },
+      pricePlan, parcel,
       ownerName: null, ownerType: 'unknown', needsOwnerDiscovery: true, steps,
       // Only one dossier key can hit, so the realistic ceiling is one dossier plus one contact call.
       maxVendorCost: VENDOR_COST.DOSSIER + VENDOR_COST.FASTAPPEND_ENTITY,
@@ -376,7 +414,7 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
       if (!parcel.situsZip?.trim()) {
         warnings.push('No zip. Tracerfy calls it strongly recommended; without it a similar address in the same city can match.')
       }
-    } else {
+    } else if (hasApn(parcel)) {
       steps.push({
         kind: 'TRACERFY_PARCEL_APN',
         endpoint: 'POST https://tracerfy.com/v1/api/trace/parcel/lookup/',
@@ -386,6 +424,13 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
         why: 'individual owner, situs incomplete; APN-keyed fallback',
       })
       warnings.push('Situs incomplete, so the cheaper address-keyed path is unavailable.')
+    } else {
+      // Exposed by making the APN optional: this branch used to build a request with
+      // parcel_id and county undefined, which cannot match a parcel and should never be sent.
+      warnings.push(
+        'Individual owner, but neither a complete situs nor a parcel id with county. ' +
+        'No lookup key exists for this owner. Route to manual review.',
+      )
     }
   } else if (ownerType === 'trust') {
     warnings.push(
@@ -398,7 +443,8 @@ export function planRoute(parcel: ParcelInput): RoutePlan {
 
   return {
     tier,
-    billing: { model: 'per_successful_trace', amount: PRICE[DEFAULT_PRICE_PLAN].tier1PerSuccess },
+    billing: { model: 'per_successful_trace', amount: priceFor(pricePlan).tier1PerSuccess },
+    pricePlan, parcel,
     ownerName, ownerType, needsOwnerDiscovery: false, steps,
     maxVendorCost: steps.reduce((a, s) => a + s.costOnHit, 0),
     warnings,
