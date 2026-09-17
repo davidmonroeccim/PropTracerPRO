@@ -6,6 +6,51 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 4b: the dossier reaches the Suite Gateway
+
+**The spec was aimed at the wrong system and got rewritten before anything was built.** 4b was
+scoped as auto-creating 65 CONTACT custom fields in each user's GoHighLevel over the API, with a
+Private Integration Token scope warning. Reading the gateway killed all three assumptions. See
+`tasks/lessons.md` L-010.
+
+- **Most users get this data through the Suite Gateway, not PTP's own push.** Only 6 of 52 PTP
+  users have direct HighLevel credentials configured at all, and the gateway CRM path has pushed
+  331 properties for 3 users.
+- **The gateway keeps property data on a custom object**, `custom_objects.property`, not on the
+  Contact. Read live: 50 fields today.
+- **Nobody has the permission the auto-create needed.** PTP's own setup page tells users to grant
+  only the `contacts` scope, and the API cannot create property-object fields at all
+  (`POST /custom-fields/` rejects `custom_objects.property` with "Invalid object key").
+- **The gateway reads PTP over MCP, never from PTP's database.** No PTP project ref exists
+  anywhere in that repo. The proxy path returns PTP's response verbatim; `crm_push_owners` parses
+  it and silently drops every key it does not name.
+
+**So the PTP change is small and it is the whole PTP change.** `listTraces` and
+`buildPerRecordResult` in `lib/suite/mcp-tools.ts` now emit `property_record` and `tier`, filtered
+through `toPublicPropertyRecord`. A gateway caller receives exactly 65 keys, verified by probing
+the real function against the 86-key fixture; the 21 provably-wrong keys never appear.
+
+- **The select was the trap.** Neither column was in `listTraces`'s `.select(...)`, so without
+  adding them the change would have been a silent no-op that looked exactly like a customer who
+  had never bought a Full Property Trace. The test stubs now emulate PostgREST column projection,
+  so dropping a column from the select turns tests red instead of passing.
+- **13 mutations applied, and one honestly reported as 0 red.** Destructuring `property_record` out
+  of the `...rest` spread turns nothing red, because the explicit filtered key wins the collision
+  while the spread stays first. The comment now says it is defence in depth rather than claiming a
+  protection the mutation disproves. The variant that is a real leak, reordering the spread to
+  last, is caught.
+- **Tool descriptions updated** so an MCP caller knows the record exists, and the copy avoids the
+  literal `property_record:` pattern because the egress scanner correctly reads that as an
+  emission even inside prose.
+- **Delivered to David:** `tasks/ghl-property-fields-to-add.txt`, the 54 property-object fields to
+  add to the GHL snapshot template, with label, type and exact field key. 86 returned, 21 withheld,
+  65 delivered, 11 already present, 54 new. Checked against the live object rather than a cache.
+  Money type is excluded throughout, because MONETORY fields cannot be written.
+- **Numbers:** 864 tests passing from 849, 56 files, 0 failing. `tsc` 0. eslint 47. Build compiles.
+- **Not done, deliberately:** the gateway's own mirror (different repo, after the snapshot ships)
+  and PTP's direct HighLevel push, which is dropped rather than built.
+
+
 ### Full Property Trace, phase 4a COMPLETE: AI Search removed, the UI shipped, v1 wired
 
 Consolidated entry. The per-pass entries below carry the detail; this is the summary.

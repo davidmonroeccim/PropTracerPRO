@@ -70,7 +70,7 @@ const handler = createMcpHandler(
     );
     server.tool(
       "bulk_status",
-      "Retrieve the results of a skip_trace_bulk job by job_id. Each record returns owner_contact_name (the resolved human, which is the point of the trace) with owner_contact_source showing where it came from, alongside input_owner_name (the company or person you asked about), phones and emails. owner_contact_name and input_owner_name are DIFFERENT fields: report the former as the contact person and never substitute the company name for it. It is null when no human was resolved; leave the field empty in that case. A record can also come back with skip_reason set, which means no vendor was ever asked and nothing was charged for it; report that reason rather than calling it a no match. Successful matches settle their per-trace charge to the wallet as they land.",
+      "Retrieve the results of a skip_trace_bulk job by job_id. Each record returns owner_contact_name (the resolved human, which is the point of the trace) with owner_contact_source showing where it came from, alongside input_owner_name (the company or person you asked about), phones and emails. owner_contact_name and input_owner_name are DIFFERENT fields: report the former as the contact person and never substitute the company name for it. It is null when no human was resolved; leave the field empty in that case. A record can also come back with skip_reason set, which means no vendor was ever asked and nothing was charged for it; report that reason rather than calling it a no match. Successful matches settle their per-trace charge to the wallet as they land. A record traced as a Full Property Trace also carries tier 2 and a property record, holding the county record for that address at up to 65 fields covering the building, the land, the assessed value, the sale and recording history, the debt and the recorded status flags. It is null on a tier 1 trace, and the assessed value is a county assessment rather than a market valuation.",
       bulkStatusSchema.shape,
       tool((admin, sub, args) => bulkStatus(admin, sub, args)),
     );
@@ -82,7 +82,7 @@ const handler = createMcpHandler(
     );
     server.tool(
       "list_traces",
-      "List the caller's own past skip-traces (results already paid for), most recent first, including each trace's resolved owner_contact_name. Use to reuse prior contacts without tracing again.",
+      "List the caller's own past skip-traces (results already paid for), most recent first, including each trace's resolved owner_contact_name. Use to reuse prior contacts without tracing again. A trace that ran as a Full Property Trace carries tier 2 and a property_record, the county record for that address at up to 65 fields; both are null on a tier 1 trace. Reading a stored record here is free, because the customer has already paid for it.",
       listTracesSchema.shape,
       tool((admin, sub, args) => listTraces(admin, sub, args)),
     );

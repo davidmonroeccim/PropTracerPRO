@@ -16,6 +16,8 @@ import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/bl
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
+import { BLOCKED_PROPERTY_RECORD_KEYS } from "@/lib/trace/publicPropertyRecord";
+import entityHitAddress from "@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json";
 
 // Mock ONLY the boundary primitives that reach the network (submitBulkTrace,
 // settleBulkJob) or the cookie-scoped server client (checkDuplicates). The pure
@@ -46,13 +48,31 @@ beforeEach(() => {
   vi.mocked(settleBulkJob).mockResolvedValue({ stalledErrorReason: null });
 });
 
+/** POSTGREST COLUMN PROJECTION, EMULATED. A column the query never asked for does not come
+ *  back, and a stub that ignores `.select(...)` hides exactly that: a test asserting on
+ *  `property_record` would stay green even after the column was dropped from the select, which
+ *  is the failure that looks identical to success. `*` passes everything through. Only keys the
+ *  row actually carries are copied, so an absent column stays absent rather than becoming an
+ *  explicit `undefined`. */
+function projectRow(row: unknown, select: string): unknown {
+  if (select.trim() === "*") return row;
+  const columns = new Set(select.split(",").map((c) => c.trim()));
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+    if (columns.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 /** Admin stub whose from().select().eq().maybeSingle() resolves to `profile` (or `profileError` when
  *  set), whose from().select().eq().order().limit() resolves to `traces`, and whose
  *  from().select().eq().eq().gte() (walletBalance's today's-spend query) also resolves to `traces`
  *  (unused by the walletBalance tests below, which don't assert on mcp_spend_today).
  *  NOTE: adjusted from the brief's stub to add the `gte` terminal (walletBalance's actual chain awaits
  *  `.gte()` directly, not `.limit()` or `.maybeSingle()`); the implementation is the source of truth.
- *  `limitFn` lets a test capture the clamped value passed to `.limit(n)`. */
+ *  `limitFn` lets a test capture the clamped value passed to `.limit(n)`.
+ *  The `.limit()` terminal PROJECTS through the last `.select(...)` string, so listTraces only ever
+ *  sees the columns it actually asked for. */
 function adminStub({
   profile = null,
   profileError = null,
@@ -64,14 +84,19 @@ function adminStub({
   traces?: unknown[];
   limitFn?: (n: number) => void;
 }) {
+  // The trace_history select is the LAST one issued (resolvePtpProfile reads user_profiles first).
+  let lastSelect = "*";
   const chain = {
-    select: () => chain,
+    select: (columns?: string) => {
+      if (typeof columns === "string") lastSelect = columns;
+      return chain;
+    },
     eq: () => chain,
     order: () => chain,
     maybeSingle: async () => ({ data: profile, error: profileError }),
     limit: async (n: number) => {
       limitFn?.(n);
-      return { data: traces, error: null };
+      return { data: traces.map((r) => projectRow(r, lastSelect)), error: null };
     },
     gte: async () => ({ data: traces, error: null }),
   };
@@ -571,9 +596,16 @@ describe("skip_trace_bulk", () => {
 function statusAdminStub(opts: { profile: unknown; job: unknown; rows?: unknown[] }) {
   const { profile, job, rows = [] } = opts;
   const captured = { traceJobsUpdates: [] as unknown[] };
+  // Same projection fence as adminStub: bulkStatus reads trace_history with select("*"), and
+  // narrowing that select to a list without property_record / tier must turn the tests red
+  // rather than silently emit nulls.
+  let historySelect = "*";
   const chainFor = (table: string) => {
     const chain: Record<string, unknown> = {
-      select: () => chain,
+      select: (columns?: string) => {
+        if (table === "trace_history" && typeof columns === "string") historySelect = columns;
+        return chain;
+      },
       eq: () => chain,
       in: () => chain,
       update: (payload: unknown) => {
@@ -587,7 +619,10 @@ function statusAdminStub(opts: { profile: unknown; job: unknown; rows?: unknown[
             ? { data: job, error: null }
             : { data: null, error: null },
       then: (resolve: (v: unknown) => unknown) =>
-        resolve({ data: table === "trace_history" ? rows : null, error: null }),
+        resolve({
+          data: table === "trace_history" ? rows.map((r) => projectRow(r, historySelect)) : null,
+          error: null,
+        }),
     };
     return chain;
   };
@@ -795,5 +830,292 @@ describe("bulk_status", () => {
     )!;
     expect(fountain.owner_contact_name).toBeNull();
     expect(fountain.owner_contact_source).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PHASE 4b: the public property record and the tier on the GATEWAY-FACING surface
+// ---------------------------------------------------------------------------
+//
+// The Suite Gateway never reads PTP's database. It reads PTP over MCP, so a field
+// that is not on THIS surface cannot reach a customer's GoHighLevel no matter what
+// the REST routes return. Both readers that hand back trace rows -- list_traces and
+// bulk_status -- therefore carry `property_record` and `tier`, named exactly as
+// app/api/trace/single and app/api/v1/trace/single already name them, because the
+// gateway parses by exact key.
+//
+// THE RECORD IS FILTERED AT THIS DOOR, like every other. Storage keeps all 86 keys;
+// egress carries 65. The 21 withheld are provably WRONG rather than merely missing
+// (estimated_value is literally assessed_value, and the renovation models score a
+// 41,588 sqft commercial building as a "large home"), and this payload lands in a
+// customer's own CRM where it outlives any caveat.
+//
+// The blocked list is IMPORTED, never retyped. A hand-copied list in a test cannot
+// fail when the vendor adds a 22nd bad key, which is the only thing a test like this
+// is for.
+
+const RAW_PROPERTY_RECORD = (
+  entityHitAddress as unknown as { response: { property: Record<string, unknown> } }
+).response.property;
+
+/** A tier 2 row as the database holds it: the vendor's object verbatim, all 86 keys. */
+function tier2Row(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "r-tier2",
+    normalized_address: "1300 MAYFIELD DR",
+    city: "ASHTABULA",
+    state: "OH",
+    zip: "44004",
+    input_owner_name: null,
+    status: "success",
+    is_successful: true,
+    phone_count: 0,
+    email_count: 0,
+    charge: 0.4,
+    created_at: "2026-09-17T00:00:00.000Z",
+    trace_result: null,
+    ai_research: null,
+    ai_research_status: null,
+    property_record: RAW_PROPERTY_RECORD,
+    tier: 2,
+    ...overrides,
+  };
+}
+
+/** A tier 1 row: owner of record supplied, no dossier bought, so the column is NULL. */
+function tier1Row(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "r-tier1",
+    normalized_address: "500 MAIN ST",
+    city: "AUSTIN",
+    state: "TX",
+    zip: "78701",
+    input_owner_name: "Colmaven, Llc",
+    status: "success",
+    is_successful: true,
+    phone_count: 1,
+    email_count: 1,
+    charge: 0.15,
+    created_at: "2026-09-17T00:00:00.000Z",
+    trace_result: { owner_name: "Daniel Hamann" },
+    ai_research: null,
+    ai_research_status: null,
+    property_record: null,
+    tier: 1,
+    ...overrides,
+  };
+}
+
+/** The 65 keys a gateway caller is entitled to, derived rather than asserted from a
+ *  literal, so this stays correct when the vendor adds a key that is NOT blocked. */
+const PUBLIC_KEY_COUNT =
+  Object.keys(RAW_PROPERTY_RECORD).length - BLOCKED_PROPERTY_RECORD_KEYS.length;
+
+describe("the property record and tier on the gateway-facing MCP surface", () => {
+  // The two sides of this comparison CAN differ (L-009): the fixture carries all 21
+  // blocked keys populated, so an unfiltered emission is 86 keys and a filtered one
+  // is 65. If the fixture ever stops carrying them the filter tests below become
+  // tautologies, so the difference itself is asserted first.
+  it("the fixture can actually fail the filter tests, so they are not tautologies", () => {
+    expect(Object.keys(RAW_PROPERTY_RECORD)).toHaveLength(86);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(RAW_PROPERTY_RECORD, `${key} absent from the fixture`).toHaveProperty(key);
+    }
+    expect(PUBLIC_KEY_COUNT).toBe(65);
+  });
+
+  describe("list_traces", () => {
+    it("emits the 65 public keys and none of the 21 blocked ones on a tier 2 row", async () => {
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ property_record: Record<string, unknown> | null }>;
+      };
+      const record = out.traces[0].property_record!;
+      // MUTATION: drop toPublicPropertyRecord from listTraces and this goes red.
+      for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+        expect(record, `${key} reached the gateway`).not.toHaveProperty(key);
+      }
+      expect(Object.keys(record)).toHaveLength(PUBLIC_KEY_COUNT);
+      expect(record.assessed_value).toBe(RAW_PROPERTY_RECORD.assessed_value);
+      expect(record).toHaveProperty("price_per_sqft");
+    });
+
+    it("emits property_record: null on a tier 1 row, never an empty object", async () => {
+      // An empty object reads as "the county published nothing". It is the placeholder
+      // CLAUDE.md rule 7 forbids, and a gateway mapping it would write 65 blanks.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier1Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ property_record: unknown }>;
+      };
+      expect(out.traces[0].property_record).toBeNull();
+    });
+
+    it("carries the tier on both a tier 1 and a tier 2 row", async () => {
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row(), tier1Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ tier: number | null }>;
+      };
+      expect(out.traces.map((t) => t.tier)).toEqual([2, 1]);
+    });
+
+    it("reports a row written before the tier column existed as tier null", async () => {
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier1Row({ tier: null })],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as { traces: Array<{ tier: unknown }> };
+      expect(out.traces[0].tier).toBeNull();
+    });
+
+    it("never leaks the raw record alongside the filtered one", async () => {
+      // property_record is destructured OUT of the spread. If it were left in `rest`,
+      // the raw 86-key object would ride along under the same key and the filtered
+      // copy would be overwritten by whichever came last.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as { traces: Array<unknown> };
+      const serialized = JSON.stringify(out.traces[0]);
+      for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+        expect(serialized, `${key} present somewhere in the trace`).not.toContain(`"${key}"`);
+      }
+    });
+
+    it("does not mutate the row it was handed", async () => {
+      // The same guarantee the submit routes depend on: the filter returns a copy.
+      const row = tier2Row({ property_record: { ...RAW_PROPERTY_RECORD } });
+      const admin = adminStub({ profile: { id: "p1", wallet_balance: 0 }, traces: [row] });
+      await listTraces(admin, "sub-1", {});
+      expect(Object.keys(row.property_record as object)).toHaveLength(86);
+    });
+
+    it("SELECT FENCE: asks the database for property_record and tier", async () => {
+      // The stub projects through .select(...), exactly as PostgREST does. Removing
+      // either column from the select makes the row arrive without it, the tool emits
+      // null, and this assertion fails -- which is the only way a select regression is
+      // distinguishable from a working filter.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ property_record: Record<string, unknown> | null; tier: number | null }>;
+      };
+      expect(out.traces[0].property_record).not.toBeNull();
+      expect(Object.keys(out.traces[0].property_record!)).toHaveLength(PUBLIC_KEY_COUNT);
+      expect(out.traces[0].tier).toBe(2);
+    });
+  });
+
+  describe("bulk_status", () => {
+    const profile = {
+      id: "p1",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_products: ["prop-tracer-pro"],
+      wallet_balance: 50,
+    };
+    const completedJob = {
+      id: "job-1",
+      user_id: "p1",
+      status: "completed",
+      records_submitted: 2,
+      records_matched: 2,
+    };
+
+    it("emits the 65 public keys and none of the 21 blocked ones on a tier 2 row", async () => {
+      const { admin } = statusAdminStub({ profile, job: completedJob, rows: [tier2Row()] });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ property_record: Record<string, unknown> | null }>;
+      };
+      const record = out.results[0].property_record!;
+      // MUTATION: drop toPublicPropertyRecord from buildPerRecordResult and this goes red.
+      for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+        expect(record, `${key} reached the gateway`).not.toHaveProperty(key);
+      }
+      expect(Object.keys(record)).toHaveLength(PUBLIC_KEY_COUNT);
+      expect(record.assessed_value).toBe(RAW_PROPERTY_RECORD.assessed_value);
+    });
+
+    it("emits property_record: null on a tier 1 row, never an empty object", async () => {
+      const { admin } = statusAdminStub({ profile, job: completedJob, rows: [tier1Row()] });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ property_record: unknown }>;
+      };
+      expect(out.results[0].property_record).toBeNull();
+    });
+
+    it("carries the tier on both a tier 1 and a tier 2 row", async () => {
+      const { admin } = statusAdminStub({
+        profile,
+        job: completedJob,
+        rows: [tier2Row(), tier1Row()],
+      });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ tier: number | null }>;
+      };
+      expect(out.results.map((r) => r.tier)).toEqual([2, 1]);
+    });
+
+    it("reports a row written before the tier column existed as tier null", async () => {
+      const { admin } = statusAdminStub({
+        profile,
+        job: completedJob,
+        rows: [tier1Row({ tier: null })],
+      });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ tier: unknown }>;
+      };
+      expect(out.results[0].tier).toBeNull();
+    });
+
+    it("carries both on the freshly-finalized branch, not only the already-completed one", async () => {
+      // bulkStatus has TWO exits that emit results: the stored-summary branch for an
+      // already completed/failed job, and the finalize branch it reaches the first
+      // time every row has landed. Both map buildPerRecordResult, and a payload that
+      // only appears on a re-poll is a payload the first caller never sees.
+      const { admin } = statusAdminStub({
+        profile,
+        job: { ...completedJob, status: "processing" },
+        rows: [tier2Row()],
+      });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        status: string;
+        results: Array<{ property_record: Record<string, unknown> | null; tier: number | null }>;
+      };
+      expect(out.status).toBe("completed");
+      expect(Object.keys(out.results[0].property_record!)).toHaveLength(PUBLIC_KEY_COUNT);
+      expect(out.results[0].tier).toBe(2);
+    });
+
+    it("does not mutate the row it was handed", async () => {
+      const row = tier2Row({ property_record: { ...RAW_PROPERTY_RECORD } });
+      const { admin } = statusAdminStub({ profile, job: completedJob, rows: [row] });
+      await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+      expect(Object.keys(row.property_record as object)).toHaveLength(86);
+    });
+
+    it("SELECT FENCE: asks the database for property_record and tier", async () => {
+      // bulkStatus reads trace_history with select("*"), so the columns arrive today.
+      // The stub projects through that select: narrowing it to a list without either
+      // column turns the assertions below red instead of silently emitting nulls.
+      const { admin } = statusAdminStub({ profile, job: completedJob, rows: [tier2Row()] });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ property_record: Record<string, unknown> | null; tier: number | null }>;
+      };
+      expect(out.results[0].property_record).not.toBeNull();
+      expect(Object.keys(out.results[0].property_record!)).toHaveLength(PUBLIC_KEY_COUNT);
+      expect(out.results[0].tier).toBe(2);
+    });
   });
 });

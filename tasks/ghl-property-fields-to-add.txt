@@ -1,0 +1,106 @@
+PROPERTY OBJECT FIELDS TO ADD TO THE GHL SNAPSHOT TEMPLATE
+PropTracerPRO Full Property Trace, generated 2026-09-17
+
+54 new fields. The dossier returns 86 keys per property. 21 are withheld
+because they are provably wrong, which leaves 65 delivered. 11 of those already
+exist on the property object (address, city, state, zip, county, parcel_number_1,
+property_type, units, year_built, last_sale_date, years_held), so 54 are new.
+
+Counts by type: Number 19, Single line 33, Date picker 2.
+
+Checked against the live Property object on location yA1CskGVS8NLWfCq3shC, which
+carries 50 fields. Not against a cache and not against a pasted list, so nothing
+here is a field you already have.
+
+Four of the eleven already-covered fields have a different name on each side. The
+dossier calls them zip_code, apn, units_count and years_owned; the property object
+calls them zip, parcel_number_1, units and years_held. Same fact, so they map
+rather than getting created again.
+
+Worth noting while you are in there: Current UPB and Original UPB now read as
+Number. They used to be the Money type, which is why neither of them could ever
+be written. If that was changed by hand it worked, and those two should start
+landing on the next push.
+
+BEFORE YOU START, THREE THINGS THAT MATTER.
+
+Do not use the Money type for any of these. GoHighLevel MONETORY fields cannot be
+written at all. Ten different wire formats were tried against original_upb and
+current_upb on a real record and every one was rejected, which is why those two
+loan fields still do not land. Money values go in a Number field instead.
+
+The yes/no fields are Single line, not Checkbox. That matches what the property
+object already does for Owner Is Individual and Owner Out Of State, which write
+the words Yes and No. Keeping one convention means the push writes them the same
+way everywhere.
+
+Assessed Value is the county assessment. It is not a market valuation and must
+never be labelled as one. On every parcel measured it was identical to the
+vendor's own estimate, and against real sale prices it ran anywhere from 7 to 59
+percent of what the property actually sold for. Portfolio Assessed Value is the
+same number added up across everything the owner holds, so it carries the same
+caveat: it measures how much they own, not what it is worth.
+
+FIELD LIST
+
+Latitude                    Number       {{custom_objects.property.latitude}}
+Longitude                   Number       {{custom_objects.property.longitude}}
+Subdivision                 Single line  {{custom_objects.property.subdivision}}
+Property Use                Single line  {{custom_objects.property.property_use}}
+Land Use                    Single line  {{custom_objects.property.land_use}}
+Bedrooms                    Number       {{custom_objects.property.beds}}
+Bathrooms                   Number       {{custom_objects.property.baths}}
+Stories                     Number       {{custom_objects.property.stories}}
+Building Size Sqft          Number       {{custom_objects.property.building_size_sqft}}
+Lot Size Sqft               Number       {{custom_objects.property.lot_size_sqft}}
+Air Conditioning            Single line  {{custom_objects.property.has_ac}}
+Garage                      Single line  {{custom_objects.property.has_garage}}
+Pool                        Single line  {{custom_objects.property.has_pool}}
+Basement                    Single line  {{custom_objects.property.has_basement}}
+Deck                        Single line  {{custom_objects.property.has_deck}}
+Last Sale Price             Number       {{custom_objects.property.last_sale_price}}
+Absentee Owner              Single line  {{custom_objects.property.absentee_owner}}
+Owner Occupied              Single line  {{custom_objects.property.owner_occupied}}
+Vacant                      Single line  {{custom_objects.property.vacant}}
+Pre-Foreclosure             Single line  {{custom_objects.property.pre_foreclosure}}
+Foreclosure                 Single line  {{custom_objects.property.foreclosure}}
+Tax Delinquent              Single line  {{custom_objects.property.tax_delinquent}}
+Tax Delinquent Since        Number       {{custom_objects.property.tax_delinquent_year}}
+Tax Lien                    Single line  {{custom_objects.property.tax_lien}}
+Inherited                   Single line  {{custom_objects.property.inherited}}
+Death Of Owner              Single line  {{custom_objects.property.death}}
+Judgment                    Single line  {{custom_objects.property.judgment}}
+HOA                         Single line  {{custom_objects.property.hoa}}
+Sale Price Per Sqft         Number       {{custom_objects.property.price_per_sqft}}
+Assessed Value              Number       {{custom_objects.property.assessed_value}}
+Area Median Income          Number       {{custom_objects.property.area_median_income}}
+Open Mortgage Balance       Number       {{custom_objects.property.open_mortgage_balance}}
+Lender Name                 Single line  {{custom_objects.property.lender_name}}
+Estimated Mortgage Payment  Number       {{custom_objects.property.estimated_mortgage_payment}}
+Properties Owned            Number       {{custom_objects.property.total_properties_owned}}
+Portfolio Assessed Value    Number       {{custom_objects.property.total_portfolio_value}}
+Cash Buyer                  Single line  {{custom_objects.property.cash_buyer}}
+Roof Material               Single line  {{custom_objects.property.roof_material}}
+Roof Construction           Single line  {{custom_objects.property.roof_construction}}
+Flood Zone                  Single line  {{custom_objects.property.flood_zone}}
+Prior Sale Price            Number       {{custom_objects.property.prior_sale_price}}
+Prior Sale Date             Date picker  {{custom_objects.property.prior_sale_date}}
+Document Type               Single line  {{custom_objects.property.document_type}}
+Quit Claim Deed             Single line  {{custom_objects.property.quit_claim}}
+Recording Date              Date picker  {{custom_objects.property.recording_date}}
+MLS Active                  Single line  {{custom_objects.property.mls_active}}
+MLS Pending                 Single line  {{custom_objects.property.mls_pending}}
+MLS Cancelled               Single line  {{custom_objects.property.mls_cancelled}}
+MLS Sold                    Single line  {{custom_objects.property.mls_sold}}
+MLS Failed                  Single line  {{custom_objects.property.mls_failed}}
+Days On Market              Number       {{custom_objects.property.mls_days_on_market}}
+Listing Price               Number       {{custom_objects.property.mls_listing_price}}
+Adjustable Rate             Single line  {{custom_objects.property.adjustable_rate}}
+Investor Buyer              Single line  {{custom_objects.property.investor_buyer}}
+
+NOTE ON FIVE OF THEM
+
+Bedrooms, Bathrooms, Tax Delinquent Since, Days On Market and Listing Price were
+empty on all four sample properties. Create them anyway. The sample is commercial
+parcels in Ohio, California and Utah, and what a county publishes varies a lot by
+county. An empty field is a coverage gap, not a broken one.

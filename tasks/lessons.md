@@ -215,3 +215,45 @@ the test was correct, the name was correct, and the pair was still worthless. On
 guard and watching nothing happen exposed it. That is the whole argument for
 `feedback_mutation_test_security`: a guard without a test that FAILS when you delete the guard is
 not a guard, and a test that keeps passing after you delete it is the evidence.
+
+---
+
+## L-010: Design the producer against the CONSUMER you verified, not the one you pictured (2026-09-17)
+
+**What I built in my head.** Phase 4b was specced as: push the 65 dossier fields into the user's
+GoHighLevel as CONTACT custom fields, auto-created over the API, with a Private Integration Token
+scope warning for existing users. I researched it properly -- read the live HighLevel docs, pulled
+the exact scope strings, confirmed the create endpoint, probed a live location -- and every one of
+those facts was correct.
+
+**All of it was aimed at the wrong thing.** David then said, in one sentence, that most users get
+this data through the Suite Gateway. Reading the gateway settled it in about twenty minutes:
+
+- The gateway reads PTP over **MCP**, never from PTP's database. No PTP project ref exists anywhere
+  in that repo.
+- It writes property data to a **custom object**, `custom_objects.property`, not to the Contact.
+- `crm_push_owners` **parses** PTP's response by name and silently drops every key it does not
+  recognise. Its own pinned fixture already carries `address`, `zip`, `research` and
+  `match_confidence` that are discarded today, which is exactly how a new `property_record` would
+  behave: invisible, with no error anywhere.
+- PTP's gateway-facing surface never emitted `property_record` at all, so there was nothing to map.
+
+So the real PTP-side work was four lines of shape, not an API integration. The auto-create design
+targeted an object the gateway does not use, over a permission no user has (our own setup page
+tells them to grant only `contacts`), for 6 of 52 users.
+
+**The rule.** Before building a producer, verify the consumer FIRST: how it reads, what shape it
+expects, and what it does with a field it does not recognise. That last question is the one that
+gets skipped, and it is the one that decides whether a silent drop or a hard error tells you the
+integration is wrong. Research quality is not a defence here. Every fact I gathered was true and
+the target was still wrong, because I validated the ANSWER and never validated the QUESTION.
+
+**How to spot it.** When work spans two systems, say out loud which side each change lands on and
+who reads it. If you cannot name the consuming function and the field it reads, you are designing
+against an imagined interface.
+
+**And a smaller error inside the same hour, worth its own line.** I told David the gateway pushed to
+GoHighLevel via CSV import. It does not; it uses the REST API record by record. I had inferred it
+from a genuine adjacent fact -- the API cannot create property-object fields -- and then stated the
+mechanism as though I had checked it. An inference drawn from a verified constraint is still an
+inference. Say which one it is, or go and look.

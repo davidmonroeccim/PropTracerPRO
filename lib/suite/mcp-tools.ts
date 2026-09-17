@@ -10,6 +10,7 @@ import {
   skipReasonFor,
 } from "@/lib/trace/blankOwnerSkip";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
+import { toPublicPropertyRecord } from "@/lib/trace/publicPropertyRecord";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
 import {
@@ -55,10 +56,15 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   // trace_result + ai_research are selected ONLY to derive owner_contact_name below; they are
   // not echoed back. Without them this tool returned input_owner_name (the COMPANY) plus bare
   // phone/email COUNTS, so a caller reviewing past traces could not see who was actually found.
+  //
+  // property_record + tier ARE echoed back, filtered. They must be named in this select or the
+  // columns never arrive and the tool emits null for every row -- a failure indistinguishable
+  // from a customer who simply never bought a Full Property Trace. mcp-tools.test.ts projects
+  // its stub rows through this exact string so a column dropped here turns the tests red.
   let q = admin
     .from("trace_history")
     .select(
-      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research",
+      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research, property_record, tier",
     )
     .eq("user_id", profile.id)
     .order("created_at", { ascending: false })
@@ -67,11 +73,31 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   const { data, error } = await q;
   if (error) throw new Error(`list_traces failed: ${error.message}`);
   const traces = (data ?? []).map((row) => {
-    const { trace_result, ai_research, ...rest } = row as Record<string, unknown> & {
+    // property_record is destructured OUT of `rest` on purpose. The filtered key below would
+    // win the collision anyway while `...rest` stays FIRST (mutation-verified: leaving it in
+    // `rest` turns nothing red), so this is defence in depth rather than the guard -- it means
+    // reordering the spread to the end cannot silently promote the raw 86-key object. The
+    // actual guard is the filter, and the test that catches the reordering is the one that
+    // scans the whole serialized trace for blocked key names.
+    const { trace_result, ai_research, property_record, tier, ...rest } = row as Record<
+      string,
+      unknown
+    > & {
       trace_result: TraceResult | null;
       ai_research: AIResearchResult | null;
+      property_record: unknown;
+      tier: number | null;
     };
-    return { ...rest, ...resolveOwnerContact({ trace_result, ai_research }) };
+    return {
+      ...rest,
+      ...resolveOwnerContact({ trace_result, ai_research }),
+      // 65 of the 86 stored keys. The other 21 are provably wrong, not merely missing, and this
+      // payload is one the Suite Gateway maps into a customer's own CRM.
+      property_record: toPublicPropertyRecord(property_record),
+      // Null on a tier 1 row and on every row written before migration 20260917. Never 0, never
+      // a guess: an unknown tier is an absence.
+      tier: tier ?? null,
+    };
   });
   return { traces };
 }
@@ -453,6 +479,14 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     result: row.trace_result,
     research: row.ai_research,
     contacts: row.ai_research?.business_trace_contacts || null,
+    // THE PUBLIC PROPERTY RECORD: 65 of the 86 keys stored on the row. Filtered here because
+    // the Suite Gateway maps this payload into a customer's own GoHighLevel, where a wrong
+    // estimated_value looks authoritative and outlives any caveat. Null on a tier 1 row -- an
+    // absence is reported as an absence, never as an empty object.
+    property_record: toPublicPropertyRecord(row.property_record),
+    // Which billing tier bought this row: 1 = per successful trace, 2 = per record submitted.
+    // Null on a row written before migration 20260917 added the column.
+    tier: row.tier ?? null,
     // Why a row came back empty without being traced. Null on every row we
     // actually asked a vendor about, so a status of no_match is never left to
     // speak for itself when no vendor was ever called.

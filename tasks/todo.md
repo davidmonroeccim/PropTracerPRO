@@ -1760,3 +1760,69 @@ Search.
 - `research_jobs` and `ai_research_claimed_at` are orphaned database objects. Safe to leave.
 - Nothing is verified against the live v1 surface. `api_logs` still holds 0 rows, so there is still
   no usage visibility on the public API.
+
+---
+
+# REVIEW: Phase 4b (2026-09-17) — the dossier reaches the gateway. Scope changed before build.
+
+## THE SPEC WAS AIMED AT THE WRONG SYSTEM
+
+4b was written as "auto-create 65 CONTACT custom fields over the HighLevel API, plus a Private
+Integration Token scope warning". Every fact gathered for it was correct and the target was wrong.
+Reading the gateway settled it. Full reasoning in `tasks/lessons.md` L-010.
+
+| Assumption | Reality, verified |
+|---|---|
+| Users get this through PTP's own push | **6 of 52** PTP users have HighLevel configured. The gateway CRM path has 3 users and 331 properties. |
+| The data belongs on the Contact | The gateway keeps it on `custom_objects.property`, **50 fields**, read live. |
+| Auto-create is available | `POST /custom-fields/` rejects `custom_objects.property` ("Invalid object key"). And PTP's own setup page tells users to grant only `contacts`, so **no token carries `locations/customFields.write`**. |
+| The gateway consumes a CSV | It uses the **REST API** record by record. There is no CSV writer in that repo; the CSV is David's hand-built INPUT. |
+
+**How the gateway actually reads PTP: over MCP, never the database.** No PTP project ref exists
+anywhere in the gateway repo. The proxy path returns PTP's response verbatim. `crm_push_owners`
+PARSES it and silently drops every key it does not name.
+
+## WHAT SHIPPED, AND IT IS THE WHOLE PTP CHANGE
+
+`listTraces` and `buildPerRecordResult` in `lib/suite/mcp-tools.ts` emit `property_record` and
+`tier`, filtered through `toPublicPropertyRecord`. A gateway caller receives **exactly 65 keys**,
+probed through the real function against the 86-key fixture. Tool descriptions updated so a caller
+knows the record exists.
+
+**The select was the trap.** Neither column was in `listTraces`'s `.select(...)`. Without adding
+them the change is a silent no-op that looks identical to a customer who never bought a Full
+Property Trace. The test stubs now emulate PostgREST column projection so a dropped column turns
+red.
+
+**13 mutations, one honestly reported as 0 red.** Destructuring `property_record` out of `...rest`
+turns nothing red while the spread stays first, so the comment calls it defence in depth rather
+than claiming a protection the mutation disproves. The real leak variant is caught.
+
+Numbers: **864 passing / 56 files / 0 failing**, `tsc` 0, eslint 47, build compiles.
+
+## HANDED TO DAVID
+
+`tasks/ghl-property-fields-to-add.txt` — the **54** property-object fields for the GHL snapshot
+template, each with label, type and exact field key. 86 returned, 21 withheld, 65 delivered, 11
+already present, 54 new. Checked against the LIVE object, not a cache. Money type excluded
+throughout because MONETORY fields cannot be written; the yes/no fields are Single line to match
+the existing `owner_is_individual` convention; `flood_zone` is a boolean, not a zone code.
+
+## NOT PTP'S JOB. Do not build these here.
+
+- The 54 GHL fields. **David creates them in the snapshot template**, then pushes to users.
+- Adding those 54 rows to `PROPERTY_FIELD_MIRROR` and teaching `crm_push_owners` to read
+  `property_record`. **suite-gateway repo**, after the snapshot ships. Until then the fields
+  reach the proxy path and are dropped by `crm_push_owners`.
+- **PTP's direct HighLevel push is DROPPED, not deferred.**
+
+## OPEN
+
+- **Three live bugs in PTP's existing HighLevel push, none fixed:** the manual Push to CRM button
+  reports success on a failed push; a 401 is silent on all five automatic paths; saving a
+  credential validates nothing and shows a green "Connected" badge for a garbage value.
+- **`list_traces` payload size.** Up to 200 rows, each potentially carrying a 65-key record, in one
+  MCP text block. Harmless today because bulk tier 2 does not exist, so live rows are tier 1 with a
+  null record. **Revisit the default limit when phase 5 lands bulk tier 2.**
+- `current_upb` / `original_upb` on the property object now read as NUMERICAL, not MONETORY. The
+  pair that could never be written should start landing on the gateway's next push.

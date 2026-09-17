@@ -7,40 +7,71 @@
 >
 > ## Where the work is
 >
-> Branch `feat/owner-routing-tiers`, **11 commits, NOT PUSHED**, `main` untouched at `a77b256`.
-> 478 tests passing, `tsc` 9 pre-existing dotenv errors, eslint 54.
+> **`main`, PUSHED, in sync with origin.** Phases 1 through 4a are live. Numbers live in the
+> REVIEW sections at the bottom of `tasks/todo.md`; do not copy them here, they go stale.
 >
 > | Phase | State |
 > |---|---|
-> | Pricing repriced on every surface | **DONE**, committed |
-> | Three billing defects from the reprice | **DONE**, mutation-verified |
-> | Deduct guard, 10 sites | **DONE** |
-> | 1. Dossier client | **DONE**, 34 tests, sanitized fixtures |
-> | 2. Never delete a billed row, cache sees paid rows | **DONE**, 19 mutations |
-> | 3a. plan-aware planRoute, address-only parcels, executor | **DONE**, 6 mutations |
-> | 3b. Tier 2 bills end to end on the session route | **DONE**, 21 mutations |
-> | 4. Remove AI Search, ship the UI, fix v1 | **NOT STARTED** |
+> | 1. Dossier client | **DONE** |
+> | 2. Never delete a billed row, cache sees paid rows | **DONE** |
+> | 3a. plan-aware planRoute, address-only parcels, executor | **DONE** |
+> | 3b. Tier 2 bills end to end on the session route | **DONE** |
+> | 3c. Pre-submit charge disclosure | **DONE** |
+> | 4a. AI Search removed, UI shipped, v1 wired, webhook | **DONE, PUSHED** |
+> | 4b. Dossier reaches the CRM | **IN PROGRESS**, scope changed, read below |
 > | 5. Bulk | **NOT STARTED** |
 >
 > **Both migrations are APPLIED to production and verified.** `property_record` and `tier` exist
 > on `trace_history`; `usage_records.unit_price` default is 0.15.
 >
-> ## THE ONE THING BLOCKING A PUSH
+> **Users were notified of the AI Search removal and the pricing change on 2026-09-17.** That was
+> the pre-push gate and it is closed.
 >
-> **`app/(dashboard)/trace/single/page.tsx:114` sends `owner_name: undefined` when the field is
-> blank, and the submit button is disabled only while loading.** So a user can submit with no
-> owner and tier 2 now charges them $0.25-$0.40 **with no warning anywhere in the UI**. The
-> pre-submit disclosure is a phase 4 item and it is the gate. Do not push until it exists.
+> ## 4b CHANGED SHAPE. The original spec was aimed at the wrong system.
 >
-> ## The other three things phase 4 must not forget
+> It was specced as: auto-create 65 CONTACT custom fields in each user's GoHighLevel over the API,
+> plus a Private Integration Token scope warning. **That was wrong on three counts**, and the
+> reasoning is in `tasks/lessons.md` L-010:
 >
-> - **v1 CANNOT be wired for tier 2 until AI Search is deleted.** `app/api/v1/trace/single/route.ts`
->   runs AI research on `(aiResearch && !ownerName)` and deducts $0.15, and an absent `ownerName`
->   is ALSO the tier-2 trigger. Wiring it now double-bills the same record and races two engines.
-> - **Tier 2 never reaches the poll route**, so no `trace.completed` webhook and no HighLevel push
->   fires on completion. Tier 1 fires both from the poll route.
-> - **`owner_name_2` now carries the owner of record** and the results card renders it unlabelled
->   as a second owner name.
+> - **Most users receive this data through the Suite Gateway**, not PTP's own push. Only 6 of 52
+>   PTP users have direct HighLevel credentials configured at all.
+> - **The gateway keeps property data on a CUSTOM OBJECT**, `custom_objects.property`, not on the
+>   Contact. That object has 50 fields today, read live on 2026-09-17.
+> - **Nobody has the permission the auto-create needs.** PTP's own setup page tells users to grant
+>   only the `contacts` scope, so no token carries `locations/customFields.write`. And the API
+>   cannot create property-object fields at all: `POST /custom-fields/` rejects
+>   `custom_objects.property` with "Invalid object key".
+>
+> **How the gateway actually reads PTP: over MCP, never from PTP's database.** No PTP project ref
+> exists anywhere in the gateway repo. The proxy path returns PTP's response verbatim, but
+> `crm_push_owners` PARSES it and silently drops every key it does not name.
+>
+> ## What 4b is now, and what is NOT PTP's job
+>
+> **PTP's half:** emit the public 65-field record and `tier` on the gateway-facing MCP surface
+> (`buildPerRecordResult` and `listTraces` in `lib/suite/mcp-tools.ts`), filtered through
+> `toPublicPropertyRecord`. That is the whole PTP change.
+>
+> **NOT PTP's job, do not build it here:**
+> - The 54 new GoHighLevel fields. The list is `tasks/ghl-property-fields-to-add.txt`, generated
+>   and checked against the live object. **David creates them in the snapshot template.**
+> - Adding those 54 rows to `PROPERTY_FIELD_MIRROR` in the **suite-gateway repo**, and teaching
+>   `crm_push_owners` to read `property_record`. Different repo, after the snapshot ships.
+>
+> **PTP's own direct HighLevel push is being DROPPED, not built.** 6 of 52 users, a permission
+> nobody has, and it would put property data on the Contact where the model keeps it on the
+> property.
+>
+> ## Live bugs in PTP's existing HighLevel push, unrelated to tier 2, NOT yet fixed
+>
+> - **The manual Push to CRM button reports success when the push failed.** The route returns
+>   `{success:false}` inside a 200 body and `PushToCrmButton` only checks `response.ok`, so a 401
+>   shows a green "Contact created".
+> - **A 401 is completely silent on all five automatic push paths.** Nothing reads the returned
+>   `{success:false}`; every call site is fire-and-forget into a `console.error`.
+> - **Save validates nothing.** A garbage credential saves with a green "Connected" badge; the
+>   Test Connection button is separate, optional, never called by save, and only proves a contacts
+>   READ.
 
 **READ THIS BEFORE TOUCHING OWNER LOOKUP, SKIP TRACE ROUTING, OR PRICING.**
 Supersedes `SESSION-HANDOFF-2026-09-15.md` for everything about owner discovery.

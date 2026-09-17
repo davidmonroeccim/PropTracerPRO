@@ -44,6 +44,16 @@ export type TraceHistoryRow = {
   email_count: number;
   is_successful: boolean | null;
   charge: number | null;
+  // Added by migration 20260917. OPTIONAL rather than `| null`: every reader of this type loads
+  // rows with select('*'), so both columns are always present in production, but a row written
+  // before the migration carries no value and the existing test fixtures construct this type by
+  // hand. Readers emit them through toPublicPropertyRecord / `?? null`, so absent reads as null.
+  //
+  // property_record is the vendor's RAW 86-key dossier as stored. It MUST be filtered before it
+  // leaves PTP: see lib/trace/publicPropertyRecord.ts.
+  property_record?: unknown;
+  // 1 = billed per successful trace, 2 = billed per record submitted.
+  tier?: number | null;
 };
 
 export type SettleBulkJobArgs = {
