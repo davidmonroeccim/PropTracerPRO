@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
@@ -163,7 +164,13 @@ export async function GET(request: Request) {
     // All results ready — process each one
     const results = statusResult.results;
     let recordsMatched = 0;
+    // Money ACTUALLY collected across the job. It is reported twice -- as
+    // `total_charge` in the bulk_job.completed webhook and in the response body
+    // -- so it may only ever accumulate what a deduct really took.
     let totalCharge = 0;
+    // Money we TRIED to take. Drives auto-rebill only: a wallet that came up
+    // short is precisely the one that needs topping up.
+    let attemptedTotal = 0;
 
     // Get user profile for billing
     const { data: profile } = await adminClient
@@ -183,11 +190,11 @@ export async function GET(request: Request) {
       const parsed = parseTracerfyResult(rawResult);
       const isSuccessful =
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
-      const charge = isSuccessful ? perTraceCharge : 0;
+      const attemptedCharge = isSuccessful ? perTraceCharge : 0;
 
       if (isSuccessful) {
         recordsMatched++;
-        totalCharge += charge;
+        attemptedTotal += attemptedCharge;
         successfulResults.push({ parsed, rawResult });
       }
 
@@ -210,6 +217,21 @@ export async function GET(request: Request) {
       const historyId = historyRows?.[0]?.id;
 
       if (historyId) {
+        // Bill for a successful match FIRST -- all tiers use wallet deduction,
+        // and a short wallet returns false without moving money. `charge` is
+        // what actually moved, so the row and the job total can only ever
+        // report collected money.
+        const charge =
+          attemptedCharge > 0
+            ? await deductOrZero(adminClient, {
+                p_user_id: user.id,
+                p_amount: attemptedCharge,
+                p_trace_history_id: historyId,
+                p_description: 'Bulk skip trace - successful match',
+              })
+            : 0;
+        totalCharge += charge;
+
         await adminClient
           .from('trace_history')
           .update({
@@ -222,16 +244,6 @@ export async function GET(request: Request) {
             charge,
           })
           .eq('id', historyId);
-
-        // Bill for successful match — all tiers use wallet deduction
-        if (isSuccessful && charge > 0) {
-          await adminClient.rpc('deduct_wallet_balance', {
-            p_user_id: user.id,
-            p_amount: charge,
-            p_trace_history_id: historyId,
-            p_description: 'Bulk skip trace - successful match',
-          });
-        }
       }
     }
 
@@ -258,8 +270,10 @@ export async function GET(request: Request) {
       })
       .eq('id', traceJob.id);
 
-    // Fire-and-forget: auto-rebill if balance dropped below threshold
-    if (totalCharge > 0) {
+    // Fire-and-forget: auto-rebill if balance dropped below threshold.
+    // Gated on what we ATTEMPTED, not what we collected: if every deduct failed
+    // the wallet is empty, which is exactly when a rebill is needed.
+    if (attemptedTotal > 0) {
       triggerAutoRebillIfNeeded(user.id).catch(() => {});
     }
 

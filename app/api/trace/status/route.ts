@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
+import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult } from '@/types';
@@ -165,7 +166,22 @@ export async function GET(request: Request) {
     const perTraceCharge = profile
       ? chargePerTrace(profile)
       : PRICING.CHARGE_PER_SUCCESS_WALLET;
-    const charge = isSuccessful ? perTraceCharge : 0;
+    // Charge the wallet FIRST so `charge` is the amount that actually moved: a
+    // short wallet returns false without deducting. This matters more here than
+    // anywhere else, because `charge` leaves this route through THREE doors --
+    // the trace_history row below, the trace.completed webhook payload, and the
+    // JSON response body. Reporting the INTENDED amount tells the customer and
+    // their webhook consumer they paid money that was never collected.
+    const attemptedCharge = isSuccessful ? perTraceCharge : 0;
+    const charge =
+      attemptedCharge > 0
+        ? await deductOrZero(adminClient, {
+            p_user_id: user.id,
+            p_amount: attemptedCharge,
+            p_trace_history_id: trace.id,
+            p_description: 'Skip trace - successful match',
+          })
+        : 0;
 
     // Update trace record
     await adminClient
@@ -177,20 +193,14 @@ export async function GET(request: Request) {
         email_count: result?.emails?.length || 0,
         is_successful: isSuccessful,
         cost: PRICING.COST_PER_RECORD,
-        charge: charge,
+        charge,
       })
       .eq('id', trace.id);
 
-    // Charge user if successful — all tiers use wallet deduction
-    if (isSuccessful && charge > 0) {
-      await adminClient.rpc('deduct_wallet_balance', {
-        p_user_id: user.id,
-        p_amount: charge,
-        p_trace_history_id: trace.id,
-        p_description: 'Skip trace - successful match',
-      });
-
-      // Fire-and-forget: auto-rebill if balance dropped below threshold
+    if (attemptedCharge > 0) {
+      // Fire-and-forget: auto-rebill if balance dropped below threshold.
+      // Still fires when the deduct failed -- that is exactly the wallet that
+      // needs topping up.
       triggerAutoRebillIfNeeded(user.id).catch(() => {});
     }
 
