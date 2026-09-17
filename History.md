@@ -6,6 +6,35 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 3c: the single-trace page discloses the tier 2 charge
+
+**The gate on shipping 3b.** The route bills per record submitted and bills a total miss too, so
+a blank owner name could take the customer's money and hand back nothing. Nothing on the page
+said so.
+
+- **New `components/trace/FullTraceDisclosure.tsx`.** Inline, always on screen while the owner
+  name is blank, no click required. Names the feature, says we go find the owner of record and
+  pull the full property record, quotes the rate, and says the charge lands whether or not
+  contacts come back.
+- **The number is the caller's own rate.** The component derives it itself from the profile via
+  `chargePerRecord()`, the same helper the route charges with, so no caller can pass it a rate
+  and get it wrong. The page loads the three entitlement columns client-side, the way
+  `trace/bulk` already loads its tier 1 rate.
+- **No profile, no number.** While the profile is loading (or if it never arrives) the copy says
+  "your per-record rate" and links to billing. Quoting $0.25 to a Pay-As-You-Go customer who
+  will be charged $0.40 is a false statement about money; an honest sentence with no figure is
+  not.
+- **It shows exactly when the route bills tier 2.** The predicate is `isFullPropertyTrace()`,
+  the route's own, not a second blank test that can drift. Whitespace is blank to both.
+- **The owner name field is no longer `required`.** FOUND WHILE BUILDING THIS: `required` was
+  still on the input and on the label, so the browser refused a blank submit outright and the
+  tier the API charges for could not be reached from this page at all. Dropped the attribute,
+  the asterisk, and the "Required for skip trace" helper line. AI Search is untouched.
+- **Tests, 19 of them, all four mutations verified.** Hardcoding the rate fails 5, swapping the
+  predicate for `ownerName !== ''` fails 1, deleting the disclosure from the page fails 2, and
+  putting `required` back fails 1. Static `renderToStaticMarkup` in vitest, no jsdom and no new
+  dependency.
+
 ### Full Property Trace, phase 3b: the tier 2 billing path goes into the session route
 
 **A new billing path, so tests came first and every money decision was mutation-verified.**

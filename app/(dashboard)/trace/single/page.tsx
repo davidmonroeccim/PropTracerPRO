@@ -1,13 +1,16 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TraceResultCard } from '@/components/trace/TraceResultCard';
 import { AIResearchCard } from '@/components/trace/AIResearchCard';
+import { FullTraceDisclosure } from '@/components/trace/FullTraceDisclosure';
 import { US_STATES } from '@/lib/constants';
+import type { EntitlementProfile } from '@/lib/suite/entitlements';
 import type { TraceResult, AIResearchResult } from '@/types';
 import { Search, Trash2 } from 'lucide-react';
 
@@ -36,6 +39,32 @@ export default function SingleTracePage() {
   const [state, setState] = useState('');
   const [zip, setZip] = useState('');
   const [ownerName, setOwnerName] = useState('');
+
+  /**
+   * The caller's own profile, for the Full Property Trace rate.
+   *
+   * Null until it arrives, and the disclosure shows no figure while it is null:
+   * a wrong price is worse than no price. Same three columns and the same
+   * client-side load the bulk page already uses for its tier 1 rate; the rate
+   * itself is derived inside FullTraceDisclosure from chargePerRecord(), which
+   * is what the route bills with.
+   */
+  const [profile, setProfile] = useState<EntitlementProfile | null>(null);
+
+  useEffect(() => {
+    const loadProfile = async () => {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from('user_profiles')
+        .select('subscription_tier, is_acquisition_pro_member, gateway_products')
+        .eq('id', user.id)
+        .single();
+      if (data) setProfile(data);
+    };
+    loadProfile();
+  }, []);
 
   // Skip trace cache ref: set to true after clearing, consumed on next Search Property.
   const skipTraceCacheRef = useRef(false);
@@ -362,14 +391,22 @@ export default function SingleTracePage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="owner">Owner Name *</Label>
+                  <Label htmlFor="owner">Owner Name</Label>
                   <div className="flex gap-2">
+                    {/*
+                      NOT `required`. A blank owner name is a supported submit: it
+                      is what routes the request to Full Property Trace, which the
+                      API bills per record submitted. The browser used to refuse
+                      that submit outright, so the tier the API charges for could
+                      not be reached from this page at all. It is reachable now,
+                      which is exactly why FullTraceDisclosure below is not
+                      optional -- the price has to be on screen before the click.
+                    */}
                     <Input
                       id="owner"
                       placeholder="John Smith"
                       value={ownerName}
                       onChange={(e) => setOwnerName(e.target.value)}
-                      required
                       className="flex-1"
                     />
                     <Button
@@ -392,10 +429,12 @@ export default function SingleTracePage() {
                     </Button>
                   </div>
                   <p className="text-xs text-gray-500">
-                    Required for skip trace. Use AI Search ($0.15 per name found) to find the owner, or type manually.
+                    Use AI Search ($0.15 per name found) to find the owner, or type it in yourself.
                   </p>
                 </div>
               </div>
+
+              <FullTraceDisclosure ownerName={ownerName} profile={profile} />
 
               {researchError && (
                 <p className="text-sm text-red-600">{researchError}</p>
