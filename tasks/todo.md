@@ -310,6 +310,149 @@ revisited, the distinction to put to David is that the dossier argument supports
 and these are worded as PRICE comparisons, which is a different assertion. That is a positioning
 question, not a correctness one, and it is his to make.
 
+---
+
+# PLAN: Tier 2 build (2026-09-17) — NOT STARTED, awaiting David's approval
+
+## The feature is called FULL PROPERTY TRACE. Decided 2026-09-17.
+
+Use it everywhere: UI, API docs, MCP tool descriptions, pricing page, user notification. Nothing
+customer-facing says "AI Search" or "AI research" after this ships.
+
+## David's decisions
+
+1. **REMOVE AI Search. Hard-remove, no deprecation window.** His reasoning: it only ever ran when
+   there was no owner, so that an owner could be traced. Full Property Trace does that job with
+   better results and returns more fields. *(This reverses an earlier "replace in place" plan,
+   which was MY recommendation and was wrong. I made it before reading what `AIResearchResult`
+   actually was. See History 2026-09-17.)*
+2. **Trigger:** automatic when the owner is missing, PLUS an explicit opt-in for users who already
+   have the owner but want the property record.
+3. **First slice:** single record in the UI, visible and clickable.
+4. **Charge follows the vendor call.** Spend at Tracerfy = charged. Served from the user's own
+   stored record = free.
+
+## Production reality, measured 2026-09-17 against the live DB
+
+AI Search is **in real use** and is not dead code:
+
+| | |
+|---|---|
+| `trace_history` rows carrying `ai_research` | **1,301** |
+| Owner found | 887 (68%) |
+| Not found | 411 |
+| Charged | 743, totalling **$111.45** |
+| Distinct users | **11** |
+| Last used | 2026-09-14 |
+
+Nothing is in flight: `ai_research_status` queued = 0, processing = 0, `research_jobs` unfinished
+= 0. **A hard removal strands no work.** The 36 unfinished `trace_jobs` are all terminal `failed`,
+not live.
+
+**`api_logs` has 0 rows** despite a writer at `lib/api/auth.ts:108`. So either the public v1 API has
+never been called, or request logging silently fails. Either way there is **no usage visibility on
+the public API**, which is why the removal decision could not be made on evidence alone.
+
+## WHAT MUST SURVIVE THE REMOVAL. Getting this wrong breaks paying customers.
+
+- **`trace_history.ai_research` (1,301 rows) is CUSTOMER DATA THEY PAID FOR. Do not drop the
+  column.** Stop writing to it; never delete it. Same for `ai_research_charge` and
+  `ai_research_status` on historical rows.
+- **`lib/ai-research/contacts.ts` STAYS.** `resolveOwnerContact()` is the single source of truth for
+  "who is the human behind this owner" and is a hard dependency of `lib/suite/mcp-tools.ts:65-69`.
+  `traceCreditFromFastAppend()` is load-bearing for the FastAppend credit path in
+  `settleBulkJob.ts`. Only the Brave+Claude ENGINE goes.
+- **The three refund sites that read `ai_research_charge`** (`sweep-business-traces:170`,
+  `settleBulkJob.ts:151,177`) still have historical rows to service. Do not gut them.
+
+## WHAT GETS DELETED
+
+`lib/ai-research/client.ts` (the Brave+Claude engine) · `lib/brave/client.ts` · the five research
+routes (`/api/research/single`, `/api/research/bulk`, `/api/research/bulk/status`,
+`/api/v1/research/single`, `/api/v1/research/status`) · `app/api/cron/sweep-bulk-research` and its
+`vercel.json` entry · `components/trace/AIResearchCard.tsx` · the AI Search UI in
+`trace/single/page.tsx` and `trace/bulk/page.tsx` · the `aiResearch` flag path in
+`app/api/v1/trace/single/route.ts` · the `research.completed` webhook · the AI-research sections of
+the API docs · `ANTHROPIC_API_KEY` and `BRAVE_API_KEY` become unused.
+
+## Architecture
+
+**Billing gets a natural home, which it does not have today.** All current billing lives in the
+POLL route because trace results are async. **The dossier is a synchronous JSON POST.** So tier 2
+calls the dossier in the SUBMIT route and charges immediately after it returns. The charge fires in
+the same request as the spend, which is exactly David's mechanical rule. Tier 1 contact traces stay
+async and keep charging in the poll route. No charge moves; a second one is added where it belongs.
+
+**One row per address per user, enriched in two phases.** `UNIQUE(user_id, address_hash)` already
+holds. A tier 2 record is the same row gaining a property record first, contacts second. No schema
+collision.
+
+## Blocking defects this exposes, all must be fixed IN this build
+
+| # | Defect | Why it is blocking |
+|---|---|---|
+| B1 | `checkSingleDuplicate` filters `.eq('is_successful', true)` (`deduplication.ts:111`) | A paid tier 2 record with a property file but no contacts is invisible to the cache, so the user is billed AGAIN for data they own. Directly violates David's rule. |
+| B2 | `trace/single/route.ts:103-109` DELETES `is_successful:false` rows before re-tracing | Would delete a paid tier 2 record, orphan its `wallet_transactions` FK, and let the next submit bill again. Double-billing. |
+| B3 | `charge > 0` implies `is_successful` everywhere | A billed tier 2 miss breaks the invariant. Needs a `tier` column so `$0.25` tier-1-wallet and `$0.25` tier-2-pro are distinguishable. `lib/constants.ts:34-36` already warns those digits collide. |
+| B4 | Balance gates reserve the tier 1 rate (`trace/single/route.ts:52`) | Under-reserves for tier 2. |
+| B5 | `planRoute()` hardcodes the `pro` price column (`ownerRoute.ts:44-46,57`) | Bills PAYG users 40% under rate. Needs a plan argument; changes the signature and touches its tests. |
+| B6 | `ParcelInput` requires `parcelIdLocal` + `county` (`ownerRoute.ts:60-62`) | The entire app is address-shaped and NOTHING produces a parcel id. Address mode is proven (5/6, and it found a parcel APN mode missed), so these must become optional. |
+
+## Phases. STOP AND CHECK IN AFTER EACH ONE.
+
+**Phase 1 — the dossier client.** `lib/tracerfy/dossier.ts` following the house pattern: bearer
+auth, never throws, `{success, ...}` return shape, no retries. Both key modes, APN then address,
+caller stops at first hit. Tested against the 24 real saved vendor payloads in
+`tasks/research-test/`, so the tests use genuine responses rather than invented fixtures.
+**Visible:** a dry-run script printing a real parsed record.
+
+**Phase 2 — the fixes that prevent double-billing.** B1, B2, B3 below. Adds `tier` and
+`property_record JSONB` to `trace_history`, makes the cache tier-aware, stops the delete path
+eating paid rows. Mutation-tested. **Visible: nothing. Flagged bluntly rather than dressed up.**
+This is also where the missing tests get written, BEFORE behaviour changes.
+
+**Phase 3 — execute the plan.** B5, B6, then the caller that runs `planRoute()`: dossier, re-enter
+with the discovered owner, route to the contact vendor. Charge immediately after the dossier
+returns, in the same request, because the dossier call is synchronous.
+**Visible:** Full Property Trace works end to end on one address via the API.
+
+**Phase 4 — remove AI Search and ship the UI.** The deletion list above, plus the Full Property
+Trace panel, the opt-in toggle, and every string that currently says AI Search. Kill
+`Free (no owner found)` at `AIResearchCard.tsx:47`, which per-record billing makes false.
+**Visible: this is the phase David judges.**
+
+**Phase 5 — bulk.** Pre-flight balance check, and budgeting against the SHARED 500/min pool: Full
+Property Trace spends TWO calls per parcel, so 150 parcels is ~300 of the pool, not 150.
+Deliberately last, because this is where a truncated run does real damage.
+
+## Copy debt this creates
+
+- **The user notification needs a new paragraph.** It currently explains a price change. It does
+  not say AI Search is going away, that Full Property Trace replaces it, or that the meter moves
+  from per-success to per-record. 11 users will notice.
+- **The marketing pages need a FULL SECTION on Full Property Trace**, not a bullet. It is the whole
+  justification for the tier 2 price. Recorded in the handoff and History.
+- **The 68% vs 96% story is worth telling.** AI Search found an owner 68% of the time in
+  production; the dossier hit 23 of 24. Those 11 users are getting a better product at a higher
+  price, and saying so is more persuasive than announcing an increase.
+
+## Known risks
+
+- **The research path is almost entirely untested.** No tests exist for `research/*` routes,
+  `lib/ai-research/client.ts`, `lib/tracerfy/client.ts`, `deduplication.ts`, or any UI. Only
+  `settleBulkJob.test.ts` and `mcp-tools.test.ts` will fail loudly on a bad change. Everything else
+  fails silently. Phase 2 must add tests before it changes behaviour.
+- **Registration state is still unresolved.** Entity calls send the property state, 13 of 22. Not
+  blocking, but tier 2 inherits that miss rate.
+- **`PRICING.COST_PER_RECORD` is $0.009**, written to `cost` at 14 sites, read at none, and
+  contradicts the verified $0.02/credit.
+
+## Open for David, not blocking Phase 1
+
+- **Does a cache HIT on tier 2 bill?** David's rule says no, because nothing is spent at Tracerfy.
+  Recorded that way. Flagging only because "per record submitted" could be read the other way.
+- **FCRA permissible-use pass-through.** Still unplaced.
+
 ### H. Deliberately NOT done
 - [ ] `supabase/schema.sql:134` `unit_price DECIMAL(10,4) DEFAULT 0.07` is baked into the LIVE
       database. Write the migration, do NOT apply it. Applying before push makes prod data

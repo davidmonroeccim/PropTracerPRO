@@ -4,6 +4,33 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-17
+
+### Decisions that shape the tier 2 build, plus a marketing debt worth flagging
+
+- **AI Search is being REMOVED, not replaced in place.** I recommended replace-in-place, David
+  accepted it on my recommendation, and reconnaissance then showed it does not work:
+  `AIResearchResult` is a stored-and-returned contract across two public routes, two webhooks, the
+  CSV export, the MCP surface and `AIResearchCard`, with no room for an 86-field property record.
+  Removal is cleaner. The recommendation should have come after the recon, not before.
+- **Tier 2 ships as a named customer-facing feature.** David proposed "Property Enrichment"; I have
+  recommended "Full Property Trace" because PTP's whole vocabulary is *trace*, and "enrichment"
+  implies you already have the property when the dominant trigger is not knowing who owns it.
+  **Name not yet decided.**
+- **MARKETING DEBT, for whenever the marketing pages are next touched: this feature needs a FULL
+  DEDICATED SECTION.** It is the entire justification for the tier 2 price and the landing page
+  says nothing about it today. The honest claim set is the measured field inventory in the handoff:
+  86 fields returned, 46 with a usable value. Do not promise the distress flags.
+- **Charge follows the vendor call, not the calendar.** A rerun served from the user's own stored
+  record is free; one that spends at Tracerfy is charged. Billing and caching become the same
+  condition, so they cannot drift apart. The cache is per-user and must stay that way.
+- **Open item 8 closed** by reading Tracerfy's actual terms. Per-user storage is permitted; what
+  4.8 forbids is resale "as a standalone data feed, database, directory", which is the
+  property-registry propagation David had already ruled out independently.
+- **Raised in its place:** Tracerfy forbids FCRA-regulated use including tenant screening, and PTP
+  passes none of that through to its own users. No FCRA language or terms route exists anywhere in
+  the app. Not a code fix; a question of which surface carries it.
+
 ## 2026-09-16
 
 ### Pricing repriced across every surface, three billing defects fixed, notification drafted

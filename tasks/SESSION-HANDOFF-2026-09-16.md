@@ -291,6 +291,75 @@ The obligation does not stop at PTP; it has to reach the end user running the se
 the restriction appears at signup, in the API docs, in the MCP caveat, or on a terms page that does
 not currently exist.
 
+### DECIDED 2026-09-17: THE CHARGE FOLLOWS THE VENDOR CALL, NOT THE CALENDAR.
+
+David: *"If a rerun pulls from Tracerfy and not the database, they get charged."*
+
+**The rule is mechanical, which is why it cannot drift:** if serving the request spends money at
+Tracerfy, the user is charged. If it is served from the user's own stored record, it is free.
+There is no separate cache policy to keep in sync with billing, because the two are the same
+condition.
+
+Consequences, all of which fall out rather than needing decisions:
+
+- **The 90-day promise at `LandingPage.tsx:378` HOLDS for tier 2**, provided the record was stored.
+  No copy change needed.
+- **The cache is PER-USER, and that is required, not incidental.** `trace_history` is already keyed
+  `UNIQUE(user_id, address_hash)`, so this needs no schema change. Two different users tracing the
+  same parcel BOTH pay, because serving user B from user A's purchase would be redistributing one
+  customer's data to another. That is the same boundary that bans registry propagation, and it is
+  the thing 4.8 prohibits. **Do not "optimise" this into a shared cache. It is the product rule.**
+- **"Clear cache and re-run" correctly charges**, because it forces a fresh vendor call by
+  definition. The existing button at `trace/single/page.tsx` already warns about a charge.
+- A record whose dossier was never captured is a cache MISS and re-buys, which is correct.
+
+### DECIDED 2026-09-17: AI SEARCH IS REMOVED. Tier 2 ships as a NAMED FEATURE.
+
+David: *"We no longer need AISearch, so remove it. Add in Property Enrichment, unless you can think
+of a better name."*
+
+This **reverses** the earlier "replace in place" decision, which was my recommendation and was
+wrong. I recommended it before reading what `AIResearchResult` actually was: a stored-and-returned
+contract across two public routes, two webhook payloads, the CSV export, the MCP surface and the
+results card, with no room for an 86-field property record. David accepted the recommendation on
+my say-so. Removal is the cleaner answer and it is now the plan.
+
+**FOR THE MARKETING PAGES, WHENEVER THEY ARE NEXT TOUCHED:** this feature needs a **full dedicated
+section**, not a bullet. It is the entire justification for the tier 2 price and the landing page
+currently says nothing about it. See the tier 2 value copy already written into
+`LandingPage.tsx:370` as a starting point, and the measured field inventory above for what may
+honestly be claimed. Do not promise the distress flags; nine of eleven are true zero times.
+
+### THE NAME IS "FULL PROPERTY TRACE". Decided by David 2026-09-17. Use it everywhere.
+
+Nothing customer-facing says "AI Search" or "AI research" after this ships: UI, API docs, MCP tool
+descriptions, pricing page, user notification.
+
+**Removal is a HARD REMOVE, no deprecation window.** David's reasoning, worth keeping because it
+is the one-line pitch for the feature: *"It was only used if there was no owner, so an owner could
+be traced. Tier 2 fixes that with better results and returns more fields."*
+
+Measured against the live DB 2026-09-17 before deciding: AI Search carried **1,301** rows across
+**11 users**, found an owner **68%** of the time, charged 743 times for **$111.45**, last used
+2026-09-14. **Nothing was in flight**, so the removal strands no work. `api_logs` holds 0 rows
+despite a writer at `lib/api/auth.ts:108`, so there is no usage visibility on the public v1 API at
+all. Full Property Trace hits 23 of 24 by comparison, so those 11 users get a materially better
+product at a higher price. **Say that in the notification rather than announcing an increase.**
+
+The reasoning behind the name, recorded so it is not re-argued:
+
+- PTP's entire vocabulary is *trace*. The product is PropTracer, the verb is trace, the unit is a
+  trace. "Enrichment" introduces a second noun users must learn and map onto the first.
+- "Property Enrichment" implies you already HAVE the property and are improving it. That fits the
+  opt-in case and misses the primary one, which is *I do not know who owns this*. Per the pricing
+  table the dominant trigger is an ABSENT owner, so the name should not presume you have anything.
+- "Full" contrasts cleanly with the basic trace and maps to the tier 1 / tier 2 split without
+  exposing the word "tier" to customers.
+
+Either name is workable. **The decision is David's; this is a recommendation only.** Whatever is
+chosen must be used consistently in the UI, the API docs, the MCP tool descriptions, the pricing
+page and the user notification, all of which currently say "AI Search" or "AI research".
+
 ### RATE LIMIT CORRECTION, same source, read 2026-09-17.
 
 The handoff's **500/min for the dossier is CORRECT**, but incomplete in a way that matters for
