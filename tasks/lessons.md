@@ -74,6 +74,61 @@ The defect is never "a tenant got in." It is "a name got in with no record behin
 
 ---
 
+## L-008: Read the saved payloads before writing the client (2026-09-17)
+
+Three times today the real vendor responses in `tasks/research-test/` contradicted a plan I had
+written from prose, and each one would have shipped silently.
+
+- The plan said the dossier's `property` object carries the owner. **It does not.** The owner is in
+  `response.owners[]`, and an entity arrives as `{first_name: "", last_name: "Colmaven, Llc"}` with
+  the whole name in `last_name`. A client built from the plan returns no owner, and tests written
+  from the same plan agree with it.
+- A FastAppend MISS carries an `error` string next to `hit:false`. Reading that as a failure makes
+  every billable miss **unbillable**, silently giving away revenue.
+- `role` is a comma-separated list: `"REGISTERED AGENT,MANAGER"`. Filtering out everyone the flag
+  marks discards 20% of paid hits.
+
+**The rule.** When a vendor payload is on disk, open it before writing the code that parses it. A
+summary of a response is not a response. This applies with more force when the summary is one I
+wrote myself, because then the code and the tests inherit the same wrong model and agree.
+
+**Corollary, learned the same day:** a test written after the implementation, from the same
+assumption, proves nothing. Phase 2 wrote 45 characterization tests pinning CURRENT behaviour green
+BEFORE changing billing code, precisely so the tests could disagree with the change.
+
+---
+
+## L-007: Bill on whether the call SUCCEEDED, never on whether it FOUND anything (2026-09-17)
+
+Tier 2 bills per record submitted, so a miss is billable. But a vendor outage is not. **Both look
+identical from outside: no owner found.**
+
+Gating the charge on `ownerFound` bills customers for Tracerfy being down. Gating on
+`ExecutionResult.success` bills the miss and not the outage. Mutation-verified: switching the gate
+turns 12 tests red, and skipping the miss charge turns 7 red.
+
+**The general form:** when two outcomes produce the same visible result and only one is billable,
+the billing condition must key on the thing that DIFFERS (did we successfully ask?) and never on
+the thing they share (did we get an answer?). Write the distinction into a comment at the gate,
+because the next reader will see two false-y values and think they can be merged.
+
+---
+
+## L-006: A loose detector produces false alarms indistinguishable from real ones (2026-09-17)
+
+Scanning committable fixtures for leaked PII, my first scan reported 40+ hits and was **wrong**. It
+substring-matched key names, so `estimated_mortgage_payment` matched on "age", and the propensity
+`_factors` arrays have a literal `name` key whose values are things like `high_equity`. Re-run with
+exact key matching and word boundaries it was clean; the three survivors were `Mayfield Dr`,
+`Youngstown`, and David's own name in a code comment.
+
+**The danger is not the false alarm, it is what it teaches.** A scanner that cries wolf 40 times
+trains its reader to skim the output, and the 41st hit is real. For anything where a miss is
+serious — PII, secrets, credentials — tighten the detector until a hit means something, and say out
+loud how many candidates were checked so the clean result is auditable.
+
+---
+
 ## L-005: Do not let the COST model's dimensions leak into the PRICE model (2026-09-16)
 
 **The correction, which took three passes.** David restated pricing, I implemented it wrong, he

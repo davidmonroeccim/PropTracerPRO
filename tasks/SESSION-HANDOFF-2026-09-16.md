@@ -1,4 +1,46 @@
-# SESSION HANDOFF, 2026-09-16
+# SESSION HANDOFF, 2026-09-16, amended through 2026-09-17
+
+> # STATE OF PLAY, 2026-09-17. READ THIS BLOCK FIRST.
+>
+> **This is the ONLY handoff. Do not create a second one.** On 2026-09-16 two documents disagreed
+> about priority order and it cost a rework; amend this file instead.
+>
+> ## Where the work is
+>
+> Branch `feat/owner-routing-tiers`, **11 commits, NOT PUSHED**, `main` untouched at `a77b256`.
+> 478 tests passing, `tsc` 9 pre-existing dotenv errors, eslint 54.
+>
+> | Phase | State |
+> |---|---|
+> | Pricing repriced on every surface | **DONE**, committed |
+> | Three billing defects from the reprice | **DONE**, mutation-verified |
+> | Deduct guard, 10 sites | **DONE** |
+> | 1. Dossier client | **DONE**, 34 tests, sanitized fixtures |
+> | 2. Never delete a billed row, cache sees paid rows | **DONE**, 19 mutations |
+> | 3a. plan-aware planRoute, address-only parcels, executor | **DONE**, 6 mutations |
+> | 3b. Tier 2 bills end to end on the session route | **DONE**, 21 mutations |
+> | 4. Remove AI Search, ship the UI, fix v1 | **NOT STARTED** |
+> | 5. Bulk | **NOT STARTED** |
+>
+> **Both migrations are APPLIED to production and verified.** `property_record` and `tier` exist
+> on `trace_history`; `usage_records.unit_price` default is 0.15.
+>
+> ## THE ONE THING BLOCKING A PUSH
+>
+> **`app/(dashboard)/trace/single/page.tsx:114` sends `owner_name: undefined` when the field is
+> blank, and the submit button is disabled only while loading.** So a user can submit with no
+> owner and tier 2 now charges them $0.25-$0.40 **with no warning anywhere in the UI**. The
+> pre-submit disclosure is a phase 4 item and it is the gate. Do not push until it exists.
+>
+> ## The other three things phase 4 must not forget
+>
+> - **v1 CANNOT be wired for tier 2 until AI Search is deleted.** `app/api/v1/trace/single/route.ts`
+>   runs AI research on `(aiResearch && !ownerName)` and deducts $0.15, and an absent `ownerName`
+>   is ALSO the tier-2 trigger. Wiring it now double-bills the same record and races two engines.
+> - **Tier 2 never reaches the poll route**, so no `trace.completed` webhook and no HighLevel push
+>   fires on completion. Tier 1 fires both from the poll route.
+> - **`owner_name_2` now carries the owner of record** and the results card renders it unlabelled
+>   as a second owner name.
 
 **READ THIS BEFORE TOUCHING OWNER LOOKUP, SKIP TRACE ROUTING, OR PRICING.**
 Supersedes `SESSION-HANDOFF-2026-09-15.md` for everything about owner discovery.

@@ -133,6 +133,36 @@ anything can create it. Nothing is wired; no user-facing behaviour is added.
 
 ## 2026-09-17
 
+### Full Property Trace, phase 3: tier 2 bills end to end on a single address
+
+- **3a:** `planRoute` now takes the price plan as a REQUIRED parameter, `DEFAULT_PRICE_PLAN`
+  deleted. A safe default still lets a mis-wire bill a customer wrong and be found from a
+  statement; a required parameter makes the compiler refuse it. Free to do only because
+  `planRoute` had no production callers yet. `FAILSAFE_PRICE_PLAN = 'wallet'` prices the DEAREST
+  column, so a mis-wire overcharges (visible, refundable) rather than undercharging (invisible,
+  compounding). `ParcelInput` accepts an address-only parcel. `executeRoute()` runs a plan through
+  injected vendor callables, stops at the first hit, re-enters `planRoute` with the discovered
+  owner, and **distinguishes a vendor FAILURE from a MISS**.
+- **3b:** tier 2 wired into the session route, fully synchronous, no polling. **The billing gate is
+  `execution.success`, never `ownerFound`** — see lessons L-007. A total dossier miss IS billed; a
+  vendor failure never is. `CACHE_HIT_FILTER` gained a third arm so a billed miss is served free
+  rather than re-bought.
+- **ZIP backfill**, added by David: pass 2 fills `situsZip` from `property.zip_code`, which the
+  dossier returns and we were discarding immediately before the lookup that needs it most. Never
+  `mailing_address.zip` (the OWNER'S zip; 21 of 24 parcels are absentee). `address_hash` never
+  rewritten.
+- **Two vendor defects found in saved payloads**, both of which would have shipped silently: a
+  FastAppend miss carries an `error` string alongside `hit:false`, so reading it as failure makes
+  every billable miss unbillable; and `role` is comma-separated, so filtering on it discards 20% of
+  paid hits.
+- **A live 500 fixed:** the route called `zip.substring(0,5)` on an optional field, so any
+  submission without a zip threw before reaching a vendor.
+- **v1 DEFERRED deliberately.** It still runs AI research on `(aiResearch && !ownerName)` and
+  deducts $0.15, and an absent owner name is ALSO the tier-2 trigger, so wiring it now would
+  double-bill the same record and race two engines. It belongs immediately after the research path
+  is deleted.
+- 478 tests passing (from 337 at the start of phase 3), 27 mutations across 3a and 3b.
+
 ### Both migrations APPLIED to production, verified against a before-snapshot
 
 - `20260917_trace_history_property_record_tier.sql` and
