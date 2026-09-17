@@ -1,0 +1,120 @@
+{
+  "request": { "company_name": "Abc Rentals Llc", "state": "UT" },
+  "response": {
+    "company_name": "Abc Rentals Llc",
+    "state": "UT",
+    "address": "200 Placeholder Ave",
+    "city": "Redacted",
+    "zip": "00000",
+    "owner_first_name": "Testowner",
+    "owner_last_name": "Placeholder",
+    "mailing_address": {
+      "street": "200 Placeholder Ave",
+      "city": "Redacted",
+      "state": "ZZ",
+      "zip": "00000"
+    },
+    "phones": [
+      { "number": "5550000001", "type": "mobile", "dnc": false, "carrier": "Placeholder Wireless", "rank": 1 },
+      { "number": "5550000002", "type": "landline", "dnc": true, "carrier": "Placeholder Telco", "rank": 2 }
+    ],
+    "emails": [{ "email": "company@example.invalid", "rank": 1 }],
+    "addresses": [
+      { "street": "200 Placeholder Ave", "city": "Redacted", "state": "ZZ", "zip": "00000" }
+    ],
+    "associated_people_count": 2,
+    "associated_people": [
+      {
+        "first_name": "Testowner",
+        "middle_name": "",
+        "last_name": "Placeholder",
+        "full_name": "Testowner Placeholder",
+        "age": 0,
+        "dob": "",
+        "deceased": false,
+        "litigator": false,
+        "mailing_address": {
+          "street": "100 Placeholder Way",
+          "city": "Redacted",
+          "state": "ZZ",
+          "zip": "00000"
+        },
+        "phones": [
+          {
+            "number": "5550000101",
+            "is_input": false,
+            "type": "mobile",
+            "dnc": false,
+            "tcpa": false,
+            "state_dnc": [],
+            "contactable": true,
+            "carrier": "Placeholder Wireless",
+            "last_seen": "2026-01-01",
+            "rank": 1
+          },
+          {
+            "number": "5550000102",
+            "is_input": false,
+            "type": "landline",
+            "dnc": false,
+            "tcpa": false,
+            "state_dnc": [],
+            "contactable": true,
+            "carrier": "Placeholder Telco",
+            "last_seen": "2026-01-01",
+            "rank": 2
+          }
+        ],
+        "emails": [
+          { "email": "principal@example.invalid", "is_input": false, "rank": 1 }
+        ],
+        "rank": 1,
+        "role": "MEMBER",
+        "is_registered_agent": false
+      },
+      {
+        "first_name": "Agentonly",
+        "middle_name": "",
+        "last_name": "Placeholder",
+        "full_name": "Agentonly Placeholder",
+        "age": 0,
+        "dob": "",
+        "deceased": false,
+        "litigator": false,
+        "mailing_address": {
+          "street": "300 Placeholder Blvd",
+          "city": "Redacted",
+          "state": "ZZ",
+          "zip": "00000"
+        },
+        "phones": [
+          {
+            "number": "5550000201",
+            "is_input": false,
+            "type": "mobile",
+            "dnc": false,
+            "tcpa": false,
+            "state_dnc": [],
+            "contactable": true,
+            "carrier": "Placeholder Wireless",
+            "last_seen": "2026-01-01",
+            "rank": 1
+          }
+        ],
+        "emails": [{ "email": "agent@example.invalid", "is_input": false, "rank": 1 }],
+        "rank": 2,
+        "role": "REGISTERED AGENT",
+        "is_registered_agent": true
+      }
+    ],
+    "is_active": true,
+    "is_foreign_owned": false,
+    "hit": true,
+    "credits_deducted": 1,
+    "meta": {
+      "request_id": "req_00000000000000000000000000000001",
+      "timestamp": "2026-09-16T15:22:49Z",
+      "api_version": "2026-08-20"
+    }
+  }
+}

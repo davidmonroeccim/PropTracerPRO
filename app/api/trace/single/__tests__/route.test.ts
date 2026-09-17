@@ -30,6 +30,11 @@ const H = vi.hoisted(() => ({
     filters: Array<[string, ...unknown[]]>;
     payload?: unknown;
   }>,
+  /** Every Postgres function call, so the wallet deduct can be counted exactly. */
+  rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
+  /** What deduct_wallet_balance resolves with. `false` = the wallet was short. */
+  deductData: true as unknown,
+  deductError: null as { message: string } | null,
   user: { id: "user-1" } as { id: string } | null,
   profile: null as unknown as Record<string, unknown> | null,
   cached: null as Record<string, unknown> | null,
@@ -45,6 +50,12 @@ const H = vi.hoisted(() => ({
     jobId?: string;
     error?: string;
   },
+  /** What lookupDossier resolves with. Set per test. */
+  dossier: null as unknown,
+  /** What the FastAppend entity lookup resolves with. */
+  entity: null as unknown,
+  /** What the Tracerfy person lookup resolves with. */
+  person: null as unknown,
 }));
 
 function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
@@ -104,6 +115,10 @@ function recordingClient() {
         update: (payload: unknown) => begin("update", payload),
       };
     },
+    rpc(fn: string, args: Record<string, unknown>) {
+      H.rpcCalls.push({ fn, args });
+      return Promise.resolve({ data: H.deductData, error: H.deductError });
+    },
   };
 }
 
@@ -124,11 +139,38 @@ vi.mock("@/lib/utils/deduplication", () => ({
 
 vi.mock("@/lib/tracerfy/client", () => ({
   submitSingleTrace: vi.fn(async () => H.submit),
+  // The two SYNCHRONOUS contact endpoints. Only the vendors are mocked: the
+  // real planRoute and the real executeRoute run, so these tests cover the
+  // routing and the spend accounting, not just the route's own branches.
+  lookupBusinessTrace: vi.fn(async () => H.entity),
+  lookupPersonTrace: vi.fn(async () => H.person),
+}));
+
+vi.mock("@/lib/tracerfy/dossier", () => ({
+  lookupDossier: vi.fn(async () => H.dossier),
+}));
+
+vi.mock("@/lib/utils/auto-rebill", () => ({
+  triggerAutoRebillIfNeeded: vi.fn(async () => undefined),
 }));
 
 const { POST } = await import("@/app/api/trace/single/route");
 
+/**
+ * The TIER 1 body. It carries an owner of record on purpose: since 2026-09-17
+ * an ABSENT owner is itself the tier 2 trigger, so a body without one no longer
+ * describes the async per-successful-trace path these tests characterize.
+ */
 const BODY = {
+  address: "123 Main St",
+  city: "Austin",
+  state: "TX",
+  zip: "78701",
+  owner_name: "ACME HOLDINGS LLC",
+};
+
+/** The TIER 2 body: same address, no owner of record. */
+const TIER2_BODY = {
   address: "123 Main St",
   city: "Austin",
   state: "TX",
@@ -162,6 +204,12 @@ function hasFilter(rec: Recorded, method: string, column: string, value?: unknow
 beforeEach(() => {
   vi.clearAllMocks();
   H.ops = [];
+  H.rpcCalls = [];
+  H.deductData = true;
+  H.deductError = null;
+  H.dossier = { success: true, hit: false, owners: [], property: null, mailingAddress: null, creditsDeducted: 0 };
+  H.entity = { success: true, hit: false, contacts: null };
+  H.person = { success: true, hit: false, contacts: null };
   H.user = { id: "user-1" };
   H.cached = null;
   H.insertedRow = { id: "trace-new" };
@@ -440,5 +488,627 @@ describe("POST /api/trace/single — row creation and submission", () => {
       (o) => o.op === "update" && (o.payload as Record<string, unknown>)?.status === "error"
     );
     expect(statusUpdate).toBeDefined();
+  });
+});
+
+/* ==================================================================== *
+ * TIER 2 — FULL PROPERTY TRACE
+ *
+ * A NEW BILLING PATH. Tier 2 bills per RECORD SUBMITTED, which makes two
+ * things true that are false everywhere else in this codebase:
+ *   - a row can carry `charge > 0` with `is_successful = false`
+ *   - a customer can receive NOTHING and still be charged
+ *
+ * The one distinction every test below is protecting: `success` is the
+ * billing gate, never `ownerFound`. A billed MISS and an unbillable vendor
+ * FAILURE both come back with ownerFound: false.
+ *
+ * Only the vendors are mocked here. The real planRoute and the real
+ * executeRoute run, so these also cover which vendor a discovered owner is
+ * routed to and what the route does with the spend report it gets back.
+ * ==================================================================== */
+
+import dossierEntityFixture from "@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json";
+import dossierIndividualFixture from "@/lib/tracerfy/__tests__/fixtures/individual-hit.json";
+
+/** A dossier HIT on an entity-owned parcel, carrying the real 86-key record. */
+const DOSSIER_ENTITY_HIT = {
+  success: true,
+  hit: true,
+  owners: dossierEntityFixture.response.owners,
+  property: dossierEntityFixture.response.property,
+  mailingAddress: dossierEntityFixture.response.mailing_address,
+  creditsDeducted: 10,
+};
+
+/** A dossier HIT on an individually-owned parcel. */
+const DOSSIER_INDIVIDUAL_HIT = {
+  success: true,
+  hit: true,
+  owners: dossierIndividualFixture.response.owners,
+  property: dossierIndividualFixture.response.property,
+  mailingAddress: dossierIndividualFixture.response.mailing_address,
+  creditsDeducted: 10,
+};
+
+/** The county has no parcel at this address. Free at the vendor, BILLED to the customer. */
+const DOSSIER_MISS = {
+  success: true,
+  hit: false,
+  owners: [],
+  property: null,
+  mailingAddress: null,
+  creditsDeducted: 0,
+};
+
+/** We could not ask. Never billed. */
+const DOSSIER_FAILURE = {
+  success: false,
+  hit: false,
+  owners: [],
+  property: null,
+  mailingAddress: null,
+  creditsDeducted: 0,
+  error: "Tracerfy service unavailable",
+};
+
+const CONTACTS_HIT = {
+  success: true,
+  hit: true,
+  contacts: {
+    ownerName: "Testowner Placeholder",
+    phones: [{ number: "5550000101", type: "mobile" }],
+    emails: ["principal@example.invalid"],
+    mailingAddress: "100 Placeholder Way, Redacted, ZZ, 00000",
+  },
+};
+
+const PAYG_PROFILE = {
+  id: "user-1",
+  subscription_tier: "wallet",
+  wallet_balance: 100,
+  is_acquisition_pro_member: false,
+  gateway_products: null,
+};
+const PRO_PROFILE = { ...PAYG_PROFILE, subscription_tier: "pro" };
+const ACQ_PRO_PROFILE = { ...PAYG_PROFILE, is_acquisition_pro_member: true };
+
+/** Every call to deduct_wallet_balance. */
+const deducts = () => H.rpcCalls.filter((c) => c.fn === "deduct_wallet_balance");
+
+/** The UPDATE that writes the tier 2 outcome. */
+function persisted(): Record<string, unknown> | undefined {
+  const rec = H.ops.find(
+    (o) =>
+      o.op === "update" &&
+      o.payload !== null &&
+      typeof o.payload === "object" &&
+      "property_record" in (o.payload as object)
+  );
+  return rec?.payload as Record<string, unknown> | undefined;
+}
+
+async function vendorsCalled() {
+  const { lookupDossier } = await import("@/lib/tracerfy/dossier");
+  const { submitSingleTrace, lookupBusinessTrace, lookupPersonTrace } = await import(
+    "@/lib/tracerfy/client"
+  );
+  return { lookupDossier, submitSingleTrace, lookupBusinessTrace, lookupPersonTrace };
+}
+
+describe("tier 2 — the trigger", () => {
+  it("runs automatically when no owner of record was supplied", async () => {
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier, submitSingleTrace } = await vendorsCalled();
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+    expect(submitSingleTrace).not.toHaveBeenCalled();
+    expect(body.tier).toBe(2);
+  });
+
+  it("does NOT run when the owner of record was supplied", async () => {
+    const { lookupDossier, submitSingleTrace } = await vendorsCalled();
+
+    const body = await (await post(BODY)).json();
+
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(submitSingleTrace).toHaveBeenCalledTimes(1);
+    expect(body.tier).toBeUndefined();
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("runs on the explicit opt-in even when the owner IS supplied", async () => {
+    // The caller has the owner and wants the county property record anyway.
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier, submitSingleTrace } = await vendorsCalled();
+
+    await post({ ...BODY, full_property_trace: true });
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+    expect(submitSingleTrace).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse the ai_research flag", async () => {
+    // AI Search is being removed; overloading its flag would couple the two.
+    const { lookupDossier } = await vendorsCalled();
+    await post({ ...BODY, ai_research: { owner_name: "ACME HOLDINGS LLC" } });
+    expect(lookupDossier).not.toHaveBeenCalled();
+  });
+
+  it("keys the dossier on the submitted address", async () => {
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await vendorsCalled();
+
+    await post(TIER2_BODY);
+
+    expect(lookupDossier).toHaveBeenCalledWith({
+      mode: "address",
+      address: "123 Main St",
+      city: "Austin",
+      state: "TX",
+      zip_code: "78701",
+    });
+  });
+});
+
+describe("tier 2 — the pre-flight balance gate", () => {
+  it("402s a pay-as-you-go wallet that cannot cover ONE record", async () => {
+    // 0.39 covers the tier 1 wallet rate (0.25) and not the tier 2 one (0.40).
+    // MUTATION: reserve chargePerTrace() here and this goes red -- the request
+    // reaches the vendors, we spend, and there is nothing to collect from.
+    H.profile = { ...PAYG_PROFILE, wallet_balance: 0.39 };
+    const { lookupDossier } = await vendorsCalled();
+
+    const res = await post(TIER2_BODY);
+
+    expect(res.status).toBe(402);
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("lets a pro wallet through at the pro rate", async () => {
+    H.profile = { ...PRO_PROFILE, wallet_balance: 0.25 };
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await vendorsCalled();
+
+    const res = await post(TIER2_BODY);
+
+    expect(res.status).toBe(200);
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("tier 2 — a vendor FAILURE is never billed", () => {
+  it("charges nothing when the dossier could not be asked", async () => {
+    // success:false and ownerFound:false. A miss looks identical on ownerFound,
+    // which is exactly why the gate is `success`.
+    // MUTATION: gate the deduct on execution.ownerFound and this goes red.
+    H.dossier = DOSSIER_FAILURE;
+
+    const res = await post(TIER2_BODY);
+    const body = await res.json();
+
+    expect(deducts()).toHaveLength(0);
+    expect(res.status).toBe(502);
+    expect(body.charge).toBe(0);
+    expect(body.error).toContain("unavailable");
+  });
+
+  it("persists nothing billable, so the customer can retry for free", async () => {
+    H.dossier = DOSSIER_FAILURE;
+
+    await post(TIER2_BODY);
+
+    expect(persisted()).toBeUndefined();
+    const errored = H.ops.find(
+      (o) => o.op === "update" && (o.payload as Record<string, unknown>)?.status === "error"
+    );
+    expect(errored).toBeDefined();
+  });
+
+  it("charges nothing when the CONTACT step fails after the dossier hit", async () => {
+    // The $0.20 dossier is already spent on our side. It is still not billed:
+    // we could not complete the ask, so the customer must be able to retry.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = { success: false, hit: false, contacts: null, error: "FastAppend auth failed (403)" };
+
+    const res = await post(TIER2_BODY);
+
+    expect(deducts()).toHaveLength(0);
+    expect(res.status).toBe(502);
+    expect(persisted()).toBeUndefined();
+  });
+});
+
+describe("tier 2 — a TOTAL MISS is still billed", () => {
+  it("charges the full per-record rate when the county has no parcel", async () => {
+    // "Per record submitted" is literal: the customer receives nothing and is
+    // charged. David, 2026-09-17.
+    // MUTATION: skip the deduct when execution.property is null and this goes red.
+    H.dossier = DOSSIER_MISS;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args.p_amount).toBe(0.4);
+    expect(deducts()[0].args.p_trace_history_id).toBe("trace-new");
+    expect(body).toMatchObject({ success: true, status: "no_match", tier: 2, charge: 0.4 });
+  });
+
+  it("writes the cacheable billed-miss row shape", async () => {
+    // tier = 2, charge > 0, property_record IS NULL, status = 'no_match'.
+    // This is the row CACHE_HIT_FILTER's third arm exists to find.
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(persisted()).toMatchObject({
+      tier: 2,
+      charge: 0.4,
+      property_record: null,
+      status: "no_match",
+      is_successful: false,
+    });
+  });
+
+  it("charges a dossier hit whose contact step found nothing", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = { success: true, hit: false, contacts: null };
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(deducts()).toHaveLength(1);
+    expect(body.status).toBe("no_match");
+    expect(persisted()).toMatchObject({ is_successful: false, charge: 0.4, tier: 2 });
+  });
+});
+
+describe("tier 2 — the caller's REAL plan is billed", () => {
+  it("bills pay-as-you-go at the wallet column", async () => {
+    // MUTATION: hardcode planRoute's plan argument to 'pro' and this goes red.
+    // That is the 40% undercharge FAILSAFE_PRICE_PLAN was written against.
+    H.profile = PAYG_PROFILE;
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(deducts()[0].args.p_amount).toBe(0.4);
+  });
+
+  it("bills a pro at the pro column", async () => {
+    H.profile = PRO_PROFILE;
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(deducts()[0].args.p_amount).toBe(0.25);
+  });
+
+  it("bills an AcquisitionPRO member at the pro column", async () => {
+    H.profile = ACQ_PRO_PROFILE;
+    H.dossier = DOSSIER_MISS;
+
+    await post(TIER2_BODY);
+
+    expect(deducts()[0].args.p_amount).toBe(0.25);
+  });
+
+  it("deducts exactly ONCE per record", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    expect(deducts()).toHaveLength(1);
+  });
+
+  it("persists only what was actually collected", async () => {
+    // deduct_wallet_balance returns FALSE without moving money when the wallet
+    // is short. Writing the intended amount would show the customer a charge
+    // they never paid.
+    // MUTATION: persist plan.billing.amount instead of the deductOrZero result
+    // and this goes red.
+    H.dossier = DOSSIER_MISS;
+    H.deductData = false;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(persisted()).toMatchObject({ charge: 0 });
+    expect(body.charge).toBe(0);
+    expect(String(body.warnings.join(" "))).toContain("did not cover");
+  });
+});
+
+describe("tier 2 — what gets persisted", () => {
+  it("stores the property record RAW, all 86 keys", async () => {
+    // The fidelity rule: no filtering, no renaming, no subsetting. A field
+    // empty in OH, CA and UT may be populated in another county, and the $0.20
+    // was already spent to fetch it.
+    // MUTATION: subset the object to the fields we display and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    const stored = persisted()!.property_record as Record<string, unknown>;
+    expect(Object.keys(stored)).toHaveLength(
+      Object.keys(dossierEntityFixture.response.property).length
+    );
+    expect(stored).toEqual(dossierEntityFixture.response.property);
+  });
+
+  it("returns the same raw record to the caller", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(body.property_record).toEqual(dossierEntityFixture.response.property);
+  });
+
+  it("puts contacts where tier 1 already puts them", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    const row = persisted()!;
+    expect(row).toMatchObject({
+      status: "success",
+      is_successful: true,
+      phone_count: 1,
+      email_count: 1,
+      tier: 2,
+      charge: 0.4,
+    });
+    const result = row.trace_result as Record<string, unknown>;
+    expect(result.owner_name).toBe("Testowner Placeholder");
+    // The OWNER OF RECORD the dossier bought, which has nowhere else to live:
+    // the 86-key property object carries no owner field.
+    expect(result.owner_name_2).toBe("Colmaven, Llc");
+    expect(result.emails).toEqual(["principal@example.invalid"]);
+  });
+
+  it("keeps the owner of record even when no contacts came back", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = { success: true, hit: false, contacts: null };
+
+    await post(TIER2_BODY);
+
+    const result = persisted()!.trace_result as Record<string, unknown>;
+    expect(result.owner_name_2).toBe("Colmaven, Llc");
+    expect(result.owner_name).toBeNull();
+    expect(result.phones).toEqual([]);
+  });
+
+  it("records what the vendors actually took, not a price-list guess", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    // $0.20 dossier (10 credits) + $0.10 entity contact call.
+    expect(persisted()!.cost).toBe(0.3);
+  });
+
+  it("clears the Tracerfy job id: there is nothing to poll", async () => {
+    H.dossier = DOSSIER_MISS;
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(persisted()!.tracerfy_job_id).toBeNull();
+    expect(body.tracerfy_job_id).toBeUndefined();
+  });
+});
+
+describe("tier 2 — the discovered owner picks the vendor", () => {
+  it("routes an entity owner to FastAppend, keyed on name plus state", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const { lookupBusinessTrace, lookupPersonTrace } = await vendorsCalled();
+
+    await post(TIER2_BODY);
+
+    expect(lookupBusinessTrace).toHaveBeenCalledWith({
+      company_name: "Colmaven, Llc",
+      state: "TX",
+    });
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+  });
+
+  it("routes an individual owner to the named Tracerfy lookup", async () => {
+    H.dossier = DOSSIER_INDIVIDUAL_HIT;
+    H.person = CONTACTS_HIT;
+    const { lookupBusinessTrace, lookupPersonTrace } = await vendorsCalled();
+
+    await post(TIER2_BODY);
+
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(lookupPersonTrace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        first_name: "Testowner",
+        last_name: "Placeholder",
+        address: "123 Main St",
+        find_owner: false,
+      })
+    );
+  });
+});
+
+describe("tier 2 — a billed row is served from the database, free", () => {
+  it("serves a billed MISS without re-running the dossier", async () => {
+    // The row carries no contacts and no property record, so only the third
+    // arm of CACHE_HIT_FILTER can find it. Re-buying it bills the customer a
+    // second time for the same absence.
+    // MUTATION: delete the isCacheHitRow branch in the route and this goes red.
+    H.cached = {
+      id: "trace-billed-miss",
+      trace_result: null,
+      status: "no_match",
+      is_successful: false,
+      charge: 0.4,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: 2,
+    };
+    H.survivingRow = { id: "trace-billed-miss" };
+    const { lookupDossier } = await vendorsCalled();
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(deducts()).toHaveLength(0);
+    expect(body).toMatchObject({ success: true, is_cached: true, charge: 0, trace_id: "trace-billed-miss" });
+  });
+
+  it("serves a paid property record with no contacts, free", async () => {
+    H.cached = {
+      id: "trace-tier2",
+      trace_result: null,
+      is_successful: false,
+      charge: 0.4,
+      ai_research_charge: 0,
+      property_record: { apn: "abc" },
+      tier: 2,
+    };
+    H.survivingRow = { id: "trace-tier2" };
+    const { lookupDossier } = await vendorsCalled();
+
+    const body = await (await post(TIER2_BODY)).json();
+
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(body.property_record).toEqual({ apn: "abc" });
+    expect(body.charge).toBe(0);
+  });
+
+  it("re-buys an UNBILLED failure rather than serving nothing forever", async () => {
+    // The guard must not become "never trace this address again".
+    H.cached = {
+      id: "trace-free",
+      trace_result: { phones: [], emails: [] },
+      is_successful: false,
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: null,
+    };
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await vendorsCalled();
+
+    await post(TIER2_BODY);
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+    expect(deducts()).toHaveLength(1);
+  });
+
+  it("re-buys a tier 2 row where nothing was ever collected", async () => {
+    // charge = 0 means the deduct returned false. There is no purchase to
+    // serve back, so this correctly spends again.
+    H.cached = {
+      id: "trace-uncollected",
+      trace_result: null,
+      is_successful: false,
+      charge: 0,
+      ai_research_charge: 0,
+      property_record: null,
+      tier: 2,
+    };
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await vendorsCalled();
+
+    await post(TIER2_BODY);
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+  });
+
+  it("skip_cache re-buys, because it forces a fresh vendor call", async () => {
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await vendorsCalled();
+
+    await post({ ...TIER2_BODY, skip_cache: true });
+
+    expect(lookupDossier).toHaveBeenCalledTimes(1);
+    expect(deducts()).toHaveLength(1);
+  });
+});
+
+describe("tier 2 — the learned zip is persisted without moving the cache key", () => {
+  it("writes the situs zip the dossier taught us when the caller sent none", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const { zip: _dropped, ...noZip } = TIER2_BODY;
+    void _dropped;
+
+    await post(noZip);
+
+    const situsZip = String(
+      (dossierEntityFixture.response.property as Record<string, unknown>).zip_code
+    );
+    expect(persisted()!.zip).toBe(situsZip);
+  });
+
+  it("NEVER touches address_hash", async () => {
+    // address_hash is sha256 of STREET|CITY|STATE and deliberately excludes the
+    // zip (migration 20260904). A row whose hash moves stops matching its own
+    // cache key and re-buys itself forever.
+    // MUTATION: add address_hash to the tier 2 update payload and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const { zip: _dropped, ...noZip } = TIER2_BODY;
+    void _dropped;
+
+    await post(noZip);
+
+    const insertedHash = (H.ops.find((o) => o.op === "insert")!.payload as Record<string, unknown>)
+      .address_hash;
+    expect(insertedHash).toBeTruthy();
+    expect(Object.keys(persisted()!)).not.toContain("address_hash");
+    expect(Object.keys(persisted()!)).not.toContain("normalized_address");
+  });
+
+  it("does not rewrite a zip the caller supplied", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+
+    expect(Object.keys(persisted()!)).not.toContain("zip");
+  });
+
+  it("no longer 500s on a submission with no zip at all", async () => {
+    // `zip.substring(0, 5)` threw before the row was even created, which made
+    // the backfill unreachable from this route.
+    H.dossier = DOSSIER_MISS;
+    const { zip: _dropped, ...noZip } = TIER2_BODY;
+    void _dropped;
+
+    const res = await post(noZip);
+
+    expect(res.status).toBe(200);
+    expect((H.ops.find((o) => o.op === "insert")!.payload as Record<string, unknown>).zip).toBeNull();
+  });
+});
+
+describe("tier 2 — the charge follows the vendor call", () => {
+  it("never deducts when no vendor was asked", async () => {
+    // planRoute emits no step when the parcel carries no usable key. Address
+    // validation makes that unreachable from this route; the guard exists
+    // because a record nobody was asked about must never reach the deduct.
+    const { planRoute } = await import("@/lib/routing/ownerRoute");
+    const spy = vi.spyOn(await import("@/lib/routing/ownerRoute"), "planRoute");
+    spy.mockImplementationOnce((parcel, plan) => ({
+      ...planRoute(parcel, plan),
+      steps: [],
+    }));
+    const { lookupDossier } = await vendorsCalled();
+
+    const res = await post(TIER2_BODY);
+
+    expect(res.status).toBe(400);
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(deducts()).toHaveLength(0);
+    spy.mockRestore();
   });
 });

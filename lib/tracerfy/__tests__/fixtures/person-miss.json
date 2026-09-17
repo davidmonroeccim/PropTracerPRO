@@ -1,0 +1,25 @@
+{
+  "request": {
+    "address": "305 W Center St",
+    "city": "Clearfield",
+    "state": "UT",
+    "zip": "84015",
+    "find_owner": true
+  },
+  "response": {
+    "address": "305 W Center St",
+    "city": "Clearfield",
+    "state": "UT",
+    "zip": "84015",
+    "find_owner": true,
+    "hit": false,
+    "persons_count": 0,
+    "credits_deducted": 0,
+    "persons": [],
+    "meta": {
+      "request_id": "req_00000000000000000000000000000005",
+      "timestamp": "2026-09-16T15:23:59Z",
+      "api_version": "2026-03-21"
+    }
+  }
+}

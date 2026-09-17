@@ -86,5 +86,55 @@ export function excludeBilledRows<Q extends FilterableQuery>(query: Q): Q {
     .is('property_record', null) as Q;
 }
 
-/** PostgREST filter matching rows that are a free cache hit for the caller. */
-export const CACHE_HIT_FILTER = 'is_successful.eq.true,property_record.not.is.null';
+/**
+ * PostgREST filter matching rows that are a free cache hit for the caller.
+ *
+ * THREE arms, and the third one is not optional:
+ *
+ *   is_successful = true          contacts were delivered (tier 1, and tier 2 with contacts)
+ *   property_record IS NOT NULL   the 86-field property record was bought (a tier 2 hit)
+ *   tier = 2 AND charge > 0       a BILLED tier 2 row, whatever it contains
+ *
+ * The third arm exists for one row shape that matches neither of the others: a
+ * tier 2 MISS. Tier 2 bills per record SUBMITTED, so the county having no
+ * parcel at that address is still billed -- `tier = 2`, `charge > 0`,
+ * `property_record IS NULL`, `status = 'no_match'`, `is_successful = false`.
+ * Without this arm that row is invisible to the cache and the next submit
+ * re-buys it, billing the customer a second time for the same absence. David,
+ * 2026-09-17: a billed tier 2 row is served from the database whatever it
+ * contains.
+ *
+ * `charge.gt.0` and not `charge.not.is.null`: a row where the wallet deduct
+ * returned false collected nothing, so there is no purchase to serve back and
+ * re-buying it is correct.
+ *
+ * `and(...)` is PostgREST's conjunction inside an `or=`; the two columns must
+ * be tested together, because `charge > 0` alone would swallow every tier 1
+ * row and `tier = 2` alone would swallow an uncharged one.
+ */
+export const CACHE_HIT_FILTER =
+  'is_successful.eq.true,property_record.not.is.null,and(tier.eq.2,charge.gt.0)';
+
+/** The columns CACHE_HIT_FILTER reads. */
+export interface CacheHitRow extends BillableTraceRow {
+  is_successful?: boolean | null;
+  tier?: number | string | null;
+}
+
+/**
+ * The JS twin of CACHE_HIT_FILTER: true when this row is the customer's to be
+ * served from the database, free.
+ *
+ * The SQL predicate gets the row OUT of the database; a caller still has to
+ * decide to serve it rather than re-run the vendors, and that decision cannot
+ * be made by re-deriving the rule in a route. Kept beside the filter so the two
+ * are read, and changed, together.
+ */
+export function isCacheHitRow(row: CacheHitRow | null | undefined): boolean {
+  if (!row) return false;
+  if (row.is_successful === true) return true;
+  if (row.property_record !== null && row.property_record !== undefined) return true;
+  return (
+    Number(row.tier) === TRACE_TIER.PER_RECORD_SUBMITTED && toAmount(row.charge) > 0
+  );
+}

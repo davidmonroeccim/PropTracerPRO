@@ -1,5 +1,13 @@
 import { TRACERFY, FASTAPPEND } from '@/lib/constants';
 import type { TracerfyResult } from '@/types';
+// Type-only, erased at compile: the contact-vendor contract is declared where
+// it is consumed (executeRoute injects these), so there is one definition of
+// "what a contact vendor returns" rather than one per module.
+import type {
+  ContactResult,
+  EntityTraceRequest,
+  PersonTraceRequest,
+} from '@/lib/routing/executeRoute';
 
 const API_KEY = process.env.TRACERFY_API_KEY;
 const BASE_URL = process.env.TRACERFY_API_URL || TRACERFY.BASE_URL;
@@ -312,6 +320,348 @@ function parseCSVLine(line: string): string[] {
   }
   result.push(current);
   return result;
+}
+
+/* ==================================================================== *
+ * SYNCHRONOUS CONTACT LOOKUPS — the vendor callables Full Property Trace
+ * injects into executeRoute().
+ *
+ * Both endpoints answer in ONE request: JSON in, JSON out, no CSV, no queue,
+ * no polling, no download URL. That is what makes a whole tier 2 request
+ * synchronous, which is what lets the charge fire in the same request as the
+ * spend.
+ *
+ *   POST app.fastappend.com/v1/api/business-trace/lookup/   1 credit  $0.10/hit
+ *   POST tracerfy.com/v1/api/trace/lookup/                  5 credits $0.10/hit
+ *   POST tracerfy.com/v1/api/trace/parcel/lookup/           5 credits $0.10/hit
+ *
+ * Misses are free on all three. The Tracerfy pair share the 500/min counter
+ * with the dossier (see lib/tracerfy/dossier.ts).
+ *
+ * These do NOT replace submitBusinessTrace/getBusinessTraceStatus/
+ * downloadBusinessTraceResults above. Those are the batch path the AI research
+ * flow still runs on and they are left exactly as they are.
+ *
+ * THREE TRAPS, each measured on the 2026-09-16 saved payloads, not assumed:
+ *
+ * 1. A MISS CARRIES AN `error` STRING. FastAppend answers a no-match with
+ *    `{ error: "Company not found: X (OH)", hit: false, credits_deducted: 0 }`.
+ *    Treating a present `error` as a failure would turn every legitimate miss
+ *    into an unbillable "vendor down" — and under tier 2 a miss IS billed.
+ *    `hit` is the answer; only the transport decides success.
+ * 2. A REGISTERED AGENT IS NOT A PRINCIPAL, BUT THE FLAG ALONE DOES NOT SAY SO.
+ *    `associated_people[]` carries `role` and `is_registered_agent`, and PTP
+ *    has historically read neither: that is how five contacts literally named
+ *    "Secretary of State" reached customers. But `role` is a COMMA-SEPARATED
+ *    LIST, and on 1 of the 5 saved hits the only person returned is
+ *    `"REGISTERED AGENT,MANAGER"` with the flag true — a real manager who also
+ *    serves as the agent. Dropping everyone the flag marks would have thrown
+ *    away the contact on 20% of the hits we paid for. Only a person whose
+ *    ONLY role is registered agent is excluded.
+ * 3. DO NOT FILTER ON `property_owner`. It returned FALSE for the verified
+ *    owner of record on an absentee-owned parcel — the owner does not live in
+ *    his own rental. Match on the NAME we asked for instead.
+ *
+ * House pattern: never throws, returns a result object on every path, no
+ * retries (a retry here silently doubles a real charge). Env is read at CALL
+ * time rather than captured at module load, the same deliberate deviation
+ * lib/tracerfy/dossier.ts documents: the module-level capture above freezes
+ * the key at import and leaves the missing-key branch untestable.
+ * ==================================================================== */
+
+/** The shape every contact-lookup failure returns. Not a miss: a miss is success + hit:false. */
+const contactFailure = (error: string): ContactResult => ({
+  success: false,
+  hit: false,
+  contacts: null,
+  error,
+});
+
+const MISSED: ContactResult = { success: true, hit: false, contacts: null };
+
+const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+const isObj = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Map an HTTP status onto the same error vocabulary the dossier client uses. */
+function transportError(label: string, status: number): string {
+  if (status === 429) return 'Rate limit exceeded. Please wait a moment before trying again.';
+  if (status === 503) return `${label} service unavailable (503)`;
+  if (status === 401 || status === 403) return `${label} auth failed (${status})`;
+  return `${label} lookup failed (${status})`;
+}
+
+/** `{ street, city, state, zip }` as one line. Null when the vendor sent nothing. */
+function flattenMailing(v: unknown): string | null {
+  if (!isObj(v)) return null;
+  const parts = [text(v.street) || text(v.address), text(v.city), text(v.state), text(v.zip)].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
+
+function readPhones(v: unknown): Array<{ number: string; type: string }> {
+  if (!Array.isArray(v)) return [];
+  const out: Array<{ number: string; type: string }> = [];
+  for (const raw of v) {
+    if (!isObj(raw)) continue;
+    const number = text(raw.number);
+    if (!number || out.some((p) => p.number === number)) continue;
+    out.push({ number, type: text(raw.type).toLowerCase() || 'unknown' });
+  }
+  return out.slice(0, TRACERFY.MAX_PHONES);
+}
+
+function readEmails(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const raw of v) {
+    const email = isObj(raw) ? text(raw.email) : text(raw);
+    if (email && !out.includes(email)) out.push(email);
+  }
+  return out.slice(0, TRACERFY.MAX_EMAILS);
+}
+
+const fullName = (p: Record<string, unknown>): string =>
+  text(p.full_name) || [text(p.first_name), text(p.last_name)].filter(Boolean).join(' ');
+
+/** Lower rank first; a person with no rank sorts last rather than first. */
+const rankOf = (p: Record<string, unknown>): number =>
+  typeof p.rank === 'number' ? p.rank : Number.MAX_SAFE_INTEGER;
+
+/** `"REGISTERED AGENT,MANAGER"` -> `['REGISTERED AGENT', 'MANAGER']`. */
+const roleTokens = (p: Record<string, unknown>): string[] =>
+  text(p.role)
+    .toUpperCase()
+    .split(',')
+    .map((r) => r.trim())
+    .filter(Boolean);
+
+/**
+ * True only when this person is a service of process and NOTHING else.
+ * See trap 2: a "REGISTERED AGENT,MANAGER" is a manager, and on the saved
+ * payloads that is sometimes the only human the vendor returns.
+ */
+const isAgentOnly = (p: Record<string, unknown>): boolean =>
+  p.is_registered_agent === true &&
+  roleTokens(p).filter((r) => r !== 'REGISTERED AGENT').length === 0;
+
+/** Someone who is only an agent-plus-something sorts behind someone who is not an agent at all. */
+const byPrincipalThenRank = (
+  a: Record<string, unknown>,
+  b: Record<string, unknown>
+): number =>
+  Number(a.is_registered_agent === true) - Number(b.is_registered_agent === true) ||
+  rankOf(a) - rankOf(b);
+
+/**
+ * Parse a FastAppend business-trace/lookup/ body. Pure, so it is testable
+ * without a network and without spending a credit.
+ */
+export function parseBusinessTraceResponse(body: unknown): ContactResult {
+  if (!isObj(body)) return contactFailure('Malformed business trace response');
+  // Read `hit` and not `error`: see trap 1 above.
+  if (typeof body.hit !== 'boolean') return contactFailure('Business trace response missing hit flag');
+  if (!body.hit) return MISSED;
+
+  const people = Array.isArray(body.associated_people) ? body.associated_people.filter(isObj) : [];
+  // Trap 2. Drop the people who are ONLY a service of process; order what is
+  // left so a plain principal always beats a principal who doubles as the agent.
+  const principals = people.filter((p) => !isAgentOnly(p)).sort(byPrincipalThenRank);
+  const principal = principals[0];
+
+  if (principal) {
+    return {
+      success: true,
+      hit: true,
+      contacts: {
+        ownerName: fullName(principal) || null,
+        phones: readPhones(principal.phones),
+        emails: readEmails(principal.emails),
+        mailingAddress: flattenMailing(principal.mailing_address) ?? flattenMailing(body.mailing_address),
+      },
+    };
+  }
+
+  // No principal: either the vendor returned only registered agents, or the
+  // record carries no people at all. The company-level block is still real and
+  // still bought, so it is returned -- but with no person's name attached to
+  // it, because naming a registered agent as the owner is the defect above.
+  const phones = readPhones(body.phones);
+  const emails = readEmails(body.emails);
+  if (!phones.length && !emails.length) {
+    return { success: true, hit: true, contacts: null };
+  }
+  return {
+    success: true,
+    hit: true,
+    contacts: {
+      ownerName: null,
+      phones,
+      emails,
+      mailingAddress: flattenMailing(body.mailing_address),
+    },
+  };
+}
+
+/**
+ * FastAppend business trace, SYNCHRONOUS. 1 credit ($0.10) on a hit, free on a
+ * miss, 500/min.
+ *
+ * Keyed on company name plus STATE OF REGISTRATION, which is not necessarily
+ * the property state: the caller decides which state to send (planRoute warns
+ * when it is falling back to the property state).
+ */
+export async function lookupBusinessTrace(req: EntityTraceRequest): Promise<ContactResult> {
+  const apiKey = process.env.FASTAPPEND_API_KEY;
+  if (!apiKey) return contactFailure('FastAppend API key not configured');
+  if (!text(req.company_name) || !text(req.state)) {
+    return contactFailure('Business trace requires a company name and a state');
+  }
+
+  try {
+    const response = await fetch(`${FASTAPPEND.BASE_URL}business-trace/lookup/`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ company_name: req.company_name, state: req.state }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('FastAppend business trace lookup error:', response.status, errorText);
+      return contactFailure(transportError('FastAppend', response.status));
+    }
+
+    return parseBusinessTraceResponse(await response.json());
+  } catch (error) {
+    console.error('FastAppend business trace lookup error:', error);
+    return contactFailure('FastAppend service unavailable');
+  }
+}
+
+/**
+ * Parse a Tracerfy trace/lookup/ or trace/parcel/lookup/ body. One parser: the
+ * two endpoints return the same envelope, `{ hit, persons_count, persons[],
+ * credits_deducted }`, and differ only in the request keys echoed back.
+ *
+ * `want` is the name we asked for, used to pick among several persons at one
+ * address. It is a NAME match, never `property_owner` -- see trap 3.
+ */
+export function parsePersonTraceResponse(
+  body: unknown,
+  want?: { first_name?: string; last_name?: string }
+): ContactResult {
+  // The research harness saw an array wrapper on this endpoint once; unwrap it
+  // rather than failing a request the customer has been charged for.
+  const one = Array.isArray(body) ? body[0] : body;
+  if (!isObj(one)) return contactFailure('Malformed person trace response');
+  if (typeof one.hit !== 'boolean') return contactFailure('Person trace response missing hit flag');
+  if (!one.hit) return MISSED;
+
+  const persons = Array.isArray(one.persons) ? one.persons.filter(isObj) : [];
+  if (!persons.length) return { success: true, hit: true, contacts: null };
+
+  const wantedLast = text(want?.last_name).toLowerCase();
+  const wantedFirst = text(want?.first_name).toLowerCase();
+  const named = wantedLast
+    ? persons.find(
+        (p) =>
+          text(p.last_name).toLowerCase() === wantedLast &&
+          (!wantedFirst || text(p.first_name).toLowerCase().startsWith(wantedFirst.charAt(0)))
+      )
+    : undefined;
+  // No name to match on (the APN-keyed form sends none), or no person carries
+  // it: take the vendor's own first record rather than discarding a paid hit.
+  const person = named ?? persons[0];
+
+  return {
+    success: true,
+    hit: true,
+    contacts: {
+      ownerName: fullName(person) || null,
+      phones: readPhones(person.phones),
+      emails: readEmails(person.emails),
+      mailingAddress: flattenMailing(person.mailing_address),
+    },
+  };
+}
+
+/**
+ * Tracerfy person lookup, SYNCHRONOUS. 5 credits ($0.10) on a hit, free on a
+ * miss, and on the 500/min counter SHARED with the dossier.
+ *
+ * Two endpoints behind one callable, chosen by the key the caller has:
+ *   parcel_id + county  ->  trace/parcel/lookup/   (APN-keyed fallback)
+ *   otherwise           ->  trace/lookup/          (address + name)
+ *
+ * The address form always sends `find_owner: false` plus the name. Measured:
+ * `find_owner: true` MISSED on an absentee-owned parcel where the named lookup
+ * hit, so the named form is the one worth spending on whenever a name exists.
+ */
+export async function lookupPersonTrace(req: PersonTraceRequest): Promise<ContactResult> {
+  const apiKey = process.env.TRACERFY_API_KEY;
+  if (!apiKey) return contactFailure('Tracerfy API key not configured');
+
+  const baseUrl = process.env.TRACERFY_API_URL || TRACERFY.BASE_URL;
+  const byParcel = Boolean(text(req.parcel_id) && text(req.county));
+
+  let path: string;
+  let payload: Record<string, unknown>;
+
+  if (byParcel) {
+    if (!text(req.state)) return contactFailure('Parcel lookup requires a state');
+    path = 'trace/parcel/lookup/';
+    payload = { parcel_id: req.parcel_id, county: req.county, state: req.state };
+  } else {
+    if (!text(req.first_name) && !text(req.last_name)) {
+      // find_owner:false with no name cannot match anything, and find_owner:true
+      // is the form that missed. Refuse before spending rather than posting a
+      // body that can only fail.
+      return contactFailure('Person trace requires a first or last name');
+    }
+    if (!text(req.address) || !text(req.city) || !text(req.state)) {
+      return contactFailure('Person trace requires address, city and state');
+    }
+    path = 'trace/lookup/';
+    payload = {
+      address: req.address,
+      city: req.city,
+      state: req.state,
+      ...(text(req.zip) ? { zip: req.zip } : {}),
+      find_owner: false,
+      first_name: req.first_name,
+      last_name: req.last_name,
+    };
+  }
+
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Tracerfy person lookup error:', response.status, errorText);
+      return contactFailure(transportError('Tracerfy', response.status));
+    }
+
+    return parsePersonTraceResponse(await response.json(), {
+      first_name: req.first_name,
+      last_name: req.last_name,
+    });
+  } catch (error) {
+    console.error('Tracerfy person lookup error:', error);
+    return contactFailure('Tracerfy service unavailable');
+  }
 }
 
 /**

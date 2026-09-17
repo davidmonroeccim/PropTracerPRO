@@ -3,11 +3,43 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
-import { excludeBilledRows, isBilledRow } from '@/lib/trace/billedRows';
-import { submitSingleTrace } from '@/lib/tracerfy/client';
+import {
+  excludeBilledRows,
+  isBilledRow,
+  isCacheHitRow,
+  TRACE_TIER,
+} from '@/lib/trace/billedRows';
+import {
+  submitSingleTrace,
+  lookupBusinessTrace,
+  lookupPersonTrace,
+} from '@/lib/tracerfy/client';
+import { lookupDossier } from '@/lib/tracerfy/dossier';
+import { executeRoute } from '@/lib/routing/executeRoute';
+import { planRoute } from '@/lib/routing/ownerRoute';
+import {
+  FULL_PROPERTY_TRACE_DESCRIPTION,
+  hasContactData,
+  isFullPropertyTrace,
+  parcelForFullTrace,
+  traceResultFor,
+} from '@/lib/trace/fullPropertyTrace';
+import { deductOrZero } from '@/lib/wallet/deduct';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING } from '@/lib/constants';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { chargePerRecord, chargePerTrace, pricePlanFor } from '@/lib/suite/pricing';
 import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
+
+/**
+ * Tier 2 runs the whole route SYNCHRONOUSLY: a dossier lookup (sometimes two,
+ * stopping at the first hit) and then one contact lookup, all JSON POSTs with
+ * no queue and no polling. Three vendor round trips do not fit in the default
+ * function timeout. 60 matches the only other route in this codebase that
+ * makes inline vendor calls (app/api/v1/trace/single, which polls FastAppend
+ * inline on a 15s budget). Tier 1 is unaffected: it still returns as soon as
+ * Tracerfy accepts the job.
+ */
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
@@ -24,7 +56,19 @@ export async function POST(request: Request) {
 
     // Parse request body
     const body = await request.json();
-    const { address, city, state, zip, owner_name, ai_research, skip_cache } = body as SingleTraceRequest & { ai_research?: AIResearchResult; skip_cache?: boolean };
+    const { address, city, state, zip, owner_name, ai_research, skip_cache, full_property_trace } =
+      body as SingleTraceRequest & {
+        ai_research?: AIResearchResult;
+        skip_cache?: boolean;
+        /**
+         * Full Property Trace opt-in, for a caller who already HAS the owner of
+         * record and wants the county property record anyway. Absent owner_name
+         * triggers tier 2 on its own; this flag is the other half of the
+         * trigger. Its own flag, deliberately: `ai_research` belongs to a
+         * feature that is being removed.
+         */
+        full_property_trace?: boolean;
+      };
 
     // Validate input
     const validation = validateAddressInput(address, city, state, zip);
@@ -49,8 +93,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check wallet balance for all users
-    const minBalance = chargePerTrace(profile);
+    // Tier 2 (Full Property Trace) when the owner of record is missing, or when
+    // the caller asked for the property record outright.
+    const fullPropertyTrace = isFullPropertyTrace({ owner_name, full_property_trace });
+
+    // Check wallet balance for all users, AGAINST THE RATE THIS REQUEST WILL
+    // CHARGE. Reserving the tier 1 rate for a tier 2 request under-reserves by
+    // $0.10-$0.15 and lets a wallet that cannot pay reach the vendors -- where
+    // the money is spent on our side whether or not we can collect it.
+    const minBalance = fullPropertyTrace ? chargePerRecord(profile) : chargePerTrace(profile);
     if (profile.wallet_balance < minBalance) {
       return NextResponse.json(
         {
@@ -108,12 +159,38 @@ export async function POST(request: Request) {
           ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
 
         if (hasData) {
-          // Return cached result with actual data - no charge
+          // Return cached result with actual data - no charge.
+          // property_record rides along: on a tier 2 row it is the thing the
+          // customer paid for, and dropping it here would serve them a cache
+          // hit poorer than the response they originally got.
           return NextResponse.json({
             success: true,
             is_cached: true,
             trace_id: cachedResult.id,
             result: cached,
+            property_record: cachedResult.property_record ?? null,
+            tier: cachedResult.tier ?? null,
+            charge: 0,
+          });
+        }
+
+        // A BILLED TIER 2 ROW IS SERVED FROM THE DATABASE WHATEVER IT CONTAINS.
+        // David, 2026-09-17: if serving the request spends money at Tracerfy the
+        // user is charged, and if it is served from their own stored record it
+        // is free. A tier 2 miss holds no contacts and no property record -- it
+        // is a paid-for "the county has no parcel at this address" -- and
+        // re-running the dossier would bill them a second time for the same
+        // absence. isCacheHitRow is the JS twin of CACHE_HIT_FILTER, which is
+        // what let this row out of the database in the first place.
+        if (fullPropertyTrace && isCacheHitRow(cachedResult)) {
+          return NextResponse.json({
+            success: true,
+            is_cached: true,
+            trace_id: cachedResult.id,
+            status: cachedResult.status,
+            result: cached,
+            property_record: cachedResult.property_record ?? null,
+            tier: cachedResult.tier ?? null,
             charge: 0,
           });
         }
@@ -189,7 +266,11 @@ export async function POST(request: Request) {
       normalized_address: normalizedAddress,
       city: city.toUpperCase(),
       state: state.toUpperCase(),
-      zip: zip.substring(0, 5),
+      // The zip is OPTIONAL at validation (it is not part of address_hash), so
+      // it can legitimately be absent. `zip.substring(0, 5)` on an absent one
+      // threw a TypeError and surfaced as a bare 500 before any vendor was
+      // called -- and an absent zip is precisely the case tier 2 backfills.
+      zip: zip ? zip.substring(0, 5) : null,
       input_owner_name: owner_name || null,
       status: 'processing',
     };
@@ -254,6 +335,165 @@ export async function POST(request: Request) {
         { success: false, error: 'Failed to process request' },
         { status: 500 }
       );
+    }
+
+    /* ---------------------------------------------------------------- *
+     * TIER 2 — FULL PROPERTY TRACE
+     *
+     * Synchronous end to end: the dossier and the contact lookup are both
+     * plain JSON POSTs, so the spend and the charge happen in this request
+     * rather than in a later poll. That is the whole reason billing lives
+     * here and nowhere else.
+     *
+     * THE CHARGE SEQUENCE, in order, and none of these steps may move:
+     *   1. plan the route (pure, no spend) at the CALLER'S OWN rate
+     *   2. run it -- dossier, then contacts for whatever owner it found
+     *   3. if a vendor FAILED, charge nothing and let them retry for free
+     *   4. otherwise deduct, ONCE, and read back what actually moved
+     *   5. persist the record, the tier, and the amount that was collected
+     * ---------------------------------------------------------------- */
+    if (fullPropertyTrace) {
+      // 1. The caller's REAL plan, derived from their profile exactly as the
+      //    tier 1 rate is. planRoute takes it as a required argument so no
+      //    route can quietly bill the wrong column.
+      const plan = planRoute(
+        parcelForFullTrace({ address, city, state, zip }),
+        pricePlanFor(profile)
+      );
+
+      // Defence in depth: planRoute emits no step at all when the parcel has
+      // no usable key. Address validation makes that unreachable from this
+      // route, and it is guarded anyway because the rule is that the charge
+      // follows the VENDOR CALL -- a record no vendor was ever asked about
+      // must not reach the deduct below.
+      if (plan.steps.length === 0) {
+        await adminClient
+          .from('trace_history')
+          .update({ status: 'error', tracerfy_job_id: null })
+          .eq('id', traceRecord.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            status: 'error',
+            trace_id: traceRecord.id,
+            tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+            charge: 0,
+            error: plan.warnings[0] || 'No usable lookup key for this address.',
+          },
+          { status: 400 }
+        );
+      }
+
+      // 2. Spend. executeRoute never throws and reports each step separately.
+      const execution = await executeRoute(plan, {
+        lookupDossier,
+        traceEntity: lookupBusinessTrace,
+        tracePerson: lookupPersonTrace,
+      });
+
+      // 3. A VENDOR FAILURE IS NEVER BILLED. `success: false` means we could
+      //    not ask -- an outage, a rate limit, a rejected key. It is NOT the
+      //    same as `ownerFound: false`, which is also what a legitimate,
+      //    billable miss looks like. Gating on ownerFound would bill customers
+      //    for our outages; gating on a hit would give away records we paid
+      //    for. Nothing is charged and nothing billable is persisted, so the
+      //    row stays retryable rather than becoming a free cache entry that
+      //    can never acquire the contacts it is missing.
+      if (!execution.success) {
+        await adminClient
+          .from('trace_history')
+          .update({ status: 'error', tracerfy_job_id: null })
+          .eq('id', traceRecord.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            status: 'error',
+            trace_id: traceRecord.id,
+            tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+            charge: 0,
+            error: execution.error || 'Property lookup failed. Please try again.',
+          },
+          { status: 502 }
+        );
+      }
+
+      // 4. Billable. A TOTAL MISS IS STILL BILLED: tier 2 is per RECORD
+      //    SUBMITTED, so "the county has no parcel at this address" is a real
+      //    answer the customer pays for. deductOrZero returns what actually
+      //    moved -- 0 when the wallet came up short between the gate above and
+      //    now -- and that is the only number that may be persisted or shown.
+      const attemptedCharge = plan.billing.amount;
+      const charge = await deductOrZero(adminClient, {
+        p_user_id: user.id,
+        p_amount: attemptedCharge,
+        p_trace_history_id: traceRecord.id,
+        p_description: FULL_PROPERTY_TRACE_DESCRIPTION,
+      });
+
+      // 5. Persist. property_record is the vendor's object BY REFERENCE, all
+      //    86 keys, unfiltered and unrenamed: the raw dump is the product, and
+      //    a key that is empty in OH, CA and UT may be populated elsewhere.
+      const result = traceResultFor(execution);
+      const isSuccessful = hasContactData(result);
+
+      const { error: persistError } = await adminClient
+        .from('trace_history')
+        .update({
+          status: isSuccessful ? 'success' : 'no_match',
+          trace_result: result,
+          phone_count: result?.phones?.length || 0,
+          email_count: result?.emails?.length || 0,
+          is_successful: isSuccessful,
+          property_record: execution.property,
+          tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+          charge,
+          // What the vendors actually took, read from their own credit
+          // counters rather than assumed from a price list.
+          cost: execution.vendorSpend,
+          tracerfy_job_id: null,
+          // The situs zip the dossier taught us, and ONLY when the caller had
+          // none. address_hash is sha256 of STREET|CITY|STATE and deliberately
+          // excludes the zip (migration 20260904), so this column is free to
+          // gain a value: the row keeps matching its own cache key. Never
+          // recompute the hash here -- a row whose hash moves is a row that
+          // re-buys itself forever.
+          ...(execution.learnedZip ? { zip: execution.learnedZip } : {}),
+        })
+        .eq('id', traceRecord.id);
+
+      if (persistError) {
+        // The money is gone and the record is bought. Say so loudly rather
+        // than returning a clean 500 that hides a paid-for result.
+        console.error('Full Property Trace - failed to persist result:', persistError.message);
+      }
+
+      // Fire-and-forget, same rule as the poll route: a charge was attempted,
+      // so top the wallet up if it has dropped below the threshold. Still
+      // fires when the deduct failed -- that is exactly the wallet that needs it.
+      triggerAutoRebillIfNeeded(user.id).catch(() => {});
+
+      const warnings = [...execution.warnings];
+      if (charge === 0) {
+        warnings.push(
+          'The wallet did not cover this record, so nothing was charged for it.'
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        status: isSuccessful ? 'success' : 'no_match',
+        trace_id: traceRecord.id,
+        tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+        charge,
+        result,
+        property_record: execution.property,
+        owner_name: execution.ownerName,
+        owner_type: execution.ownerType,
+        needs_manual_review: execution.needsManualReview,
+        warnings,
+      });
     }
 
     // Submit to Tracerfy

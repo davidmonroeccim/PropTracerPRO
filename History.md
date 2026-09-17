@@ -6,6 +6,42 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 3b: the tier 2 billing path goes into the session route
+
+**A new billing path, so tests came first and every money decision was mutation-verified.**
+Session route only. `app/api/v1/trace/single/route.ts` was deliberately NOT done — see below.
+
+- **Trigger.** Tier 2 runs when `owner_name` is absent (automatic) or when the caller sends
+  `full_property_trace: true` (opt-in, for someone who has the owner and wants the county
+  record anyway). Its own flag, not `ai_research`: that feature is being deleted in phase 4 and
+  overloading its flag would couple the two.
+- **The charge sequence, in order.** Plan the route at the caller's own rate → run it → if a
+  vendor FAILED, charge nothing → otherwise deduct once via `deductOrZero` → persist the record,
+  the tier, and the amount that actually moved. The gate is `ExecutionResult.success`, never
+  `ownerFound`: a billed miss and an unbillable outage both have `ownerFound: false`.
+- **A total dossier miss IS billed** ($0.25 / $0.40 per record submitted) and **a vendor failure
+  never is.** On a failure nothing billable is persisted either, so the row stays retryable
+  rather than becoming a free cache entry that can never acquire its missing contacts.
+- **The miss is cached.** `CACHE_HIT_FILTER` gained a third arm, `and(tier.eq.2,charge.gt.0)`,
+  plus a JS twin (`isCacheHitRow`) so the route can SERVE the row rather than re-buy it.
+- **The caller's real plan is billed.** `pricePlanFor()` / `chargePerRecord()` in
+  `lib/suite/pricing.ts`, derived from `effectiveIsPro` exactly as `chargePerTrace` is. The
+  pre-flight balance gate now reserves the tier 2 rate; it reserved the tier 1 rate before.
+- **The whole request is synchronous.** Two new callers in `lib/tracerfy/client.ts` hit the
+  SYNCHRONOUS endpoints (`business-trace/lookup/`, `trace/lookup/` + `trace/parcel/lookup/`)
+  instead of the bulk-and-poll path the handoff named as a defect. `maxDuration = 60`.
+- **ZIP backfill (added to 3b by David).** `executeRoute` now feeds the dossier's SITUS zip
+  (`property.zip_code`) into pass 2's named lookup when the caller supplied none. Never the
+  owner's mailing zip, which is a different place entirely on an absentee-owned parcel.
+- **Two vendor-reading defects found in real payloads and fenced:** a FastAppend MISS carries an
+  `error` string (reading it as a failure makes every miss unbillable), and a person whose role
+  is `"REGISTERED AGENT,MANAGER"` is a manager — excluding everyone the flag marks would have
+  discarded the contact on 1 of the 5 paid hits in the saved corpus.
+- **Numbers:** 478 tests passing (from 380), 39 files, 0 failing. `tsc` 9 pre-existing dotenv
+  errors, unchanged. eslint 54 problems, unchanged. **21 mutations applied and all 21 caught.**
+- **Not done, on purpose:** the v1 API route (its still-live `aiResearch` path would double-bill
+  the same record), bulk, UI, marketing copy, migrations.
+
 ### Full Property Trace, phase 3a: plan-aware pricing, address-only parcels, and the executor
 
 **Scope was deliberately half of phase 3.** B5, B6 and `executeRoute()`. No billing, no

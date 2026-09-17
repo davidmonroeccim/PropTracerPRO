@@ -1,0 +1,71 @@
+{
+  "request": { "company_name": "Estates Ave Properties Llc", "state": "CA" },
+  "response": {
+    "company_name": "Estates Ave Properties Llc",
+    "state": "CA",
+    "address": "400 Placeholder Ct",
+    "city": "Redacted",
+    "zip": "00000",
+    "owner_first_name": "Testowner",
+    "owner_last_name": "Placeholder",
+    "mailing_address": {
+      "street": "400 Placeholder Ct",
+      "city": "Redacted",
+      "state": "ZZ",
+      "zip": "00000"
+    },
+    "phones": [
+      { "number": "5550000301", "type": "mobile", "dnc": false, "carrier": "Placeholder Wireless", "rank": 1 }
+    ],
+    "emails": [{ "email": "company2@example.invalid", "rank": 1 }],
+    "addresses": [
+      { "street": "400 Placeholder Ct", "city": "Redacted", "state": "ZZ", "zip": "00000" }
+    ],
+    "associated_people_count": 1,
+    "associated_people": [
+      {
+        "first_name": "Testowner",
+        "middle_name": "",
+        "last_name": "Placeholder",
+        "full_name": "Testowner Placeholder",
+        "age": 0,
+        "dob": "",
+        "deceased": false,
+        "litigator": false,
+        "mailing_address": {
+          "street": "400 Placeholder Ct",
+          "city": "Redacted",
+          "state": "ZZ",
+          "zip": "00000"
+        },
+        "phones": [
+          {
+            "number": "5550000401",
+            "is_input": false,
+            "type": "mobile",
+            "dnc": false,
+            "tcpa": false,
+            "state_dnc": [],
+            "contactable": true,
+            "carrier": "Placeholder Wireless",
+            "last_seen": "2026-01-01",
+            "rank": 1
+          }
+        ],
+        "emails": [{ "email": "manager@example.invalid", "is_input": false, "rank": 1 }],
+        "rank": 1,
+        "role": "REGISTERED AGENT,MANAGER",
+        "is_registered_agent": true
+      }
+    ],
+    "is_active": true,
+    "is_foreign_owned": false,
+    "hit": true,
+    "credits_deducted": 1,
+    "meta": {
+      "request_id": "req_00000000000000000000000000000002",
+      "timestamp": "2026-09-16T15:22:52Z",
+      "api_version": "2026-08-20"
+    }
+  }
+}

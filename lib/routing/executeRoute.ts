@@ -36,6 +36,7 @@ import {
   planRoute,
   type BillingTier,
   type OwnerType,
+  type ParcelInput,
   type RoutePlan,
   type RouteStep,
   type StepKind,
@@ -130,6 +131,12 @@ export interface ExecutionResult {
   /** False when any step FAILED. Partial results below are still populated and still real. */
   success: boolean
   ownerFound: boolean
+  /**
+   * The SITUS zip the dossier taught us, set ONLY when the caller had none.
+   * Null when the caller supplied one (theirs wins) or the dossier had none.
+   * The caller may persist it; it is the property's own zip, not the owner's.
+   */
+  learnedZip: string | null
   /** Owner of record. Multiple owners are joined with " | ", the shape classifyOwnerName parses. */
   ownerName: string | null
   ownerType: OwnerType
@@ -322,6 +329,34 @@ async function runStage(steps: RouteStep[], deps: RouteDeps): Promise<StageResul
 }
 
 /**
+ * The SITUS zip, read off the dossier's property record.
+ *
+ * TWO ZIPS COME BACK AND THEY ARE NOT THE SAME THING. Do not "simplify" this
+ * by reaching for the other one; the field names are close enough that someone
+ * will try.
+ *
+ *   property.zip_code       the PROPERTY's own zip. Present on 16 of the 16
+ *                           saved payloads that carry a property object.
+ *   mailing_address.zip     the OWNER'S MAILING zip. 21 of the 24 parcels in
+ *                           the study are absentee-owned, so this is routinely
+ *                           a different city and frequently a different state.
+ *
+ * The contact step is keyed on the PROPERTY address. Feeding it the owner's
+ * mailing zip would contradict the street, city and state it is sent with, and
+ * it would do so invisibly: the call still succeeds, it just matches less
+ * often. That is worse than sending no zip at all, which is the state this
+ * function exists to improve on.
+ *
+ * ZIP+4 is trimmed to the 5 the vendor's own examples use.
+ */
+export function situsZipFrom(property: DossierProperty | null | undefined): string | null {
+  const raw = property?.zip_code
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null
+  const match = String(raw).trim().match(/^\d{5}/)
+  return match ? match[0] : null
+}
+
+/**
  * Join the dossier's owners into the one string classifyOwnerName() and splitPersonName()
  * both parse. An entity arrives with its whole name in last_name and first_name empty, so
  * this must not assume two parts.
@@ -338,6 +373,7 @@ export async function executeRoute(plan: RoutePlan, deps: RouteDeps): Promise<Ex
   const result: ExecutionResult = {
     success: true,
     ownerFound: Boolean(plan.ownerName),
+    learnedZip: null,
     ownerName: plan.ownerName,
     ownerType: plan.ownerType,
     property: null,
@@ -400,7 +436,27 @@ export async function executeRoute(plan: RoutePlan, deps: RouteDeps): Promise<Ex
   }
 
   // ---- Pass 2. Re-enter planRoute with the discovered owner to pick the contact vendor. ----
-  const contactPlan = planRoute({ ...plan.parcel, ownerName: result.ownerName }, plan.pricePlan)
+  //
+  // ZIP BACKFILL. The $0.20 we just spent bought the property's own zip, and
+  // the contact step is the one that decides whether the customer gets a phone
+  // number at all: Tracerfy calls the zip strongly recommended for the named
+  // lookup, and without one a similar address in the same city can match
+  // instead. It matters most exactly where it is hardest to supply -- no Utah
+  // county in the study publishes a zip.
+  //
+  // THE CALLER'S OWN ZIP WINS. They may know something the county file does
+  // not, and silently overwriting submitted data with vendor data is how a
+  // "helpful" backfill becomes a bug report nobody can reproduce.
+  const callerZip = plan.parcel.situsZip?.trim() || ''
+  const learnedZip = callerZip ? null : situsZipFrom(result.property)
+  result.learnedZip = learnedZip
+
+  const contactParcel: ParcelInput = {
+    ...plan.parcel,
+    ownerName: result.ownerName,
+    situsZip: callerZip || learnedZip,
+  }
+  const contactPlan = planRoute(contactParcel, plan.pricePlan)
   for (const w of contactPlan.warnings) if (!warnings.includes(w)) warnings.push(w)
 
   if (contactPlan.steps.length === 0) {

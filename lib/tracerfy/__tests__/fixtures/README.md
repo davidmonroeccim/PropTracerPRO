@@ -51,3 +51,47 @@ The generator is deliberately not committed: it names paths inside the gitignore
 these ever need rebuilding, the rules are the table above, and the acceptance check is that no
 string from `tasks/research-test/` `contacts` blocks or individual `owners` entries appears
 anywhere in this directory.
+
+---
+
+# Contact-lookup fixtures — added 2026-09-17 (phase 3b)
+
+Five more files, same rules, for the two SYNCHRONOUS contact endpoints Full Property Trace calls
+after the dossier: `POST app.fastappend.com/v1/api/business-trace/lookup/` and
+`POST tracerfy.com/v1/api/trace/lookup/`. Sources are `tasks/research-test/fastappend/` and
+`tasks/research-test/tracerfy-individual/`, captured 2026-09-16, and gitignored for the same reason
+as everything above: they hold purchased contact data on real people.
+
+## What was KEPT verbatim
+
+- **The response envelope.** `hit`, `credits_deducted`, `persons_count`, `error`, `meta`, and the
+  request keys the vendor echoes back.
+- **The exact key set of every nested object**, including the ones our parser ignores
+  (`dnc`, `tcpa`, `state_dnc`, `contactable`, `carrier`, `last_seen`, `is_input`, `litigator`,
+  `deceased`, `property_owner`, `is_active`, `is_foreign_owned`). A parser that only ever sees the
+  keys it reads is not being tested against the payload it will actually receive.
+- **`role` and `is_registered_agent` exactly as observed**, including the combined
+  `"REGISTERED AGENT,MANAGER"` form, which is the whole reason `business-hit-agent-manager.json`
+  exists.
+- Entity names, which are public record.
+
+## What was SCRUBBED
+
+Every person's name, age, dob, phone number, carrier, email address and mailing address. Phone
+numbers are `555000xxxx`, emails are `@example.invalid` (a reserved TLD that can never resolve),
+mailing addresses are the same `100 Placeholder Way, Redacted ZZ 00000` shape used above, and
+`request_id` is a counter rather than the real vendor id.
+
+## The files
+
+| File | Derived from | Shape it exists to cover |
+|---|---|---|
+| `business-hit.json` | `fastappend/raw-12.json` | Entity hit: a rank-1 `MEMBER` plus a pure `REGISTERED AGENT`. The agent must never be returned as the owner contact. |
+| `business-hit-agent-manager.json` | `fastappend/raw-8.json` | The ONLY person returned is `"REGISTERED AGENT,MANAGER"` with the flag true. A rule that dropped everyone the flag marks would discard the contact on 1 of the 5 paid hits in the corpus. |
+| `business-miss.json` | `fastappend/raw-4.json` | A miss — and it carries `error: "Company not found: ..."`. Reading `error` as a failure would turn every miss into an unbillable outage. |
+| `person-hit.json` | `tracerfy-individual/raw-B.json`, second person synthesised | Person hit. Two persons at one address, and the one we asked for is NOT `persons[0]` and NOT the one flagged `property_owner` — that flag returned false for the verified owner of record on an absentee-owned parcel. |
+| `person-miss.json` | `tracerfy-individual/raw-A.json` | `find_owner: true` missing on the same parcel the named lookup hit. `hit:false`, `persons: []`, `credits_deducted: 0`. |
+
+`person-hit.json` is the one file carrying a synthesised SECOND record: the source response
+returned a single person. The envelope, the key set and the field types are the vendor's; the
+multi-person ordering is constructed, deliberately, to pin the name-match rule.

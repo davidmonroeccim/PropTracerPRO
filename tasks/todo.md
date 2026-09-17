@@ -431,6 +431,21 @@ MISS. No billing, no persistence, no routes.
   synchronous POST. Never on submission: a record that dies on validation before any vendor call
   must not be billed.
 
+**ZIP BACKFILL, added to 3b by David 2026-09-17.** The dossier returns the situs ZIP; pass 2's
+named person lookup currently runs without it. Tracerfy documents the ZIP as strongly recommended
+for that lookup, and the handoff notes address mode backfilling it "matters because no Utah county
+publishes one". A match-rate improvement on the step that decides whether the customer gets a phone
+number at all.
+
+Two traps, both fenced by tests:
+- **The response carries TWO zips.** `property.zip_code` is the SITUS zip (100% fill, the one you
+  want). `mailing_address.zip` is the OWNER'S MAILING zip, a different state entirely for an
+  absentee owner, and 21 of 24 parcels measured absentee. Using it would look like an improvement
+  while quietly making matches worse.
+- **`address_hash` excludes the ZIP by design** since migration 20260904. Persisting a learned ZIP
+  must NOT recompute the hash, or the row stops matching its own cache key and every future lookup
+  re-buys.
+
 **Visible:** Full Property Trace works end to end on one address via the API.
 
 **PHASE 4 REQUIREMENT this creates, not optional:** the UI must disclose that a charge applies
@@ -821,3 +836,188 @@ mistake that would bill customers for an outage.
 Still open for 3b: `executeRoute` does not backfill a missing zip from the dossier record before
 the contact call, though the address-mode step's own `why` notes the dossier returns one. It is a
 possible match-rate improvement for the named Tracerfy lookup, not a defect.
+
+---
+
+# REVIEW: Phase 3b (2026-09-17) — tier 2 wired into the session route. In the tree, uncommitted.
+
+**A NEW BILLING PATH.** Tests first, every money decision mutation-verified, and the two things
+that were ambiguous are named at the bottom rather than guessed.
+
+## Numbers
+
+| | Before (3a) | After |
+|---|---|---|
+| `npx vitest run` | 380 passing, 37 files | **478 passing, 39 files, 0 failing** |
+| `npx tsc --noEmit` | 9 errors (all dotenv, research-scripts) | **9, unchanged, zero elsewhere** |
+| `npx eslint app lib components` | 54 problems | **54, unchanged** |
+| Mutations applied / caught | 6 / 6 | **21 / 21** |
+
+## The trigger, and the flag
+
+`full_property_trace: true` (session body, snake_case, matching the route's other flags) OR an
+absent `owner_name`. Both live in one predicate, `isFullPropertyTrace()`, so the two halves cannot
+drift apart between the balance gate and the execution.
+
+**It is NOT `ai_research`.** That flag belongs to a feature being deleted in phase 4.
+
+**The opt-in path is dossier-first.** `parcelForFullTrace()` deliberately passes `ownerName: null`
+even when the caller supplied one: `planRoute` with an owner name present returns a TIER 1 plan
+with no dossier step, so honouring the caller's name would take their money for a property record
+and never buy it. The supplied name is still stored as `input_owner_name`.
+
+## The charge sequence, in order, and none of it may move
+
+1. **Pre-flight.** `chargePerRecord(profile)` — the TIER 2 rate. The old gate reserved the tier 1
+   rate and under-reserved by $0.10-$0.15.
+2. **Cache.** A billed tier 2 row is SERVED from the database, free, whatever it contains.
+3. **Row first, vendors second.** The row exists before any vendor is called, so the deduct has a
+   `trace_history_id` to reference.
+4. **`planRoute(parcel, pricePlanFor(profile))`** — pure, no spend, the caller's real plan.
+5. **`executeRoute(plan, { lookupDossier, lookupBusinessTrace, lookupPersonTrace })`** — dossier,
+   then contacts for whatever owner it found. Synchronous.
+6. **`if (!execution.success)` → charge NOTHING**, mark the row `error`, 502. Nothing billable is
+   persisted, so the retry is free AND still able to complete.
+7. **`deductOrZero(...)` ONCE**, at `plan.billing.amount`, AFTER the vendors answered.
+8. **Persist what was COLLECTED**, not what was intended, alongside `tier = 2`, the raw property
+   record, and the real vendor spend in `cost`.
+
+## The four rules, and the test that fails when each is inverted
+
+| Rule | Mutation | Tests red |
+|---|---|---|
+| The gate is `success`, never `ownerFound` | gate on `ownerFound` | 12 |
+| A vendor failure is never billed | drop the failure gate | 3 |
+| A total dossier miss IS billed | skip the deduct when `property` is null | 5 |
+| Persist only what was collected | persist `attemptedCharge` | 1 |
+| Reserve the tier 2 rate up front | reserve `chargePerTrace` | 1 |
+| The cache serves a billed tier 2 miss | drop the third arm of `CACHE_HIT_FILTER` | 3 |
+| ...and only when money moved | relax it to `tier.eq.2` | 3 |
+| The route SERVES that row | delete the `isCacheHitRow` branch | 2 |
+| Bill the caller's real plan | hardcode `'pro'` | 10 |
+| Store all 86 keys | subset to the populated fields | 1 |
+| The opt-in is half the trigger | delete the flag arm | 1 |
+| The opt-in still buys the record | pass the caller's owner into the plan | 1 |
+| Backfill the SITUS zip | read `mailing_address.zip` | 3 |
+| The caller's zip wins | prefer the dossier's | 1 |
+| A learned zip never moves `address_hash` | write the hash alongside it | 1 |
+| A "REGISTERED AGENT,MANAGER" is a manager | exclude every flagged person | 1 |
+| A FastAppend miss is an answer | treat `error` as a failure | 1 |
+| Match the person on the NAME | take `persons[0]` | 2 |
+| `find_owner: false` plus a name | send `find_owner: true` | 1 |
+| A company name is never the contact person | fall back to the owner of record in `owner_name` | 2 |
+| The charge follows the vendor call | delete the "no step was planned" guard | 1 |
+
+**21 of 21 caught.** Each applied in isolation, full suite re-run, tree restored.
+
+One further attempt was discarded rather than counted: making `parcelForFullTrace` read an
+`ownerName` off its own input changed nothing at runtime, because the route never passes one. It
+was replaced by the mutation that matters — the ROUTE passing `owner_name` into the plan — which
+is the row above marked "the opt-in still buys the record".
+
+## The synchronous vendor callables
+
+`lib/tracerfy/client.ts` gains `lookupBusinessTrace()` and `lookupPersonTrace()` plus their two
+pure parsers. No existing function was rewritten: the batch path the AI research flow still runs on
+is untouched. This removes the polling the handoff named as defect 4 — the whole tier 2 request is
+now one HTTP request with three vendor round trips inside it.
+
+`lookupPersonTrace` covers BOTH Tracerfy person endpoints, choosing by the key it was handed:
+`parcel_id + county` goes to `trace/parcel/lookup/`, anything else to `trace/lookup/` with
+`find_owner: false` and the name. The parcel form is unreachable from this route today (nothing in
+PTP produces a parcel id) and is implemented anyway because `executeRoute` can plan it.
+
+**Two defects found in the saved payloads, both of which would have cost money:**
+
+1. **A FastAppend MISS carries `error: "Company not found: X (OH)"` alongside `hit: false`.**
+   Reading `error` as a failure would have made every legitimate miss unbillable — and under tier 2
+   a miss is exactly what we are entitled to bill for.
+2. **`role` is a comma-separated LIST.** 1 of the 5 saved hits returns a single person whose role
+   is `"REGISTERED AGENT,MANAGER"` with `is_registered_agent: true`. Excluding everyone the flag
+   marks — the obvious reading of "a registered agent is not a principal" — would have thrown away
+   the contact on 20% of the hits we paid for. Only a person whose ONLY role is registered agent is
+   dropped, and when that is all there is, the company block is returned with NO name attached.
+
+`maxDuration = 60` on the session route. It had none, which means the platform default; three
+vendor round trips do not reliably fit in it. 60 matches `app/api/v1/trace/single/route.ts`, the
+only other route in this codebase that makes inline vendor calls.
+
+## The zip backfill (added to 3b by David, reported separately)
+
+`executeRoute`'s pass 2 now populates `situsZip` from the dossier's `property.zip_code` when the
+caller supplied none, and `ExecutionResult.learnedZip` carries it out so the route can persist it.
+
+- **The situs zip, never the mailing zip.** `property.zip_code` is the property's own and is
+  present on all 16 saved payloads that carry a property object. `mailing_address.zip` is the
+  OWNER'S and is routinely another city or state. Using it would have looked like a match-rate
+  improvement while quietly lowering the match rate. Fenced by a test that asserts the two differ.
+- **The caller's zip wins.** Never overwritten.
+- **`address_hash` is untouched.** It is sha256 of STREET|CITY|STATE and excludes the zip by
+  design (migration 20260904), so the column can gain a value without the row losing its own cache
+  key. A test asserts the update payload contains neither `address_hash` nor `normalized_address`.
+
+**One real bug had to be fixed to make the backfill reachable:** the zip is OPTIONAL at validation,
+but the route did `zip.substring(0, 5)` unconditionally, so a submission without one threw a
+TypeError and returned a bare 500 before any vendor was called. It now stores `null`.
+
+## What gets persisted
+
+| Column | Value |
+|---|---|
+| `property_record` | the vendor's object BY REFERENCE, all 86 keys, unfiltered and unrenamed |
+| `tier` | 2 |
+| `charge` | what `deductOrZero` actually collected |
+| `cost` | `execution.vendorSpend`, read from the vendors' own credit counters |
+| `trace_result` | contacts, in the tier 1 shape, where every downstream reader already looks |
+| `zip` | only when the dossier taught us one and the caller had none |
+
+`trace_result.owner_name` is the PERSON (null for an entity with no named principal — a company
+name is never a contact person, per `resolveOwnerContact`). `trace_result.owner_name_2` is the
+OWNER OF RECORD the dossier bought. It has nowhere else to live: the 86-key property object carries
+no owner field, and injecting one into a raw dump is not an option. **Flagged for phase 4:** the
+results card renders `owner_name_2` as a second "Owner Name" line, which is accurate but not
+labelled as the owner of record.
+
+## DEFERRED: `app/api/v1/trace/single/route.ts`. It is NOT a clean parallel.
+
+**The blocker is a double charge, not a style difference.** That route still runs AI research
+inline when `aiResearch && !ownerName`, and deducts `AI_RESEARCH.CHARGE_PER_RECORD` ($0.15) when it
+finds an owner. An absent `ownerName` is ALSO the tier 2 trigger. Wiring tier 2 in as specified
+would make a single request run both engines over the same record and bill **$0.15 + $0.25-$0.40**
+for it, while the two paths race to resolve the same owner by different means.
+
+**Three ways out, and the choice is David's:**
+
+1. **`fullPropertyTrace` suppresses `aiResearch`** on that route — tier 2 wins, the older engine is
+   skipped and not billed. Closest to "AI Search is being replaced".
+2. **Tier 2 is opt-in ONLY on v1** (no automatic trigger on an absent owner) until phase 4 deletes
+   the research path. Smallest change, but v1 then prices the same request differently from the
+   session route, which is its own trap.
+3. **Do v1 in phase 4**, immediately after the AI research path is deleted, when the collision
+   cannot exist. **Recommended**, because phase 4 has to touch that route anyway.
+
+**A second, smaller divergence exists regardless:** v1 is Track B and derives its rate from the RAW
+`getChargePerTrace(subscription_tier, is_acquisition_pro_member)`, deliberately NOT the grant-aware
+`chargePerTrace`. It therefore needs its own plan-derivation function; `pricePlanFor` is Track A
+only and must not be reused there.
+
+**There is also no usage visibility on v1 at all** (`api_logs` holds 0 rows), so nobody can say how
+many callers a trigger change would surprise.
+
+## Known gaps, flagged not hidden
+
+- **No `trace.completed` webhook and no HighLevel push on a tier 2 completion.** Tier 1 fires both
+  from the POLL route; tier 2 never reaches that route because it completes inline. A webhook
+  customer would silently stop receiving events for tier 2 traces. Not wired here because it is an
+  integration surface nobody asked this phase to touch — **phase 4 must wire it or say why not.**
+- **A pass-2 failure discards a dossier record we paid $0.20 for.** The rule is settled (a vendor
+  failure is never billed), and the alternative — persisting the record unbilled — makes the row a
+  free cache hit that can never acquire contacts, so the customer would be permanently stuck with a
+  partial answer. The cost is ours and it only occurs during a contact-vendor outage.
+- **Re-tracing an address OVERWRITES `charge` on the reused row.** Inherited from the phase 2 reuse
+  design, and true of tier 1 as well (the status route does the same). The dashboard SUMs that
+  column, so a re-traced address contributes once, not twice. `wallet_transactions` remains the
+  real ledger. Worth a decision, but not a phase 3b regression.
+- **The session UI will now bill per record for any trace with no owner name.** That is the
+  decided trigger, and phase 4's disclosure requirement ("you are charged whether or not anything
+  is found, BEFORE the submit") is what makes it safe to expose. **Do not ship the UI without it.**

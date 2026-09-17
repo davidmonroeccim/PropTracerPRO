@@ -1,0 +1,72 @@
+{
+  "request": {
+    "address": "305 W Center St",
+    "city": "Clearfield",
+    "state": "UT",
+    "zip": "84015",
+    "find_owner": false,
+    "first_name": "Testowner",
+    "last_name": "Placeholder"
+  },
+  "response": {
+    "address": "305 W Center St",
+    "city": "Clearfield",
+    "state": "UT",
+    "zip": "84015",
+    "find_owner": false,
+    "hit": true,
+    "persons_count": 2,
+    "credits_deducted": 5,
+    "persons": [
+      {
+        "first_name": "Someoneelse",
+        "last_name": "Different",
+        "full_name": "Someoneelse Different",
+        "dob": "",
+        "age": "00",
+        "deceased": false,
+        "property_owner": true,
+        "litigator": false,
+        "mailing_address": {
+          "street": "500 Placeholder Rd",
+          "city": "Redacted",
+          "state": "ZZ",
+          "zip": "00000"
+        },
+        "phones": [
+          { "number": "5550000501", "type": "mobile", "dnc": false, "tcpa": false, "carrier": "Placeholder Wireless", "rank": 1 }
+        ],
+        "emails": [{ "email": "someoneelse@example.invalid", "rank": 1 }]
+      },
+      {
+        "first_name": "Testowner",
+        "last_name": "Placeholder",
+        "full_name": "Testowner Placeholder",
+        "dob": "",
+        "age": "00",
+        "deceased": false,
+        "property_owner": false,
+        "litigator": false,
+        "mailing_address": {
+          "street": "100 Placeholder Way",
+          "city": "Redacted",
+          "state": "ZZ",
+          "zip": "00000"
+        },
+        "phones": [
+          { "number": "5550000601", "type": "mobile", "dnc": false, "tcpa": false, "carrier": "Placeholder Wireless", "rank": 1 },
+          { "number": "5550000602", "type": "landline", "dnc": true, "tcpa": false, "carrier": "Placeholder Telco", "rank": 2 }
+        ],
+        "emails": [
+          { "email": "owner1@example.invalid", "rank": 1 },
+          { "email": "owner2@example.invalid", "rank": 2 }
+        ]
+      }
+    ],
+    "meta": {
+      "request_id": "req_00000000000000000000000000000004",
+      "timestamp": "2026-09-16T15:24:00Z",
+      "api_version": "2026-03-21"
+    }
+  }
+}

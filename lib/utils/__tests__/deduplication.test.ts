@@ -131,7 +131,11 @@ describe("checkSingleDuplicate", () => {
     const rec = H.ops[0];
     const or = rec.filters.find((f) => f[0] === "or");
     expect(or).toBeDefined();
-    expect(String(or![1])).toBe("is_successful.eq.true,property_record.not.is.null");
+    // Asserted by arm rather than by whole string: the filter grew a third arm
+    // on 2026-09-17 for the billed tier 2 MISS, and the exact spelling is
+    // pinned once, in lib/trace/__tests__/billedRows.test.ts.
+    expect(String(or![1])).toContain("is_successful.eq.true");
+    expect(String(or![1])).toContain("property_record.not.is.null");
     // The unconditional equality filter must be GONE. Leaving it alongside the
     // .or() would AND the two together and the tier 2 row stays invisible.
     expect(filter(rec, "eq", "is_successful")).toBeUndefined();

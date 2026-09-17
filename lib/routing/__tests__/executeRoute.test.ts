@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { executeRoute, type RouteDeps, type ContactResult } from '../executeRoute'
+import { executeRoute, situsZipFrom, type RouteDeps, type ContactResult } from '../executeRoute'
 import { planRoute, VENDOR_COST, type ParcelInput } from '../ownerRoute'
 import { parseDossierResponse, type DossierResult } from '@/lib/tracerfy/dossier'
 
@@ -437,5 +437,115 @@ describe('executeRoute — the fidelity fence', () => {
     const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
     const r = await executeRoute(tier2Plan(), d)
     expect(r.mailingAddress).toEqual(HIT_INDIVIDUAL.mailingAddress)
+  })
+})
+
+/* ==================================================================== *
+ * ZIP BACKFILL — the dossier teaches the contact step the situs zip
+ *
+ * The $0.20 dossier returns the property's own zip. The contact step is the
+ * one that decides whether the customer gets a phone number at all, and
+ * Tracerfy calls the zip strongly recommended for the named lookup. Feeding
+ * it back is free.
+ * ==================================================================== */
+
+describe('executeRoute — zip backfill', () => {
+  /** The zip the contact vendor was actually sent. */
+  const sentZip = (fn: unknown): unknown =>
+    (fn as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls[0][0].zip
+
+  it('feeds the SITUS zip from the dossier into the contact lookup', async () => {
+    // The caller had none: nothing in PTP requires a zip and no Utah county in
+    // the study publishes one.
+    const tracePerson = vi.fn(async () => CONTACT_HIT)
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson })
+
+    const res = await executeRoute(tier2Plan({ situsZip: null }), d)
+
+    const situsZip = String(
+      (individualHit.response.property as Record<string, unknown>).zip_code
+    )
+    expect(situsZip).toMatch(/^\d{5}$/)
+    expect(sentZip(tracePerson)).toBe(situsZip)
+    expect(res.learnedZip).toBe(situsZip)
+  })
+
+  it('NEVER uses the owner mailing zip', async () => {
+    // property.zip_code is the PROPERTY's. mailing_address.zip is the OWNER'S,
+    // and 21 of the 24 parcels studied are absentee-owned -- routinely a
+    // different city, often a different state. Sending it would contradict the
+    // street and city it travels with and quietly lower the match rate.
+    // MUTATION: read mailingAddress.zip instead and this goes red.
+    const tracePerson = vi.fn(async () => CONTACT_HIT)
+    const mailingZip = individualHit.response.mailing_address.zip
+    const situsZip = String(
+      (individualHit.response.property as Record<string, unknown>).zip_code
+    )
+    expect(mailingZip).not.toBe(situsZip)
+
+    await executeRoute(
+      tier2Plan({ situsZip: null }),
+      deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson })
+    )
+
+    expect(sentZip(tracePerson)).not.toBe(mailingZip)
+    expect(sentZip(tracePerson)).toBe(situsZip)
+  })
+
+  it("does not overwrite the CALLER'S zip", async () => {
+    // They may know something the county file does not, and silently replacing
+    // submitted data with vendor data is unreproducible from a bug report.
+    // MUTATION: always prefer the dossier zip and this goes red.
+    const tracePerson = vi.fn(async () => CONTACT_HIT)
+
+    const res = await executeRoute(
+      tier2Plan({ situsZip: '99999' }),
+      deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson })
+    )
+
+    expect(sentZip(tracePerson)).toBe('99999')
+    // Nothing was learned, so the caller has nothing to persist.
+    expect(res.learnedZip).toBeNull()
+  })
+
+  it('learns nothing from a dossier miss', async () => {
+    const res = await executeRoute(tier2Plan({ situsZip: null }), deps())
+    expect(res.learnedZip).toBeNull()
+  })
+
+  it('leaves the entity path alone: FastAppend is keyed on name and state', async () => {
+    const traceEntity = vi.fn(async () => CONTACT_HIT)
+
+    await executeRoute(
+      tier2Plan({ situsZip: null }),
+      deps({ lookupDossier: dossierSequence(HIT_ENTITY_ADDRESS), traceEntity })
+    )
+
+    expect(traceEntity).toHaveBeenCalledWith({
+      company_name: 'Colmaven, Llc',
+      state: 'UT',
+    })
+  })
+})
+
+describe('situsZipFrom', () => {
+  it('reads zip_code off the property record', () => {
+    expect(situsZipFrom({ zip_code: '84115' })).toBe('84115')
+  })
+
+  it('trims ZIP+4 to the 5 the vendor examples use', () => {
+    expect(situsZipFrom({ zip_code: '84115-1234' })).toBe('84115')
+  })
+
+  it('accepts a numeric zip without losing a leading zero', () => {
+    expect(situsZipFrom({ zip_code: 84115 })).toBe('84115')
+  })
+
+  it('returns null rather than a partial or absent zip', () => {
+    expect(situsZipFrom({ zip_code: '' })).toBeNull()
+    expect(situsZipFrom({ zip_code: 'N/A' })).toBeNull()
+    expect(situsZipFrom({})).toBeNull()
+    expect(situsZipFrom(null)).toBeNull()
+    expect(situsZipFrom(undefined)).toBeNull()
   })
 })

@@ -1,0 +1,314 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  lookupBusinessTrace,
+  lookupPersonTrace,
+  parseBusinessTraceResponse,
+  parsePersonTraceResponse,
+} from '@/lib/tracerfy/client'
+
+import businessHit from './fixtures/business-hit.json'
+import businessAgentManager from './fixtures/business-hit-agent-manager.json'
+import businessMiss from './fixtures/business-miss.json'
+import personHit from './fixtures/person-hit.json'
+import personMiss from './fixtures/person-miss.json'
+
+/**
+ * The two SYNCHRONOUS contact endpoints Full Property Trace spends on.
+ *
+ * Fixtures are SANITIZED derivatives of real 2026-09-16 vendor responses; see
+ * ./fixtures/README.md. These tests must never read tasks/research-test/,
+ * which is gitignored purchased PII.
+ *
+ * The distinction these tests exist to protect: a MISS is an answer (free,
+ * final, and under tier 2 still BILLED) and a FAILURE is "we could not ask"
+ * (free, and never billed). Both come back with contacts: null, so only
+ * `success` separates them, and executeRoute bills on `success`.
+ */
+
+const FASTAPPEND_URL = 'https://app.fastappend.com/v1/api/business-trace/lookup/'
+const TRACERFY_URL = 'https://tracerfy.com/v1/api/trace/lookup/'
+const TRACERFY_PARCEL_URL = 'https://tracerfy.com/v1/api/trace/parcel/lookup/'
+
+const okResponse = (body: unknown) =>
+  ({
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  }) as Response
+
+const errorResponse = (status: number, text = 'upstream said no') =>
+  ({
+    ok: false,
+    status,
+    json: async () => {
+      throw new Error('not json')
+    },
+    text: async () => text,
+  }) as unknown as Response
+
+let fetchMock: ReturnType<typeof vi.fn>
+
+const ENTITY = { company_name: 'Abc Rentals Llc', state: 'UT' }
+const PERSON = {
+  first_name: 'Testowner',
+  last_name: 'Placeholder',
+  address: '305 W Center St',
+  city: 'Clearfield',
+  state: 'UT',
+  zip: '84015',
+  find_owner: false,
+}
+
+beforeEach(() => {
+  process.env.TRACERFY_API_KEY = 'test-key'
+  process.env.FASTAPPEND_API_KEY = 'test-fa-key'
+  delete process.env.TRACERFY_API_URL
+  fetchMock = vi.fn()
+  vi.stubGlobal('fetch', fetchMock)
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+/** The body that was POSTed on the Nth fetch. */
+const sentBody = (call = 0): Record<string, unknown> =>
+  JSON.parse(String(fetchMock.mock.calls[call][1].body))
+
+describe('parseBusinessTraceResponse', () => {
+  it('a miss is an ANSWER, not a failure, even though it carries an error string', () => {
+    // { error: "Company not found: X (OH)", hit: false, credits_deducted: 0 }
+    // Reading `error` as a failure makes every miss unbillable, and under tier 2
+    // a miss IS billed.
+    // MUTATION: gate on body.error instead of body.hit and this goes red.
+    const res = parseBusinessTraceResponse(businessMiss.response)
+    expect(res.success).toBe(true)
+    expect(res.hit).toBe(false)
+    expect(res.contacts).toBeNull()
+    expect(res.error).toBeUndefined()
+  })
+
+  it('returns the principal, never the pure registered agent', () => {
+    // A registered agent is a service of process. Returning one as the owner
+    // contact is how contacts named "Secretary of State" reached customers.
+    // MUTATION: take associated_people[0] blindly and this stays green -- the
+    // fixture's principal IS first -- which is why the ordering test below
+    // exists as well.
+    const res = parseBusinessTraceResponse(businessHit.response)
+    expect(res.success).toBe(true)
+    expect(res.hit).toBe(true)
+    expect(res.contacts?.ownerName).toBe('Testowner Placeholder')
+    expect(res.contacts?.phones.map((p) => p.number)).toEqual(['5550000101', '5550000102'])
+    expect(res.contacts?.emails).toEqual(['principal@example.invalid'])
+    expect(res.contacts?.mailingAddress).toBe('100 Placeholder Way, Redacted, ZZ, 00000')
+  })
+
+  it('prefers a principal even when the agent outranks them', () => {
+    const reordered = {
+      ...businessHit.response,
+      associated_people: [
+        { ...businessHit.response.associated_people[1], rank: 1 },
+        { ...businessHit.response.associated_people[0], rank: 2 },
+      ],
+    }
+    // MUTATION: drop the is_registered_agent term from byPrincipalThenRank and
+    // this goes red.
+    expect(parseBusinessTraceResponse(reordered).contacts?.ownerName).toBe('Testowner Placeholder')
+  })
+
+  it('KEEPS a "REGISTERED AGENT,MANAGER" — they are a manager', () => {
+    // 1 of the 5 saved hits returns exactly this person and nobody else.
+    // Excluding everyone the flag marks throws away 20% of the hits we paid for.
+    // MUTATION: filter on is_registered_agent alone and this goes red.
+    const res = parseBusinessTraceResponse(businessAgentManager.response)
+    expect(res.hit).toBe(true)
+    expect(res.contacts?.ownerName).toBe('Testowner Placeholder')
+    expect(res.contacts?.emails).toEqual(['manager@example.invalid'])
+  })
+
+  it('falls back to the company block with NO name when only an agent is returned', () => {
+    const agentOnly = {
+      ...businessHit.response,
+      associated_people: [businessHit.response.associated_people[1]],
+    }
+    const res = parseBusinessTraceResponse(agentOnly)
+    expect(res.hit).toBe(true)
+    // The company's own phones and emails are real and were paid for...
+    expect(res.contacts?.phones.map((p) => p.number)).toEqual(['5550000001', '5550000002'])
+    // ...but the agent is never named as the owner.
+    expect(res.contacts?.ownerName).toBeNull()
+  })
+
+  it('a hit with no people and no company contacts returns no contacts, still a hit', () => {
+    const bare = { hit: true, credits_deducted: 1, associated_people: [] }
+    const res = parseBusinessTraceResponse(bare)
+    expect(res).toEqual({ success: true, hit: true, contacts: null })
+  })
+
+  it('fails on a body with no hit flag', () => {
+    expect(parseBusinessTraceResponse({ credits_deducted: 0 }).success).toBe(false)
+    expect(parseBusinessTraceResponse('nonsense').success).toBe(false)
+    expect(parseBusinessTraceResponse(null).success).toBe(false)
+  })
+})
+
+describe('lookupBusinessTrace', () => {
+  it('posts company_name and state to the synchronous endpoint', async () => {
+    fetchMock.mockResolvedValue(okResponse(businessHit.response))
+    const res = await lookupBusinessTrace(ENTITY)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(FASTAPPEND_URL)
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST')
+    expect(sentBody()).toEqual({ company_name: 'Abc Rentals Llc', state: 'UT' })
+    expect(res.hit).toBe(true)
+  })
+
+  it('does not retry', async () => {
+    // A retry silently doubles a real charge.
+    fetchMock.mockResolvedValue(errorResponse(503))
+    await lookupBusinessTrace(ENTITY)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('a transport error is a FAILURE, never a miss', async () => {
+    for (const status of [401, 403, 429, 500, 503]) {
+      fetchMock.mockResolvedValue(errorResponse(status))
+      const res = await lookupBusinessTrace(ENTITY)
+      expect(res.success).toBe(false)
+      expect(res.hit).toBe(false)
+      expect(res.error).toBeTruthy()
+    }
+  })
+
+  it('a thrown fetch is a failure, not an exception', async () => {
+    fetchMock.mockRejectedValue(new Error('socket hang up'))
+    const res = await lookupBusinessTrace(ENTITY)
+    expect(res.success).toBe(false)
+  })
+
+  it('refuses to spend without an API key or without a state', async () => {
+    delete process.env.FASTAPPEND_API_KEY
+    expect((await lookupBusinessTrace(ENTITY)).success).toBe(false)
+    process.env.FASTAPPEND_API_KEY = 'test-fa-key'
+    expect((await lookupBusinessTrace({ company_name: 'X Llc', state: ' ' })).success).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('parsePersonTraceResponse', () => {
+  it('a miss is an answer', () => {
+    const res = parsePersonTraceResponse(personMiss.response)
+    expect(res).toEqual({ success: true, hit: false, contacts: null })
+  })
+
+  it('matches on the NAME we asked for, not on persons[0]', () => {
+    // MUTATION: return persons[0] and this goes red.
+    const res = parsePersonTraceResponse(personHit.response, {
+      first_name: 'Testowner',
+      last_name: 'Placeholder',
+    })
+    expect(res.contacts?.ownerName).toBe('Testowner Placeholder')
+    expect(res.contacts?.emails).toEqual(['owner1@example.invalid', 'owner2@example.invalid'])
+  })
+
+  it('does NOT prefer the person flagged property_owner', () => {
+    // property_owner returned FALSE for the verified owner of record on an
+    // absentee-owned parcel: the owner does not live in his own rental. In the
+    // fixture the flag is on the OTHER person.
+    // MUTATION: filter on property_owner and this goes red.
+    const res = parsePersonTraceResponse(personHit.response, {
+      first_name: 'Testowner',
+      last_name: 'Placeholder',
+    })
+    expect(res.contacts?.ownerName).not.toBe('Someoneelse Different')
+  })
+
+  it('takes the first person when there is no name to match on', () => {
+    // The APN-keyed form sends no name. Discarding a paid hit because nothing
+    // matched would be worse than returning what the vendor ranked first.
+    const res = parsePersonTraceResponse(personHit.response)
+    expect(res.contacts?.ownerName).toBe('Someoneelse Different')
+  })
+
+  it('falls back to the first person when the requested name is absent', () => {
+    const res = parsePersonTraceResponse(personHit.response, {
+      first_name: 'Nobody',
+      last_name: 'Nothere',
+    })
+    expect(res.contacts?.ownerName).toBe('Someoneelse Different')
+  })
+
+  it('unwraps an array-wrapped body', () => {
+    expect(parsePersonTraceResponse([personMiss.response]).success).toBe(true)
+  })
+
+  it('fails on a body with no hit flag', () => {
+    expect(parsePersonTraceResponse({ persons: [] }).success).toBe(false)
+  })
+})
+
+describe('lookupPersonTrace', () => {
+  it('sends the named address form with find_owner false', async () => {
+    // find_owner:true MISSED on the parcel the named form hit.
+    // MUTATION: send find_owner:true and this goes red.
+    fetchMock.mockResolvedValue(okResponse(personHit.response))
+    await lookupPersonTrace(PERSON)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(TRACERFY_URL)
+    expect(sentBody()).toEqual({
+      address: '305 W Center St',
+      city: 'Clearfield',
+      state: 'UT',
+      zip: '84015',
+      find_owner: false,
+      first_name: 'Testowner',
+      last_name: 'Placeholder',
+    })
+  })
+
+  it('omits an absent zip rather than sending it empty', async () => {
+    fetchMock.mockResolvedValue(okResponse(personHit.response))
+    await lookupPersonTrace({ ...PERSON, zip: '' })
+    expect(sentBody()).not.toHaveProperty('zip')
+  })
+
+  it('routes an APN-keyed request to the parcel endpoint', async () => {
+    fetchMock.mockResolvedValue(okResponse(personMiss.response))
+    await lookupPersonTrace({
+      first_name: '',
+      last_name: '',
+      parcel_id: '10000052',
+      county: 'Stark',
+      state: 'OH',
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe(TRACERFY_PARCEL_URL)
+    expect(sentBody()).toEqual({ parcel_id: '10000052', county: 'Stark', state: 'OH' })
+  })
+
+  it('refuses to spend on a nameless address lookup', async () => {
+    // find_owner:false with no name cannot match; find_owner:true is the form
+    // that missed. Either way, posting it can only waste a call.
+    const res = await lookupPersonTrace({ ...PERSON, first_name: '', last_name: '' })
+    expect(res.success).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a transport error is a FAILURE, never a miss', async () => {
+    fetchMock.mockResolvedValue(errorResponse(429))
+    const res = await lookupPersonTrace(PERSON)
+    expect(res.success).toBe(false)
+    expect(res.hit).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses to spend without an API key', async () => {
+    delete process.env.TRACERFY_API_KEY
+    expect((await lookupPersonTrace(PERSON)).success).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
