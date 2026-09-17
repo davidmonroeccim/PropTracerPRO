@@ -425,6 +425,102 @@ Trace panel, the opt-in toggle, and every string that currently says AI Search. 
 Property Trace spends TWO calls per parcel, so 150 parcels is ~300 of the pool, not 150.
 Deliberately last, because this is where a truncated run does real damage.
 
+## DATA FIDELITY REQUIREMENT. David, 2026-09-17. Not optional, not a phase-5 nicety.
+
+> *"All the fields available in Tier 2 will be added to the database, and must also be added to the
+> export engine, when we get there."*
+
+**Two obligations, and the second one was missing from this plan entirely:**
+
+1. **STORE ALL 86 FIELDS.** Not the 46 usable ones, not the 3 currently read. The whole
+   `response.property` object lands in `property_record JSONB` verbatim. This is the same rule as
+   the registry's `raw_attributes`: **the raw dump IS the product.** A field that is empty in OH,
+   CA and UT may be populated in another county, and a stored raw record costs nothing extra
+   because the $0.20 was already spent to fetch it.
+2. **EXPORT ALL 86 FIELDS.** `app/api/trace/bulk/download/route.ts` currently emits contact columns
+   only. Every dossier field must reach the CSV. A customer who paid for an 86-field record and
+   receives a 9-column CSV did not get what they bought.
+
+**Design rules for the export, so it does not break the people already using it:**
+
+- **APPEND the new columns, never reorder or rename the existing ones.** Customers have import
+  mappings into their CRMs. Appending is safe for both header-keyed and index-keyed importers;
+  reordering silently corrupts the index-keyed ones.
+- **Emit a STABLE column set.** Every dossier column appears in every export whether or not it is
+  populated for that row, so the CSV shape does not shift between runs. A user building a recurring
+  import cannot have columns appear and disappear.
+- **Empty means empty.** A field the county did not publish exports as blank. Never a zero, never
+  "N/A", never a placeholder. Per CLAUDE.md rule 7 and [[feedback_no_fake_data]].
+- **Single-record needs an export too**, or the feature is bulk-only in practice. Not currently
+  planned; flag it at phase 4.
+
+### SETTLED 2026-09-17: the blocked fields are blocked from EXPORT too.
+
+David confirmed the 7 provably-wrong fields and the 15 propensity scores stay blocked. "All the
+fields available" means all the LEGITIMATE fields; the wrong ones are not available by our own
+earlier decision. An export lands in a customer's CRM where a wrong `estimated_value` looks
+authoritative and outlives any caveat we could put on a screen.
+
+**The two exclusion categories are NOT the same and must never be merged again:**
+
+| Category | Count | Store? | Export? | Why |
+|---|---|---|---|---|
+| Provably wrong | 7 | YES, raw | **NO** | `estimated_value` IS the assessed value, there is no AVM; equity/`high_equity`/`free_clear` all derive from it; `corporate_owned` returned FALSE for a Delaware LP; `price_per_sqft` is 0 with no sale. More counties will NOT fix vendor math. |
+| Propensity scores | 15 | YES, raw | **NO** | Equity-contaminated, and the renovation models are residential: they score a 41,588 sqft building as a "large home". |
+| Never seen in our sample | 18 | YES, raw | **YES, as empty columns** | Coverage, not correctness. Absent in OH/CA/UT says nothing about other counties. NOT blocked. |
+
+**Therefore the export carries 64 columns.** 86 returned, minus 7 wrong, minus 15 scores. Of those
+64, **46 held a usable value at least once** in the 24-parcel sample and 18 did not, which is why
+the stable-column-set rule matters: all 64 ship every time, blanks included.
+
+**This also finally makes the marketing claim exact.** "Over 60 fields" is 64 fields actually
+delivered to the customer, derivable from the measured inventory rather than asserted. Earlier in
+this session I challenged that claim as unsupported; it is now supported, with a number behind it.
+
+## PHASE 1 REVIEW — COMPLETE 2026-09-17
+
+`lib/tracerfy/dossier.ts` plus 34 tests, 6 sanitized fixtures, and a dry-run script. Nothing wired
+to any route, UI or billing path. No live API call was made.
+
+**Verified independently, not relayed:** 265 tests passing (from 231), `tsc` 9 pre-existing dotenv
+errors unchanged, eslint 55 problems unchanged from the `main` baseline.
+
+**Two things the real payloads corrected before a line was written:**
+
+1. **`property` carries NO owner field.** The owner lives in `response.owners[]`. The plan assumed
+   otherwise; building from the plan would have shipped a client that silently returned no owner.
+2. **An entity arrives as `{ first_name: "", last_name: "Colmaven, Llc", age: "" }`** — the whole
+   entity name in `last_name`. Some parcels return TWO owners, which maps onto the `owner_name` /
+   `owner_name_2` pair `trace_result` already has.
+
+**The fidelity fence is real and I mutated it myself.** Subsetting the property object to drop
+empty-valued keys — the plausible "cleanup" a future dev makes — turns **7 tests red**. Restored
+green. A client that quietly returns fewer than 86 keys cannot ship without someone deleting a test
+on purpose.
+
+**PII: the fixtures are clean, verified independently.** `tasks/research-test/` is gitignored
+because it holds purchased data on 63 real people, so tests could not read from it. Fixtures are
+sanitized derivatives: the full 86-key property object and entity names kept, individual names,
+ages and the whole `contacts` block scrubbed. I harvested 373 real-person values from the corpus
+and word-boundary matched them against every committable file: **zero leaks**. My first scan
+reported 40+ hits and was wrong — it substring-matched, so `estimated_mortgage_payment` matched on
+"age" and the propensity `_factors` arrays have a literal `name` key. Worth remembering: a PII
+scanner that matches loosely produces false alarms that are indistinguishable from real ones.
+
+**Deviations from the house pattern, each deliberate:**
+- Env read at call time, not module load. `client.ts` freezes the key at import, which makes the
+  missing-key branch untestable.
+- A contaminated key (fields from both modes) is REFUSED, not silently stripped. Quietly keying on
+  the APN when the caller meant the address would charge $0.20 for the wrong parcel.
+- A `"Stark County"` guard rejects before spending rather than posting a body that cannot match.
+- `response.contacts` is parsed but not surfaced. It carries PII and the contact step is a separate
+  vendor call on a separate ledger line. Phase 3 can add it if needed.
+
+**Known limitation, flagged not hidden:** the individual-owner and two-owner fixtures derive from
+the SAME source record, because `dossier/raw-10.json` is the only natural-person owner in all 24
+saved payloads. Everything else is entity-owned. So the individual shape is genuine but
+uncorroborated; if a future payload shows a different shape, that fixture is the one to revisit.
+
 ## Copy debt this creates
 
 - **The user notification needs a new paragraph.** It currently explains a price change. It does

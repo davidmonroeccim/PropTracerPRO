@@ -1,0 +1,267 @@
+{
+  "request": {
+    "address": "1815 S State St",
+    "city": "Salt Lake City",
+    "state": "UT"
+  },
+  "response": {
+    "hit": true,
+    "credits_deducted": 10,
+    "skip_trace_hit": true,
+    "property": {
+      "address": "1815 S State St",
+      "city": "Salt Lake City",
+      "state": "UT",
+      "zip_code": "84115",
+      "county": "Salt Lake County",
+      "latitude": 40.73093152971248,
+      "longitude": -111.88758804199307,
+      "apn": "16-18-306-029",
+      "subdivision": "",
+      "property_type": "Retail Stores (Personal Servic",
+      "property_use": "Retail Stores (Personal Services, Photography, Travel)",
+      "land_use": "Retail Store",
+      "year_built": 1957,
+      "beds": null,
+      "baths": null,
+      "units_count": 1,
+      "stories": 2,
+      "building_size_sqft": 36037,
+      "lot_size_sqft": 37897,
+      "has_ac": false,
+      "has_garage": false,
+      "has_pool": false,
+      "has_basement": false,
+      "has_deck": false,
+      "estimated_value": 2799600,
+      "estimated_equity": 2799600,
+      "equity_percent": 100,
+      "last_sale_date": "2022-05-13",
+      "last_sale_price": 0,
+      "years_owned": 4,
+      "absentee_owner": true,
+      "owner_occupied": false,
+      "vacant": false,
+      "free_clear": true,
+      "high_equity": true,
+      "pre_foreclosure": false,
+      "foreclosure": false,
+      "tax_delinquent": false,
+      "tax_delinquent_year": null,
+      "tax_lien": false,
+      "inherited": false,
+      "death": false,
+      "judgment": false,
+      "hoa": false,
+      "price_per_sqft": 0,
+      "assessed_value": 2799600,
+      "area_median_income": 47943,
+      "open_mortgage_balance": 0,
+      "lender_name": "",
+      "estimated_mortgage_payment": 0,
+      "total_properties_owned": 15,
+      "total_portfolio_value": 70006885,
+      "cash_buyer": true,
+      "corporate_owned": true,
+      "roof_material": "",
+      "roof_construction": "",
+      "flood_zone": true,
+      "prior_sale_price": 0,
+      "prior_sale_date": "2020-10-19",
+      "document_type": "Special Warranty Deed",
+      "quit_claim": false,
+      "recording_date": "2022-05-13",
+      "mls_active": false,
+      "mls_pending": false,
+      "mls_cancelled": false,
+      "mls_sold": false,
+      "mls_failed": false,
+      "mls_days_on_market": null,
+      "mls_listing_price": null,
+      "adjustable_rate": false,
+      "investor_buyer": true,
+      "sell_propensity_score": 32,
+      "sell_propensity_category": "Low",
+      "sell_propensity_factors": [
+        {
+          "name": "absentee_owner",
+          "points": 8,
+          "reason": "Absentee owner — less attached to property"
+        },
+        {
+          "name": "investor_buyer",
+          "points": 5,
+          "reason": "Known investor buyer — portfolio-minded seller"
+        },
+        {
+          "name": "portfolio_size",
+          "points": 5,
+          "reason": "Owns 15 properties — likely pruning portfolio"
+        },
+        {
+          "name": "free_clear",
+          "points": 4,
+          "reason": "Free and clear — no mortgage friction at sale"
+        },
+        {
+          "name": "aging_property",
+          "points": 4,
+          "reason": "Built 1957 — significant deferred-maintenance burden"
+        },
+        {
+          "name": "corporate_owned",
+          "points": 3,
+          "reason": "Corporate / LLC ownership — investor pruning likely"
+        },
+        {
+          "name": "flood_zone",
+          "points": 3,
+          "reason": "FEMA flood zone — recurring insurance cost + climate exit pressure"
+        }
+      ],
+      "refi_propensity_score": 21,
+      "refi_propensity_category": "Low",
+      "refi_propensity_factors": [
+        {
+          "name": "high_equity",
+          "points": 15,
+          "reason": "High equity — strong candidate for cash-out refi"
+        },
+        {
+          "name": "free_clear",
+          "points": 6,
+          "reason": "Free and clear — could take on a new mortgage product"
+        }
+      ],
+      "roof_renovate_propensity_score": 58,
+      "roof_renovate_propensity_category": "Medium",
+      "roof_renovate_propensity_factors": [
+        {
+          "name": "home_age",
+          "points": 25,
+          "reason": "Home built in 1957 (69 years old) — roof likely overdue"
+        },
+        {
+          "name": "high_equity",
+          "points": 15,
+          "reason": "High equity — homeowner has financial capacity for roof project"
+        },
+        {
+          "name": "flood_zone",
+          "points": 10,
+          "reason": "Flood zone — elevated weather exposure accelerates roof wear"
+        },
+        {
+          "name": "free_clear",
+          "points": 8,
+          "reason": "Free and clear — no mortgage constraints on repair spending"
+        }
+      ],
+      "hvac_renovate_propensity_score": 59,
+      "hvac_renovate_propensity_category": "Medium",
+      "hvac_renovate_propensity_factors": [
+        {
+          "name": "home_age",
+          "points": 28,
+          "reason": "Home built in 1957 (69 years old) — HVAC likely past useful life"
+        },
+        {
+          "name": "building_size",
+          "points": 15,
+          "reason": "36,037 sqft — large home, higher HVAC cost and complexity"
+        },
+        {
+          "name": "high_equity",
+          "points": 10,
+          "reason": "High equity — financial capacity for HVAC replacement"
+        },
+        {
+          "name": "free_clear",
+          "points": 6,
+          "reason": "Free and clear — no mortgage constraints on repair spending"
+        }
+      ],
+      "solar_renovate_propensity_score": 56,
+      "solar_renovate_propensity_category": "Medium",
+      "solar_renovate_propensity_factors": [
+        {
+          "name": "home_value",
+          "points": 20,
+          "reason": "Home value $2,799,600 — high-value homes prioritize solar ROI"
+        },
+        {
+          "name": "high_equity",
+          "points": 18,
+          "reason": "High equity — can finance solar via cash-out or HELOC"
+        },
+        {
+          "name": "solar_state_tier",
+          "points": 8,
+          "reason": "UT — Tier 3 solar market (emerging incentives)"
+        },
+        {
+          "name": "free_clear",
+          "points": 6,
+          "reason": "Free and clear — full equity available for solar financing"
+        },
+        {
+          "name": "years_owned",
+          "points": 3,
+          "reason": "Owned 4 years — settled in, solar worth considering"
+        },
+        {
+          "name": "year_built",
+          "points": 1,
+          "reason": "Built 1957 — older home, roof evaluation required before solar"
+        }
+      ]
+    },
+    "owners": [
+      {
+        "first_name": "",
+        "last_name": "Colmaven, Llc",
+        "age": ""
+      }
+    ],
+    "mailing_address": {
+      "address": "1201 E Wilmington Ave",
+      "city": "Salt Lake City",
+      "state": "UT",
+      "zip": "84106"
+    },
+    "contacts": {
+      "has_contact": true,
+      "contact_clean": true,
+      "litigator": false,
+      "phones": [
+        {
+          "number": "5555550100",
+          "type": "mobile",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER WIRELESS",
+          "rank": 1
+        },
+        {
+          "number": "5555550101",
+          "type": "landline",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER TELECOM",
+          "rank": 2
+        }
+      ],
+      "emails": [
+        {
+          "email": "redacted@example.invalid",
+          "rank": 1
+        }
+      ]
+    },
+    "meta": {
+      "request_id": "req_b196a223510c4df895f58d86b91bac31",
+      "timestamp": "2026-09-16T16:39:37Z",
+      "api_version": "2026-03-21"
+    }
+  }
+}

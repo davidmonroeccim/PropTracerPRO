@@ -6,6 +6,28 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 1: the dossier client
+
+- **`lib/tracerfy/dossier.ts`** plus 34 tests, 6 sanitized fixtures and a dry-run script. Nothing
+  wired to a route, UI or billing path. No live API call made. 265 tests passing (from 231), `tsc`
+  and eslint unchanged from baseline.
+- **The real payloads corrected the plan twice before code was written.** `property` carries NO
+  owner field; the owner is in `response.owners[]`. And an entity arrives as
+  `{first_name: "", last_name: "Colmaven, Llc", age: ""}`, the whole name in `last_name`. Building
+  from the plan rather than the payloads would have shipped a client returning no owner at all.
+- **A fidelity fence guards the 86-key record.** Subsetting the property object turns 7 tests red,
+  mutation-verified. A "cleanup" that quietly returns fewer fields than the customer paid for
+  cannot ship without someone deleting a test deliberately.
+- **Fixtures are sanitized derivatives, because `tasks/research-test/` is gitignored** and holds
+  purchased data on 63 real people. Full 86-key property object and entity names kept; individual
+  names, ages and the whole `contacts` block scrubbed. 373 real-person values word-boundary matched
+  against every committable file: zero leaks.
+- **Export decisions settled.** All 86 fields are STORED raw; **64 are EXPORTED** (86 minus 7
+  provably-wrong minus 15 propensity scores). The 18 never seen in our sample ARE exported, as
+  empty columns, because that is coverage not correctness. Export rules: append never reorder,
+  stable column set, empty means empty. This also makes "over 60 fields" exact at 64 rather than
+  asserted.
+
 ### Decisions that shape the tier 2 build, plus a marketing debt worth flagging
 
 - **AI Search is being REMOVED, not replaced in place.** I recommended replace-in-place, David

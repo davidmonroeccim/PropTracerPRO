@@ -1,0 +1,217 @@
+{
+  "request": {
+    "apn": "10000052",
+    "county": "Stark",
+    "state": "OH"
+  },
+  "response": {
+    "hit": true,
+    "credits_deducted": 10,
+    "skip_trace_hit": true,
+    "property": {
+      "address": "4898 Hills And Dales Rd Nw",
+      "city": "Canton",
+      "state": "OH",
+      "zip_code": "44708",
+      "county": "Stark County",
+      "latitude": 40.83289032698817,
+      "longitude": -81.43744103269022,
+      "apn": "10-000052",
+      "subdivision": "",
+      "property_type": "Light Industrial (10% Improved",
+      "property_use": "Light Industrial (10% Improved Office Space; Machine Shop)",
+      "land_use": "Industrial",
+      "year_built": 1972,
+      "beds": null,
+      "baths": null,
+      "units_count": 1,
+      "stories": 1,
+      "building_size_sqft": 10476,
+      "lot_size_sqft": 47045,
+      "has_ac": false,
+      "has_garage": false,
+      "has_pool": false,
+      "has_basement": false,
+      "has_deck": false,
+      "estimated_value": 203740,
+      "estimated_equity": 0,
+      "equity_percent": 0,
+      "last_sale_date": "2025-03-25",
+      "last_sale_price": 675000,
+      "years_owned": 1,
+      "absentee_owner": true,
+      "owner_occupied": false,
+      "vacant": false,
+      "free_clear": false,
+      "high_equity": false,
+      "pre_foreclosure": false,
+      "foreclosure": false,
+      "tax_delinquent": false,
+      "tax_delinquent_year": null,
+      "tax_lien": false,
+      "inherited": false,
+      "death": false,
+      "judgment": false,
+      "hoa": false,
+      "price_per_sqft": 64,
+      "assessed_value": 203740,
+      "area_median_income": 57260,
+      "open_mortgage_balance": 922500,
+      "lender_name": "First Commonwealth Bank",
+      "estimated_mortgage_payment": 8769,
+      "total_properties_owned": 3,
+      "total_portfolio_value": 1032972,
+      "cash_buyer": false,
+      "corporate_owned": true,
+      "roof_material": "",
+      "roof_construction": "",
+      "flood_zone": true,
+      "prior_sale_price": null,
+      "prior_sale_date": "",
+      "document_type": "Warranty Deed",
+      "quit_claim": false,
+      "recording_date": "2025-03-27",
+      "mls_active": false,
+      "mls_pending": false,
+      "mls_cancelled": false,
+      "mls_sold": false,
+      "mls_failed": false,
+      "mls_days_on_market": null,
+      "mls_listing_price": null,
+      "adjustable_rate": false,
+      "investor_buyer": true,
+      "sell_propensity_score": 34,
+      "sell_propensity_category": "Low",
+      "sell_propensity_factors": [
+        {
+          "name": "low_equity_distress",
+          "points": 10,
+          "reason": "Under 10% equity — owner has little cushion"
+        },
+        {
+          "name": "absentee_owner",
+          "points": 8,
+          "reason": "Absentee owner — less attached to property"
+        },
+        {
+          "name": "investor_buyer",
+          "points": 5,
+          "reason": "Known investor buyer — portfolio-minded seller"
+        },
+        {
+          "name": "corporate_owned",
+          "points": 3,
+          "reason": "Corporate / LLC ownership — investor pruning likely"
+        },
+        {
+          "name": "flood_zone",
+          "points": 3,
+          "reason": "FEMA flood zone — recurring insurance cost + climate exit pressure"
+        },
+        {
+          "name": "portfolio_size",
+          "points": 3,
+          "reason": "Owns 3 properties — possible portfolio seller"
+        },
+        {
+          "name": "aging_property",
+          "points": 2,
+          "reason": "Built 1972 — moderate-age property, some maintenance pressure"
+        }
+      ],
+      "refi_propensity_score": 0,
+      "refi_propensity_category": "Low",
+      "refi_propensity_factors": [
+        {
+          "name": "thin_equity",
+          "points": -15,
+          "reason": "Thin equity — unlikely to qualify for refinance"
+        }
+      ],
+      "roof_renovate_propensity_score": 35,
+      "roof_renovate_propensity_category": "Low",
+      "roof_renovate_propensity_factors": [
+        {
+          "name": "home_age",
+          "points": 25,
+          "reason": "Home built in 1972 (54 years old) — roof likely overdue"
+        },
+        {
+          "name": "flood_zone",
+          "points": 10,
+          "reason": "Flood zone — elevated weather exposure accelerates roof wear"
+        }
+      ],
+      "hvac_renovate_propensity_score": 43,
+      "hvac_renovate_propensity_category": "Medium",
+      "hvac_renovate_propensity_factors": [
+        {
+          "name": "home_age",
+          "points": 28,
+          "reason": "Home built in 1972 (54 years old) — HVAC likely past useful life"
+        },
+        {
+          "name": "building_size",
+          "points": 15,
+          "reason": "10,476 sqft — large home, higher HVAC cost and complexity"
+        }
+      ],
+      "solar_renovate_propensity_score": 4,
+      "solar_renovate_propensity_category": "Low",
+      "solar_renovate_propensity_factors": [
+        {
+          "name": "year_built",
+          "points": 4,
+          "reason": "Built 1972 — older construction, possible roof upgrade before solar"
+        }
+      ]
+    },
+    "owners": [
+      {
+        "first_name": "",
+        "last_name": "Cutting Edge Hodings Llc",
+        "age": ""
+      }
+    ],
+    "mailing_address": {
+      "address": "843 Mayfield Dr",
+      "city": "Youngstown",
+      "state": "OH",
+      "zip": "44512"
+    },
+    "contacts": {
+      "has_contact": true,
+      "contact_clean": true,
+      "litigator": false,
+      "phones": [
+        {
+          "number": "5555550100",
+          "type": "mobile",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER WIRELESS",
+          "rank": 1
+        },
+        {
+          "number": "5555550101",
+          "type": "landline",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER TELECOM",
+          "rank": 2
+        }
+      ],
+      "emails": [
+        {
+          "email": "redacted@example.invalid",
+          "rank": 1
+        }
+      ]
+    },
+    "meta": {
+      "request_id": "req_3bff3fc472324ef58a6b87d9b104bcf3",
+      "timestamp": "2026-09-16T15:13:14Z",
+      "api_version": "2026-03-21"
+    }
+  }
+}

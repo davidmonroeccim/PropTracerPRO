@@ -19,9 +19,14 @@ All require an explicit `--live` flag to spend.
 | `ohio-test.ts` | Full dossier + FastAppend pipeline, 12 parcels, 4 Ohio counties. 12/12 owners, 8/12 entity hits. | $3.20 |
 | `address-mode.ts` | The dossier answers from an ADDRESS with no parcel id. 5/6, and it found a parcel APN mode missed. | $1.00 |
 | `run-research.ts` | The `researchProperty` harness. Built, dry-run verified, NEVER RUN live. | $0 |
+| `dossier-client-check.ts` | Not a research probe — the **visible slice of Full Property Trace phase 1**. Runs the shipped `lib/tracerfy/dossier.ts` and prints the parsed record: owners, mailing address, and all 86 property keys. `--dry-run` reads a committed sanitized fixture and spends nothing; `--live` does ONE lookup. | $0 dry-run, $0.20/hit live |
 
 To re-run any of them you need `tsx` and `dotenv`, which were installed in the scratchpad,
 not the repo. `npx tsx <script> --dry-run` where supported; `--live` spends.
+
+`dossier-client-check.ts` is the exception: it parses `.env.local` itself instead of importing
+`dotenv`, so it runs with nothing but `npx tsx`. The nine `tsc --noEmit` errors in this directory
+are all the missing `dotenv` types in the other scripts; this one adds none.
 
 Raw outputs live in `tasks/research-test/`, which is gitignored because it holds purchased
 skip-trace PII for 63 real individuals.

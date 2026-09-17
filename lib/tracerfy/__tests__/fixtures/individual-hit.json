@@ -1,0 +1,207 @@
+{
+  "request": {
+    "apn": "120220101",
+    "county": "Davis",
+    "state": "UT"
+  },
+  "response": {
+    "hit": true,
+    "credits_deducted": 10,
+    "skip_trace_hit": false,
+    "property": {
+      "address": "305 W Center St",
+      "city": "Clearfield",
+      "state": "UT",
+      "zip_code": "84015",
+      "county": "Davis County",
+      "latitude": 41.10987798349027,
+      "longitude": -112.03096588362531,
+      "apn": "12-022-0101",
+      "subdivision": "",
+      "property_type": "Mini-Warehouse, Storage",
+      "property_use": "Mini-Warehouse, Storage",
+      "land_use": "Mini Warehouse",
+      "year_built": 2020,
+      "beds": null,
+      "baths": null,
+      "units_count": 0,
+      "stories": 1,
+      "building_size_sqft": 3500,
+      "lot_size_sqft": 139828,
+      "has_ac": false,
+      "has_garage": false,
+      "has_pool": false,
+      "has_basement": false,
+      "has_deck": false,
+      "estimated_value": 2946654,
+      "estimated_equity": 960793,
+      "equity_percent": 32,
+      "last_sale_date": "2025-02-12",
+      "last_sale_price": 0,
+      "years_owned": 1,
+      "absentee_owner": true,
+      "owner_occupied": false,
+      "vacant": false,
+      "free_clear": false,
+      "high_equity": false,
+      "pre_foreclosure": false,
+      "foreclosure": false,
+      "tax_delinquent": false,
+      "tax_delinquent_year": null,
+      "tax_lien": false,
+      "inherited": false,
+      "death": false,
+      "judgment": false,
+      "hoa": false,
+      "price_per_sqft": 0,
+      "assessed_value": 2946654,
+      "area_median_income": 79704,
+      "open_mortgage_balance": 2050000,
+      "lender_name": "Trade Space Llc",
+      "estimated_mortgage_payment": 12291,
+      "total_properties_owned": null,
+      "total_portfolio_value": null,
+      "cash_buyer": false,
+      "corporate_owned": false,
+      "roof_material": "",
+      "roof_construction": "Gable",
+      "flood_zone": true,
+      "prior_sale_price": 0,
+      "prior_sale_date": "2024-12-30",
+      "document_type": "Correction Deed",
+      "quit_claim": false,
+      "recording_date": "2025-02-18",
+      "mls_active": false,
+      "mls_pending": false,
+      "mls_cancelled": false,
+      "mls_sold": false,
+      "mls_failed": false,
+      "mls_days_on_market": null,
+      "mls_listing_price": null,
+      "adjustable_rate": false,
+      "investor_buyer": true,
+      "sell_propensity_score": 16,
+      "sell_propensity_category": "Low",
+      "sell_propensity_factors": [
+        {
+          "name": "absentee_owner",
+          "points": 8,
+          "reason": "Absentee owner — less attached to property"
+        },
+        {
+          "name": "investor_buyer",
+          "points": 5,
+          "reason": "Known investor buyer — portfolio-minded seller"
+        },
+        {
+          "name": "flood_zone",
+          "points": 3,
+          "reason": "FEMA flood zone — recurring insurance cost + climate exit pressure"
+        }
+      ],
+      "refi_propensity_score": 5,
+      "refi_propensity_category": "Low",
+      "refi_propensity_factors": [
+        {
+          "name": "ltv_sweet_spot",
+          "points": 5,
+          "reason": "LTV 70% — ideal range for conventional refi approval"
+        }
+      ],
+      "roof_renovate_propensity_score": 15,
+      "roof_renovate_propensity_category": "Low",
+      "roof_renovate_propensity_factors": [
+        {
+          "name": "flood_zone",
+          "points": 10,
+          "reason": "Flood zone — elevated weather exposure accelerates roof wear"
+        },
+        {
+          "name": "area_median_income",
+          "points": 5,
+          "reason": "Area median income $79,704 — solid ability to fund the project"
+        }
+      ],
+      "hvac_renovate_propensity_score": 20,
+      "hvac_renovate_propensity_category": "Low",
+      "hvac_renovate_propensity_factors": [
+        {
+          "name": "building_size",
+          "points": 15,
+          "reason": "3,500 sqft — large home, higher HVAC cost and complexity"
+        },
+        {
+          "name": "area_median_income",
+          "points": 5,
+          "reason": "Area median income $79,704 — solid ability to fund the project"
+        }
+      ],
+      "solar_renovate_propensity_score": 34,
+      "solar_renovate_propensity_category": "Low",
+      "solar_renovate_propensity_factors": [
+        {
+          "name": "home_value",
+          "points": 20,
+          "reason": "Home value $2,946,654 — high-value homes prioritize solar ROI"
+        },
+        {
+          "name": "solar_state_tier",
+          "points": 8,
+          "reason": "UT — Tier 3 solar market (emerging incentives)"
+        },
+        {
+          "name": "area_median_income",
+          "points": 6,
+          "reason": "Area median income $79,704 — solid ability to fund the project"
+        }
+      ]
+    },
+    "owners": [
+      {
+        "first_name": "Testowner",
+        "last_name": "Placeholder",
+        "age": "00"
+      }
+    ],
+    "mailing_address": {
+      "address": "100 Placeholder Way",
+      "city": "Redacted",
+      "state": "ZZ",
+      "zip": "00000"
+    },
+    "contacts": {
+      "has_contact": true,
+      "contact_clean": true,
+      "litigator": false,
+      "phones": [
+        {
+          "number": "5555550100",
+          "type": "mobile",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER WIRELESS",
+          "rank": 1
+        },
+        {
+          "number": "5555550101",
+          "type": "landline",
+          "dnc": false,
+          "tcpa": false,
+          "carrier": "PLACEHOLDER TELECOM",
+          "rank": 2
+        }
+      ],
+      "emails": [
+        {
+          "email": "redacted@example.invalid",
+          "rank": 1
+        }
+      ]
+    },
+    "meta": {
+      "request_id": "req_685205ade18b4e69b1a4426aac0a91e9",
+      "timestamp": "2026-09-16T15:13:31Z",
+      "api_version": "2026-03-21"
+    }
+  }
+}
