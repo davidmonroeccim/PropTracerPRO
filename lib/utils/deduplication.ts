@@ -1,11 +1,20 @@
 import { createClient } from '@/lib/supabase/server';
 import { normalizeAddress, createAddressHash } from './address-normalizer';
 import { DEDUPE, STALE_PROCESSING } from '@/lib/constants';
+import { CACHE_HIT_FILTER } from '@/lib/trace/billedRows';
 import type { AddressInput, DedupeResult, TraceHistory } from '@/types';
 
 /**
  * Checks for duplicate addresses against user's trace history.
  * Returns new records to process and cached results for duplicates.
+ *
+ * NEEDS NO TIER 2 CHANGE, checked 2026-09-17. Unlike checkSingleDuplicate this
+ * path never narrowed to `is_successful = true`: any row inside the dedup
+ * window (bar a stale `processing` one) counts as a duplicate. A tier 2 row
+ * carrying a property record but no contacts is therefore already a cache hit
+ * here, and already free. The bias runs the other way -- a plain failed row
+ * also blocks resubmission -- which is pre-existing behaviour, costs the
+ * customer nothing, and is not this phase's to change.
  */
 export async function checkDuplicates(
   userId: string,
@@ -102,14 +111,26 @@ export async function checkSingleDuplicate(
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - DEDUPE.WINDOW_DAYS);
 
-  // Only return successful traces as cached results
-  // Failed traces should be retried
+  // A row is a cache hit when the customer already owns what it holds:
+  //   is_successful = true       -> contacts were delivered (tier 1)
+  //   property_record IS NOT NULL -> the 86-field property record was bought (tier 2)
+  //
+  // The second arm is not optional. Tier 2 bills per record SUBMITTED, so a row
+  // can carry a charge with is_successful = false: the property record was paid
+  // for and the contact step, a separate call, returned nothing. Narrowing to
+  // is_successful = true made that row invisible here, and an invisible row is
+  // one the customer is billed for a SECOND time for data they already own --
+  // the opposite of the rule that a result served from the database is free.
+  //
+  // Everything else still re-traces: a plain failure carries neither marker.
+  // And this is a no-op against every row written before tier 2, because
+  // property_record is NULL on all of them.
   const { data, error } = await supabase
     .from('trace_history')
     .select('*')
     .eq('user_id', userId)
     .eq('address_hash', hash)
-    .eq('is_successful', true)
+    .or(CACHE_HIT_FILTER)
     .gte('created_at', cutoffDate.toISOString())
     .single();
 

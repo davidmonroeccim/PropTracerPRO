@@ -4,6 +4,7 @@ import { researchProperty } from '@/lib/ai-research/client';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import { AI_RESEARCH, PRICING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
@@ -195,6 +196,7 @@ export async function GET(request: Request) {
               is_successful: true,
               cost: PRICING.COST_PER_RECORD,
               charge,
+              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
             })
             .eq('id', row.id);
           fastAppendCredited++;
@@ -238,6 +240,7 @@ export async function GET(request: Request) {
               status: 'no_match',
               is_successful: false,
               charge: 0,
+              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
             })
             .eq('id', row.id);
           noMatch++;
@@ -265,6 +268,7 @@ export async function GET(request: Request) {
               status: 'no_match',
               is_successful: false,
               charge: 0,
+              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
             })
             .eq('id', row.id);
           noMatch++;

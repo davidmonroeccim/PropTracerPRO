@@ -3,8 +3,9 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicate } from '@/lib/utils/deduplication';
+import { excludeBilledRows, isBilledRow } from '@/lib/trace/billedRows';
 import { submitSingleTrace } from '@/lib/tracerfy/client';
-import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { SingleTraceRequest, TraceResult, AIResearchResult } from '@/types';
 
@@ -66,13 +67,37 @@ export async function POST(request: Request) {
 
     const adminClient = createAdminClient();
 
+    // Every delete below is narrowed by excludeBilledRows() and its error is
+    // checked. A refused delete used to be invisible: the row survived, this
+    // route carried on as though it had not, and the INSERT at the bottom died
+    // on UNIQUE(user_id, address_hash) with a 500 that named nothing. See
+    // lib/trace/billedRows.ts.
+    const deleteErrors: string[] = [];
+    const runDelete = async (
+      label: string,
+      build: () => PromiseLike<{ error: { message: string } | null }>
+    ) => {
+      const { error } = await build();
+      if (error) {
+        console.error(`Single trace - ${label} delete failed:`, error.message);
+        deleteErrors.push(error.message);
+      }
+    };
+
     if (skip_cache) {
-      // User explicitly cleared cache — delete all trace_history rows for this address
-      await adminClient
-        .from('trace_history')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash);
+      // User explicitly cleared cache — delete this address's trace_history rows.
+      // A billed row survives on purpose: the customer paid for what it holds, so
+      // it is theirs to be served from, not ours to throw away. The reuse branch
+      // below picks it up instead of colliding with it.
+      await runDelete('skip_cache', () =>
+        excludeBilledRows(
+          adminClient
+            .from('trace_history')
+            .delete()
+            .eq('user_id', user.id)
+            .eq('address_hash', addressHash)
+        )
+      );
     } else {
       // Check for duplicate (cached result)
       const cachedResult = await checkSingleDuplicate(user.id, address, city, state);
@@ -93,42 +118,68 @@ export async function POST(request: Request) {
           });
         }
 
-        // Cached result has no contact data - delete it and re-trace
-        await adminClient
-          .from('trace_history')
-          .delete()
-          .eq('id', cachedResult.id);
+        // Cached row holds no contacts, so re-trace. Delete it only if the
+        // customer has not paid for it: a tier 2 row's property record IS the
+        // thing they bought, and its wallet_transactions row references this id.
+        if (!isBilledRow(cachedResult)) {
+          await runDelete('cached-empty', () =>
+            adminClient.from('trace_history').delete().eq('id', cachedResult.id)
+          );
+        }
       }
 
-      // Delete any existing failed traces for this address (to allow retry)
-      await adminClient
-        .from('trace_history')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash)
-        .eq('is_successful', false);
+      // Delete any existing failed traces for this address (to allow retry).
+      // is_successful = false is ALSO the tier 2 paid-but-no-contacts shape,
+      // which is why this sweep must exclude billed rows.
+      await runDelete('failed', () =>
+        excludeBilledRows(
+          adminClient
+            .from('trace_history')
+            .delete()
+            .eq('user_id', user.id)
+            .eq('address_hash', addressHash)
+            .eq('is_successful', false)
+        )
+      );
 
       // Delete stale processing traces (stuck for longer than threshold)
       const staleCutoff = new Date();
       staleCutoff.setMinutes(staleCutoff.getMinutes() - STALE_PROCESSING.STALE_MINUTES);
-      await adminClient
-        .from('trace_history')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('address_hash', addressHash)
-        .eq('status', 'processing')
-        .lt('created_at', staleCutoff.toISOString());
+      await runDelete('stale-processing', () =>
+        excludeBilledRows(
+          adminClient
+            .from('trace_history')
+            .delete()
+            .eq('user_id', user.id)
+            .eq('address_hash', addressHash)
+            .eq('status', 'processing')
+            .lt('created_at', staleCutoff.toISOString())
+        )
+      );
 
       // If a different owner name is provided, delete any existing trace for this address.
       // This allows re-tracing when AI research resolves a person name from an LLC.
       if (owner_name) {
-        await adminClient
-          .from('trace_history')
-          .delete()
-          .eq('user_id', user.id)
-          .eq('address_hash', addressHash)
-          .neq('input_owner_name', owner_name);
+        await runDelete('owner-changed', () =>
+          excludeBilledRows(
+            adminClient
+              .from('trace_history')
+              .delete()
+              .eq('user_id', user.id)
+              .eq('address_hash', addressHash)
+              .neq('input_owner_name', owner_name)
+          )
+        );
       }
+    }
+
+    if (deleteErrors.length > 0) {
+      // Stop here rather than walking into the unique-constraint violation the
+      // surviving row guarantees. The customer gets the real reason.
+      return NextResponse.json(
+        { success: false, error: `Failed to clear previous trace: ${deleteErrors[0]}` },
+        { status: 500 }
+      );
     }
 
     // Insert pending trace record (include AI research data if provided)
@@ -148,14 +199,57 @@ export async function POST(request: Request) {
       insertData.ai_research_status = ai_research.owner_name ? 'found' : 'not_found';
     }
 
-    const { data: traceRecord, error: insertError } = await adminClient
+    // UNIQUE(user_id, address_hash) means ONE row per address per user. A row
+    // that survived the guarded deletes above is a billed row, so this submit
+    // enriches it in place instead of inserting a second one that cannot exist.
+    // That is also the shape tier 2 wants: one row gaining a property record
+    // first and contacts second.
+    const { data: surviving, error: survivingError } = await adminClient
       .from('trace_history')
-      .insert(insertData)
-      .select()
-      .single();
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('address_hash', addressHash)
+      .maybeSingle();
 
-    if (insertError) {
-      console.error('Failed to create trace record:', insertError.message);
+    if (survivingError) {
+      console.error('Failed to look up existing trace record:', survivingError.message);
+      return NextResponse.json(
+        { success: false, error: 'Failed to process request' },
+        { status: 500 }
+      );
+    }
+
+    let traceRecord: { id: string } | null = null;
+    let insertError: { message: string } | null = null;
+
+    if (surviving) {
+      // Reset only the columns that describe THIS attempt. The identity columns
+      // (user_id, address_hash) already match, and charge, ai_research_charge,
+      // property_record and tier are left untouched: they are what the customer
+      // already paid for.
+      const { user_id: _u, address_hash: _h, ...resubmitData } = insertData;
+      void _u;
+      void _h;
+      const { data, error } = await adminClient
+        .from('trace_history')
+        .update({ ...resubmitData, tracerfy_job_id: null })
+        .eq('id', surviving.id)
+        .select()
+        .single();
+      traceRecord = data;
+      insertError = error;
+    } else {
+      const { data, error } = await adminClient
+        .from('trace_history')
+        .insert(insertData)
+        .select()
+        .single();
+      traceRecord = data;
+      insertError = error;
+    }
+
+    if (insertError || !traceRecord) {
+      console.error('Failed to create trace record:', insertError?.message);
       return NextResponse.json(
         { success: false, error: 'Failed to process request' },
         { status: 500 }

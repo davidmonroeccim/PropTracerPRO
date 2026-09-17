@@ -7,6 +7,7 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 export async function GET(request: Request) {
@@ -242,6 +243,7 @@ export async function GET(request: Request) {
             is_successful: isSuccessful,
             cost: PRICING.COST_PER_RECORD,
             charge,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
           })
           .eq('id', historyId);
       }
@@ -255,6 +257,7 @@ export async function GET(request: Request) {
         is_successful: false,
         cost: PRICING.COST_PER_RECORD,
         charge: 0,
+        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
       })
       .eq('user_id', user.id)
       .eq('tracerfy_job_id', traceJob.tracerfy_job_id)

@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { getChargePerTrace } from "@/lib/constants";
+import { TRACE_TIER } from "@/lib/trace/billedRows";
 
 /**
  * Money fence for the API-key single-trace status route.
@@ -170,5 +171,18 @@ describe("v1 trace/status route reports only the wallet amount actually collecte
     expect(billingUpdate()?.payload.charge).toBe(rate);
     expect(body.charge).toBe(rate);
     expect(webhookBody().charge).toBe(rate);
+  });
+
+  it("stamps tier = 1 alongside the charge", async () => {
+    // $0.25 is BOTH the tier 1 Pay-As-You-Go per-success rate and the tier 2
+    // Pro per-record rate (lib/constants.ts:34-36), so the amount alone cannot
+    // say which model produced the row.
+    // MUTATION: remove `tier:` from the update payload and this goes red.
+    H.deductResult = true;
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
   });
 });

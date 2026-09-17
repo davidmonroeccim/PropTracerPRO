@@ -146,10 +146,26 @@ END OF COPY. NOTHING BELOW THIS LINE IS FOR SENDING.
 
 NOTES FOR DAVID
 
-1. TIMING. This notice describes both tiers as live. The higher
-   per-record tier is not wired yet. Do not send this until the
-   planRoute wiring lands and ships, or you will be announcing a price
-   for something the app cannot charge.
+0. STATUS, 2026-09-17: SUPERSEDED IN PART. David sent his own message
+   to users announcing a 24 hour downtime, the price change and the
+   added value. So the "do not send" instruction below is spent. What
+   is still useful here is the tier table, the mixed up-and-down
+   framing, and the field wording, which are all measured and safe to
+   reuse. What is NOT in this draft and still needs saying somewhere:
+   that AI Search is being removed and replaced by Full Property
+   Trace, and that the meter moves from per-success to per-record on
+   the higher tier.
+
+   Scale context, measured 2026-09-17: only 11 users have ever used
+   AI Search, and David reports just 2 non-member users of PTP in over
+   a year. The blast radius of all of this is small. That lowers the
+   risk, it does not lower the correctness bar, because the code
+   outlives the current user count.
+
+1. TIMING, NOW HISTORICAL. This notice describes both tiers as live.
+   When it was written the per-record tier was not wired. That is
+   still true at the time of this note; it is the push gate, not a
+   mailing gate.
 
 2. THE CHANGE IS MIXED, NOT A FLAT INCREASE. Verified against main,
    where entity rows bill a flat $0.25 through

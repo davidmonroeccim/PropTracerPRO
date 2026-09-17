@@ -17,6 +17,7 @@ import type { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import { PRICING } from '@/lib/constants';
 import type { TraceResult, AIResearchResult } from '@/types';
 
@@ -134,6 +135,7 @@ export async function settleBulkJob(
           is_successful: true,
           cost: PRICING.COST_PER_RECORD,
           charge,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
         .eq('id', row.id);
 
@@ -175,6 +177,7 @@ export async function settleBulkJob(
           cost: PRICING.COST_PER_RECORD,
           charge,
           ai_research_charge: 0,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
         .eq('id', row.id);
 
@@ -200,6 +203,7 @@ export async function settleBulkJob(
           is_successful: false,
           cost: PRICING.COST_PER_RECORD,
           charge: 0,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
         .eq('id', row.id);
 
@@ -250,6 +254,7 @@ export async function settleBulkJob(
           is_successful: isSuccessful,
           cost: PRICING.COST_PER_RECORD,
           charge,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
         .eq('id', match.id);
 
@@ -274,6 +279,7 @@ export async function settleBulkJob(
           is_successful: false,
           cost: PRICING.COST_PER_RECORD,
           charge: 0,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
         .in(
           'id',

@@ -656,3 +656,104 @@ $4,208/sqft that caught the $175,000,000 blanket loan. Neither derives from asse
 - [ ] History.md, tasks/*, docs/superpowers/specs/, docs/superpowers/plans/ are historical
       records. Do not rewrite prices in them.
 - [ ] goacquisitionpro.com and the Stripe dashboard hold copy outside this repo. Separate pass.
+
+## PHASE 2 REVIEW — COMPLETE 2026-09-17
+
+**Visible output: none, and that is the phase.** Phase 2 makes the tier 2 row shape safe BEFORE
+anything can create it. Nothing is wired. No route gains a feature. Flagging that bluntly rather
+than dressing it up, per the phase plan above.
+
+### Order of work: tests first, and the baseline is recorded
+
+`lib/utils/deduplication.ts`, `app/api/trace/single/route.ts`, `app/api/v1/trace/single/route.ts`
+and `app/api/cache/clear/route.ts` had ZERO coverage while carrying the billing path. 45
+characterization tests pinning the CURRENT behaviour went green against unmodified code first:
+
+| | |
+|---|---|
+| Green characterization baseline | **310 passing, 34 files, 0 failing** (from 265 / 30) |
+| Failures after the fixes landed | 14, every one a characterization test pinning replaced behaviour |
+| Final | **337 passing, 36 files, 0 failing** |
+
+### What actually happens today at the failed-delete-then-insert path (B2, asked explicitly)
+
+Measured by characterization test before the fix, not inferred:
+
+1. `trace/single/route.ts:104-109` deletes `WHERE is_successful = false`. If the row is referenced
+   by `wallet_transactions` or `usage_records` (both `REFERENCES trace_history(id)` with NO
+   ON DELETE clause, i.e. NO ACTION), Postgres raises **23503** and PostgREST returns it as an
+   error envelope.
+2. The route **discards the error**. The row survives. Execution continues as though it had not.
+3. The INSERT at ~:135 then violates `UNIQUE(user_id, address_hash)` and comes back **23505**.
+4. `insertError` IS checked, so this is **a hard error, not an upsert and not a silent no-op**:
+   HTTP **500** with the generic body `{success: false, error: "Failed to process request"}`.
+   The real cause (duplicate key) reaches only the server log.
+5. Net effect: **the address becomes permanently un-retraceable.** "Clear cache" does not rescue
+   it, because `skip_cache` and `/api/cache/clear` delete the same referenced row and fail the same
+   way — and `cache/clear` then returned `{success: true}` regardless.
+
+No double CHARGE occurs on that specific path, because tier 1 bills in the poll route. The damage
+is a dead address plus a lie about success.
+
+### Does `checkDuplicates` (bulk) need work? No.
+
+It never narrowed to `is_successful = true`. Any row inside the dedup window (bar a stale
+`processing` one) already counts as a duplicate, so a tier 2 row carrying a property record but no
+contacts is already a free cache hit there. Its bias runs the OTHER way — a plain failed row also
+blocks resubmission — which is pre-existing, costs the customer nothing, and is not this phase's to
+change. Documented in the function's docstring so the next reader does not "fix" it.
+
+### Changes
+
+- `supabase/migrations/20260917_trace_history_property_record_tier.sql` — **written, NOT applied.**
+  `property_record JSONB` + `tier SMALLINT`, both nullable. Header carries DO NOT APPLY UNTIL PUSH,
+  the ordering note (this one is the OPPOSITE of 20260916: old code ignores the columns, new code
+  REQUIRES them, so apply at or immediately BEFORE the deploy, never after), and the reason there
+  are no GRANTs.
+- `supabase/schema.sql` — same two columns, declared after `created_at` so a fresh provision has the
+  same column order as a migrated production table.
+- `lib/trace/billedRows.ts` — NEW. One definition of billed
+  (`charge > 0 OR ai_research_charge > 0 OR property_record IS NOT NULL`), the SQL predicate that
+  excludes it, `CACHE_HIT_FILTER`, and `TRACE_TIER`.
+- `lib/utils/deduplication.ts` — B1. `checkSingleDuplicate` now matches
+  `is_successful = true OR property_record IS NOT NULL`.
+- `app/api/trace/single/route.ts`, `app/api/v1/trace/single/route.ts` — B2. Every delete guarded and
+  error-checked; delete-then-insert became **reuse**: a row that survives the guarded deletes is
+  UPDATED in place, because `UNIQUE(user_id, address_hash)` already means one row per address per
+  user and tier 2 enriches one row in two phases.
+- `app/api/cache/clear/route.ts` — B2. Guarded, and it no longer reports success on a failed delete.
+- B3 — `tier` stamped at all **16** sites that write `trace_history.charge`, across
+  `trace/status`, `v1/trace/status`, `trace/bulk/status`, `sweep-stale-traces`,
+  `sweep-bulk-research`, `sweep-business-traces` and `settleBulkJob`. No backfill.
+
+### Mutation verification: 19 mutations, 19 caught
+
+Each fix reverted in isolation, full suite re-run, tree restored. Every one turned at least one
+test red (1 to 8 failures each). Includes the `tier` stamps, the `property_record` arm of
+`isBilledRow`, both halves of `CACHE_HIT_FILTER`, both reuse branches and both delete-error checks.
+
+### Verified numbers
+
+| | Baseline | After |
+|---|---|---|
+| `npx vitest run` | 265 passing / 30 files | **337 passing / 36 files, 0 failing** |
+| `npx tsc --noEmit` | 9 errors, all dotenv in `tasks/research-scripts` | **9, unchanged, zero elsewhere** |
+| `npx eslint app lib components` | 55 problems | **54** (one fewer: an unused `PRICING` import removed) |
+
+### Deliberately NOT done, and why
+
+- **Migration not applied.** As instructed.
+- **`planRoute` / `ownerRoute.ts` / `dossier.ts` untouched.** Phase 2 wires nothing.
+- **No pricing constant, marketing string or "60+ fields" claim changed.**
+- **`ai_research*` columns untouched.** 1,301 rows of paid customer data.
+- **No backfill of `tier`.** NULL honestly means "before tiers existed".
+- **The reuse UPDATE does not clear `trace_result` / `is_successful` / `phone_count`.** Clearing
+  them would destroy paid-for contact data if the new trace then failed. The status route overwrites
+  them on completion. Cost: a row re-traced after the 90-day cache window shows its previous result
+  while `status = 'processing'`. Previously that path 500'd outright, so this is strictly better,
+  but it IS a behaviour change worth knowing about.
+- **`skip_cache` and `/api/cache/clear` no longer remove a billed row.** Intended: the customer paid
+  for it, so it is theirs to be served from. The retry still works because the submit route reuses
+  the surviving row instead of colliding with it.
+
+---

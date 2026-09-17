@@ -90,6 +90,20 @@ export interface TraceHistory {
   ai_research: AIResearchResult | null;
   ai_research_status: string | null;
   ai_research_charge: number;
+  /**
+   * Raw Tracerfy dossier `response.property` object, all 86 keys verbatim.
+   * Non-null marks a row the customer has PAID for, even when `is_successful`
+   * is false -- tier 2 bills per record submitted, and contacts are a separate
+   * step that may return nothing. Never delete such a row; always serve it free.
+   */
+  property_record: Record<string, unknown> | null;
+  /**
+   * Billing model that produced this row. 1 = per successful trace (free on a
+   * miss), 2 = per record submitted (billed on a miss). NULL = written before
+   * tiers existed. Never infer it from `charge`: 0.25 is ambiguous between the
+   * tier 1 wallet rate and the tier 2 pro rate (lib/constants.ts:34-36).
+   */
+  tier: number | null;
   created_at: string;
 }
 

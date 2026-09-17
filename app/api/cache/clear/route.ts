@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
+import { excludeBilledRows } from '@/lib/trace/billedRows';
 
 export async function POST(request: Request) {
   try {
@@ -36,13 +37,30 @@ export async function POST(request: Request) {
     const addressHash = createAddressHash(normalizedAddress);
     const adminClient = createAdminClient();
 
-    // Delete all trace_history rows for this address regardless of type.
-    // This is the most reliable way to clear cached data.
-    await adminClient
-      .from('trace_history')
-      .delete()
-      .eq('user_id', user.id)
-      .eq('address_hash', addressHash);
+    // Delete this address's trace_history rows regardless of type.
+    //
+    // BILLED ROWS SURVIVE ON PURPOSE. A row carrying a charge, an AI research
+    // charge or a property record is something the customer paid for, and
+    // `wallet_transactions.trace_history_id` references it with no ON DELETE
+    // clause — deleting it raises 23503 and this route used to report success
+    // anyway. "Clear cache" means "let me re-trace", not "destroy my receipt":
+    // the submit route now reuses a surviving billed row instead of colliding
+    // with it, so the retry still works.
+    const { error: deleteError } = await excludeBilledRows(
+      adminClient
+        .from('trace_history')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('address_hash', addressHash)
+    );
+
+    if (deleteError) {
+      console.error('Cache clear - delete failed:', deleteError.message);
+      return NextResponse.json(
+        { success: false, error: `Failed to clear cache: ${deleteError.message}` },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {

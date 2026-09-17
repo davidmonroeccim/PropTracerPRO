@@ -5,6 +5,7 @@ import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
@@ -167,6 +168,10 @@ export async function GET(request: Request) {
         is_successful: isSuccessful,
         cost: PRICING.COST_PER_RECORD,
         charge,
+        // Stamp the billing model alongside the amount. `charge` alone is
+        // ambiguous: PRICING.CHARGE_PER_SUCCESS_WALLET and
+        // PRICING.TIER2_PER_RECORD_SUBMITTED_PRO are both 0.25.
+        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
       })
       .eq('id', trace.id);
 

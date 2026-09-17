@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
+import { TRACE_TIER } from "@/lib/trace/billedRows";
 
 /**
  * Money fence for the session-side single-trace status route.
@@ -190,5 +191,34 @@ describe("trace/status route reports only the wallet amount actually collected",
     expect(billingUpdate()?.payload.charge).toBe(rate);
     expect(body.charge).toBe(rate);
     expect(webhookBody().charge).toBe(rate);
+  });
+});
+
+describe("trace/status route stamps the billing model onto the ledger row", () => {
+  it("writes tier = 1 alongside the charge", async () => {
+    // $0.25 is BOTH the tier 1 Pay-As-You-Go per-success rate and the tier 2
+    // Pro per-record rate (lib/constants.ts:34-36). Without `tier` the row is
+    // ambiguous and no refund or revenue split can be computed from it.
+    // MUTATION: remove `tier:` from the update payload and this goes red.
+    H.deductResult = true;
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+  });
+
+  it("writes tier = 1 on a no-match too, where the charge is 0", async () => {
+    // Tier is a property of the BILLING MODEL, not of the outcome. A free
+    // no-match is still "tier 1 rules applied", and that is the fact a tier 2
+    // billed miss has to be distinguishable from.
+    H.deductResult = true;
+    H.jobStatus = { success: true, pending: false, results: [] };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1"));
+
+    expect(billingUpdate()?.payload.charge).toBe(0);
+    expect(billingUpdate()?.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
   });
 });

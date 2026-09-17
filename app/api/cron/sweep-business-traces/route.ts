@@ -5,6 +5,7 @@ import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import type { AIResearchResult, BusinessTraceJob } from '@/types';
 
 /**
@@ -198,6 +199,7 @@ export async function GET(request: Request) {
                 is_successful: true,
                 cost: PRICING.COST_PER_RECORD,
                 charge,
+                tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
               })
               .eq('id', historyRow.id);
 

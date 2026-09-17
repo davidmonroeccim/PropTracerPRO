@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING, AI_RESEARCH } from "@/lib/constants";
 import { settleBulkJob, type TraceHistoryRow } from "@/lib/trace/settleBulkJob";
+import { TRACE_TIER } from "@/lib/trace/billedRows";
 
 // Mock the tracerfy client so getJobStatus returns a controlled result set and
 // parseTracerfyResult is identity (the money-contract test controls `parsed`
@@ -270,6 +271,41 @@ describe('settleBulkJob records $0 when the wallet deduct fails', () => {
     expect(persisted.status).toBe('success');
     expect(persisted.phone_count).toBe(1);
     expect(row.is_successful).toBe(true);
+    // Every charge write stamps the billing model that produced it: 0.25 is
+    // both the tier 1 wallet per-success rate and the tier 2 pro per-record
+    // rate, so the amount alone is ambiguous (lib/constants.ts:34-36).
+    // MUTATION: remove `tier:` from this update payload and this goes red.
+    expect(persisted.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+  });
+
+  it('stamps tier = 1 on EVERY charge write in the bulk settle path', async () => {
+    // Five sites write trace_history.charge in settleBulkJob. A site that
+    // forgets `tier` leaves an unattributable row in the billing ledger.
+    getJobStatus.mockResolvedValue({
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: '1 Main St',
+          phones: [{ number: '5125550123', type: 'mobile' }],
+          emails: [],
+        },
+      ],
+    });
+    const admin = makeAdmin({ deductResult: { data: true, error: null } });
+
+    await settleBulkJob(admin as never, {
+      tracerfyJobId: 'tj-tier-1',
+      bucketRows: [mkRow({ id: 'row-a' }), mkRow({ id: 'row-b' })],
+      userId: USER_ID,
+      personRate: PRICING.CHARGE_PER_SUCCESS_WALLET,
+    });
+
+    const chargeWrites = historyUpdates(admin).filter((u) => 'charge' in u.payload);
+    expect(chargeWrites.length).toBeGreaterThan(0);
+    for (const write of chargeWrites) {
+      expect(write.payload.tier).toBe(TRACE_TIER.PER_SUCCESSFUL_TRACE);
+    }
   });
 
   it('site 2 (FastAppend credit): persists charge 0 after the refund', async () => {

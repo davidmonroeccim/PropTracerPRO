@@ -6,6 +6,60 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 2: the fixes that prevent double-billing
+
+**Visible output: none. That is the phase, not a shortfall.** Phase 2 makes a row shape safe before
+anything can create it. Nothing is wired; no user-facing behaviour is added.
+
+- **Tests were written FIRST, against unmodified code.** `lib/utils/deduplication.ts`,
+  `app/api/trace/single/route.ts`, `app/api/v1/trace/single/route.ts` and
+  `app/api/cache/clear/route.ts` all had ZERO coverage while carrying the billing path. 45
+  characterization tests pinning the OLD behaviour went green first: **310 passing, 34 files, 0
+  failing** (from 265/30). Only then was anything changed. The 14 that then went red were exactly
+  the ones pinning behaviour the fixes replace.
+- **The new row shape.** Tier 2 bills per record SUBMITTED, so `is_successful = false` AND
+  `charge > 0` becomes legal for the first time: the customer bought an 86-field property record,
+  and contacts are a separate call that may return nothing. The whole codebase assumed
+  `charge > 0` implies `is_successful`.
+- **Migration written, NOT applied.** `20260917_trace_history_property_record_tier.sql` adds
+  `property_record JSONB` and `tier SMALLINT`, both nullable. `supabase/schema.sql` updated so a
+  fresh provision matches, with the columns declared after `created_at` because that is where
+  `ADD COLUMN` puts them. No GRANTs: `ALTER TABLE` on a pre-existing table is exempt, and adding
+  them would WIDEN the table's privileges, which is the self-write vuln class. The header says so,
+  so nobody adds them cargo-cult.
+- **B1: a paid tier 2 row is now visible to the cache.** `checkSingleDuplicate` filtered
+  `.eq('is_successful', true)`, so a row whose value IS the property record was invisible and the
+  customer was billed AGAIN for data they already own. Now `is_successful = true OR property_record
+  IS NOT NULL`. A no-op against every existing row, because `property_record` is NULL on all of
+  them. `checkDuplicates` (bulk) needs NOTHING: it never filtered on `is_successful`, so a tier 2
+  row is already a free cache hit there.
+- **B2: no billed row is ever targeted for deletion, and every delete checks its error.** All ten
+  delete sites on `trace_history` ignored their error. `wallet_transactions.trace_history_id` and
+  `usage_records.trace_history_id` both reference these rows with NO ON DELETE clause, so a delete
+  on a referenced row FAILS with 23503 — and the swallowed failure then walked into
+  `UNIQUE(user_id, address_hash)` on the INSERT, surfacing as a 500 that named nothing and leaving
+  the address permanently un-retraceable. `lib/trace/billedRows.ts` now holds one definition of
+  billed (`charge > 0 OR ai_research_charge > 0 OR property_record IS NOT NULL`), pushed into the
+  database as a predicate so there is no read-then-delete race.
+- **Delete-then-insert became reuse.** `UNIQUE(user_id, address_hash)` already means one row per
+  address per user, and tier 2 enriches one row in two phases, so a row that survives the guarded
+  deletes is now UPDATED in place. `charge`, `ai_research_charge`, `property_record` and `tier` are
+  never in that payload.
+- **B3: the ledger is self-describing.** `tier` is stamped at all 16 sites that write
+  `trace_history.charge`, across two status routes, three crons, the bulk status route and the bulk
+  settle helper. It exists because `PRICING.CHARGE_PER_SUCCESS_WALLET` and
+  `PRICING.TIER2_PER_RECORD_SUBMITTED_PRO` are BOTH 0.25. A source-level invariant test fails the
+  moment a new charge site is written without one. No backfill: existing rows stay NULL, which
+  honestly means "before tiers existed".
+- **19 mutations, every one caught.** Each fix was reverted in isolation and the suite re-run;
+  all 19 turned at least one test red (1 to 8 failures each).
+- **Verified:** 337 tests passing, 36 files, 0 failing. `tsc` 9 pre-existing dotenv errors,
+  unchanged. eslint 54 problems, one FEWER than the 55 baseline (an unused import removed).
+
+---
+
+## 2026-09-17
+
 ### Full Property Trace, phase 1: the dossier client
 
 - **`lib/tracerfy/dossier.ts`** plus 34 tests, 6 sanitized fixtures and a dry-run script. Nothing

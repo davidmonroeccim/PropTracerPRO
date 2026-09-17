@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS trace_history (
   ai_research_status VARCHAR(20) DEFAULT NULL,
   ai_research_charge DECIMAL(10,4) DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
+  -- Full Property Trace (tier 2). See migrations/20260917_trace_history_property_record_tier.sql
+  -- for the full rationale; kept here so a fresh provision matches production. Declared AFTER
+  -- created_at on purpose: that is where ADD COLUMN puts them on the live table, so a freshly
+  -- provisioned database and a migrated one have identical column order.
+  -- property_record: the raw 86-key Tracerfy dossier `response.property` object, verbatim.
+  --   Non-null marks a row the customer has PAID for even when is_successful is false.
+  -- tier: 1 = per successful trace (free on a miss), 2 = per record submitted (billed on a
+  --   miss), NULL = written before tiers existed. Never infer it from `charge`: 0.25 is
+  --   ambiguous between tier 1 wallet and tier 2 pro (lib/constants.ts:34-36).
+  property_record JSONB DEFAULT NULL,
+  tier SMALLINT DEFAULT NULL,
 
   UNIQUE(user_id, address_hash)
 );

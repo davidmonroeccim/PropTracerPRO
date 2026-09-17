@@ -4,6 +4,7 @@ import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
+import { TRACE_TIER } from '@/lib/trace/billedRows';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult, TracerfyResult } from '@/types';
@@ -127,6 +128,7 @@ export async function GET(request: Request) {
             is_successful: isSuccessful,
             cost: PRICING.COST_PER_RECORD,
             charge,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
           })
           .eq('id', trace.id);
 
@@ -284,6 +286,7 @@ export async function GET(request: Request) {
                 is_successful: isSuccessful,
                 cost: PRICING.COST_PER_RECORD,
                 charge,
+                tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
               })
               .eq('id', historyId);
           }
@@ -292,7 +295,13 @@ export async function GET(request: Request) {
         // Mark remaining processing rows as no_match
         await adminClient
           .from('trace_history')
-          .update({ status: 'no_match', is_successful: false, cost: PRICING.COST_PER_RECORD, charge: 0 })
+          .update({
+            status: 'no_match',
+            is_successful: false,
+            cost: PRICING.COST_PER_RECORD,
+            charge: 0,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          })
           .eq('user_id', job.user_id)
           .eq('tracerfy_job_id', job.tracerfy_job_id)
           .eq('status', 'processing');
