@@ -14,7 +14,7 @@ import {
   nextAfterFailedAttempt,
   processingStatusFor,
 } from '@/lib/trace/entityTraceAttempts';
-import { PRICING } from '@/lib/constants';
+import { PRICING, getChargePerTrace } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
 
@@ -155,20 +155,48 @@ export async function GET(request: Request) {
   // calling the vendor for it.
   let exhausted = 0;
 
-  // Tier 1 per-successful-trace rate for a user, resolved once per run. Owner
-  // type selects the VENDOR, not the price, so a FastAppend entity success
-  // bills the same plan rate a Tracerfy person success does.
+  // Tier 1 per-successful-trace rate, resolved once per (user, track) per run.
+  //
+  // OWNER TYPE SELECTS THE VENDOR, NEVER THE PRICE (lessons.md L-005). This
+  // cron settles the ENTITY rows of a bulk job while the job's own status route
+  // settles the PERSON rows, so if the two disagree about the rate, one batch
+  // bills two different prices for the same work, split by owner type. That is
+  // exactly the rule David restated three times.
+  //
+  // THE TRACK IS THE AXIS, not the user. PTP has two price derivations and the
+  // split is deliberate (lib/suite/pricing.ts): Track A (session, MCP) is
+  // GRANT-AWARE, Track B (the /api/v1/* API-key surface) is RAW and does not
+  // consult the gateway snapshot. This cron used the grant-aware rate for
+  // everything, so on a v1 bulk job a gateway-grant holder on the wallet tier
+  // paid $0.25 for person rows (raw, from the v1 status route) and $0.15 for
+  // entity rows (grant-aware, from here). Same job, same work, two prices.
+  //
+  // `source` is tagged 'mcp' by lib/suite/mcp-tools.ts on both the job and the
+  // row; a v1 bulk row carries none. So an untagged row is Track B, which is
+  // also the RAW and dearer derivation, making the fallback the safe direction.
   const tier1RateCache = new Map<string, number>();
-  const tier1RateFor = async (userId: string): Promise<number> => {
-    const cached = tier1RateCache.get(userId);
+  const tier1RateFor = async (
+    userId: string,
+    source: string | null | undefined
+  ): Promise<number> => {
+    const isTrackA = source === 'mcp';
+    const key = `${userId}:${isTrackA ? 'A' : 'B'}`;
+    const cached = tier1RateCache.get(key);
     if (cached !== undefined) return cached;
     const { data: rateProfile } = await adminClient
       .from('user_profiles')
       .select('subscription_tier, is_acquisition_pro_member, gateway_products')
       .eq('id', userId)
       .single();
-    const rate = rateProfile ? chargePerTrace(rateProfile) : PRICING.CHARGE_PER_SUCCESS_WALLET;
-    tier1RateCache.set(userId, rate);
+    const rate = !rateProfile
+      ? PRICING.CHARGE_PER_SUCCESS_WALLET
+      : isTrackA
+        ? chargePerTrace(rateProfile)
+        : getChargePerTrace(
+            rateProfile.subscription_tier,
+            rateProfile.is_acquisition_pro_member
+          );
+    tier1RateCache.set(key, rate);
     return rate;
   };
 
@@ -389,7 +417,7 @@ export async function GET(request: Request) {
               : // Deduct FIRST, then persist the amount that actually moved.
                 await deductOrZero(adminClient, {
                   p_user_id: row.user_id,
-                  p_amount: await tier1RateFor(row.user_id),
+                  p_amount: await tier1RateFor(row.user_id, row.source),
                   p_trace_history_id: row.id,
                   p_description: 'FastAppend business-trace contacts (successful trace)',
                 });

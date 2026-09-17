@@ -424,15 +424,53 @@ describe("the vendor returned contacts", () => {
     expect(submitSingleTrace).not.toHaveBeenCalled();
   });
 
-  it("charges a grant holder their own lower rate, not a flat one", async () => {
+  /**
+   * THE RATE FOLLOWS THE TRACK, NOT THE OWNER TYPE.
+   *
+   * This cron settles the ENTITY rows of a bulk job; the job's own status route
+   * settles the PERSON rows. If the two disagree about the rate, one batch bills
+   * two prices for the same work, split by owner type -- the exact thing L-005
+   * says is impossible, since owner type selects the vendor and never the price.
+   *
+   * It used to use the grant-aware Track A rate for everything, so a gateway
+   * grant holder on the wallet tier running a v1 bulk job paid $0.25 for person
+   * rows (raw, Track B, from the v1 status route) and $0.15 for entity rows
+   * (grant-aware, from here). Same job, same work, two prices.
+   *
+   * Both tests run with NEXT_PUBLIC_SUITE_SIGNIN_ENABLED set, because the ONLY
+   * thing separating the two tracks is hasSuiteAccess(), which is behind that
+   * flag. With the flag off both collapse to `wallet`, both assertions pass
+   * under either implementation, and the pair proves nothing. That is L-009,
+   * which this build earned twice.
+   */
+  it("bills a grant holder the GRANT-AWARE rate on a Track A row", async () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = {
       subscription_tier: "wallet",
       is_acquisition_pro_member: false,
       gateway_products: ["prop-tracer-pro"],
     };
+    // source 'mcp' is Track A, tagged by lib/suite/mcp-tools.ts.
+    H.queuedRows = H.queuedRows.map((r) => ({ ...r, source: "mcp" }));
     await run();
     expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS);
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+  });
+
+  it("bills that same grant holder the RAW rate on a Track B row, matching the v1 person rows", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_products: ["prop-tracer-pro"],
+    };
+    // A v1 bulk row carries no source. Untagged is Track B, which is also the
+    // dearer derivation, so the fallback errs in the safe direction.
+    await run();
+    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    // The whole point: the same profile, same vendor, two tracks, and the entity
+    // row is never cheaper than the person row sitting beside it in the job.
+    expect(deducts()[0].args.p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS);
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 });
