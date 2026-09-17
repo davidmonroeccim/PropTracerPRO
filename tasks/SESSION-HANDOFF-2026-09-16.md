@@ -419,13 +419,24 @@ counties, and blocking storage on a 24-parcel sample is the L-001 mistake. He is
 is blocked from STORAGE.** The rules below govern DISPLAY only, and each one names its reason,
 because the reasons are not the same and they do not age the same way.
 
-**Group A, 7 fields. Do not DISPLAY. Reason: provably wrong, not missing.**
+**Group A, SIX fields. Do not DISPLAY or EXPORT. Reason: provably wrong, not missing.**
 `estimated_value` (100% populated, but it equals `assessed_value` on 23 of 23; there is no AVM),
 and everything derived from it: `estimated_equity` (46%), `equity_percent` (46%), `high_equity`
 (33%), `free_clear` (33%). Plus `corporate_owned` (92% populated but returned FALSE for
-`STORAGE TRUST PROPERTIES, L.P.`) and `price_per_sqft` (sale ÷ sqft, 0 with no sale).
+`STORAGE TRUST PROPERTIES, L.P.`).
 **More counties will not fix these.** The defect is in the vendor's math, not in county coverage.
 Store them; if the vendor ever ships a real AVM the history is there.
+
+> **`price_per_sqft` WAS in this group and was MOVED OUT, 2026-09-17.** It does not belong here.
+> Measured against every parcel carrying both inputs, it is `last_sale_price ÷ building_size_sqft`
+> and has nothing to do with assessed value: 64 vs a sale/sqft of 64.43 where assessed/sqft was
+> 19.45; 370 vs 369.98 where assessed was 169.76; 349 vs 348.88 where assessed was 58.14.
+>
+> It was blocked on a REDUNDANCY argument (derivable from two exported columns), not a correctness
+> one, and this document filed it alongside six fields that are genuinely wrong. **The two
+> arguments are not the same and must not be merged.** It is now EXPORTED, with its 0 rendered
+> BLANK: it reads 0 on 9 of 12 parcels and every one of those is "no sale price on record", so a
+> 0 in that column would be fabricated data, not a measurement.
 
 **Group B, 15 propensity fields. The blanket ban was TOO BROAD. Two separate problems:**
 

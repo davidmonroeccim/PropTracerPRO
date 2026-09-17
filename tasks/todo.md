@@ -521,6 +521,106 @@ the SAME source record, because `dossier/raw-10.json` is the only natural-person
 saved payloads. Everything else is entity-owned. So the individual shape is genuine but
 uncorroborated; if a future payload shows a different shape, that fixture is the one to revisit.
 
+## PORTFOLIO-DEBT GAP. Raised by David 2026-09-17. NOT currently in this plan. My omission.
+
+**Three separate findings. Only the first is good news.**
+
+### 1. `assessLoan()` already handles both cases David raised, better than the handoff implies
+
+- **Stale sale:** `SALE_BASIS_MAX_AGE_YEARS = 10`. Past that, the bands widen from 1.25/2.5 to
+  **2.0/4.0**, so a 15-year-old sale plus a recent refi does NOT get falsely called portfolio.
+- **No sale price at all:** falls back to $/sqft of building area. Portfolio above $1,000/sqft,
+  suspect above $600/sqft, otherwise `unknown`.
+- **Neither:** returns `unknown` rather than guessing.
+
+### 2. But it detects STALENESS, not REFINANCING, and three useful fields go unread
+
+A refi is a different event from appreciation, and `assessLoan` cannot tell them apart. The dossier
+carries **`recording_date` (82%)**, **`document_type` (82%)** and **`years_owned` (82%)**, and
+`LoanInput` takes **none of them**. A recording date much newer than the sale date is a refi
+signal sitting unused at a higher fill rate than `last_sale_price` itself.
+
+### 3. THE SALE-PRICE BASIS IS ALMOST NEVER AVAILABLE. Measured, 24 saved parcels:
+
+| | |
+|---|---|
+| Parcels carrying an open mortgage balance | **7** |
+| Judgeable against a sale price | **1** |
+| Forced onto the $/sqft fallback | **6** |
+
+So the method the handoff presents as *the* approach applies to **1 in 7** mortgaged parcels. And
+the fallback resolves only the extreme: of those 6, five come back `unknown` and one is caught
+($4,208/sqft, the $175,000,000 blanket loan on 41,588 sqft).
+
+**Net: 5 of 7 mortgaged parcels get NO usable loan verdict.** One sits at $586/sqft, fourteen
+dollars under the suspect threshold. Another is David's exact scenario: **$2,725,000 against 7,700
+sqft, `years_owned` 13, no sale price** — long hold, large loan, unjudgeable.
+
+### THE HOLE THIS OPENS IN THE EXPORT DECISION
+
+`open_mortgage_balance` is in the **64 exported columns**, and it ships **bare, with no verdict
+beside it**. A customer exporting these parcels receives `$175,000,000` against a 41,588 sqft
+building as a plain number in a spreadsheet column.
+
+**That is the same failure class as `estimated_value`, which we BLOCKED.** A real vendor number
+that misleads when presented without its context, landing in a CRM where it looks authoritative and
+outlives any caveat on a screen. We blocked one and are shipping the other.
+
+### SETTLED 2026-09-17: export a VERDICT COLUMN beside the balance.
+
+David's call. `open_mortgage_balance` keeps shipping, and `assessLoan()`'s judgement ships next to
+it so the number is never read bare. **`assessLoan()` has zero callers today; wiring it is phase 3.**
+
+Minimum derived columns, recommended:
+
+| Column | From | Why |
+|---|---|---|
+| `loan_verdict` | `assessLoan().verdict` | `parcel_level` / `suspect` / `portfolio` / `unknown` |
+| `loan_basis` | `assessLoan().basis` | `sale` / `stale_sale` / `sqft` / `none`. **Tells the customer how much to trust the verdict**, which matters because `sqft` is the basis 6 times out of 7. |
+
+Also available and worth considering: `loan_per_sqft` (`dollarsPerSqft`) and `building_area_suspect`
+(`buildingAreaSuspect`), which flags when the square footage contradicts the sale badly enough to
+distrust the sqft, e.g. the observed 20-39 unit complex reporting 782 sqft.
+
+`loan_verdict` will read `unknown` on roughly 5 of 7 mortgaged parcels. That is honest and it is
+the point: an empty verdict says "we cannot tell", which is the truth, and is what stops a customer
+reading $175,000,000 as parcel debt.
+
+### `price_per_sqft` RESOLVED: it is SALE-derived, not assessed. Measured, not assumed.
+
+David asked where it comes from, on the reasonable worry that it was assessed-value-derived. It is
+not. Verified against every parcel carrying both inputs:
+
+| `price_per_sqft` | sale ÷ sqft | assessed ÷ sqft |
+|---|---|---|
+| 64 | **64.43** | 19.45 |
+| 370 | **369.98** | 169.76 |
+| 349 | **348.88** | 58.14 |
+
+It is `last_sale_price ÷ building_size_sqft`, full stop. **So it belongs in a different category
+from the other 6 blocked fields.** Those are blocked because they are WRONG (`estimated_value` IS
+the assessed value; equity and `free_clear` inherit that error). `price_per_sqft` is merely
+REDUNDANT, being derivable from two columns already exported, and the handoff blocked it on a
+redundancy argument, not a correctness one.
+
+**SETTLED 2026-09-17, David: EXPORT it, with its 0 rendered BLANK.** It reads 0 on 9 of 12 parcels
+and in every one of those cases the cause is no sale price on record. **0 does not mean "$0 per
+foot", it means "unknown", and shipping a 0 into a spreadsheet column is fake data** under
+CLAUDE.md rule 7 and the export rule above. Blanked, the field is honest and useful.
+
+**The export is therefore 65 raw columns** plus the derived loan columns, and **6 fields stay
+blocked, not 7.** The blocked six are `estimated_value`, `estimated_equity`, `equity_percent`,
+`high_equity`, `free_clear`, `corporate_owned` — every one of them blocked for being WRONG.
+
+**Implementation note for phase 2/3:** the 0-to-blank rule is not special-cased to
+`price_per_sqft`. Any numeric dossier field whose 0 means "not on record" must export blank. Decide
+this per field against the measured inventory, do NOT blanket-convert every 0, because a genuine
+0 exists for some fields and erasing it would be its own lie.
+
+**Do not confuse the two per-foot numbers.** `price_per_sqft` is a VALUE metric (sale ÷ area).
+`assessLoan().dollarsPerSqft` is a DEBT INTENSITY metric (mortgage ÷ area) and is what produced the
+$4,208/sqft that caught the $175,000,000 blanket loan. Neither derives from assessed value.
+
 ## Copy debt this creates
 
 - **The user notification needs a new paragraph.** It currently explains a price change. It does

@@ -22,11 +22,25 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   purchased data on 63 real people. Full 86-key property object and entity names kept; individual
   names, ages and the whole `contacts` block scrubbed. 373 real-person values word-boundary matched
   against every committable file: zero leaks.
-- **Export decisions settled.** All 86 fields are STORED raw; **64 are EXPORTED** (86 minus 7
-  provably-wrong minus 15 propensity scores). The 18 never seen in our sample ARE exported, as
-  empty columns, because that is coverage not correctness. Export rules: append never reorder,
-  stable column set, empty means empty. This also makes "over 60 fields" exact at 64 rather than
-  asserted.
+- **Export decisions settled.** All 86 fields are STORED raw; **65 are EXPORTED** (86 minus 6
+  provably-wrong minus 15 propensity scores), plus derived loan columns. The 18 never seen in our
+  sample ARE exported, as empty columns, because that is coverage not correctness. Export rules:
+  append never reorder, stable column set, empty means empty. This also makes "over 60 fields"
+  exact rather than asserted.
+- **Portfolio-debt gap found by David, and it exposed a hole in the export decision.**
+  `open_mortgage_balance` was going to ship BARE, so a customer would export `$175,000,000` against
+  a 41,588 sqft building as a plain spreadsheet number. That is the same failure class as
+  `estimated_value`, which we had just blocked. Fix: `assessLoan()`'s verdict exports beside the
+  balance, with `loan_basis` so the customer knows how much to trust it. Measured first: of 7
+  mortgaged parcels only **1** can be judged against a sale price; 5 of 7 return `unknown`.
+  `assessLoan()` has zero callers and moves into phase 3.
+- **`assessLoan()` handles stale sales but not REFINANCING**, and `recording_date`,
+  `document_type` and `years_owned` all sit unread at 82% fill, a higher rate than
+  `last_sale_price` itself. A recording date newer than the sale date is an unused refi signal.
+- **`price_per_sqft` moved OUT of the blocked set.** Measured: it is `last_sale_price ÷
+  building_size_sqft`, not assessed-derived. It had been blocked on a REDUNDANCY argument while
+  filed alongside six fields blocked for being WRONG. Now exported with its 0 rendered blank,
+  because 0 there means "no sale price on record" and shipping it would be fabricated data.
 
 ### Decisions that shape the tier 2 build, plus a marketing debt worth flagging
 
