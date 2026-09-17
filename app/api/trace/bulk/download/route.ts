@@ -1,8 +1,40 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
-import type { TraceJob, TraceHistory, TraceResult, AIResearchResult } from '@/types';
+import { buildExportCsv } from '@/lib/trace/exportCsv';
+import type { TraceJob, TraceHistory } from '@/types';
+
+/**
+ * How many rows are asked for at a time.
+ *
+ * THIS ROUTE USED TO HAVE NO RANGE AT ALL, and PostgREST silently caps an
+ * unbounded select at 1,000. A job with more rows than that lost the rest with
+ * NO error: a 200, a valid CSV, and a customer who has no way to tell that the
+ * file is short. The biggest job to date is 345 rows so nobody has been bitten,
+ * but MAX_RECORDS is 10,000, so it was waiting.
+ *
+ * The loop stops on an EMPTY page rather than on a short one. A short page would
+ * also be the answer if the server's own cap were below this number, and
+ * treating that as "the end" is the same silent truncation in a new place.
+ */
+const PAGE_SIZE = 1000;
+
+/**
+ * The most rows a bulk job can contain, mirroring `MAX_RECORDS` in the two
+ * submit routes (`app/api/trace/bulk/route.ts` and its v1 twin) and the upload
+ * guard on the bulk page. Kept as a local constant rather than imported, because
+ * importing a submit route would drag its whole vendor and billing graph into a
+ * download.
+ *
+ * It exists here only to BOUND THE LOOP. If a future client ever ignored
+ * `.range()`, every page would come back full and non-empty and the loop would
+ * run forever holding the whole table in memory. The cap turns that into an
+ * error instead of a hang.
+ */
+const MAX_EXPORT_ROWS = 10000;
+
+/** Full pages for a maximum job, plus the one empty page that confirms the end. */
+const MAX_PAGES = Math.ceil(MAX_EXPORT_ROWS / PAGE_SIZE) + 1;
 
 export async function GET(request: Request) {
   try {
@@ -64,95 +96,74 @@ export async function GET(request: Request) {
     // was submitted in, a skipped row by the bulk job it belongs to. Rows
     // written before trace_job_id was populated on this path carry only the
     // former, which is why the Tracerfy arm stays.
-    const historyQuery = adminClient
-      .from('trace_history')
-      .select('*')
-      .eq('user_id', user.id);
+    //
+    // REBUILT PER PAGE rather than reused: a PostgREST builder is a one-shot
+    // thenable, and handing the same one two ranges is how a paginated read
+    // quietly returns the first page twice.
+    const pageOf = (from: number) => {
+      const query = adminClient.from('trace_history').select('*').eq('user_id', user.id);
 
-    const { data: rows, error: queryError } = await (traceJob.tracerfy_job_id
-      ? historyQuery.or(
-          `tracerfy_job_id.eq.${traceJob.tracerfy_job_id},trace_job_id.eq.${traceJob.id}`
-        )
-      : historyQuery.eq('trace_job_id', traceJob.id)
-    ).order('created_at', { ascending: true });
+      return (
+        traceJob.tracerfy_job_id
+          ? query.or(`tracerfy_job_id.eq.${traceJob.tracerfy_job_id},trace_job_id.eq.${traceJob.id}`)
+          : query.eq('trace_job_id', traceJob.id)
+      )
+        .order('created_at', { ascending: true })
+        // The tiebreaker is not decoration. Two rows written in the same
+        // instant have no defined order between them, and an undefined order
+        // across a page boundary drops one row and repeats another.
+        .order('id', { ascending: true })
+        .range(from, from + PAGE_SIZE - 1);
+    };
 
-    if (queryError) {
-      console.error('Failed to query trace history:', queryError.message);
+    const historyRows: TraceHistory[] = [];
+    let from = 0;
+    let complete = false;
+
+    for (let requests = 0; requests < MAX_PAGES; requests++) {
+      const { data, error: queryError } = await pageOf(from);
+
+      // A FAILED PAGE MUST NOT BECOME A SHORT FILE. Breaking out here instead of
+      // returning would hand back a 200 and a valid-looking CSV missing every
+      // row after the failure, which is byte for byte the silent truncation this
+      // pagination exists to remove, just moved into the error branch. The whole
+      // download fails or none of it does.
+      if (queryError) {
+        console.error('Failed to query trace history:', queryError.message);
+        return NextResponse.json(
+          { success: false, error: 'Failed to retrieve results' },
+          { status: 500 }
+        );
+      }
+
+      const page = (data || []) as TraceHistory[];
+      if (page.length === 0) {
+        complete = true;
+        break;
+      }
+      historyRows.push(...page);
+      from += page.length;
+    }
+
+    // Ran out of pages without ever seeing the end. Something is wrong with the
+    // read, and a truncated file is the one answer that must never ship.
+    if (!complete) {
+      console.error(
+        `Bulk download exceeded ${MAX_PAGES} pages for job ${traceJob.id}; refusing to serve a partial file`
+      );
       return NextResponse.json(
         { success: false, error: 'Failed to retrieve results' },
         { status: 500 }
       );
     }
 
-    const historyRows = (rows || []) as TraceHistory[];
-
-    // The four research columns are HISTORICAL. `deceased` and `relatives` could only ever
-    // be produced by the AI Search engine, which was removed on 2026-09-17, and a row
-    // written since then carries neither. They stay because the 1,301 rows that do carry
-    // them are data the customer paid for and this download is one of the places that
-    // serves it. The header only appears when a row in this job actually has research, so a
-    // new job exports the base columns and nothing empty.
-    const hasResearch = historyRows.some((row) => row.ai_research);
-
-    // A row we accepted and did not trace carries a reason. Asked of
-    // skipReasonFor(), the one accessor for "why did this come back empty
-    // without being traced", so the column appears for every such row and not
-    // just the blank-owner kind. Only added when one of them is in the file, so
-    // a normal job's CSV is unchanged. Without it a skipped row reads as a
-    // plain no_match, which is the one thing it must never silently look like.
-    const hasSkipped = historyRows.some((row) => skipReasonFor(row.ai_research_status) !== null);
-
-    // Build CSV
-    const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
-
-    const baseHeaders = 'address,city,state,zip,owner_name,status,phone_1,phone_2,phone_3,email_1,email_2,email_3,mailing_address,mailing_city,mailing_state,charge';
-    const skipHeader = hasSkipped ? ',skip_reason' : '';
-    const researchHeaders = hasResearch ? ',owner_type,deceased,relatives,property_type' : '';
-
-    const csvLines = [baseHeaders + skipHeader + researchHeaders];
-
-    for (const row of historyRows) {
-      const result = row.trace_result as TraceResult | null;
-      const phones = result?.phones || [];
-      const emails = result?.emails || [];
-
-      const baseCols = [
-        esc(row.normalized_address || ''),
-        esc(row.city || ''),
-        esc(row.state || ''),
-        esc(row.zip || ''),
-        esc(result?.owner_name || row.input_owner_name || ''),
-        esc(row.status),
-        esc(phones[0]?.number || ''),
-        esc(phones[1]?.number || ''),
-        esc(phones[2]?.number || ''),
-        esc(emails[0] || ''),
-        esc(emails[1] || ''),
-        esc(emails[2] || ''),
-        esc(result?.mailing_address || ''),
-        esc(result?.mailing_city || ''),
-        esc(result?.mailing_state || ''),
-        (row.charge || 0).toFixed(2),
-      ];
-
-      if (hasSkipped) {
-        baseCols.push(esc(skipReasonFor(row.ai_research_status) || ''));
-      }
-
-      if (hasResearch) {
-        const research = row.ai_research as AIResearchResult | null;
-        baseCols.push(
-          esc(research?.owner_type || ''),
-          esc(research?.is_deceased === true ? 'Yes' : research?.is_deceased === false ? 'No' : ''),
-          esc((research?.relatives || []).join('; ')),
-          esc(research?.property_type || ''),
-        );
-      }
-
-      csvLines.push(baseCols.join(','));
-    }
-
-    const csvContent = csvLines.join('\n');
+    // The 103 columns live in lib/trace/exportCsv.ts, shared with the
+    // single-record download so the two files cannot drift apart. The header is
+    // FIXED: it no longer depends on whether a row in this particular job
+    // happens to carry research or a skip reason, because a header that changes
+    // shape between two downloads of the same product breaks the importer
+    // pointed at it.
+    const csvContent = buildExportCsv(historyRows);
     const date = new Date().toISOString().substring(0, 10);
 
     return new Response(csvContent, {

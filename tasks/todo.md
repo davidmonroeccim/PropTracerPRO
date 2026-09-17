@@ -1747,10 +1747,36 @@ Search.
 
 ## STILL OPEN, NOT FIXED, NOT HIDDEN
 
-- **A grant holder is billed BY OWNER TYPE on the v1 bulk surface.** Person rows settle at the
-  non-grant rate, entity rows at the grant-aware rate, so one batch bills $0.25 and $0.15 for the
-  same work. Pre-existing, and it violates L-005's rule that owner type selects the vendor and never
-  the price. Deliberately left out of this diff. **David's call.**
+- ~~**A grant holder is billed BY OWNER TYPE on the v1 bulk surface.**~~ **WRONG AS WRITTEN.
+  CORRECTED 2026-09-17 by tracing all six surfaces and both crons. This defect cannot fire on v1,
+  for two INDEPENDENT reasons.** (1) `sweep-entity-traces` is already source-aware:
+  `tier1RateFor(user_id, source)` at :191-198 reads an untagged row as Track B raw, the identical
+  expression the v1 status route uses for person rows. The fix is in the tree and the comment at
+  :166-172 is a post-mortem of this bullet's own wording. (2) Even without it, `lib/api/auth.ts:94`
+  gates every v1 route on raw `subscription_tier === 'pro' || is_acquisition_pro_member`, which is
+  EXACTLY the predicate `getChargePerTrace` returns $0.15 on. So for every caller who can reach v1,
+  raw and grant-aware both return $0.15. The grant-only profile is the sole shape where they
+  diverge and it gets a 403 before any handler runs.
+  **David's rule, given 2026-09-17:** *"It doesn't matter if it's a person or entity, it's $0.15 per
+  record found, if the owner came from the database and not from the dossier."* Already satisfied
+  on v1. Owner PROVENANCE picks the tier (database = tier 1 per record found, dossier = tier 2 per
+  record submitted); owner TYPE picks the vendor and never the price.
+  **What IS real, and replaces this bullet — both go into phase 5b:**
+  - `app/api/cron/sweep-business-traces/route.ts:45` is unconditionally grant-aware and never got
+    the `source` argument its twin got. Currently harmless because nothing in the main tree inserts
+    into `business_trace_jobs` any more; it drains historical rows only. A live writer re-opens it.
+  - `app/api/trace/bulk/route.ts` settles grant-aware (`bulk/status/route.ts:227`) while writing
+    **no `source`**, which the entity cron reads as raw. Adding an entity route there without
+    tagging `source` creates this same split INVERTED: person $0.15, entity $0.25, one batch.
+  - **L-009 WARNING, and it is LIVE not theoretical.** `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED` is
+    `false` in `.env.local` but **`true` in production** — verified 2026-09-17 by fetching
+    `https://proptracerpro.com/login`, which serves "Sign in with Suite" and
+    `/api/auth/suite/start`, and both render only inside `isSuiteSignInEnabled()`. So
+    `hasSuiteAccess()` is always false in tests and can be true in production: grant-aware and raw
+    are **provably identical in every test and genuinely divergent in prod**. A grant-holding
+    wallet-tier user is charged $0.15 by `chargePerTrace` and $0.25 by `getChargePerTrace` today.
+    Any test asserting the two differ MUST set that flag inside the test or it pins a tautology,
+    and the tautology will look green while production behaves differently.
 - `MAX_ENTITY_TRACE_ATTEMPTS = 5` against a one-minute cron retires a row after ~5 minutes of
   consecutive FastAppend failure. One constant if that is too short.
 - The partial index from migration 20260411 is `WHERE ai_research_status = 'queued'` and no longer
@@ -1826,3 +1852,252 @@ the existing `owner_is_individual` convention; `flood_zone` is a boolean, not a 
   null record. **Revisit the default limit when phase 5 lands bulk tier 2.**
 - `current_upb` / `original_upb` on the property object now read as NUMERICAL, not MONETORY. The
   pair that could never be written should start landing on the gateway's next push.
+
+---
+
+# PLAN: Phase 5a (2026-09-17) — the export carries everything purchased. APPROVED by David.
+
+## THE SCOPE CHANGED BEFORE THE BUILD, AND DAVID'S QUESTION IS WHY
+
+This was specced as "append the 65 dossier columns". David asked one question before we started:
+*"on the export, the contact information is included with the property records?"* Checking it
+against the live DB found the export is **already** short-changing customers on contacts, before a
+single dossier column is added. So 5a is not "add the property layer", it is **make the export
+carry everything the customer paid for**, contact layer and property layer, in one pass. That also
+honours the existing rule that the column set gets designed once.
+
+### Measured against production 2026-09-17, not assumed
+
+| Loss | Live number |
+|---|---|
+| Phones capped at 3 columns; rows store up to 9 | **863 of 1,362** rows exceed 3 phones |
+| Phone numbers bought and never exported | **1,554** |
+| Emails capped at 3 columns; rows store up to 5 | **142** addresses never exported |
+| Phone type (mobile/landline/voip), no column exists | populated on **1,297 of 1,362** rows |
+| `mailing_zip`, in the stored shape, no column | 0 today (tier 1 never fills it), tier 2 will |
+
+### THE ONE THAT BITES TIER 2, and it is the worst outcome available in the export
+
+The owner of record lives in **`trace_result.owner_name_2`** and **has no column**. The CSV's
+`owner_name` emits the resolved PERSON (`trace_result.owner_name`), falling back to
+`input_owner_name`. For a blank-owner bulk row — precisely what tier 2 exists for — both are empty
+whenever no principal is found. Handoff numbers: commercial is 22 entities of 24 parcels and
+FastAppend hits 13 of 22, so roughly **9 in 23 records would show a blank owner column** after the
+customer paid specifically to discover the owner of record. On the hits they still only ever see
+the person, never `Colmaven, Llc`.
+
+## THE COLUMN SET: 103, and the first 16 never move
+
+Append-only. Existing indices are preserved, so index-keyed importers survive. The layout is ugly
+(phone_4 lands after the research block, not beside phone_3) and that is the correct price.
+
+| Block | Count | Notes |
+|---|---|---|
+| Existing base | 16 | unchanged, unmoved, unrenamed |
+| research | 4 | `hasResearch` conditional REMOVED, always emitted |
+| skip_reason | 1 | `hasSkipped` conditional REMOVED, always emitted |
+| `owner_of_record` | 1 | `trace_result.owner_name_2` |
+| `phone_4`..`phone_8` | 5 | `TRACERFY.MAX_PHONES` = 8 |
+| `phone_1_type`..`phone_8_type` | 8 | mobile / landline / voip |
+| `email_4`, `email_5` | 2 | `TRACERFY.MAX_EMAILS` = 5 |
+| `mailing_zip` | 1 | |
+| dossier | 65 | `toPublicPropertyRecord`'s survivors |
+
+**Why unconditional is a pure append and not a reorder.** Measured: of the 44 bulk jobs carrying
+rows, **40 have the research columns and ZERO have skip_reason**. `skip_no_research` = 0 and
+`both` = 0. So ordering base, research, skip_reason, dossier appends for 100% of existing jobs.
+Had a single job carried skip-without-research this ordering would have been a reorder; it was
+checked, not assumed.
+
+## THE FENCE COMES FIRST. Nothing else lands before it.
+
+`lib/trace/__tests__/propertyRecordEgress.test.ts` finds egress sites by matching the literal token
+`property_record:` in source. **A CSV builder that reads `row.property_record` and emits 65
+separate columns produces no such token.** The download route contains zero matches today and is
+invisible to the fence. This phase builds exactly the fifth surface the fence exists to catch, in
+the one shape it cannot see.
+
+Fix structurally, not with a wider regex:
+
+1. **One canonical ordered list**, `DOSSIER_EXPORT_KEYS`, exported from
+   `lib/trace/publicPropertyRecord.ts`. 65 entries, vendor key order.
+2. The fence asserts `DOSSIER_EXPORT_KEYS` contains **no** member of `BLOCKED_PROPERTY_RECORD_KEYS`
+   and has exactly 65 entries.
+3. **The drift test that makes a vendor addition loud.** Assert every public key of the committed
+   86-key fixture appears in `DOSSIER_EXPORT_KEYS`. A new vendor key then turns the suite RED and a
+   human adds a column deliberately. This is the resolution of the real tension in this phase:
+   `toPublicPropertyRecord` is a DENYLIST so a new key reaches the customer, but a STABLE column
+   set cannot shift under them. A fixed list plus a red test is how both hold.
+4. A CSV-level fence: build a row from the 86-key fixture and assert no blocked key appears in the
+   header and the header is exactly the 103.
+
+## TASKS
+
+- [x] 1. `DOSSIER_EXPORT_KEYS` (65, ordered) in `lib/trace/publicPropertyRecord.ts`.
+- [x] 2. Extend the egress fence: the four assertions above. **Before any column ships.**
+- [x] 3. `lib/trace/exportCsv.ts` — `EXPORT_COLUMNS` (103), `renderCell`, `buildExportCsv(rows)`.
+      One module, so bulk and single cannot diverge and the fence has one target.
+- [x] 4. `renderCell`. The current `esc` is typed `string` and **throws a TypeError on a number
+      argument** (`(123 || '').replace` is not a function); the new columns are mostly numbers and
+      booleans. Rules:
+      - `null` / `undefined` / `''` → blank
+      - `true` → `Yes`, `false` → `No`. A known negative is information; blanking it turns it into
+        an unknown. Matches the GHL convention David applied 2026-09-17.
+      - **numeric `0` → blank.** Precedent, not invention: the handoff's fill rates "treat 0 as
+        absent", and `price_per_sqft` was un-blocked specifically on the basis that its 0 renders
+        BLANK because every 0 was "no sale price on record". A 0 in these columns would be
+        fabricated data. CLAUDE.md rule 7.
+      - numbers render bare, unquoted, no thousands separators
+      - strings quoted, inner `"` doubled, as today
+- [x] 5. Rewrite `app/api/trace/bulk/download/route.ts` onto the shared module. Drop both
+      conditionals. `select('*')` already fetches `property_record`, so no query change.
+- [x] 6. **Fix the silent row truncation.** The route has no `.limit()`/`.range()`, so PostgREST
+      caps it at 1000 and a bigger job loses rows with NO error. Biggest job today is 345 rows so
+      nobody has hit it, but `MAX_RECORDS` is 10,000. Paginate with `.range()`.
+- [x] 7. Single-record export: `app/api/trace/single/download/route.ts` + a button on
+      `trace/single/page.tsx`. Same 103 columns, one row. Without it the feature is bulk-only in
+      practice.
+- [x] 8. Tests, then mutations, re-run by me rather than trusted from the report.
+
+## OUT OF SCOPE, NAMED NOT HIDDEN
+
+- **8 rows hold a 9th phone** (earliest 2026-08-13) although `lib/tracerfy/client.ts:415` slices at
+  `MAX_PHONES` = 8. Columns follow the constant. Recovering 1,554 numbers while leaving 8 is the
+  right trade and sizing columns off live data would break the stable-set rule. The cap
+  discrepancy is its own question.
+- Until 5c lands, every bulk CSV carries 65 empty dossier columns. That is the stable-set rule
+  working, and it is one release of odd-looking output.
+- `match_confidence` gets no column. Internal scoring, not a purchased fact.
+
+
+## REVIEW: Phase 5a shipped 2026-09-17
+
+Build order was the spec's: the fence extension landed and went green BEFORE a single new
+column was emitted, which is the only ordering that makes the fence worth having here.
+
+### Files
+
+| File | Change |
+|---|---|
+| `lib/trace/publicPropertyRecord.ts` | + `DOSSIER_EXPORT_KEYS`, 65 keys in vendor order. Nothing existing touched. |
+| `lib/trace/__tests__/propertyRecordEgress.test.ts` | + 4 assertions, the fifth surface the scan cannot see |
+| `lib/trace/exportCsv.ts` | NEW. `EXPORT_COLUMNS` (103), `renderCell`, `toExportValues`, `buildExportCsv` |
+| `lib/trace/__tests__/exportCsv.test.ts` | NEW, 29 tests |
+| `app/api/trace/bulk/download/route.ts` | 171 -> 143 lines. Inline builder gone, both conditionals gone, paginated |
+| `app/api/trace/bulk/download/__tests__/route.test.ts` | stub pages now; + 4 pagination tests; the "no skip column" test inverted |
+| `app/api/trace/single/download/route.ts` | NEW |
+| `app/api/trace/single/download/__tests__/route.test.ts` | NEW, 8 tests |
+| `app/(dashboard)/trace/single/page.tsx` | + Download CSV button, same navigation pattern as bulk |
+
+### Verified
+
+`npx vitest run` 909 passing / 58 files / 0 failing (from 864 / 56).
+`npx tsc --noEmit` 0 errors. `npx eslint app lib components` 47 problems, unchanged.
+
+Mutations, each run and each observed RED, then restored:
+
+| Mutation | Caught by |
+|---|---|
+| a blocked key pasted into `DOSSIER_EXPORT_KEYS` | 3 fence tests |
+| a vendor key deleted from it | 2 fence tests (the drift test) |
+| `renderCell(false)` blanked instead of `No` | 3 |
+| numeric `0` emitted as `0` | 2 |
+| `PHONE_COLUMN_COUNT` drifted from `TRACERFY.MAX_PHONES` | 5 |
+| pagination loop removed (the original silent truncation) | 3 |
+| the `id` tiebreaker removed | 1 |
+| `.eq('user_id', ...)` removed from the single download | 1 |
+
+The fence also caught a real leak DURING the build: the token `property_record:` in a doc
+comment in the new module. Reworded, not exempted.
+
+### THE NAMING DECISION WAS TAKEN: ALL 65 DOSSIER COLUMNS ARE PREFIXED `prop_`
+
+Approved by David. `prop_address`, `prop_city`, `prop_apn`, `prop_flood_zone`, all 65. The four
+duplicate headers (`address`, `city`, `state`, `property_type`) are gone and every column name in
+the file is now unique.
+
+**The duplicates were hiding missing assertions, which is the real reason this mattered.** The test
+helper resolved a duplicate name last-wins, so the base `state` column and the research
+`property_type` column were unreachable by name and went unasserted. Both survived being replaced
+with `null` in an adversarial mutation run with the suite fully green. Prefixing made them
+addressable; the assertions were then written and both mutations now go red.
+
+## FIX PASS: Phase 5a, after an adversarial review (2026-09-17)
+
+An adversarial review ran 14 mutations against the first cut. **Four produced ZERO red.** Every
+number in the original report re-checked correctly, so this was a coverage failure, not a
+correctness one. All nine follow-ups are done.
+
+### The four dead mutations, and what kills them now
+
+| Mutation that was 0 red | Now red | Killed by |
+|---|---|---|
+| `row.state` -> `null` | **2** | `the base columns > carries the address the customer submitted` |
+| `research?.property_type` -> `null` | **2** | `the file itself > carries the historical research` |
+| widen the builder's dossier SELECTION | **1** | the new sentinel test (assertion 1 stays green, proving it catches something different) |
+| in-loop error `return` -> `break` | **1** | `fails the whole download when a page errors` |
+
+### What changed
+
+1. **All 65 dossier columns prefixed `prop_`.** `DOSSIER_COLUMN_PREFIX` + `DOSSIER_EXPORT_COLUMNS`
+   in `lib/trace/exportCsv.ts`. Header is still 103, now with zero duplicate names.
+2. **The two assertions the duplicates were hiding**, plus one asserting the two `state`s and the
+   two `property_type`s hold different values, plus a header-uniqueness test so a future collision
+   fails instead of silently swallowing an assertion.
+3. **THE NUMERIC ZERO RULE WAS WRONG AND IS REPLACED.** Blanking every numeric 0 came from a
+   MEASUREMENT convention for fill rates, not a rendering decision, and the `price_per_sqft`
+   precedent was measured on PRICE fields only. It destroyed real facts: `years_owned: 0` is bought
+   this year, `mls_days_on_market: 0` is listed today, and `beds`/`baths`/`units_count`/`stories` are
+   genuinely 0 on commercial stock, which is this product's entire market. Now: **0 renders as `0`**,
+   except for `ZERO_MEANS_ABSENT_KEYS` -- money (9), size (2), years (2), coordinates (2) -- where 0
+   is IMPOSSIBLE, not merely unlikely. A parcel is not assessed at $0, a building is not 0 sqft,
+   there is no year 0, and 0,0 is a point in the Gulf of Guinea. Both sides tested.
+4. **`renderCell` no longer fabricates on non-scalars.** It rendered `[object Object]` for objects
+   and arrays and printed `NaN`/`Infinity` bare. Now: arrays join on `; ` (the existing `relatives`
+   convention), plain objects blank, non-finite numbers blank. Unreachable today, but this is the
+   single renderer for the product and the drift test does not fire on a LIVE vendor addition.
+5. **CSV formula injection defused.** `=`, `+`, `-`, `@`, tab and CR at the start of a value get a
+   leading apostrophe inside the quoted cell. `"=1+1"` is valid CSV that Excel, Sheets and
+   LibreOffice all evaluate, and this phase grew the vendor-controlled free-text surface from 16
+   columns to 103. Guarded at the front only; a trigger mid-value is inert.
+6. **Two comments that claimed protection a mutation disproved, reworded rather than propped up
+   with a test written to justify them** (the phase 4b precedent). The `toPublicPropertyRecord` call
+   in the builder is now labelled defence in depth, saying plainly that the key list carries the
+   weight. The drift test no longer claims a new vendor key "turns the suite RED": it fires when a
+   human re-records the fixture, and until then a live vendor addition is silently dropped.
+7. **Fence assertion 4's value half was a tautology and is rebuilt.** `not.toContain('propensity')`
+   could not fail under any single change. Replaced with a unique sentinel written into every
+   blocked key, run through the real builder.
+8. **The truncation fix had relocated its own failure mode.** A PostgREST error on page 2 of 3
+   returned 200 with a short, valid-looking CSV. The whole download now fails or none of it does.
+9. **`charge` renders bare again** (`0.40`, not `"0.40"`) so the column can be summed, and the
+   pagination loop is bounded by `MAX_PAGES`, derived from a 10,000-row job, so it cannot run
+   unbounded if `.range()` is ever ignored.
+
+### Gates observed after the fix pass
+
+`npx vitest run` **933 passing / 58 files / 0 failing** (from 909).
+`npx tsc --noEmit` exit 0. `npx eslint app lib components` **47 problems**, unchanged.
+`npm run build` exit 0, compiled successfully, 34/34 static pages.
+
+Ten mutations run in this pass, every one observed RED: the four above plus blanket zero-blanking
+(2), ignoring the impossible-zero set (3), objects as `[object Object]` (1), bare `NaN` (1),
+dropping the `prop_` prefix (14), and quoting `charge` (2).
+
+### Deliberately not done, per the coordinator
+
+- Peak memory on a 10,000-row export with no streaming.
+- The 9th-phone cap discrepancy.
+- `MAX_EXPORT_ROWS` is a local constant in the download route rather than an import of the submit
+  routes' `MAX_RECORDS`. Importing a submit route would drag its vendor and billing graph into a
+  download, and those files were out of bounds this phase.
+
+### Named, not hidden
+
+- Every bulk CSV now carries 65 blank dossier columns until 5c lands. Known, per the plan.
+- `charge` deliberately escapes the "0 is blank" rule -- it renders `"0.00"` via a
+  pre-formatted string, because a zero charge is the statement "this row was free", not an
+  absent value. It is also now quoted where it used to be bare; harmless to every parser.
+- Blank cells are now genuinely empty where they used to be `""`. Same meaning, less noise.
+- The 9th phone on 8 rows stays unexported. Columns follow `TRACERFY.MAX_PHONES` = 8, and a
+  test now goes red if that constant moves, so the 9th column gets added on purpose or not at all.

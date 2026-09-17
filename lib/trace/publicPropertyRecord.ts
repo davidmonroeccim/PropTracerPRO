@@ -125,3 +125,100 @@ export function toPublicPropertyRecord(record: unknown): Record<string, unknown>
   }
   return out;
 }
+
+/**
+ * THE 65 DOSSIER KEYS THE CSV EXPORT EMITS, AS COLUMNS, IN VENDOR ORDER.
+ *
+ * ------------------------------------------------------------------------
+ * WHY A FIXED LIST NEXT TO A DENYLIST, WHICH LOOKS LIKE A CONTRADICTION
+ * ------------------------------------------------------------------------
+ *
+ * `toPublicPropertyRecord` is deliberately a DENYLIST: a key the vendor adds
+ * tomorrow reaches the customer instead of being silently swallowed. A CSV
+ * cannot work that way. A spreadsheet whose column set moves under a customer
+ * breaks every importer pointed at it, so the export needs a set that is stable
+ * until a human changes it.
+ *
+ * Both hold at once because of the DRIFT TEST in
+ * `lib/trace/__tests__/propertyRecordEgress.test.ts`: every public key of the
+ * committed 86-key fixture must appear in this list. A new vendor key turns the
+ * suite RED, and somebody adds the column on purpose. The payload surfaces keep
+ * their open default; the export gets its stable set; neither is silent.
+ *
+ * ORDER IS THE VENDOR'S, not alphabetical and not regrouped. It is the order
+ * the dossier arrives in and the order the fixture records, so a diff against a
+ * raw payload reads straight down.
+ *
+ * NOTHING HERE MAY BE A BLOCKED KEY. The fence asserts that too, because this
+ * list is the one place a blocked field could reach a customer without ever
+ * passing through the filter above.
+ */
+export const DOSSIER_EXPORT_KEYS = [
+  'address',
+  'city',
+  'state',
+  'zip_code',
+  'county',
+  'latitude',
+  'longitude',
+  'apn',
+  'subdivision',
+  'property_type',
+  'property_use',
+  'land_use',
+  'year_built',
+  'beds',
+  'baths',
+  'units_count',
+  'stories',
+  'building_size_sqft',
+  'lot_size_sqft',
+  'has_ac',
+  'has_garage',
+  'has_pool',
+  'has_basement',
+  'has_deck',
+  'last_sale_date',
+  'last_sale_price',
+  'years_owned',
+  'absentee_owner',
+  'owner_occupied',
+  'vacant',
+  'pre_foreclosure',
+  'foreclosure',
+  'tax_delinquent',
+  'tax_delinquent_year',
+  'tax_lien',
+  'inherited',
+  'death',
+  'judgment',
+  'hoa',
+  'price_per_sqft',
+  'assessed_value',
+  'area_median_income',
+  'open_mortgage_balance',
+  'lender_name',
+  'estimated_mortgage_payment',
+  'total_properties_owned',
+  'total_portfolio_value',
+  'cash_buyer',
+  'roof_material',
+  'roof_construction',
+  'flood_zone',
+  'prior_sale_price',
+  'prior_sale_date',
+  'document_type',
+  'quit_claim',
+  'recording_date',
+  'mls_active',
+  'mls_pending',
+  'mls_cancelled',
+  'mls_sold',
+  'mls_failed',
+  'mls_days_on_market',
+  'mls_listing_price',
+  'adjustable_rate',
+  'investor_buyer',
+] as const;
+
+export type DossierExportKey = (typeof DOSSIER_EXPORT_KEYS)[number];

@@ -1,9 +1,15 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BLOCKED_PROPERTY_RECORD_KEYS } from '@/lib/trace/publicPropertyRecord';
+import {
+  BLOCKED_PROPERTY_RECORD_KEYS,
+  DOSSIER_EXPORT_KEYS,
+  toPublicPropertyRecord,
+} from '@/lib/trace/publicPropertyRecord';
+import { buildExportCsv, DOSSIER_COLUMN_PREFIX, EXPORT_COLUMNS } from '@/lib/trace/exportCsv';
 import { dispatchTraceCompleted } from '@/lib/trace/traceCompletedWebhook';
 import entityHitAddress from '@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json';
+import type { TraceHistory } from '@/types';
 
 /**
  * THE FENCE AROUND EVERY DOOR A PROPERTY RECORD LEAVES THROUGH.
@@ -150,6 +156,121 @@ describe('every property record that leaves PTP goes through the one filter', ()
         expect(rawCounts.get(`${file}::${text}`) ?? 0, `${file} :: ${text}`).toBe(count);
       }
     }
+  });
+});
+
+/**
+ * THE FIFTH SURFACE, AND THE ONE SHAPE THE SCAN ABOVE CANNOT SEE.
+ *
+ * The scan finds a leak by matching the literal token `property_record:` in an
+ * object literal. A CSV builder reads `row.property_record` and writes SIXTY-FIVE
+ * SEPARATE COLUMNS, producing no such token anywhere. It is invisible to the
+ * regex, and widening the regex would not fix it: there is no text to match.
+ *
+ * So the export gets a fence of its own, built on the one canonical list. Each
+ * assertion catches a DIFFERENT way a blocked field reaches a customer, and one
+ * that could not catch anything was rewritten rather than kept for the look of it:
+ *
+ *   1. no blocked key is IN the list
+ *   2. the list is exactly the 65 a customer is entitled to
+ *   3. no key in the committed fixture is missing from it (see the test for what
+ *      this does NOT do)
+ *   4. the header the list produces names none of them
+ *   5. and a blocked VALUE carrying a unique sentinel does not reach the file,
+ *      which bites on the builder widening its selection rather than on the list
+ */
+describe('the CSV export column set', () => {
+  const FIXTURE = (entityHitAddress as { response: { property: Record<string, unknown> } })
+    .response.property;
+
+  it('names none of the 21 blocked keys', () => {
+    // MUTATION: paste `estimated_value` into DOSSIER_EXPORT_KEYS and this goes red.
+    const listed = new Set<string>(DOSSIER_EXPORT_KEYS);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      expect(listed.has(key), `${key} would become a column in a customer's spreadsheet`).toBe(
+        false
+      );
+    }
+  });
+
+  it('is exactly the 65 a customer is entitled to, with no duplicates', () => {
+    expect(DOSSIER_EXPORT_KEYS).toHaveLength(65);
+    expect(new Set<string>(DOSSIER_EXPORT_KEYS).size).toBe(65);
+  });
+
+  it('carries every public key in the committed fixture', () => {
+    // THE DRIFT TEST, AND AN HONEST ACCOUNT OF WHAT IT DOES NOT DO.
+    //
+    // `toPublicPropertyRecord` is a DENYLIST, so a key the vendor adds tomorrow
+    // reaches the payload surfaces by default. The export cannot work that way:
+    // a column set that moves under a customer breaks their importer.
+    //
+    // WHAT THIS CATCHES is a key being dropped from `DOSSIER_EXPORT_KEYS` while
+    // the fixture still has it, and a key added to the FIXTURE without a column.
+    //
+    // WHAT IT DOES NOT CATCH, and an earlier comment here wrongly claimed it
+    // did: a live vendor addition. The fixture is a committed file. Tracerfy
+    // adding an 87th key changes nothing in this repo, the suite stays green,
+    // and the new key is silently dropped from the CSV until a human re-records
+    // the fixture. This test fires on the RE-RECORD, not on the addition.
+    //
+    // It is still worth having -- re-recording a fixture is the normal way a new
+    // vendor key enters this repo, and this is what makes that moment loud -- it
+    // just is not the live tripwire the comment used to promise.
+    const publicKeys = Object.keys(toPublicPropertyRecord(FIXTURE)!);
+    const listed = new Set<string>(DOSSIER_EXPORT_KEYS);
+    const missing = publicKeys.filter((key) => !listed.has(key));
+
+    expect(
+      missing,
+      `The vendor sends these and the CSV drops them. Add them to DOSSIER_EXPORT_KEYS (or block them) deliberately:\n      ${missing.join('\n      ')}`
+    ).toEqual([]);
+  });
+
+  it('produces a file carrying none of them, from a real 86-key dossier', () => {
+    // The list being clean is not the same claim as the FILE being clean. This
+    // builds the actual CSV from the actual vendor payload and reads the header
+    // a customer would open.
+    const csv = buildExportCsv([
+      { property_record: FIXTURE, charge: 0.4, status: 'success' } as unknown as TraceHistory,
+    ]);
+    const header = csv.split('\n')[0].split(',');
+
+    expect(header).toEqual([...EXPORT_COLUMNS]);
+    expect(header).toHaveLength(103);
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      const column = `${DOSSIER_COLUMN_PREFIX}${key}`;
+      expect(header, `${key} is a column in the customer's spreadsheet`).not.toContain(column);
+      expect(header, `${key} is a column in the customer's spreadsheet`).not.toContain(key);
+    }
+  });
+
+  it('drops a blocked VALUE even when the vendor fills it with something unique', () => {
+    // THE VALUE HALF, REBUILT SO IT CAN ACTUALLY FAIL.
+    //
+    // It used to assert `csv` did not contain 'propensity' or 'large home'. That
+    // could not fail under any single change: values are selected only through
+    // `DOSSIER_EXPORT_KEYS`, which assertion 1 already pins, so the two claims
+    // were restatements of each other. A test that cannot go red is worse than
+    // no test, because it reads like coverage.
+    //
+    // This version puts a UNIQUE sentinel in every blocked key and runs the real
+    // builder. It bites on a different mutation from assertion 1: widening how
+    // the builder SELECTS values, rather than what the list contains. Replacing
+    // the `DOSSIER_EXPORT_KEYS.map(...)` in toExportValues with anything that
+    // walks the record's own keys leaks the sentinel and this goes red, while
+    // the column list stays untouched and assertion 1 stays green.
+    const SENTINEL = 'BLOCKED-VALUE-SENTINEL';
+    const record: Record<string, unknown> = { ...FIXTURE };
+    for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
+      record[key] = `${SENTINEL}-${key}`;
+    }
+
+    const csv = buildExportCsv([
+      { property_record: record, charge: 0.4, status: 'success' } as unknown as TraceHistory,
+    ]);
+
+    expect(csv, 'a blocked value reached the customer spreadsheet').not.toContain(SENTINEL);
   });
 });
 

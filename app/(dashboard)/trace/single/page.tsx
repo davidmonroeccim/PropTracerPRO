@@ -442,6 +442,22 @@ export default function SingleTracePage() {
               )}
 
               <PropertyRecordCard record={result.property_record} />
+
+              {/* The same 103-column file the bulk job produces, for one row.
+                  Without it this page is read-only: the contacts and the county
+                  dossier are on screen and the only way into the customer's own
+                  system is retyping them. Same navigation pattern as the bulk
+                  download button, so the browser saves the attachment. */}
+              <div className="flex">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    window.location.href = `/api/trace/single/download?trace_id=${result.trace_id}`;
+                  }}
+                >
+                  Download CSV
+                </Button>
+              </div>
             </>
           ) : loading ? (
             <Card className="flex items-center justify-center">

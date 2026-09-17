@@ -6,6 +6,105 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-17
 
+### Full Property Trace, phase 5a fix pass: four mutations that produced zero red
+
+An adversarial review ran 14 mutations against the 5a build. **Four came back completely green**,
+which is a coverage failure rather than a correctness one -- every number in the original report
+re-checked correctly. All nine follow-ups are done and each dead mutation now bites.
+
+- **All 65 dossier columns are prefixed `prop_`.** This removes the four duplicate headers
+  (`address`, `city`, `state`, `property_type`), and the duplicates turned out to be **hiding two
+  missing assertions**: the test helper resolved a duplicate name last-wins, so the base `state`
+  column and the research `property_type` column were unreachable by name. Both survived being
+  replaced with `null` with the suite fully green. Prefixed, addressable, now asserted, both red.
+- **THE NUMERIC ZERO RULE WAS WRONG.** The plan told us to blank every numeric 0, citing the
+  handoff's "fill rates treat 0 as absent". That is a MEASUREMENT convention for computing coverage,
+  not a rendering rule, and the `price_per_sqft` precedent was measured on PRICE fields only.
+  Generalised it destroyed facts the customer paid for: `years_owned: 0` is bought this year,
+  `mls_days_on_market: 0` is listed today, and `beds`/`baths`/`units_count`/`stories` are genuinely
+  zero on commercial stock -- this product's entire market. A 0 now renders `0`, except for a named
+  `ZERO_MEANS_ABSENT_KEYS` set where 0 is IMPOSSIBLE rather than unlikely: money, size, years and
+  coordinates. A parcel is not assessed at $0, a building is not 0 sqft, there is no year 0, and
+  lat/long 0,0 is a point in the Gulf of Guinea.
+- **`renderCell` was fabricating on non-scalars.** Objects and arrays rendered `[object Object]`,
+  and `NaN`/`Infinity` printed bare. `[object Object]` in a paying customer's spreadsheet is
+  fabricated data, CLAUDE.md rule 7. Arrays now join on `; `, objects blank, non-finite numbers
+  blank. Unreachable today, but this is the single renderer for the product and the drift test does
+  not fire on a live vendor addition.
+- **CSV formula injection defused.** `"=1+1"` is valid CSV that Excel, Sheets and LibreOffice all
+  strip and evaluate, and the dangerous forms are `=HYPERLINK(...)` and the DDE `=cmd|...`, not
+  arithmetic. This phase grew the vendor-controlled free-text surface from 16 columns to 103
+  (`lender_name`, `subdivision`, `roof_material`, `document_type`, `property_use`). A leading
+  `=`, `+`, `-`, `@`, tab or CR now gets an apostrophe inside the quoted cell.
+- **Two comments claimed protection a mutation disproved.** Following the 4b precedent they were
+  reworded, not propped up with a test invented to justify them. The `toPublicPropertyRecord` call
+  in the builder is genuinely redundant and is now labelled defence in depth. The drift test does
+  NOT turn red on a live vendor addition -- it fires when a human re-records the committed fixture,
+  and until then a new key is silently dropped from the CSV. Said plainly in the test.
+- **A fence assertion was a tautology.** `expect(csv).not.toContain('propensity')` could not fail
+  under any single change, because values are selected only through `DOSSIER_EXPORT_KEYS`, which
+  another assertion already pins. Rebuilt as a unique sentinel written into every blocked key and
+  run through the real builder: it bites on the BUILDER widening its selection, which is a different
+  mutation from the list changing.
+- **The truncation fix had relocated its own failure mode.** A PostgREST error on page 2 of 3 was
+  swallowed and returned a 200 with a short, valid-looking CSV -- byte for byte the silent
+  truncation this phase exists to remove, wearing an error handler as a disguise. The whole download
+  now fails or none of it does. The loop is also bounded now, so an ignored `.range()` is a 500
+  rather than a hang.
+- **`charge` renders bare again** (`0.40`, not `"0.40"`), the one column where being a number to a
+  spreadsheet matters most.
+- 933 tests passing (from 909), 58 files, 0 failing. `tsc` exit 0. eslint 47, unchanged.
+  `npm run build` exit 0. Ten mutations run this pass, every one observed red. No billing code
+  touched, nothing committed.
+
+
+### Full Property Trace, phase 5a: the export carries everything purchased
+
+**The scope changed before the build.** 5a was specced as "append the 65 dossier columns". Checked
+against production first, the export was already short-changing customers on CONTACTS: phones capped
+at 3 columns where rows store up to 9 (863 of 1,362 rows over the cap, 1,554 numbers bought and never
+exported), emails capped at 3 (142 addresses lost), no phone-type column at all (populated on 1,297
+rows), no `mailing_zip`, and -- worst -- **no column for the owner of record**. `trace_result.owner_name_2`
+holds the entity the county has on file and had nowhere to go, so a tier 2 customer never saw
+"Colmaven, Llc" even on a hit, and saw a blank owner entirely when no principal was found.
+
+- **One shared module, `lib/trace/exportCsv.ts`.** `EXPORT_COLUMNS` (103), `renderCell`,
+  `buildExportCsv`. Both download routes build from it, so the bulk file and the single-record file
+  cannot drift apart within a release.
+- **The fence came first, and it was the point.** `lib/trace/__tests__/propertyRecordEgress.test.ts`
+  finds leaks by matching a record written into an object KEY. A builder that reads
+  `row.property_record` and writes 65 separate columns writes no such key and is invisible to it --
+  this phase built exactly the shape the fence was blind to. Fixed structurally with one canonical
+  `DOSSIER_EXPORT_KEYS` list and four new assertions, not with a wider regex. It went green BEFORE
+  any new column was emitted, and it caught a real leak during the build (the literal token in a doc
+  comment in the new module).
+- **The drift test resolves the real tension.** `toPublicPropertyRecord` is a DENYLIST so a new
+  vendor key reaches the customer; a CSV column set must be STABLE or it breaks their importer. A
+  fixed list plus a test asserting every public fixture key appears in it means a new vendor key
+  turns the suite RED and a human adds the column deliberately. Same bargain now guards
+  `TRACERFY.MAX_PHONES`.
+- **`renderCell` replaces `esc`, which threw on a number.** `(123 || '').replace` is not a function;
+  it survived only because every column it ever saw was a string, and most of the 87 new ones are
+  numbers and booleans. `false` renders `No` (a known negative is information, not an unknown);
+  numeric `0` renders BLANK (the vendor zero-fills an absence, same basis `price_per_sqft` was
+  un-blocked on); numbers bare; strings quoted.
+- **Append-only. The first 16 columns never moved.** Research went unconditional at its existing
+  indices 17-20 and `skip_reason` appended at 21, which is a pure append only because it was measured:
+  of 44 bulk jobs carrying rows, 40 have research and ZERO have skip_reason.
+- **Fixed a silent row truncation that was waiting to happen.** The bulk route had no `.range()`, so
+  PostgREST capped it at 1,000 rows and a bigger job lost the rest with a 200 and a valid-looking
+  file. Biggest job to date is 345 rows; `MAX_RECORDS` is 10,000. Now paginated, stopping on an EMPTY
+  page rather than a short one, with an `id` tiebreaker so a page boundary cannot drop or repeat a row.
+- **New single-record export**, `app/api/trace/single/download/route.ts` plus a button on the single
+  trace page. Same 103 columns. Without it the export was bulk-only in practice.
+- 909 tests passing (from 864), 58 files, 0 failing. `tsc` clean. eslint 47, unchanged. Eight
+  mutations run and each observed red. No billing code touched.
+- **Open, needs a naming call:** `address`, `city`, `state` and `property_type` each appear twice in
+  the header now (input vs county). Index-keyed importers are fine; name-keyed ones are not. Prefixing
+  the 65 is free today and a breaking change after the first release. See the 5a review in
+  `tasks/todo.md`.
+
+
 ### Full Property Trace, phase 4b: the dossier reaches the Suite Gateway
 
 **The spec was aimed at the wrong system and got rewritten before anything was built.** 4b was

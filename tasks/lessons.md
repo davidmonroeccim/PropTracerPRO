@@ -257,3 +257,44 @@ GoHighLevel via CSV import. It does not; it uses the REST API record by record. 
 from a genuine adjacent fact -- the API cannot create property-object fields -- and then stated the
 mechanism as though I had checked it. An inference drawn from a verified constraint is still an
 inference. Say which one it is, or go and look.
+
+---
+
+## L-011: A handoff's OPEN list is its least reliable section (2026-09-17)
+
+**What happened.** Phase 5 inherited a bullet under "STILL OPEN, NOT FIXED, NOT HIDDEN": a grant
+holder billed by owner type on v1 bulk, $0.25 for person rows and $0.15 for entity rows in one
+batch, flagged as David's call. David gave a ruling on it. Before implementing the ruling I traced
+all six surfaces and both crons, and **the defect could not fire.** It was already fixed by a
+source-aware `tier1RateFor` in the same session that wrote the bullet, and independently foreclosed
+by the v1 auth gate, which admits only the profiles for which both rate derivations return the same
+number.
+
+**Why this section specifically.** The rest of a handoff records what WAS done, and is written after
+the doing. An OPEN list records what was NOT done, and is written *before the session ends*. Any fix
+that lands in the remaining hours makes it stale, and nothing re-reads it. The measured sections of
+these documents have been reliable all build; it is the forward-looking list that rots.
+
+**The rule.** An inherited OPEN item is a hypothesis, not a fact. Before acting on one — and
+especially before asking David to rule on one — prove it can still fire. Ask which single
+predicate, if already true, would make the two sides identical, then go and check that predicate.
+That is L-009 pointed at a document instead of at a test.
+
+**The near miss worth naming.** Had I not checked, I would have "fixed" a live billing path on a
+ruling given about a defect that did not exist, and written a test proving a distinction that the
+v1 auth gate makes unreachable. It would have passed review, because the reviewer would have
+audited it against the same stale bullet. That is the same shape as L-005: two artifacts agreeing
+with each other and both wrong.
+
+**And the flag underneath it, which is WORSE than L-009 recorded.** `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED`
+is `false` in `.env.local` but **`true` in production**, verified 2026-09-17 by fetching
+`https://proptracerpro.com/login` and finding "Sign in with Suite" and `/api/auth/suite/start` in
+the served HTML, both of which render only inside `isSuiteSignInEnabled()`.
+
+So the two pricing derivations are **provably identical in every test and genuinely divergent in
+production**. This is not a dormant trap, it is the live configuration. A grant-holding wallet-tier
+user pays $0.15 through `chargePerTrace` and $0.25 through `getChargePerTrace` right now, and no
+test in the suite can tell those apart unless it sets the flag itself.
+
+Every test asserting those two paths differ MUST set the flag inside the test. This is the third
+time this one flag has produced a test asserting a tautology. See L-009, earned twice in phase 4.
