@@ -2937,3 +2937,45 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       unchanged. Two residuals left on purpose and named in the migration header: the now-dead
       INSERT/UPDATE policies (re-granting the verb would silently re-open the hole, so prefer
       dropping them next time this table is worked) and anon's retained SELECT.
+
+---
+
+# REVIEW: Phase 5c FINAL FIX (2026-09-18) — the four seams. Committed, not pushed.
+
+Commit `cca815c`. **1306 passing from 1277, 67 files, 0 failing**, `npx tsc --noEmit` 0,
+`npx eslint app lib components` 47, `npm run build` compiles. 14 mutations, all 14 killed.
+
+Full report: `.superpowers/sdd/todo/final-fix-report.md`. Harness:
+`.superpowers/sdd/todo/final-fix-mutations.mjs`.
+
+Each sub-phase of 5c passed its own review and the whole-phase review still returned DO NOT SHIP.
+Every finding was at a JOIN, which is the part no per-task review can see.
+
+- **F1.** The tier split validated blank-owner rows with `validateAddressInput`, whose ZIP rule was
+  never written for a question about lookupability. A valid street, city and state with an
+  Excel-mangled ZIP was filed as no-key, told it was missing something it had, and locked out for 90
+  days. The split now asks street, city, state only, and a malformed ZIP is dropped at the row write
+  via the new `usableZip()` rather than sent on to a dossier it would contradict. v1 and MCP do NOT
+  share the shape: they refuse the batch up front with an honest, actionable error and write nothing.
+- **F2.** `collectedChargeFor` was unbounded, so on a REUSED row a resubmit's dossier purchase was
+  answered with the first submit's debit and collected $0.00, repeatably. **Bet taken: narrow the
+  guard.** `collectedChargesFor` now answers the decision within the current bulk job and the
+  persisted amount as the ledger's full net, off one read. **Bet NOT taken: make dedup real on v1 and
+  MCP.** It cannot reach the dashboard on day 91 where a fresh charge is genuinely owed, and
+  `deduplication.ts` already records it as a product decision belonging to the bulk-route owner,
+  because it would also start blocking retries of failed addresses on a public API. It is named in
+  task 17 instead. **Both halves are genuinely needed; only the money half was in my remit.**
+- **F3.** No submit route wrote `property_trace_status: null` on a tier 1 row, so a reused row served
+  the other billing model's money sentence. **The three tests guarding it asserted `?? null`, which
+  an absent key satisfies** (L-015). Tests fixed first, then the code, then mutation-proved.
+- **F4.** `records_failed` and the partial-failure sentence were in the response and on no screen.
+  Own tile in both phases plus the sentence whenever a half failed.
+- **F5.** Task 17 widened above rather than remedied, per instruction.
+
+## What this leaves open
+
+1. Dedup inert on v1 and MCP, and the `trace_job_id` re-point that moves a finished job's
+   `total_charge`. Both in task 17.
+2. `validateAddressInput`'s ZIP rule still refuses a mangled ZIP on v1, MCP and both single routes.
+   Honest and recoverable there; loosening it is a public API change beyond this brief.
+3. Task 16 untouched, still needs a migration.

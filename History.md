@@ -6,6 +6,71 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### Phase 5c final fix: the four seams between the sub-phases
+
+Commit `cca815c`. 1306 passing from 1277, 67 files, 0 failing, `tsc` clean, eslint at its 47,
+`npm run build` compiles. 14 mutations proposed and all 14 killed.
+
+Phase 5c was built as four sub-phases and every one passed its own review. The whole-phase review
+returned DO NOT SHIP over four defects, and every one of them sits at a JOIN. No per-task review
+could see them, because each half was correct in isolation.
+
+- **F1, HIGH. A mangled ZIP silently killed the phase's core capability, under a false reason.** The
+  session route's tier split validated blank-owner rows with `validateAddressInput`, which carries a
+  5-or-9-digit ZIP rule, and wrote failures as `PROPERTY_TRACE_NO_KEY_STATUS`, whose sentence was
+  written for a row that cannot be looked up at all. A row with a valid street, city and state and a
+  broken ZIP was told it was missing a component it had, and then locked out for 90 days, because
+  `normalizeAddress` excludes the ZIP so a corrected resend hashes identically. Excel strips the
+  leading zero from a ZIP column on export, so an MA, NJ, CT, RI, NH, ME, VT or PR file arrives
+  mangled on every row while its owner-name rows trace normally. **The split now asks only whether a
+  vendor can be ASKED: street, city, state.** The no-key status is reserved for a row genuinely
+  missing one of those, which is also the only population its resend advice is true for.
+- **And the broken ZIP is dropped rather than carried.** New `usableZip()` in
+  `lib/utils/address-normalizer.ts`, sharing one ZIP pattern with the validator. This route does not
+  validate per record and as of 5c that column reaches a vendor: a zip contradicting the street, city
+  and state it travels with is worse than none, `executeRoute.ts` already says so, and tier 2 bills
+  per record SUBMITTED, so a miss caused by our own mangled input is one the customer pays for. It
+  also blocks the dossier's zip backfill, which only fires when the caller had none.
+- **v1 and MCP do NOT share the shape and were left alone.** Both validate every record up front and
+  refuse the whole batch with a structured error naming the ZIP. Nothing is written, nothing is
+  locked out, and the caller is told something true and actionable.
+- **F2, HIGH. PTP did paid work and collected nothing, repeatably.** `collectedChargeFor` was
+  unbounded in time and job, and `trace_history` is UNIQUE(user_id, address_hash), so a resubmit
+  re-enqueues the SAME row. The cron re-bought the dossier, the probe found the first submit's debit,
+  and the deduct was skipped. **The decision is now scoped to the bulk job the row is currently
+  enqueued for; the amount persisted stays the ledger's full net.** Those are two questions and
+  answering both with one number is how this got in. `collectedChargesFor` answers both off one read.
+  An unreadable job falls back to unbounded, which can only refuse a charge PTP is owed rather than
+  take one twice from a customer.
+- **The other available bet on F2 was making duplicate detection real on v1 and MCP, and it was NOT
+  taken.** It cannot reach the dashboard on day 91, where the row is legitimately resubmitted and a
+  fresh charge is genuinely owed, and `lib/utils/deduplication.ts` already records it as a product
+  decision belonging elsewhere: `checkDuplicates` counts ANY row in the window as a duplicate,
+  including a plain failure, so moving it to the service-role client would start blocking retries of
+  failed addresses on a public API. It is named in task 17 rather than half done.
+- **F3, MEDIUM. A reused row served the other billing model's sentence, and its tests could not
+  fail.** All three submit routes null `ai_research_status` explicitly and none did the mirror-image
+  write for `property_trace_status`. The upsert touches only the keys in its payload, so a row that
+  was tier 2 kept its terminal value while settling as tier 1, and `rowSkipReason` asks tier 2 first.
+  **The three tests guarding it asserted `property_trace_status ?? null` is null, which an ABSENT key
+  satisfies** (L-015). Tests fixed first, on presence and value, then the code. The status route's
+  `records_matched` double count came from the same missing write and went with it.
+- **F4, MEDIUM. The honest partial-failure report never reached the screen.** 5c-3A made a half-failed
+  submit report accurately; 5c-3B did not know to render it. `records_failed` was not in the page's
+  interface and the message was shown only when no row carried a skip reason, so five explained rows
+  silenced it. Because every other figure is re-quoted to the survivors, no arithmetic on the page
+  could recover the fact. Its own tile in both phases, and the sentence shown whenever a half failed.
+- **F5, LOW. Recorded, not built, as instructed.** Task 17 said "a FREE failed bulk row", which
+  excluded the only population that is OUT OF POCKET: a billed `property_trace_no_reach` row paid for
+  two calls, received one, and can reach the contacts through neither the cache nor a resend. Task 17
+  now covers that shape explicitly. `PROPERTY_TRACE_NO_REACH_REASON` was re-read at the same time and
+  invites no retry it cannot honour.
+- **One exemption survived scrutiny rather than being deleted.** `ALLOWED_RAW_WRITES` still covers
+  `sweep-property-traces`, and its reason was rewritten: the value written is still the ledger's own
+  net, so folding it onto the row's column would count one debit twice. Its first draft here folded
+  instead, and a test caught it double-counting on the unreadable-job fallback.
+
+
 ### Full Property Trace, phase 5c-3B: the surfaces stop describing a product that no longer exists
 
 Commits `fd73b39`, `2a443ea`, `01a0b32`, `627b78c`. 1277 passing from 1193, 67 files, 0 failing.

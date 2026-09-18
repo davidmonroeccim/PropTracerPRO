@@ -137,11 +137,14 @@ describe('the finished job summary', () => {
  * page can recover the fact. The tile is the only place it can appear.
  */
 describe('a submit where half the file was never sent', () => {
-  it('reads records_failed off the submit response at all', () => {
-    // MUTATION: drop the field from JobStats and this goes red. It was absent
-    // from the interface for the whole life of the defect, so the value arrived
-    // and was discarded at the type boundary.
-    expect(SOURCE).toContain('records_failed');
+  it('declares records_failed on JobStats, so the value is not dropped at the boundary', () => {
+    // ASSERTED ON THE DECLARATION, NOT ON THE NAME. `toContain('records_failed')`
+    // is satisfied by the JSX further down the file, so it survived a mutation
+    // that deleted the interface field outright -- the L-015 shape, an assertion
+    // satisfied by something other than the thing it is checking, and exactly the
+    // state the three F3 tests were in.
+    // MUTATION: remove the field from JobStats and this goes red.
+    expect(SOURCE).toContain('  records_failed?: number;');
   });
 
   it('gives it a tile in BOTH phases, because both are read as the account', () => {
