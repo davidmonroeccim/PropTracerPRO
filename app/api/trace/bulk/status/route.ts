@@ -231,24 +231,53 @@ export async function GET(request: Request) {
       console.error(
         `[trace/bulk/status] stall: job=${traceJob.id} reason=${statusResult.errorReason} age=${jobAgeMinutes.toFixed(1)}m`
       );
-      await adminClient
-        .from('trace_jobs')
-        .update({
-          status: 'failed',
-          error_message: errorMessage,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', traceJob.id);
+      // The TIER 1 rows really are stuck, so they are errored either way. The
+      // filter is on tracerfy_job_id, which a tier 2 row does not carry, so this
+      // cannot reach the queue.
       await adminClient
         .from('trace_history')
         .update({ status: 'error' })
         .eq('user_id', user.id)
         .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
         .eq('status', 'processing');
+
+      // BUT THE JOB IS NOT THE TIER 1 HALF. A stalled Tracerfy bulk says nothing
+      // about the dossier queue, which is a different vendor endpoint on a
+      // different clock, and those rows keep running and keep billing. Declaring
+      // the job failed over them hands the customer a terminal verdict on work
+      // that is still being charged for, and the top of this handler then
+      // short-circuits the job so it is never polled again.
+      const stallRows = await readJobRows();
+      const stillQueued = stallRows.filter((r) =>
+        isPropertyTracePending(r.property_trace_status)
+      ).length;
+
+      if (stillQueued === 0) {
+        await adminClient
+          .from('trace_jobs')
+          .update({
+            status: 'failed',
+            error_message: errorMessage,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', traceJob.id);
+        return NextResponse.json({
+          success: false,
+          status: 'failed',
+          job_id: traceJob.id,
+          error_message: errorMessage,
+          tracerfy_state: statusResult.errorReason,
+          age_minutes: Math.round(jobAgeMinutes),
+        });
+      }
+
+      // The tier 1 half is dead and the tier 2 half is alive. The job stays open
+      // and the caller is told both facts rather than one of them.
       return NextResponse.json({
-        success: false,
-        status: 'failed',
+        success: true,
+        status: 'processing',
         job_id: traceJob.id,
+        records_pending_property_trace: stillQueued,
         error_message: errorMessage,
         tracerfy_state: statusResult.errorReason,
         age_minutes: Math.round(jobAgeMinutes),
@@ -290,9 +319,28 @@ export async function GET(request: Request) {
     // All results ready — process each one
     const results = statusResult.results;
     let recordsMatched = 0;
-    // Money ACTUALLY collected across the job. It is reported twice -- as
-    // `total_charge` in the bulk_job.completed webhook and in the response body
-    // -- so it may only ever accumulate what a deduct really took.
+    // Money THIS POLL collected, and only that. It is no longer what gets
+    // reported: finalize() below replaces it with the sum of the stored per-row
+    // charges before either the response body or the bulk_job.completed webhook
+    // reads it.
+    //
+    // WHY IT HAD TO STOP BEING THE REPORTED NUMBER. A poll-local accumulator
+    // structurally cannot see a charge sweep-property-traces booked, because
+    // that money never passes through this handler. An all-tier-2 job would have
+    // completed reporting 0 against a wallet the customer had watched drop, and
+    // a mixed job would have reported its tier 1 half only. The
+    // already-completed branch at the top of this handler was ALREADY summing
+    // stored charges, so the same handler answered one question two ways
+    // depending on which poll you hit.
+    //
+    // CONSUMER-VISIBLE CHANGE, 2026-09-18: `total_charge` on the
+    // bulk_job.completed webhook now means the job's stored charges rather than
+    // one poll's collections. For a tier 1 only job those are the same number.
+    // They differ on a job carrying tier 2 rows, and on a REUSED address whose
+    // row already held a receipt from an earlier job, which the sum attributes
+    // to this one. Both match what the already-completed branch has always
+    // reported, which is why this is the consistent answer rather than a second
+    // one.
     let totalCharge = 0;
     // Money we TRIED to take. Drives auto-rebill only: a wallet that came up
     // short is precisely the one that needs topping up.

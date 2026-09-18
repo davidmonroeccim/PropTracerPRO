@@ -4,6 +4,7 @@ import {
   PROPERTY_TRACE_PENDING_STATUSES,
   PROPERTY_TRACE_SETTLED_STATUS,
 } from "@/lib/trace/propertyTraceAttempts";
+import { STALE_PROCESSING } from "@/lib/constants";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
@@ -233,6 +234,45 @@ describe("in-flight unbilled work", () => {
     expect(H.filters.some((f) => f[0] === "eq" && f[1] === "user_id" && f[2] === "u1")).toBe(
       true
     );
+  });
+
+  it("bounds the TIER 1 arm by age, so an orphan cannot reserve forever", async () => {
+    // A tier 1 row can be orphaned at 'processing': a billed row inside a job
+    // already marked completed is invisible to both stages of
+    // sweep-stale-traces, so nothing ever resolves it. Unbounded, 40 of those
+    // reserve $10 of a customer's wallet permanently and their 402 describes
+    // traces as still running that never will.
+    // MUTATION: drop the `and(...)` wrapper and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const or = H.filters.find((f) => f[0] === "or");
+    expect(or).toBeDefined();
+    expect(String(or![1])).toContain("and(status.eq.processing,created_at.gte.");
+  });
+
+  it("does NOT bound the tier 2 arm, because that one is bounded already", async () => {
+    // The ladder and the cron's stale-claim recovery guarantee a tier 2 row
+    // reaches a terminal value, so an age bound there would stop reserving for a
+    // row that IS going to be billed. Under-reserving certain money is the wrong
+    // direction to fail in.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    const tier2Part = clause.slice(clause.indexOf("property_trace_status.in."));
+    expect(tier2Part).not.toContain("created_at");
+  });
+
+  it("uses the age at which the system itself calls a processing row stale", async () => {
+    // Not a number picked here. Past CRON_TIMEOUT_MINUTES the sweeper resolves
+    // such a row, so beyond it a row still sitting there is orphaned by the
+    // system's own definition, and the reserve and the sweep agree about what
+    // "still running" means instead of each having a private answer.
+    const before = Date.now();
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    const cutoff = Date.parse(
+      clause.slice(clause.indexOf("created_at.gte.") + "created_at.gte.".length).split(")")[0]
+    );
+    const expected = before - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000;
+    expect(Math.abs(cutoff - expected)).toBeLessThan(5000);
   });
 
   it("raises rather than reporting zero when the query fails", async () => {

@@ -529,6 +529,105 @@ describe("a job whose only rows are queued", () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * A FAILED PERSON SUBMIT IS NOT A FAILED JOB ANY MORE.
+ *
+ * The tier 2 rows are written BEFORE the Tracerfy call, deliberately.
+ * sweep-property-traces claims on property_trace_status alone and never
+ * reads the parent job, so marking the job failed here stops nothing:
+ * it works every one of those rows and bills each one. The customer
+ * would get an HTTP 500, a job reading failed, and a charge for work
+ * they were told did not happen -- and since the rows now exist, a
+ * resubmit inside the 90-day window comes back as duplicates, so they
+ * could not even re-run what they paid for.
+ * ------------------------------------------------------------------ */
+
+describe("when the Tracerfy person submit fails", () => {
+  beforeEach(() => {
+    H.submit = { success: false, error: "Tracerfy 503" };
+  });
+
+  it("does NOT mark the job failed while tier 2 rows are queued", async () => {
+    // MUTATION: fail the job unconditionally again and this goes red.
+    await post([rec("John Smith", 1), rec(undefined, 2)]);
+    const failed = H.ops.find(
+      (o) =>
+        o.table === "trace_jobs" &&
+        o.op === "update" &&
+        (o.payload as Record<string, unknown>)?.status === "failed"
+    );
+    expect(failed).toBeUndefined();
+  });
+
+  it("does not hand back a 500 for a job that is still running and will be billed", async () => {
+    const res = await post([rec("John Smith", 1), rec(undefined, 2)]);
+    expect(res.status).not.toBe(500);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.records_queued).toBe(1);
+    expect(body.records_failed).toBe(1);
+  });
+
+  it("quotes only the rows that are actually going to run", async () => {
+    // The tier 1 half was never submitted, so charging for it would be a
+    // statement about money that is not true.
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.estimated_cost).toBeCloseTo(TIER2);
+  });
+
+  it("tells the customer which half failed and that it was free", async () => {
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.message).toContain("not charged");
+    expect(body.message).not.toMatch(/[—–*]/);
+  });
+
+  it("writes the tier 1 rows terminal so every accepted record has one", async () => {
+    // records_submitted is the denominator of the match rate. A record with no
+    // row at all would leave the job permanently un-finishable.
+    await post([rec("John Smith", 1), rec(undefined, 2)]);
+    const errored = historyRows().filter((r) => r.status === "error");
+    expect(errored).toHaveLength(1);
+    expect(errored[0].input_owner_name).toBe("John Smith");
+  });
+
+  it("STILL fails the job when nothing survives the failure", async () => {
+    // The guard must not become a blanket refusal to ever fail a job. With no
+    // tier 2 rows there is nothing left running, and this branch is exactly what
+    // it was written for.
+    const res = await post([rec("John Smith", 1)]);
+    expect(res.status).toBe(500);
+    const failed = H.ops.find(
+      (o) =>
+        o.table === "trace_jobs" &&
+        o.op === "update" &&
+        (o.payload as Record<string, unknown>)?.status === "failed"
+    );
+    expect(failed).toBeDefined();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * A REUSED ROW CARRIES WHATEVER THE LAST WRITER LEFT ON IT.
+ * ------------------------------------------------------------------ */
+
+describe("the entity-queue column on every row this route writes", () => {
+  it("is written null rather than left alone", async () => {
+    // THE UPSERT ONLY TOUCHES THE KEYS IN THE PAYLOAD. A row is REUSED, not
+    // re-inserted, so an omitted key keeps its old value. A pre-5c blank-owner
+    // row carries 'skipped_no_owner' and 273 of them exist: left in place, the
+    // row is enqueued and billed while summarizeSkips() reads that stale value
+    // and tells the customer "you were not charged" on a row that was. A stale
+    // 'queued' is worse, putting one row on two queues to be settled twice.
+    // MUTATION: drop the ai_research_status key and this goes red.
+    await post([rec("John Smith", 1), rec(undefined, 2), noKeyRec(3)]);
+    expect(historyRows()).toHaveLength(3);
+    for (const row of historyRows()) {
+      expect(Object.keys(row)).toContain("ai_research_status");
+      expect(row.ai_research_status).toBeNull();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
  * UNCHANGED BEHAVIOUR THAT THE CHANGE MUST NOT BREAK.
  * ------------------------------------------------------------------ */
 

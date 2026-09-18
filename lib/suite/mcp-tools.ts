@@ -455,7 +455,13 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
           .from("trace_history")
           .upsert(errorRows.slice(i, i + BULK_BATCH_SIZE), { onConflict: "user_id,address_hash" });
       }
-      if (entityRecords.length === 0) {
+      // THE TIER 2 TERM IS NEW. This guard was written when the third bucket did not exist, so
+      // it asked only whether the ENTITY queue still had work. sweep-property-traces claims on
+      // `property_trace_status` alone and never reads the parent job, so failing the job here
+      // stops nothing: it works every tier 2 row written above and bills each one. The caller
+      // would be told the submit failed and charged for it, with a resubmit inside the 90-day
+      // window coming back as duplicates.
+      if (entityRecords.length === 0 && tier2Records.length === 0) {
         await admin
           .from("trace_jobs")
           .update({ status: "failed", error_message: submitResult.error || "Submit failed" })

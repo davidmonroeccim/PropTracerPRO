@@ -32,6 +32,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getAnalytics } from '@/lib/tracerfy/client';
+import { STALE_PROCESSING } from '@/lib/constants';
 import {
   PROPERTY_TRACE_PENDING_STATUSES,
   isPropertyTracePending,
@@ -54,11 +55,22 @@ import {
  * accepts that an all-individual job would draw half as much again as this
  * check reserved.
  *
- * What makes that safe is that running short mid-job is not a billing event: a
- * vendor we could not ask is our outage, not the customer's miss (L-007), so
- * the cron's retry ladder absorbs it and the row settles free. The cost of
- * under-sizing is a slow honest failure. The cost of over-sizing is refusing
- * work we could have done. The floor is the right side to err on.
+ * THE INDIVIDUAL CONTACT LEG IS NOT THE ONLY THING THIS UNDER-COUNTS, AND A
+ * READER WHO STOPS AT THE PARAGRAPH ABOVE WILL THINK IT IS. Tier 1 person
+ * traces draw the SAME Tracerfy account balance, both the ones in the batch
+ * being submitted and the ones already in flight, and neither appears in
+ * `needed` nor in the queued term below. The `newRecords <= 0` short circuit
+ * goes further: a 500-record all-tier-1 batch never reads the balance at all.
+ * That is inside the brief, which scoped this check to tier 2 sizing, so it is
+ * deliberate rather than missed -- but it means the real headroom is always
+ * lower than this function computes, in three directions rather than one.
+ *
+ * What makes the whole floor safe is that running short mid-job is not a
+ * billing event: a vendor we could not ask is our outage, not the customer's
+ * miss (L-007), so the cron's retry ladder absorbs it and the row settles free.
+ * The cost of under-sizing is a slow honest failure. The cost of over-sizing is
+ * refusing work we could have done. This check exists to stop one obviously
+ * oversized job from eating the pool, not to be an accounting of it.
  */
 export const TRACERFY_DOSSIER_CREDITS = 10;
 
@@ -173,6 +185,28 @@ export async function tracerfyCanRunTier2(
  * A settled row is excluded because it has already been billed; reserving for
  * it twice would refuse a wallet that has already paid.
  *
+ * THE TIER 1 ARM IS AGE-BOUNDED AND THE TIER 2 ARM IS NOT, AND THE ASYMMETRY IS
+ * THE POINT. A tier 1 row can be ORPHANED at `status: 'processing'`: a billed
+ * row inside a job already marked completed is invisible to both stages of
+ * sweep-stale-traces (stage 2 only claims jobs still processing, stage 1 only
+ * rows with no parent job), so nothing ever resolves it. Unbounded, 40 such rows
+ * would reserve $10 of a customer's wallet permanently, and their 402 would
+ * describe traces as still running that will never run and never be billed. That
+ * is the same harm the capacity refusal's wording rules exist to prevent,
+ * arriving through the other check.
+ *
+ * STALE_PROCESSING.CRON_TIMEOUT_MINUTES is the bound because it is the age at
+ * which the system ITSELF declares a processing row stale and resolves it. Past
+ * that, a row still sitting there is orphaned by the system's own definition,
+ * and the reserve and the sweep now agree about what "still running" means
+ * rather than each having a private answer.
+ *
+ * A tier 2 row needs no such bound and must not have one. It is bounded already,
+ * by MAX_PROPERTY_TRACE_ATTEMPTS and the cron's stale-claim recovery, so it
+ * always reaches a terminal value. Bounding it by age instead would stop
+ * reserving for a row that IS going to be billed, and under-reserving certain
+ * money is the wrong direction to fail in.
+ *
  * THIS IS A RESERVE, NOT A LOCK, AND THE DIFFERENCE IS HONEST. Nothing here
  * takes a row out of anyone else's reach: it reads accepted work and prices it.
  * The window it does not close is the few hundred milliseconds between one
@@ -188,12 +222,20 @@ export async function inFlightUnbilledCost(
   userId: string,
   rates: { tier1: number; tier2: number }
 ): Promise<number> {
+  // The tier 1 arm carries the age bound, the tier 2 arm deliberately does not.
+  // Written as one `or` with a nested `and` so the database does the filtering:
+  // a tier 1 row older than the cutoff is never returned at all, while a tier 2
+  // row on any rung of the ladder is returned however old it is.
+  const tier1Cutoff = new Date(
+    Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
+  ).toISOString();
+
   const { data, error } = await admin
     .from('trace_history')
     .select('status, property_trace_status')
     .eq('user_id', userId)
     .or(
-      `status.eq.processing,property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')})`
+      `and(status.eq.processing,created_at.gte.${tier1Cutoff}),property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')})`
     );
 
   if (error) {

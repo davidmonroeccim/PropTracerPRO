@@ -356,6 +356,62 @@ describe("when PTP's own credit pool cannot cover the job", () => {
   });
 });
 
+/**
+ * A FAILED PERSON SUBMIT IS NOT A FAILED JOB.
+ *
+ * This guard was written when the third bucket did not exist, so it asked only
+ * whether the ENTITY queue still had work. sweep-property-traces claims on
+ * property_trace_status alone and never reads the parent job, so failing the job
+ * here stops nothing: it works every tier 2 row written above and bills each
+ * one. The caller would be told the submit failed and charged for it, and a
+ * resubmit inside the 90-day window comes back as duplicates.
+ */
+describe("when the Tracerfy person submit fails", () => {
+  const failedJob = () =>
+    H.ops.find(
+      (o) =>
+        o.table === "trace_jobs" &&
+        o.op === "update" &&
+        (o.payload as Record<string, unknown>)?.status === "failed"
+    );
+
+  beforeEach(() => {
+    H.submit = { success: false, error: "Tracerfy 503" };
+  });
+
+  it("does NOT fail the job while tier 2 rows are queued", async () => {
+    // MUTATION: drop the `&& tier2Records.length === 0` term and this goes red.
+    const res = await post([rec("John Smith", 1), rec(undefined, 2)]);
+    expect(failedJob()).toBeUndefined();
+    expect(res.status).not.toBe(500);
+  });
+
+  it("does NOT fail the job while entity rows are queued either", async () => {
+    // The original half of the guard, still holding.
+    const res = await post([rec("John Smith", 1), rec("Acme Holdings Llc", 2)]);
+    expect(failedJob()).toBeUndefined();
+    expect(res.status).not.toBe(500);
+  });
+
+  it("STILL fails a job where nothing else was queued", async () => {
+    // The guard must not become a blanket refusal to ever fail a job.
+    const res = await post([rec("John Smith", 1)]);
+    expect(res.status).toBe(500);
+    expect(failedJob()).toBeDefined();
+  });
+
+  it("leaves the queued tier 2 rows on the queue, not errored", async () => {
+    // Only the person rows failed. Rewriting the tier 2 rows here would strand
+    // work the cron is about to run and the customer is about to be billed for.
+    await post([rec("John Smith", 1), rec(undefined, 2)]);
+    const queued = historyRows().filter(
+      (r) => r.property_trace_status === queuedStatusFor(1)
+    );
+    expect(queued).toHaveLength(1);
+    expect(queued[0].status).toBe("processing");
+  });
+});
+
 describe("the record cap", () => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => rec("John Smith", i + 1));
 

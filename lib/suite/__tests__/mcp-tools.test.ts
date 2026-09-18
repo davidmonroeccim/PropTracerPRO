@@ -694,6 +694,42 @@ describe("skip_trace_bulk", () => {
     expect(out).not.toMatchObject({ error: "capacity_unavailable" });
   });
 
+  it("does NOT fail the job when the person submit fails but tier 2 rows are queued", async () => {
+    // The guard was written when the third bucket did not exist, so it asked
+    // only whether the ENTITY queue still had work. sweep-property-traces never
+    // reads the parent job, so failing it here stops nothing: it works every
+    // tier 2 row and bills each one, against a caller told the submit failed.
+    // MUTATION: drop the `&& tier2Records.length === 0` term and this goes red.
+    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    });
+    expect(out).not.toMatchObject({ error: "submit_failed" });
+    expect(
+      captured.traceJobsUpdates.filter(
+        (u) => (u as Record<string, unknown>)?.status === "failed",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("STILL fails a job where the person submit failed and nothing else was queued", async () => {
+    // The guard must not become a blanket refusal to ever fail a job.
+    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    });
+    expect(out).toMatchObject({ error: "submit_failed" });
+  });
+
   it("sizes the wallet gate against work already accepted and not yet billed", async () => {
     // Two batches submitted back to back both passed against the same dollars, because the gate
     // reserved nothing and the real debit lands per record at settle time.

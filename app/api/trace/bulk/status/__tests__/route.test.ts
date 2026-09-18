@@ -385,6 +385,85 @@ describe("a job whose tier 2 rows are still queued", () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * THE STALL PATH IS A VERDICT ON THE WHOLE JOB TOO.
+ *
+ * When Tracerfy has been unhealthy for 15 minutes this route marks the
+ * job failed. That says nothing about the dossier queue, which is a
+ * different vendor endpoint on a different clock, and whose rows keep
+ * running and keep billing. Declaring the job failed over them hands the
+ * customer a terminal verdict on work they are still being charged for,
+ * and the top of this handler then short-circuits the job so it is never
+ * polled again.
+ * ------------------------------------------------------------------ */
+
+describe("a Tracerfy stall on a job with tier 2 rows", () => {
+  beforeEach(() => {
+    H.job = {
+      ...H.job,
+      created_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    };
+    H.jobStatus = { success: false, pending: false, errorReason: "rate_limited" };
+  });
+
+  const jobStatusWrites = () =>
+    H.updates.filter((u) => u.table === "trace_jobs");
+
+  it("does NOT fail the job while the queue is still working", async () => {
+    // MUTATION: mark the job failed unconditionally again and this goes red.
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending_property_trace).toBe(1);
+    expect(jobStatusWrites()).toHaveLength(0);
+  });
+
+  it("still errors the stalled tier 1 rows, which really are stuck", async () => {
+    // Holding the job open is not a reason to leave a tier 1 row at
+    // 'processing' for another cron to settle against a stranger's contacts.
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"));
+
+    const errored = H.updates.filter(
+      (u) => u.table === "trace_history" && u.payload.status === "error"
+    );
+    expect(errored).toHaveLength(1);
+  });
+
+  it("tells the caller the Tracerfy half died, rather than hiding it", async () => {
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.tracerfy_state).toBe("rate_limited");
+    expect(body.error_message).toContain("unhealthy");
+  });
+
+  it("STILL fails the job when no tier 2 row is running", async () => {
+    // The guard must not become a blanket refusal to ever fail a stalled job.
+    H.jobRows = [{ charge: null, ai_research_status: null }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("failed");
+    expect(jobStatusWrites()).toHaveLength(1);
+    expect(jobStatusWrites()[0].payload.status).toBe("failed");
+  });
+});
+
+/* ------------------------------------------------------------------ *
  * A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
  * TWO.
  *

@@ -288,6 +288,19 @@ export async function POST(request: Request) {
         normalized_address: normalizedAddress,
         city: (record.city || '').toUpperCase(),
         state: (record.state || '').toUpperCase(),
+        // WRITTEN EXPLICITLY, ON EVERY ROW, BECAUSE THE UPSERT ONLY TOUCHES THE
+        // KEYS IN THIS PAYLOAD. This route never uses the entity queue, so null
+        // is always the right value -- but a row is REUSED rather than
+        // re-inserted (UNIQUE(user_id, address_hash)), and omitting the key
+        // leaves whatever the row already carried. A pre-5c blank-owner row
+        // carries 'skipped_no_owner', and 273 of them exist: left in place, the
+        // row is enqueued and billed while summarizeSkips() reads that stale
+        // value through skipReasonFor() and tells the customer "you were not
+        // charged" on a row that was. A stale 'queued' is worse still, putting
+        // one row on two queues to be settled twice under two billing models.
+        // The v1 route and the MCP submit both write this null for the same
+        // reason.
+        ai_research_status: null,
         zip: (record.zip || '').substring(0, 5),
         input_owner_name: record.owner_name || null,
         // Same tag as the job above, and on EVERY row including the skipped
@@ -429,16 +442,59 @@ export async function POST(request: Request) {
     const submitResult = await submitBulkTrace(csvContent);
 
     if (!submitResult.success || !submitResult.jobId) {
-      // Update job as failed
-      await adminClient
-        .from('trace_jobs')
-        .update({ status: 'failed', error_message: submitResult.error || 'Submit failed' })
-        .eq('id', job.id);
-
-      return NextResponse.json(
-        { success: false, error: submitResult.error || 'Failed to submit bulk trace' },
-        { status: 500 }
+      // THE TIER 2 ROWS ARE ALREADY ON THE QUEUE, AND THIS BRANCH USED TO
+      // DECLARE THE WHOLE JOB DEAD OVER THEM.
+      //
+      // They were written above, before this call, deliberately. The cron claims
+      // on `property_trace_status` alone and never reads the parent job, so
+      // marking the job failed here stops nothing: it works all of them and
+      // bills every one. The customer would get an HTTP 500, a job reading
+      // failed, and a charge for work they were told did not happen -- and
+      // because the rows now exist, a resubmit inside the 90-day window comes
+      // back "all records are duplicates", so they cannot even re-run what they
+      // paid for. Charged, told nothing ran, and blocked from retrying.
+      //
+      // The tier 1 half really did fail, so those rows are written terminal as
+      // errors. Every accepted record therefore has a row, which keeps the job's
+      // records_submitted honest as the denominator of the match rate.
+      await insertHistoryRows(
+        tier1Records.map((record) => ({
+          ...buildHistoryRow(record),
+          status: 'error' as const,
+        }))
       );
+
+      if (tier2Records.length === 0) {
+        // Nothing survives the failure. The job really is dead, which is what
+        // this branch was written for.
+        await adminClient
+          .from('trace_jobs')
+          .update({ status: 'failed', error_message: submitResult.error || 'Submit failed' })
+          .eq('id', job.id);
+
+        return NextResponse.json(
+          { success: false, error: submitResult.error || 'Failed to submit bulk trace' },
+          { status: 500 }
+        );
+      }
+
+      // PARTIAL. The job stays open because the queue is still working, and the
+      // customer is told exactly which half failed rather than being handed a
+      // blanket failure for a job that is still running and will still be
+      // billed.
+      return NextResponse.json({
+        success: true,
+        job_id: job.id,
+        total_records: records.length,
+        dedupe_removed: totalDeduped,
+        records_submitted: tier2Records.length,
+        records_queued: tier2Records.length,
+        records_failed: tier1Records.length,
+        ...noKeyFields,
+        cached_count: dedupeResult.cachedResults.length,
+        estimated_cost: tier2Records.length * tier2Rate,
+        message: `We could not send the ${tier1Records.length} records that came with an owner name, so those were not traced and you were not charged for them. The other ${tier2Records.length} are running a full property trace and will finish on their own.`,
+      });
     }
 
     // Update job with Tracerfy job ID

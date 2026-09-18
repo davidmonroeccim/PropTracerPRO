@@ -217,6 +217,49 @@ export async function GET(request: Request) {
       for (const job of staleJobs) {
         bulkSwept++;
 
+        // THE TIER 2 QUEUE OUTRANKS EVERY TERMINAL VERDICT IN THIS LOOP, SO IT
+        // IS ASKED ONCE, HERE, BEFORE ANY BRANCH.
+        //
+        // This loop writes a terminal `trace_jobs.status` in four places: the
+        // 'No Tracerfy job ID' failure, the 'Timed out waiting for Tracerfy'
+        // failure, the completion at the end, and the completion just below.
+        // Every one of them is a verdict on the WHOLE job, and none of them can
+        // see the dossier queue: sweep-property-traces claims on
+        // `property_trace_status` alone and never reads the parent job, so its
+        // rows keep running and keep billing whatever this cron decides.
+        //
+        // A mixed job under queue contention reaches this 60-minute cutoff with
+        // tier 2 rows still pending as a matter of course. Finalizing it there
+        // writes a terminal status the status route's top-of-handler
+        // short-circuit then makes permanent, so the customer's summary and
+        // downloadable CSV are short by exactly the rows they are about to be
+        // charged for, on a file they have every reason to treat as final.
+        //
+        // Hoisting the question above the branch is also what stops the next
+        // person adding a fifth verdict below it and missing the guard.
+        const { data: jobRows } = await adminClient
+          .from('trace_history')
+          .select('property_trace_status, is_successful')
+          .eq('user_id', job.user_id)
+          .eq('trace_job_id', job.id);
+        const rows = (jobRows || []) as Array<{
+          property_trace_status: string | null;
+          is_successful: boolean | null;
+        }>;
+        const tier2Rows = rows.filter((r) => r.property_trace_status);
+
+        if (tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status))) {
+          // Still real work in flight, whatever the Tracerfy half is doing. Not
+          // stale, so leave the job entirely alone.
+          //
+          // This DEFERS the tier 1 settle rather than dropping it: the job stays
+          // 'processing', so the next run of this cron five minutes later picks
+          // it up again, and the status route settles it too if anyone polls.
+          // Once the queue drains, the branches below run exactly as they always
+          // did. Nothing is stranded, it just waits.
+          continue;
+        }
+
         if (!job.tracerfy_job_id) {
           // A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
           // TWO. Until phase 5c it could only be a submit that failed silently,
@@ -225,27 +268,6 @@ export async function GET(request: Request) {
           // no person CSV, sweep-property-traces owns every row, and the job
           // legitimately outlives this cutoff whenever the queue is under
           // contention.
-          //
-          // Failing that job would be the worst available outcome. Its rows are
-          // billed as the dossier answers, so the customer would be charged for
-          // a job this cron told them failed, while the cron that is actually
-          // working it carries on.
-          const { data: jobRows } = await adminClient
-            .from('trace_history')
-            .select('property_trace_status, is_successful')
-            .eq('user_id', job.user_id)
-            .eq('trace_job_id', job.id);
-          const rows = (jobRows || []) as Array<{
-            property_trace_status: string | null;
-            is_successful: boolean | null;
-          }>;
-          const tier2Rows = rows.filter((r) => r.property_trace_status);
-
-          if (tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status))) {
-            // Still real work in flight. Not stale, so leave it entirely alone.
-            continue;
-          }
-
           if (tier2Rows.length > 0) {
             // The queue has drained and the status route was never polled to
             // notice. Finish it the way that route would: COMPLETED, not failed.

@@ -348,3 +348,65 @@ describe("a stale bulk job carrying tier 2 rows", () => {
     });
   });
 });
+
+/**
+ * THE SAME GUARD, ON THE BRANCH THAT ALREADY HAD A TRACERFY JOB.
+ *
+ * The loop writes a terminal trace_jobs.status in four places, and all four are
+ * verdicts on the WHOLE job. A MIXED job -- tier 1 rows this cron settles, tier 2
+ * rows sweep-property-traces is still working -- reaches the 60-minute cutoff
+ * with its queue pending as a matter of course under contention. Finalizing it
+ * there writes a status the bulk status route's top-of-handler short-circuit
+ * then makes permanent, so the customer's CSV is short by exactly the rows they
+ * are about to be charged for.
+ */
+describe("a stale MIXED bulk job, whose Tracerfy half is ready", () => {
+  const jobWrites = () =>
+    H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+
+  beforeEach(() => {
+    H.staleJobs = [
+      { id: "job-1", user_id: "user-1", tracerfy_job_id: "tf-1", records_submitted: 2 },
+    ];
+  });
+
+  it("is not COMPLETED over a pending tier 2 row", async () => {
+    // MUTATION: move the guard back inside the !tracerfy_job_id branch and this
+    // goes red.
+    H.jobStatus = {
+      success: true,
+      pending: false,
+      results: [{ address: "1 MAIN ST", city: "AUSTIN", state: "TX" }],
+    };
+    H.historyRows = [{ property_trace_status: "queued", is_successful: null }];
+    await run();
+    expect(jobWrites()).toHaveLength(0);
+  });
+
+  it("is not FAILED over a pending tier 2 row when Tracerfy times out", async () => {
+    // The fourth terminal verdict in the same loop. A stalled Tracerfy bulk says
+    // nothing about the dossier queue, which is a different endpoint on a
+    // different clock and is still billing.
+    H.jobStatus = { success: false, pending: true };
+    H.historyRows = [{ property_trace_status: "processing_2", is_successful: null }];
+    await run();
+    expect(jobWrites()).toHaveLength(0);
+  });
+
+  it("is finalized normally once the queue has drained", async () => {
+    // The guard defers, it does not disable: the job stays processing, so the
+    // next run picks it up. It must not hold a job open for good.
+    H.jobStatus = { success: false, pending: true };
+    H.historyRows = [{ property_trace_status: "property_trace_done", is_successful: true }];
+    await run();
+    expect(jobWrites().length).toBeGreaterThan(0);
+  });
+
+  it("is finalized normally when it carries no tier 2 rows at all", async () => {
+    // Pre-5c shape, untouched.
+    H.jobStatus = { success: false, pending: true };
+    H.historyRows = [{ property_trace_status: null, is_successful: null }];
+    await run();
+    expect(jobWrites().length).toBeGreaterThan(0);
+  });
+});

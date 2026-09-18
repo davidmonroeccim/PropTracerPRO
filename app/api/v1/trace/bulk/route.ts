@@ -370,7 +370,15 @@ export async function POST(request: Request) {
             .upsert(batch, { onConflict: 'user_id,address_hash' });
         }
 
-        if (entityRecords.length === 0) {
+        // THE TIER 2 TERM IS NEW AND IT IS THE POINT. This guard was written
+        // when the third bucket did not exist, so it asked only whether the
+        // ENTITY queue still had work. The tier 2 rows were written above and
+        // sweep-property-traces claims on `property_trace_status` alone, never
+        // reading the parent job, so failing the job here stops nothing: it
+        // works them and bills every one. The caller would be told the submit
+        // failed and charged for it, and a resubmit inside the 90-day window
+        // comes back as duplicates, so they could not re-run what they paid for.
+        if (entityRecords.length === 0 && tier2Records.length === 0) {
           await adminClient
             .from('trace_jobs')
             .update({ status: 'failed', error_message: submitResult.error || 'Submit failed' })

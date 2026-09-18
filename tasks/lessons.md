@@ -4,6 +4,38 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-015: Asserting two outputs DIFFER is weaker than asserting what each one SAYS (2026-09-18)
+
+**What happened.** 5c-3A had to stop `deductOrZero` reporting a short wallet and an RPC error as the
+same thing, because one is an expected business outcome and the other is an infrastructure failure,
+and PTP has no alerting channel so the log is the only place an operator can tell them apart. The
+implementer wrote the fix, then wrote a test asserting the two log lines DIFFER, then mutated the
+code to collapse the classification.
+
+**The mutation SURVIVED.** The test still passed, because the two lines still differed: the vendor's
+own message text was different in each case even though both had been re-labelled as our database
+breaking. The assertion was satisfied by an incidental difference while the meaningful distinction,
+whose fault it is, had been destroyed. Re-written to assert the CLASSIFICATION each line carries, the
+mutation goes red.
+
+**The general form.** "These two outputs are not equal" is a much weaker claim than it looks, because
+any incidental variation satisfies it: a timestamp, an id, an interpolated vendor string. If the
+thing you care about is WHICH of two categories an output belongs to, assert the category. A
+difference test cannot tell you that the difference is the one that matters.
+
+**This is now the fourth member of one family** and they are worth reading together, because each
+produces a green test that would stay green if the thing it guards were deleted:
+- **L-009**, two branches identical by default because a flag collapses them.
+- **L-012**, a mutation that never applied, and a file that stopped loading.
+- **L-013**, an assertion satisfied by state left over from an earlier test.
+- **L-015**, an assertion satisfied by an incidental difference rather than the meaningful one.
+
+The common defence is the same in all four: **mutate the guard and watch it go red, and when it
+survives, do not assume the guard is fine because the test looks right.** Three of these four were
+invisible to reading and were caught only by the mutation run.
+
+---
+
 ## L-013: A spy you never clear is a fence that cannot fail (2026-09-18)
 
 **What happened.** Writing the test that proves a contact-vendor outage gets logged, the 5c-2
