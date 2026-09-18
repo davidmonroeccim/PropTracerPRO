@@ -2869,17 +2869,17 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 ## TASKS
 - [x] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status. **DONE `55616b0`**
 - [x] 2. P2: fix `getAnalytics` against the real response; test it. **DONE `55616b0`**
-- [ ] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time.
+- [~] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time. **ROUTES DONE `f9b15d7`; UI half is 5c-3B**
 - [x] 4. Migration: two queue columns + the all-rungs partial index. **DONE `54f1b41`, APPLIED to production and read back 2026-09-18**
 - [x] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5. **DONE `54f1b41`**
 - [x] 6. Billing in the worker: answer = billable, failure = retry, fold never flat. **DONE `54f1b41` + `64cd577`**
-- [ ] 7. Both pre-flight checks, with the two different failure owners.
-- [ ] 8. All three submit estimates.
+- [x] 7. Both pre-flight checks, with the two different failure owners. **DONE `c1556dd`, `lib/trace/bulkPreflight.ts`**
+- [x] 8. All three submit estimates. **DONE `f9b15d7` + `c1556dd`**
 - [ ] 9. Every string above.
 - [ ] 10. Poll ceiling / long-job UX.
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
-- [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
+- [x] 13. The submit wallet check must size against in-flight unbilled work. **DONE `c1556dd`.** Closes the back-to-back gap; the sub-second in-submit window is task 16.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and
@@ -2887,7 +2887,7 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       Recorded as a task rather than left in a source comment, which was the 5c-3A implementer's own
       point and it is right: a limitation living only in a comment is one nobody ever schedules.
       Caveat is at `lib/trace/bulkPreflight.ts:176-184`. **NOT a 5c blocker.**
-- [ ] 15. **THE ENQUEUE, and the plan never numbered it.** The submit routes must stop SKIPPING
+- [x] 15. **DONE `f9b15d7`, `c1556dd`, `c257062`. THE ENQUEUE, and the plan never numbered it.** The submit routes must stop SKIPPING
       blank-owner rows and start enqueueing them into `property_trace_status`. Today
       `app/api/trace/bulk/route.ts:92` pushes them to `skippedRecords` and writes
       `ai_research_status: BLANK_OWNER_SKIP_STATUS`. This is the actual capability change 5c exists

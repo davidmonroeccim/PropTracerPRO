@@ -6,6 +6,73 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### Full Property Trace, phase 5c-3A: blank-owner rows are traced, and a job cannot end over live work
+
+Commits `4336f5b`, `f9b15d7`, `c1556dd`, `c257062`, `76833aa`, then `e5a978c` and `2b327e9` from two
+fix rounds. 1193 passing from 1075, 65 files, 0 failing.
+
+**The capability change, and the plan never numbered it.** A bulk row arriving with no owner name was
+skipped and free. It is now enqueued and runs a Full Property Trace automatically, billed per record
+SUBMITTED, which means a miss is billed. 273 of 1,270 historical bulk rows are blank-owner. The task
+list had no entry for this; it lived only in a sentence of 5c-2's prose, and every other 5c-3 task is
+downstream of it. Added as task 15 before work began.
+
+- **The cap is 500 on all three surfaces**, down from 10,000 on two of them. Measured against all 92
+  historical jobs: median 20, p95 223, max 654, and exactly one job exceeds 500.
+- **Two pre-flight checks that must never be merged.** The customer's wallet answers "can the
+  customer pay" and fails 402. PTP's Tracerfy balance answers "can PTP execute" and refuses SILENTLY,
+  by David's explicit decision, because PTP has no alerting channel and he chose no alert over a fake
+  one. No message tells the customer to add funds for PTP's shortage; their wallet is not the problem.
+- **The wallet check now reserves rather than merely comparing.** It was a bare comparison that wrote
+  nothing, so two jobs submitted back to back both passed against the same dollars and the second got
+  the vendor work done for free. Settlement fails closed, so no customer was ever harmed and no
+  balance went negative, which is exactly why nobody found it: the only party out of pocket was PTP.
+  It closes the back-to-back gap but NOT the sub-second window inside one submit, which needs a
+  transactional hold and is recorded as task 16 rather than left in a comment.
+- **A blank-owner row with an unusable address is written `PROPERTY_TRACE_NO_KEY_STATUS`,** not the
+  blank-owner skip. The plan said otherwise and the plan was stale: `BLANK_OWNER_SKIP_REASON` tells
+  the customer to resend with the owner of record, which will not make a city-less row run. False
+  remediation advice is worse than a vague message, because the customer acts on it and it fails
+  again. The cron already wrote the honest status for the identical row; now the submit route does
+  too. One row shape, one answer, whichever layer notices.
+
+**NOTHING WAITED ON THE NEW QUEUE, and finding that was the difference between shipping and
+outage.** `property_trace_status` had exactly one reader outside its own module. So the moment the
+submit routes enqueued, an all-blank job would have hung at `processing` forever and a mixed job
+would have been marked complete by the first vendor poll while its tier 2 rows were still queued,
+landing a short CSV the customer may treat as final for rows they were charged for. Eleven terminal
+`trace_jobs.status` writers across four files now sit behind a pending-tier-2 gate. One of them, the
+"Timed out waiting for Tracerfy" verdict, was found by sweeping every writer rather than patching the
+ones that had been listed, and the guard is hoisted above its branch precisely so a fifth verdict
+cannot be added below it later.
+
+**A failed submit could charge a customer for work it told them did not happen.** When the person CSV
+failed, the job was marked `failed` and a 500 returned while the already-enqueued tier 2 rows kept
+billing. A 60 plus 40 batch on a vendor 5xx gave the customer an HTTP 500, a job reading failed, a $16
+charge, and "all duplicates" if they tried again. Now the job stays open, and all three surfaces say
+which half failed and requote only the survivors. Every count and quote field is computed from the
+surviving record set, including `trace_jobs.records_submitted`, which is off-payload, is the
+match-rate denominator, and is read back by both the status route and the completion webhook. Six
+fields in total were still counting the dead half; three were named in review and three were found by
+sweeping.
+
+**One sentence carries the whole two-model problem.** The partial-failure message states a charge for
+the tier 2 survivors and deliberately makes no charge promise about entity survivors, because
+entities are tier 1, billed per successful trace and free on a miss, so "you will be charged for
+these" would be false in the other direction. Only tier 2 is billed unconditionally, so only tier 2
+gets an unconditional sentence.
+
+Also fixed: `deductOrZero` reported a short wallet and an RPC error identically, so an operator with
+no alerting could not tell an expected business outcome from an infrastructure failure. And
+`total_charge` on the session status route now sums the stored per-row charges, because a per-poll
+number structurally cannot see a charge the cron booked.
+
+`lessons.md` gains L-015: asserting two outputs DIFFER is weaker than asserting what each one SAYS.
+The test proving the two deduct log lines were distinguishable SURVIVED its mutation, because the
+lines still differed by vendor message text while the meaningful classification had been destroyed.
+That is now the fourth member of a family with L-009, L-012 and L-013, all of which produce a green
+test that would stay green if the guard were deleted.
+
 ### SECURITY, found while applying the 5c-2 migration: trace_history is browser-writable
 
 **Not caused by 5c-2, but widened by it, and it must be closed before 5c ships.** Reading privileges
