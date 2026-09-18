@@ -2988,3 +2988,162 @@ Every finding was at a JOIN, which is the part no per-task review can see.
 2. `validateAddressInput`'s ZIP rule still refuses a mangled ZIP on v1, MCP and both single routes.
    Honest and recoverable there; loosening it is a public API change beyond this brief.
 3. Task 16 untouched, still needs a migration.
+
+---
+
+# PLAN: The HighLevel push bugs (2026-09-18). NOT STARTED, awaiting David's decisions.
+
+Baselines re-verified before planning: **1306 passing / 67 files / 0 failing**, `npx tsc --noEmit` 0.
+Blast radius read from PRODUCTION, not the handoff: **6 of 53 users** have both
+`highlevel_api_key` and `highlevel_location_id` set. The handoff's "6 of 52" holds.
+
+## THE PREDICATE, and it is not the three bullets
+
+The handoff lists three bugs. Per L-011 each was treated as a hypothesis and each was CONFIRMED
+against source, quoted below. But the list is a FLOOR (L-016). The property actually being fixed is:
+
+> **Every place a HighLevel push can fail, or a credential can be wrong, where the customer is
+> never told.**
+
+Grepping for that property rather than working the list found six more instances, three of which
+are in the same call path as the named bugs and two of which are worse than anything on the list.
+
+## ROOT CAUSES. Three, and the three named bugs are symptoms of them.
+
+### A. The client throws away WHY it failed, and never throws
+
+`lib/highlevel/client.ts:218-222` (create) and `:203-207` (update) are the whole of the failure
+handling:
+
+```ts
+if (!createRes.ok) {
+  const errText = await createRes.text();
+  console.error('HighLevel create contact error:', errText);
+  return { success: false, error: 'Failed to create contact' };
+}
+```
+
+`response.status` appears NOWHERE in `pushTraceToHighLevel`. A 401 (dead credential), a 422 (bad
+payload) and a 429 (rate limit) are indistinguishable to every caller and identical in the log.
+And because every fetch sits inside a `try` whose `catch` RETURNS rather than rethrows
+(`client.ts:227-230`), the function never rejects, so the `.catch()` on all five automatic call
+sites is dead handling that cannot fire on an HTTP failure.
+
+**A.2, the fully silent one, not in the handoff.** The duplicate-search step at `client.ts:166-180`
+tests `searchRes.ok` and has **no else**. A 401 there logs nothing at all, leaves
+`existingContactId` null, and falls through to the CREATE branch. So a credential failure on search
+silently converts "update the existing contact" into "create a duplicate", and if the credential is
+only partly broken that duplicate SUCCEEDS. This is a silent data-quality defect, not just a silent
+error.
+
+### B. `{success:false}` travels inside an HTTP 200, and nothing reads `success`
+
+`app/api/integrations/highlevel/push/route.ts:73` returns the client's result verbatim:
+`return NextResponse.json(result);`. `components/trace/PushToCrmButton.tsx:38-48` branches on
+`response.ok`, then on `data.pushed`, then on `data.action`. **It never reads `data.success`.**
+A 401 yields `{success:false, error:'Failed to create contact'}` at status 200, so `response.ok` is
+true, `pushed` and `action` are both undefined, and the component renders a green check reading
+**"Contact created"** for a contact that was not created. Confirmed by reading both files.
+
+**B.2, the bulk half, not in the handoff.** `push/route.ts:128` hardcodes
+`{ success: true, pushed, failed, total }`. `failed` is computed at `:124` and rendered nowhere.
+A 50-record job where every single write 401s shows a green check reading **"0 contacts pushed"**.
+
+The button is mounted in six places: `dashboard/page.tsx:270,328`, `history/page.tsx:189,247`,
+`trace/bulk/page.tsx:1061`, `TraceResultCard.tsx:284`.
+
+### C. "Connected" is a non-null check on two strings
+
+`settings/integrations/page.tsx:96`:
+`const isHlConnected = !!(profile?.highlevel_api_key && profile?.highlevel_location_id);`
+
+`app/api/integrations/highlevel/save/route.ts` makes **zero** outbound calls. It presence-checks two
+fields and writes them. Typing `x` and `y` and pressing Save yields a permanent green "Connected".
+
+**C.2, worse than the handoff recorded.** `page.tsx:142`, inside `saveHighLevel`, runs
+`setTestResult(null)`. So pressing Test Connection, receiving a red "Invalid API key", and pressing
+Save anyway CLEARS the red banner and turns the badge green in the same tick. Save does not merely
+skip validation, it erases a failure the user has already been shown.
+
+**C.3, the scope mismatch.** `page.tsx:370` tells the user to grant the `contacts` scope. The test
+route proves a READ (`test/route.ts:28`, `GET /contacts/?limit=1`). Every real push is a WRITE
+(`client.ts:197` PUT, `client.ts:212` POST). A read-only credential passes Test Connection cleanly
+and fails 100% of pushes. Confirming the exact GHL scope names against live GHL is a prerequisite
+for task 3.
+
+## THE ORGANISING DISTINCTION, and it is L-007 pointed at pushes
+
+**A 401 is not a trace failure. It is a CREDENTIAL failure.** Those two need different handling and
+today they are the same code path, which is why there is nowhere to put the error.
+
+| Class | Examples | What is broken | Who must hear about it |
+|---|---|---|---|
+| **credential** | 401, 403 | the stored key, for EVERY future push | the account owner, once, on the integrations page |
+| **record** | 422, 404 location | this one payload | whoever submitted this record |
+| **transient** | 429, 5xx, network | nothing | a retry |
+
+This is the same shape as L-007: two outcomes look identical from outside (no contact appeared in
+the CRM) and the handling must key on the thing that DIFFERS (is the key dead, or did this record
+fail), never on the thing they share (success is false). Writing the classification at the gate is
+required, with the comment, because the next reader will see three false-y values and merge them.
+
+**It is also what makes the automatic paths fixable at all.** Five of the six push sites have no
+user watching, so there is no synchronous channel to report into. Marking the CREDENTIAL dead is a
+single write that reaches the user later, on a page they will visit, and it covers all five at once.
+
+## TASKS
+
+- [ ] 1. **The client tells the truth about why it failed.** Return a discriminated failure
+      carrying the class above and the HTTP status. Fix the missing else at `client.ts:166-180` so a
+      failed search cannot silently become a duplicate create. Log the status, which is currently
+      never logged. Tests from scratch; there is no test file for this module.
+- [ ] 2. **The manual button stops reporting success on a failure.** Route: stop returning
+      `{success:false}` at 200, and stop hardcoding `success:true` on the bulk branch. Button: read
+      the outcome rather than `response.ok`, and show `failed` on bulk. Covers both B and B.2.
+- [ ] 3. **"Connected" means the credential worked.** Save validates before it stores. Save stops
+      clearing a failed test result (`page.tsx:142`). The badge reads a validated state. Depends on
+      decision 2 and on confirming the GHL scope names live (C.3).
+- [ ] 4. **The five automatic paths mark the credential dead on a credential-class failure.**
+      DEPENDS ON DECISION 1. Needs a migration. The five sites are `trace/status/route.ts:285`,
+      `trace/bulk/status/route.ts:599`, `v1/trace/status/route.ts:257`,
+      `v1/trace/bulk/status/route.ts:395`, `cron/sweep-stale-traces/route.ts:192`.
+
+## TEST POSITION, stated because it changes the work
+
+**There is zero coverage of any of this.** No test file for `lib/highlevel/client.ts`, for any of
+the four `/api/integrations/highlevel/*` routes, or for `PushToCrmButton`. The five test files that
+mention HighLevel all do the identical thing: `vi.mock` the module away AND set
+`highlevel_api_key: null`, so the push branch is never entered and there are no assertions on the
+mock at all. Every test here is new, none is a modification. Per L-015 the mutation run is the
+only thing that will prove any of them are worth having.
+
+## RECORDED, NOT FIXED. Named so they are not rediscovered as bugs.
+
+- **R1. The two newest crons never push at all, and the page says they do.**
+  `sweep-business-traces` and `sweep-property-traces` finalize traces and dispatch the user webhook
+  but never read the HighLevel columns. `settings/integrations/page.tsx:389` promises "Successful
+  traces will automatically create or update contacts in your HighLevel CRM." **So Full Property
+  Trace results never reach the CRM by the direct push.** This is a false claim rather than a silent
+  failure, and it is DECISION 3.
+- **R2. An entity pushes a garbage contact that SUCCEEDS.** `client.ts:155-157` splits `owner_name`
+  on whitespace and takes `[0]` as the first name, so `Colmaven, Llc` becomes firstName `Colmaven,`.
+  HighLevel accepts it. A successful push of wrong data, invisible to everyone.
+- **R3. Nothing is persisted about a push.** No `highlevel_contact_id` column anywhere. `contactId`
+  is returned by the client and dropped by all seven callers, so "did this trace reach the CRM" is
+  unanswerable after the fact.
+- **R4. A failed push still leaves a billed, successful trace.** On all five automatic paths the
+  row is set `is_successful: true` and the wallet is charged BEFORE the push fires (e.g.
+  `trace/status/route.ts:245-252` precedes `:285`). The user is billed, sees a successful trace, and
+  has nothing in the CRM. Correct under the billing model, since the trace did succeed, but it is
+  the reason the silent push failure is expensive rather than cosmetic.
+- **R5. UNVERIFIED, needs a live check.** `client.ts:191` sends `tags: ['proptracerpro']` in the PUT
+  body. Whether GHL v2 MERGES or REPLACES the tag array decides whether pushing over an existing
+  contact silently wipes the customer's own tags. This is GHL API semantics, not a repo fact, and
+  it is not safe to assume either way.
+- **R6. Only the first phone and first email are ever sent** (`client.ts:159-160`). Every other
+  contact on the trace is dropped without a word.
+- **R7. `createHighLevelContact` (`client.ts:88`) has zero callers.** Dead code, and it reads the
+  env-var credentials rather than the user's.
+- **R8. The bulk push loops are unbounded and uncapped.** `push/route.ts:110` is sequential with no
+  `maxDuration` on the route, so a large job can be cut off mid-loop with the already-counted
+  `pushed` value lost.
