@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import type { HighLevelFailureKind, HighLevelPushResult } from '@/lib/highlevel/client';
+import { recordHighLevelOutcomes } from '@/lib/highlevel/credentialHealth';
 import type { TraceResult } from '@/types';
 
 type PushFailure = Extract<HighLevelPushResult, { success: false }>;
@@ -121,6 +122,13 @@ export async function POST(request: NextRequest) {
         propertyZip: trace.zip || undefined,
       });
 
+      // The user IS watching this one, but the credential outcome still has to
+      // be recorded: the badge on the integrations page has to agree with what
+      // just happened here, and a success has to clear a flag an earlier
+      // automatic push set. Awaited because nothing downstream depends on the
+      // order and it never throws.
+      await recordHighLevelOutcomes(user.id, [result]);
+
       // A `{ success: false }` body used to leave here as an HTTP 200, which
       // made every `!response.ok` check downstream report a success.
       if (!result.success) {
@@ -163,6 +171,7 @@ export async function POST(request: NextRequest) {
 
       let pushed = 0;
       const failures: PushFailure[] = [];
+      const outcomes: HighLevelPushResult[] = [];
 
       for (const trace of traces) {
         const result = await pushTraceToHighLevel({
@@ -175,12 +184,17 @@ export async function POST(request: NextRequest) {
           propertyZip: trace.zip || undefined,
         });
 
+        outcomes.push(result);
+
         if (result.success) {
           pushed++;
         } else {
           failures.push(result);
         }
       }
+
+      // One credential decision for the whole job, not one per record.
+      await recordHighLevelOutcomes(user.id, outcomes);
 
       const failed = failures.length;
       const total = traces.length;

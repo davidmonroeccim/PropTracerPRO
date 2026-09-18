@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
@@ -188,16 +189,22 @@ export async function GET(request: Request) {
             }).catch((err) => console.error('Cron webhook error:', err));
           }
 
+          // This is the path with the LEAST chance of anyone noticing a dead
+          // credential: no user is on a page at all. The outcome is recorded
+          // against the credential so the integrations page can show it. It
+          // never throws, so the sweep continues either way.
           if (profile.highlevel_api_key && profile.highlevel_location_id && isSuccessful) {
-            pushTraceToHighLevel({
-              apiKey: profile.highlevel_api_key,
-              locationId: profile.highlevel_location_id,
-              traceResult: result,
-              propertyAddress: trace.normalized_address,
-              propertyCity: trace.city || undefined,
-              propertyState: trace.state || undefined,
-              propertyZip: trace.zip || undefined,
-            }).catch((err) => console.error('Cron HighLevel error:', err));
+            recordHighLevelPushes(trace.user_id, [
+              pushTraceToHighLevel({
+                apiKey: profile.highlevel_api_key,
+                locationId: profile.highlevel_location_id,
+                traceResult: result,
+                propertyAddress: trace.normalized_address,
+                propertyCity: trace.city || undefined,
+                propertyState: trace.state || undefined,
+                propertyZip: trace.zip || undefined,
+              }),
+            ]);
           }
         }
 

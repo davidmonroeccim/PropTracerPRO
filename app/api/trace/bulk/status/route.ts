@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
@@ -593,18 +594,25 @@ export async function GET(request: Request) {
         }).catch((err) => console.error('Bulk webhook dispatch error:', err));
       }
 
-      // HighLevel push — push each successful result
+      // HighLevel push — push each successful result. The whole batch is ONE
+      // credential decision rather than one write per record: a credential
+      // refusal anywhere flags the key, and an all-successful batch clears it
+      // once. Nobody is watching this push, so the flag is the only channel it
+      // has. See lib/highlevel/credentialHealth.ts.
       if (profile.highlevel_api_key && profile.highlevel_location_id) {
-        for (const { parsed, rawResult } of successfulResults) {
-          pushTraceToHighLevel({
-            apiKey: profile.highlevel_api_key,
-            locationId: profile.highlevel_location_id,
-            traceResult: parsed,
-            propertyAddress: rawResult.address,
-            propertyCity: rawResult.city,
-            propertyState: rawResult.state,
-          }).catch((err) => console.error('Bulk HighLevel push error:', err));
-        }
+        recordHighLevelPushes(
+          user.id,
+          successfulResults.map(({ parsed, rawResult }) =>
+            pushTraceToHighLevel({
+              apiKey: profile.highlevel_api_key,
+              locationId: profile.highlevel_location_id,
+              traceResult: parsed,
+              propertyAddress: rawResult.address,
+              propertyCity: rawResult.city,
+              propertyState: rawResult.state,
+            })
+          )
+        );
       }
     }
 

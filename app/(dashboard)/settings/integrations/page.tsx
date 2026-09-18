@@ -8,8 +8,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Eye, EyeOff, Copy, Check, ExternalLink, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
+import {
+  HighLevelInvalidNotice,
+  HighLevelStatusBadge,
+} from '@/components/integrations/HighLevelConnectionStatus';
+import { highLevelConnectionState } from '@/lib/highlevel/connectionState';
 import type { UserProfile } from '@/types';
 
 /**
@@ -55,7 +59,18 @@ export default function IntegrationsPage() {
   const [hlLocationId, setHlLocationId] = useState('');
   const [showHlKey, setShowHlKey] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ connected: boolean; error?: string } | null>(null);
+  /**
+   * The outcome of the last thing the user pressed, Test Connection or Save.
+   * Three tones, because there are three honest answers: it worked, it did not,
+   * and we could not tell. The third one exists so a save we could not verify
+   * never renders as a success.
+   */
+  const [testResult, setTestResult] = useState<{
+    connected: boolean;
+    error?: string;
+    warning?: string;
+    message?: string;
+  } | null>(null);
   const [savingHl, setSavingHl] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
@@ -93,7 +108,14 @@ export default function IntegrationsPage() {
     setLoading(false);
   };
 
-  const isHlConnected = !!(profile?.highlevel_api_key && profile?.highlevel_location_id);
+  /**
+   * "Connected" used to be `!!(api_key && location_id)`: two non-empty strings.
+   * It now also requires that no push has flagged the credential. The profile
+   * is read with `select('*')` above, so `highlevel_invalid_at` and
+   * `highlevel_invalid_reason` arrive with it and need no separate query.
+   */
+  const hlState = highLevelConnectionState(profile);
+  const isHlConnected = hlState.status !== 'not_connected';
 
   const testConnection = async () => {
     setTesting(true);
@@ -112,7 +134,10 @@ export default function IntegrationsPage() {
       const data = await response.json();
       setTestResult(data);
     } catch {
-      setTestResult({ connected: false, error: 'Network error' });
+      setTestResult({
+        connected: false,
+        error: 'We could not reach PropTracerPRO to run the test. Check your connection and try again.',
+      });
     }
 
     setTesting(false);
@@ -133,16 +158,45 @@ export default function IntegrationsPage() {
       });
 
       const data = await response.json();
+
+      // SAVE REPLACES THE LAST OUTCOME, IT DOES NOT ERASE IT. This used to run
+      // setTestResult(null), so a red "Invalid API key" from Test Connection
+      // vanished the moment Save was pressed and the badge turned green in the
+      // same tick. Save now always leaves its own honest answer on screen.
       if (data.success) {
         setProfile({
           ...profile,
           highlevel_api_key: hlApiKey,
           highlevel_location_id: hlLocationId,
+          // Only a VERIFIED save clears the flag, and the server has already
+          // done it. A save we could not verify leaves it exactly as it was,
+          // because the flag still describes the last push that really ran.
+          ...(data.connected
+            ? {
+                highlevel_invalid_at: null,
+                highlevel_invalid_status: null,
+                highlevel_invalid_reason: null,
+              }
+            : {}),
         });
-        setTestResult(null);
+
+        setTestResult(
+          data.connected
+            ? { connected: true, message: 'Saved. We reached HighLevel with this key and it worked.' }
+            : { connected: false, warning: data.warning }
+        );
+      } else {
+        setTestResult({
+          connected: false,
+          error: data.error || 'We could not save your HighLevel key. Try again in a moment.',
+        });
       }
     } catch (error) {
       console.error('Failed to save HighLevel credentials:', error);
+      setTestResult({
+        connected: false,
+        error: 'We could not reach PropTracerPRO to save your key. Check your connection and try again.',
+      });
     }
 
     setSavingHl(false);
@@ -259,14 +313,10 @@ export default function IntegrationsPage() {
             <div>
               <CardTitle>HighLevel CRM</CardTitle>
               <CardDescription>
-                Automatically create or update contacts in your HighLevel CRM when traces complete.
+                Create or update contacts in your HighLevel CRM from your trace results.
               </CardDescription>
             </div>
-            {isHlConnected ? (
-              <Badge className="bg-green-100 text-green-800">Connected</Badge>
-            ) : (
-              <Badge variant="secondary">Not Connected</Badge>
-            )}
+            <HighLevelStatusBadge state={hlState} />
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -303,9 +353,24 @@ export default function IntegrationsPage() {
             />
           </div>
 
+          {/* What the last real push said about this credential, and the fix. */}
+          <HighLevelInvalidNotice state={hlState} />
+
           {testResult && (
-            <div className={`text-sm p-3 rounded ${testResult.connected ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-              {testResult.connected ? 'Connection successful!' : `Connection failed: ${testResult.error}`}
+            <div
+              className={`text-sm p-3 rounded ${
+                testResult.connected
+                  ? 'bg-green-50 text-green-700'
+                  : testResult.warning
+                    ? 'bg-amber-50 text-amber-800'
+                    : 'bg-red-50 text-red-700'
+              }`}
+            >
+              {testResult.connected
+                ? testResult.message || 'We reached HighLevel with this key and it worked.'
+                : testResult.warning ||
+                  testResult.error ||
+                  'Something went wrong talking to HighLevel.'}
             </div>
           )}
 
@@ -367,11 +432,12 @@ export default function IntegrationsPage() {
                     <li>Log in to your HighLevel sub-account</li>
                     <li>Go to <strong>Settings, then Private Integrations</strong></li>
                     <li>Click <strong>Create new Integration</strong></li>
-                    <li>Name it (e.g. &quot;PropTracerPRO&quot;) and select the <strong>contacts</strong> scope</li>
+                    <li>Name it (e.g. &quot;PropTracerPRO&quot;) and tick BOTH <strong>contacts.readonly</strong> and <strong>contacts.write</strong>. They are two separate permissions in HighLevel. Test Connection only reads, so a token with just contacts.readonly passes the test and then fails every push</li>
                     <li>Copy the generated token immediately. <strong>You won&apos;t be able to see it again</strong></li>
                     <li>Paste the token in the API Key field above</li>
                   </ol>
                   <p className="mt-1 text-xs text-gray-500">If you don&apos;t see Private Integrations, enable it under <strong>Settings, then Labs</strong> first.</p>
+                  <p className="mt-1 text-xs text-gray-500">Ticked the wrong permissions? You can edit them on an integration you already made, so you do not need to create a new token or paste a new key here.</p>
                 </div>
 
                 <div>
@@ -385,8 +451,19 @@ export default function IntegrationsPage() {
             )}
           </div>
 
+          {/*
+            R1. This used to read "Successful traces will automatically create
+            or update contacts in your HighLevel CRM", which is not true of
+            every trace. The two crons that finalize a Full Property Trace
+            (sweep-business-traces, sweep-property-traces) never touch the
+            HighLevel columns, so a tier 2 result does not reach the CRM on its
+            own. The sentence now says what actually happens. Do not widen it
+            back without adding the push.
+          */}
           <p className="text-xs text-gray-500">
-            Successful traces will automatically create or update contacts in your HighLevel CRM.
+            A skip trace where you give us the owner of record pushes to HighLevel on its own as soon
+            as it comes back, whether you ran it here, in bulk, or through the API. A Full Property
+            Trace does not push itself, so send those over with the Push to CRM button on the result.
           </p>
         </CardContent>
       </Card>

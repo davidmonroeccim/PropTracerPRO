@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { pushTraceToHighLevel, validateHighLevelCredential } from '@/lib/highlevel/client';
 import type { TraceResult } from '@/types';
 
 /**
@@ -458,5 +458,82 @@ describe('the copy rules, which are enforced elsewhere in this repo', () => {
       expect(message).not.toMatch(/[–—*`#_]/u);
       expect(message).not.toMatch(/\p{Extended_Pictographic}/u);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('validateHighLevelCredential, which is what Save and Test Connection ask', () => {
+  function validate() {
+    return validateHighLevelCredential({ apiKey: 'key-1', locationId: 'loc-1' });
+  }
+
+  it('reads one contact at the location it was given', async () => {
+    legs = { search: json(200, { contacts: [] }) };
+
+    await expect(validate()).resolves.toEqual({ success: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toContain('/contacts/');
+    expect(calls[0].url).toContain('locationId=loc-1');
+    expect(calls[0].url).toContain('limit=1');
+  });
+
+  it('never writes anything, so a check cannot create a contact', async () => {
+    legs = { search: json(200, { contacts: [] }) };
+    await validate();
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it.each([
+    ['a revoked token', 401, { message: 'Invalid JWT' }, 'token'],
+    [
+      'a missing read scope',
+      401,
+      { message: 'The token is not authorized for this scope.' },
+      'scope',
+    ],
+    [
+      'the wrong location',
+      403,
+      { message: 'The token does not have access to this location.' },
+      'location',
+    ],
+    ['a refusal we cannot read', 401, { message: 'something new' }, 'unknown'],
+  ] as Array<[string, number, unknown, string]>)(
+    '%s classifies as credential with reason %s',
+    async (_label, status, body, reason) => {
+      // The reason is the whole reason this function is shared with save: the
+      // save policy REFUSES on token and location and SAVES on scope, and all
+      // three arrive as a 401 or a 403 with nothing else to tell them apart.
+      legs = { search: json(status, body) };
+
+      const result = await validate();
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error('unreachable');
+      expect(result.kind).toBe('credential');
+      if (result.kind !== 'credential') throw new Error('unreachable');
+      expect(result.reason).toBe(reason);
+      expect(result.status).toBe(status);
+    }
+  );
+
+  it('classifies a rate limit as transient, not as a bad credential', async () => {
+    legs = { search: json(429, { message: 'slow down' }) };
+
+    const result = await validate();
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error('unreachable');
+    expect(result.kind).toBe('transient');
+  });
+
+  it('classifies a thrown fetch as transient with no status at all', async () => {
+    legs = { search: new Error('ECONNRESET') };
+
+    const result = await validate();
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error('unreachable');
+    expect(result.kind).toBe('transient');
+    expect(result).not.toHaveProperty('status');
   });
 });

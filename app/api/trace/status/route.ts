@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
@@ -280,17 +281,25 @@ export async function GET(request: Request) {
         }).catch((err) => console.error('Webhook dispatch error:', err));
       }
 
-      // HighLevel push — only for successful traces with results
+      // HighLevel push — only for successful traces with results.
+      //
+      // THE OUTCOME IS RECORDED, NOT DISCARDED. Nobody is watching this push,
+      // so a dead credential used to reach a console.error and stop. The
+      // recorder is the channel: a credential-class refusal flags the key on
+      // the profile and the integrations page shows it. It never throws, so
+      // this route still returns the customer's trace result either way.
       if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
-        pushTraceToHighLevel({
-          apiKey: integrationProfile.highlevel_api_key,
-          locationId: integrationProfile.highlevel_location_id,
-          traceResult: result,
-          propertyAddress: trace.normalized_address,
-          propertyCity: trace.city || undefined,
-          propertyState: trace.state || undefined,
-          propertyZip: trace.zip || undefined,
-        }).catch((err) => console.error('HighLevel push error:', err));
+        recordHighLevelPushes(user.id, [
+          pushTraceToHighLevel({
+            apiKey: integrationProfile.highlevel_api_key,
+            locationId: integrationProfile.highlevel_location_id,
+            traceResult: result,
+            propertyAddress: trace.normalized_address,
+            propertyCity: trace.city || undefined,
+            propertyState: trace.state || undefined,
+            propertyZip: trace.zip || undefined,
+          }),
+        ]);
       }
     }
 

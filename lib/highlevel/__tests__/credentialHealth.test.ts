@@ -1,0 +1,337 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * WHY THIS FILE EXISTS. Five of the seven `pushTraceToHighLevel` call sites run
+ * with nobody watching, and every one of them threw the result away. A customer
+ * whose HighLevel key was revoked got silence forever. This helper is the only
+ * channel those paths have, so its routing is the whole fix.
+ *
+ * THE THREE FAILURE CLASSES ARE NOT INTERCHANGEABLE and the tests below assert
+ * the CLASSIFICATION and the STORED VALUES, never that two runs merely differ
+ * (L-015). A record failure and a transient failure must write NOTHING, and
+ * "wrote nothing" is asserted as an empty update list rather than as an absent
+ * key, because an absent key is also what a half-written payload looks like.
+ */
+
+interface Update {
+  table: string;
+  payload: Record<string, unknown>;
+}
+
+const H = vi.hoisted(() => ({
+  /** The row `select('highlevel_invalid_at')` comes back with. */
+  profileRow: null as Record<string, unknown> | null,
+  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  selects: [] as string[],
+  /** Set to make every update come back as a PostgREST error. */
+  updateError: null as unknown,
+  /** Set to make createAdminClient itself blow up. */
+  adminThrows: false,
+}));
+
+function chainTo(data: unknown, error: unknown = null) {
+  const node: Record<string, unknown> = {};
+  const self = () => node;
+  node.eq = self;
+  node.single = () => Promise.resolve({ data, error });
+  node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+    Promise.resolve({ data, error }).then(res, rej);
+  return node;
+}
+
+vi.mock('@/lib/supabase/admin', () => ({
+  createAdminClient: () => {
+    if (H.adminThrows) throw new Error('missing service role key');
+    return {
+      from: (table: string) => ({
+        select: (columns: string) => {
+          H.selects.push(`${table}:${columns}`);
+          return chainTo(H.profileRow);
+        },
+        update: (payload: Record<string, unknown>) => {
+          H.updates.push({ table, payload });
+          return chainTo(null, H.updateError);
+        },
+      }),
+    };
+  },
+}));
+
+const { recordHighLevelOutcomes, recordHighLevelPushes, highLevelVerdict } = await import(
+  '@/lib/highlevel/credentialHealth'
+);
+type Outcome = NonNullable<Parameters<typeof recordHighLevelOutcomes>[1][number]>;
+
+const SUCCESS = { success: true, contactId: 'c-1', action: 'created' } as const;
+
+const TOKEN_DEAD = {
+  success: false,
+  kind: 'credential',
+  reason: 'token',
+  status: 401,
+  error: 'HighLevel rejected your API key. Reconnect HighLevel in Settings.',
+} as const;
+
+const SCOPE_DEAD = {
+  success: false,
+  kind: 'credential',
+  reason: 'scope',
+  status: 401,
+  error: 'Your HighLevel token is missing the contacts.write permission.',
+} as const;
+
+const LOCATION_DEAD = {
+  success: false,
+  kind: 'credential',
+  reason: 'location',
+  status: 403,
+  error: 'Your HighLevel token does not have access to that location.',
+} as const;
+
+const UNKNOWN_DEAD = {
+  success: false,
+  kind: 'credential',
+  reason: 'unknown',
+  status: 401,
+  error: 'HighLevel refused the credential.',
+} as const;
+
+const RECORD_FAILURE = {
+  success: false,
+  kind: 'record',
+  status: 422,
+  error: 'HighLevel would not accept this contact.',
+} as const;
+
+const RATE_LIMITED = {
+  success: false,
+  kind: 'transient',
+  status: 429,
+  error: 'HighLevel is not accepting pushes right now.',
+} as const;
+
+/** A thrown fetch: transient with NO status at all. */
+const NETWORK_DOWN = {
+  success: false,
+  kind: 'transient',
+  error: 'HighLevel is not accepting pushes right now.',
+} as const;
+
+beforeEach(() => {
+  H.updates = [];
+  H.selects = [];
+  H.profileRow = null;
+  H.updateError = null;
+  H.adminThrows = false;
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+/** The update rows this run wrote to user_profiles, in order. */
+function profileUpdates(): Update[] {
+  return H.updates.filter((u) => u.table === 'user_profiles');
+}
+
+// ---------------------------------------------------------------------------
+
+describe('a credential-class failure marks the credential dead, with the reason', () => {
+  it.each([
+    ['token', TOKEN_DEAD, 401],
+    ['scope', SCOPE_DEAD, 401],
+    ['location', LOCATION_DEAD, 403],
+    ['unknown', UNKNOWN_DEAD, 401],
+  ] as const)('reason %s is stored, not inferred from the status', async (reason, failure, status) => {
+    await recordHighLevelOutcomes('user-1', [failure as Outcome]);
+
+    const updates = profileUpdates();
+    expect(updates).toHaveLength(1);
+    const payload = updates[0].payload;
+
+    // All three columns must be PRESENT. A payload carrying only the timestamp
+    // leaves a stale reason behind and the badge then names the wrong fix.
+    expect('highlevel_invalid_at' in payload).toBe(true);
+    expect('highlevel_invalid_status' in payload).toBe(true);
+    expect('highlevel_invalid_reason' in payload).toBe(true);
+
+    expect(payload.highlevel_invalid_reason).toBe(reason);
+    expect(payload.highlevel_invalid_status).toBe(status);
+    expect(typeof payload.highlevel_invalid_at).toBe('string');
+    expect(Number.isNaN(Date.parse(String(payload.highlevel_invalid_at)))).toBe(false);
+  });
+
+  it('401 alone does not decide the reason: two 401s store two different reasons', async () => {
+    // The point of the reason column. A revoked token and a missing scope are
+    // BOTH 401 and need different instructions from the user.
+    await recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome]);
+    await recordHighLevelOutcomes('user-1', [SCOPE_DEAD as Outcome]);
+
+    const updates = profileUpdates();
+    expect(updates.map((u) => u.payload.highlevel_invalid_status)).toEqual([401, 401]);
+    expect(updates.map((u) => u.payload.highlevel_invalid_reason)).toEqual(['token', 'scope']);
+  });
+});
+
+describe('a failure that says nothing about the credential changes nothing', () => {
+  it('a record failure writes nothing at all', async () => {
+    await recordHighLevelOutcomes('user-1', [RECORD_FAILURE as Outcome]);
+    expect(H.updates).toEqual([]);
+  });
+
+  it('a rate limit writes nothing at all', async () => {
+    await recordHighLevelOutcomes('user-1', [RATE_LIMITED as Outcome]);
+    expect(H.updates).toEqual([]);
+  });
+
+  it('a network throw writes nothing at all', async () => {
+    await recordHighLevelOutcomes('user-1', [NETWORK_DOWN as Outcome]);
+    expect(H.updates).toEqual([]);
+  });
+
+  it('a record failure does not even read the profile, so it cannot clear one either', async () => {
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+    await recordHighLevelOutcomes('user-1', [RECORD_FAILURE as Outcome]);
+    expect(H.selects).toEqual([]);
+    expect(H.updates).toEqual([]);
+  });
+});
+
+describe('a success CLEARS the flag, which is the half nobody sees until it is missing', () => {
+  it('clears all three columns to null when the flag is set', async () => {
+    // HighLevel scopes are editable without regenerating the token, so a user
+    // can fix a scope problem with no save ever happening in PTP. If only save
+    // cleared the flag, that user stays red forever while pushes work.
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+
+    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+
+    const updates = profileUpdates();
+    expect(updates).toHaveLength(1);
+    const payload = updates[0].payload;
+
+    // `in` rather than `?? null`: an ABSENT key satisfies a null assertion just
+    // as well as a null value, and an absent key leaves the flag standing.
+    expect('highlevel_invalid_at' in payload).toBe(true);
+    expect('highlevel_invalid_status' in payload).toBe(true);
+    expect('highlevel_invalid_reason' in payload).toBe(true);
+    expect(payload.highlevel_invalid_at).toBeNull();
+    expect(payload.highlevel_invalid_status).toBeNull();
+    expect(payload.highlevel_invalid_reason).toBeNull();
+  });
+
+  it('writes nothing when the flag is already clear, so a healthy push costs one read', async () => {
+    H.profileRow = { highlevel_invalid_at: null };
+    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+    expect(H.updates).toEqual([]);
+    expect(H.selects).toEqual(['user_profiles:highlevel_invalid_at']);
+  });
+
+  it('writes nothing when the profile row cannot be read', async () => {
+    H.profileRow = null;
+    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+    expect(H.updates).toEqual([]);
+  });
+});
+
+describe('a batch is one decision, not one write per record', () => {
+  it('clears once for fifty successful pushes', async () => {
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+    const outcomes = Array.from({ length: 50 }, () => SUCCESS as Outcome);
+
+    await recordHighLevelOutcomes('user-1', outcomes);
+
+    expect(profileUpdates()).toHaveLength(1);
+    expect(H.selects).toHaveLength(1);
+  });
+
+  it('one credential failure among successes marks the credential dead', async () => {
+    // Credential wins over success deliberately: a key that refused any write
+    // is the outcome that keeps failing until somebody acts on it.
+    await recordHighLevelOutcomes('user-1', [
+      SUCCESS as Outcome,
+      SCOPE_DEAD as Outcome,
+      SUCCESS as Outcome,
+    ]);
+
+    const updates = profileUpdates();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].payload.highlevel_invalid_reason).toBe('scope');
+    expect(updates[0].payload.highlevel_invalid_at).not.toBeNull();
+  });
+
+  it('successes mixed with record failures still clear, because no credential complaint was made', async () => {
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+
+    await recordHighLevelOutcomes('user-1', [
+      RECORD_FAILURE as Outcome,
+      SUCCESS as Outcome,
+      RECORD_FAILURE as Outcome,
+    ]);
+
+    const updates = profileUpdates();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].payload.highlevel_invalid_at).toBeNull();
+  });
+
+  it('an all-transient batch writes nothing', async () => {
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+    await recordHighLevelOutcomes('user-1', [RATE_LIMITED as Outcome, NETWORK_DOWN as Outcome]);
+    expect(H.updates).toEqual([]);
+  });
+});
+
+describe('it never throws into the caller, because five call sites are on a request path', () => {
+  it('survives a failed update', async () => {
+    H.updateError = { message: 'permission denied' };
+    await expect(recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
+  });
+
+  it('survives createAdminClient throwing', async () => {
+    H.adminThrows = true;
+    await expect(recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
+  });
+
+  it('survives a push promise that rejects, and records nothing from it', async () => {
+    await expect(
+      recordHighLevelPushes('user-1', [Promise.reject(new Error('boom'))])
+    ).resolves.toBeUndefined();
+    expect(H.updates).toEqual([]);
+  });
+
+  it('records the resolved outcomes of the promises it is handed', async () => {
+    await recordHighLevelPushes('user-1', [
+      Promise.resolve(SUCCESS as Outcome),
+      Promise.resolve(LOCATION_DEAD as Outcome),
+    ]);
+
+    const updates = profileUpdates();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].payload.highlevel_invalid_reason).toBe('location');
+    expect(updates[0].payload.highlevel_invalid_status).toBe(403);
+  });
+});
+
+describe('the verdict itself, so the routing is readable without a database', () => {
+  it('names the credential failure it is acting on', () => {
+    expect(highLevelVerdict([RECORD_FAILURE as Outcome, SCOPE_DEAD as Outcome])).toEqual({
+      kind: 'dead',
+      failure: SCOPE_DEAD,
+    });
+  });
+
+  it('calls a run with only non-credential failures no signal, not healthy', () => {
+    // "Not dead" is not "alive". Treating a rate limit as proof the key works
+    // would clear a red badge that is still correct.
+    expect(highLevelVerdict([RATE_LIMITED as Outcome, RECORD_FAILURE as Outcome])).toEqual({
+      kind: 'no_signal',
+    });
+  });
+
+  it('calls a run with a success healthy', () => {
+    expect(highLevelVerdict([RATE_LIMITED as Outcome, SUCCESS as Outcome])).toEqual({
+      kind: 'healthy',
+    });
+  });
+
+  it('calls an empty run no signal', () => {
+    expect(highLevelVerdict([])).toEqual({ kind: 'no_signal' });
+  });
+});

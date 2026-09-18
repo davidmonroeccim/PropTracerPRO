@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
@@ -252,17 +253,21 @@ export async function GET(request: Request) {
         }).catch((err) => console.error('Webhook dispatch error:', err));
       }
 
-      // HighLevel push — only for successful traces with results
+      // HighLevel push — only for successful traces with results. The outcome
+      // is recorded against the credential rather than discarded: see the same
+      // block in app/api/trace/status/route.ts for why.
       if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
-        pushTraceToHighLevel({
-          apiKey: integrationProfile.highlevel_api_key,
-          locationId: integrationProfile.highlevel_location_id,
-          traceResult: result,
-          propertyAddress: trace.normalized_address,
-          propertyCity: trace.city || undefined,
-          propertyState: trace.state || undefined,
-          propertyZip: trace.zip || undefined,
-        }).catch((err) => console.error('HighLevel push error:', err));
+        recordHighLevelPushes(profile.id, [
+          pushTraceToHighLevel({
+            apiKey: integrationProfile.highlevel_api_key,
+            locationId: integrationProfile.highlevel_location_id,
+            traceResult: result,
+            propertyAddress: trace.normalized_address,
+            propertyCity: trace.city || undefined,
+            propertyState: trace.state || undefined,
+            propertyZip: trace.zip || undefined,
+          }),
+        ]);
       }
     }
 

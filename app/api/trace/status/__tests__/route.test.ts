@@ -27,6 +27,8 @@ const H = vi.hoisted(() => ({
   jobStatus: null as unknown as Record<string, unknown>,
   updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
+  /** What the fire-and-forget HighLevel push resolves with. */
+  pushResult: { success: true, contactId: "c-1", action: "created" } as Record<string, unknown>,
 }));
 
 /** Minimal PostgREST-shaped builder: chainable AND awaitable, like the real one. */
@@ -76,7 +78,9 @@ vi.mock("@/lib/tracerfy/client", async (importOriginal) => {
 vi.mock("@/lib/utils/auto-rebill", () => ({
   triggerAutoRebillIfNeeded: vi.fn(async () => {}),
 }));
-vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
+vi.mock("@/lib/highlevel/client", () => ({
+  pushTraceToHighLevel: vi.fn(async () => H.pushResult),
+}));
 
 const fetchSpy = vi.fn(async () => new Response(null, { status: 200 }));
 
@@ -84,6 +88,7 @@ beforeEach(() => {
   H.updates = [];
   H.rpcCalls = [];
   H.deductResult = true;
+  H.pushResult = { success: true, contactId: "c-1", action: "created" };
   fetchSpy.mockClear();
   vi.stubGlobal("fetch", fetchSpy);
 
@@ -502,5 +507,105 @@ describe("trace/status route publishes 65 of the stored 86 keys", () => {
     await GET(new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1"));
 
     expect(Object.keys(row)).toHaveLength(86);
+  });
+});
+
+/**
+ * THE AUTOMATIC PATH. This route pushes to HighLevel with nobody watching and
+ * used to drop the result on the floor entirely: `.catch(console.error)` on a
+ * function that never rejects. A customer whose key was revoked got silence,
+ * forever. The push outcome now has to reach the credential health columns,
+ * which is the only channel a fire-and-forget path has.
+ *
+ * These assert the STORED VALUES, through the real recorder and the same
+ * mocked admin client the rest of this file uses.
+ */
+describe("trace/status route records the HighLevel push outcome against the credential", () => {
+  /** One macrotask tick, which flushes every pending microtask in these mocks. */
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  const flagWrite = () =>
+    H.updates.find(
+      (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
+    );
+
+  beforeEach(() => {
+    H.profile = {
+      ...H.profile,
+      highlevel_api_key: "key-1",
+      highlevel_location_id: "loc-1",
+    };
+  });
+
+  it("marks the credential dead, with the reason, on a credential-class failure", async () => {
+    H.pushResult = {
+      success: false,
+      kind: "credential",
+      reason: "scope",
+      status: 401,
+      error: "missing contacts.write",
+    };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
+    );
+    await settle();
+
+    const flag = flagWrite();
+    expect(flag).toBeDefined();
+    expect(flag?.payload.highlevel_invalid_reason).toBe("scope");
+    expect(flag?.payload.highlevel_invalid_status).toBe(401);
+    expect(flag?.payload.highlevel_invalid_at).not.toBeNull();
+  });
+
+  it("leaves the credential alone when only the record was refused", async () => {
+    // A malformed payload says nothing about the key. Marking it dead here
+    // would send a user to reconnect a credential that works.
+    H.pushResult = { success: false, kind: "record", status: 422, error: "bad payload" };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
+    );
+    await settle();
+
+    expect(flagWrite()).toBeUndefined();
+  });
+
+  it("leaves the credential alone when HighLevel was simply busy", async () => {
+    H.pushResult = { success: false, kind: "transient", status: 429, error: "slow down" };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
+    );
+    await settle();
+
+    expect(flagWrite()).toBeUndefined();
+  });
+
+  it("still returns the trace result when the credential write happens", async () => {
+    // Five of these sites are on a request path the customer is waiting on.
+    // Recording the credential outcome must never change what they get back.
+    H.pushResult = {
+      success: false,
+      kind: "credential",
+      reason: "token",
+      status: 401,
+      error: "Invalid JWT",
+    };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
+      )
+    ).json();
+    await settle();
+
+    expect(body.success).toBe(true);
+    expect(body.status).toBe("success");
+    expect(body.result.phones).toHaveLength(1);
   });
 });

@@ -247,7 +247,8 @@ const RECORD_MESSAGE = 'HighLevel would not accept this contact.';
 /** Covers 429, every 5xx and a thrown network error: in all three HighLevel is simply not taking it. */
 const TRANSIENT_MESSAGE = 'HighLevel is not accepting pushes right now. Try again shortly.';
 
-type HighLevelPushFailure = Extract<HighLevelPushResult, { success: false }>;
+/** Any classified refusal, whatever call produced it. */
+export type HighLevelPushFailure = Extract<HighLevelPushResult, { success: false }>;
 
 /** Turn a non-ok response into a classified failure, and log the status while we have it. */
 async function failureFrom(stage: string, response: Response): Promise<HighLevelPushFailure> {
@@ -275,6 +276,55 @@ async function failureFrom(stage: string, response: Response): Promise<HighLevel
 function networkFailure(stage: string, cause: unknown): HighLevelPushFailure {
   console.error(`HighLevel ${stage} failed:`, { kind: 'transient', cause });
   return { success: false, kind: 'transient', error: TRANSIENT_MESSAGE };
+}
+
+/** A credential check: it worked, or the same classified refusal a push returns. */
+export type HighLevelValidation = { success: true } | HighLevelPushFailure;
+
+/**
+ * Asks HighLevel whether a credential works, by reading one contact.
+ *
+ * WHAT THIS PROVES, AND WHAT IT DOES NOT, because the difference decides what
+ * the caller is allowed to do with the answer. This is a READ. Every product
+ * call PTP makes is a WRITE, and `contacts.readonly` and `contacts.write` are
+ * SEPARATE HighLevel scopes
+ * (https://marketplace.gohighlevel.com/docs/Authorization/Scopes/). So:
+ *
+ *   success          the token reaches this location and can read contacts.
+ *                    It does NOT prove a write will be accepted.
+ *   reason token     the token itself was rejected. That holds for every verb.
+ *   reason location  the token cannot reach this location. Every verb again.
+ *   reason scope     only that the READ scope is missing. A token with
+ *                    contacts.write and not contacts.readonly lands here and
+ *                    pushes perfectly. Refusing on this would block a working
+ *                    credential.
+ *   transient/record HighLevel did not give us an answer we can generalise
+ *                    from. Assert nothing.
+ *
+ * Callers must key on the reason, never on "the check failed".
+ */
+export async function validateHighLevelCredential(params: {
+  apiKey: string;
+  locationId: string;
+}): Promise<HighLevelValidation> {
+  const { apiKey, locationId } = params;
+
+  try {
+    const url = `${HIGHLEVEL.BASE_URL}/contacts/?locationId=${encodeURIComponent(locationId)}&limit=1`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Version: HIGHLEVEL.API_VERSION,
+      },
+    });
+
+    if (!response.ok) return failureFrom('credential check', response);
+
+    return { success: true };
+  } catch (error) {
+    return networkFailure('credential check', error);
+  }
 }
 
 /**

@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
@@ -389,19 +390,26 @@ export async function GET(request: Request) {
       }).catch((err) => console.error('API v1 bulk webhook dispatch error:', err));
     }
 
+    // The whole batch is ONE credential decision rather than one write per
+    // record. Nobody is watching this push, so the credential flag is the only
+    // channel it has. See lib/highlevel/credentialHealth.ts.
     if (profile.highlevel_api_key && profile.highlevel_location_id) {
+      const pushes = [];
       for (const row of rows) {
         if (!row.is_successful || !row.trace_result) continue;
-        pushTraceToHighLevel({
-          apiKey: profile.highlevel_api_key,
-          locationId: profile.highlevel_location_id,
-          traceResult: row.trace_result,
-          propertyAddress: row.normalized_address,
-          propertyCity: row.city || undefined,
-          propertyState: row.state || undefined,
-          propertyZip: row.zip || undefined,
-        }).catch((err) => console.error('API v1 bulk HighLevel push error:', err));
+        pushes.push(
+          pushTraceToHighLevel({
+            apiKey: profile.highlevel_api_key,
+            locationId: profile.highlevel_location_id,
+            traceResult: row.trace_result,
+            propertyAddress: row.normalized_address,
+            propertyCity: row.city || undefined,
+            propertyState: row.state || undefined,
+            propertyZip: row.zip || undefined,
+          })
+        );
       }
+      recordHighLevelPushes(profile.id, pushes);
     }
 
     return NextResponse.json({

@@ -33,6 +33,15 @@ export interface UserProfile {
   // HighLevel Integration
   highlevel_api_key: string | null;
   highlevel_location_id: string | null;
+  // Credential health. NULL `highlevel_invalid_at` means healthy. Written only
+  // by the server (anon and authenticated hold no UPDATE grant on this table),
+  // so a user cannot clear their own red badge. The status is for diagnosis and
+  // does NOT carry the remediation: a revoked token and a missing scope are
+  // both 401. Use the reason. See
+  // supabase/migrations/20260918_highlevel_credential_health.sql.
+  highlevel_invalid_at: string | null;
+  highlevel_invalid_status: number | null;
+  highlevel_invalid_reason: string | null;
 
   // Wallet
   wallet_balance: number;
