@@ -2880,6 +2880,13 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
+- [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
+      submit check now sizes against in-flight unbilled work, which closes the back-to-back
+      double-submit gap. It does NOT close the sub-second window between one submit's own read and
+      its own writes; that needs a transactional hold taken in the same transaction as the insert.
+      Recorded as a task rather than left in a source comment, which was the 5c-3A implementer's own
+      point and it is right: a limitation living only in a comment is one nobody ever schedules.
+      Caveat is at `lib/trace/bulkPreflight.ts:176-184`. **NOT a 5c blocker.**
 - [ ] 15. **THE ENQUEUE, and the plan never numbered it.** The submit routes must stop SKIPPING
       blank-owner rows and start enqueueing them into `property_trace_status`. Today
       `app/api/trace/bulk/route.ts:92` pushes them to `skippedRecords` and writes

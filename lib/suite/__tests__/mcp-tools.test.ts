@@ -717,6 +717,76 @@ describe("skip_trace_bulk", () => {
     ).toHaveLength(0);
   });
 
+  it("stops counting and pricing the errored person records", async () => {
+    // THE HALF THAT WAS MISSED. The billing hole was closed but the payload
+    // still described the dead half as accepted and priced it.
+    // MUTATION: report personRecords.length or the pre-failure worst case and
+    // this goes red.
+    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = (await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    })) as Record<string, unknown>;
+
+    expect(out.persons).toBe(0);
+    expect(out.accepted).toBe(1);
+    // Only the surviving tier 2 record is committed, at the tier 2 rate.
+    expect(out.committed_worst_case).toBeCloseTo(0.4);
+  });
+
+  it("carries the failure as a FIELD, because a model reads this payload", async () => {
+    // Prose can be summarised away by the model consuming this. A named count it
+    // can compare against `accepted` cannot be dropped silently.
+    // MUTATION: delete records_failed and leave only the message, and this goes red.
+    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = (await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    })) as Record<string, unknown>;
+
+    expect(out.records_failed).toBe(1);
+    expect(typeof out.records_failed).toBe("number");
+    expect(String(out.message)).toContain("not charged");
+    expect(String(out.message)).not.toMatch(/[—–*]/);
+  });
+
+  it("keeps the field present and zero when nothing failed", async () => {
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = (await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    })) as Record<string, unknown>;
+    expect(out.records_failed).toBe(0);
+    expect(out.persons).toBe(1);
+  });
+
+  it("corrects the job's records_submitted, the match-rate denominator", async () => {
+    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    await skipTraceBulk(admin, "sub-1", {
+      records: [
+        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
+        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
+      ],
+      confirm: true,
+    });
+    const corrected = captured.traceJobsUpdates.filter(
+      (u) => (u as Record<string, unknown>)?.records_submitted !== undefined,
+    );
+    expect(corrected).toHaveLength(1);
+    expect(corrected[0]).toMatchObject({ records_submitted: 1 });
+  });
+
   it("STILL fails a job where the person submit failed and nothing else was queued", async () => {
     // The guard must not become a blanket refusal to ever fail a job.
     vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });

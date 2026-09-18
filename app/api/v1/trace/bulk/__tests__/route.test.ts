@@ -400,6 +400,70 @@ describe("when the Tracerfy person submit fails", () => {
     expect(failedJob()).toBeDefined();
   });
 
+  it("stops counting the errored person records as running", async () => {
+    // THE HALF THAT WAS MISSED. The billing hole was closed but the payload
+    // still described the dead half as in progress. MUTATION: report
+    // personRecords.length again and this goes red.
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.recordsDirectTrace).toBe(0);
+    expect(body.recordsFailed).toBe(1);
+    expect(body.recordsToProcess).toBe(1);
+  });
+
+  it("requotes for the survivors instead of pricing work that will never run", async () => {
+    // A caller reconciles this number against their bill. Quoting the person
+    // half means the bill comes back short and the only way they find out is by
+    // doing the arithmetic themselves.
+    // MUTATION: return the pre-failure estimatedCost and this goes red.
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.estimatedCost).toBeCloseTo(TIER2);
+    expect(body.estimatedCost).not.toBeCloseTo(TIER1 + TIER2);
+  });
+
+  it("corrects the job's records_submitted, which is the match-rate denominator", async () => {
+    // Read back by the status route and carried in the bulk_job.completed
+    // webhook, so leaving it would have the payload and the job disagree about
+    // one job.
+    await post([rec("John Smith", 1), rec(undefined, 2)]);
+    const corrected = H.ops.filter(
+      (o) =>
+        o.table === "trace_jobs" &&
+        o.op === "update" &&
+        (o.payload as Record<string, unknown>)?.records_submitted !== undefined
+    );
+    expect(corrected).toHaveLength(1);
+    expect(corrected[0].payload).toMatchObject({ records_submitted: 1 });
+  });
+
+  it("names the failed half and gets BOTH charge statements right", async () => {
+    // The errored person records are NOT billed and the surviving tier 2
+    // records WILL be. Saying only one of those is how a caller ends up
+    // surprised by the half that was left out.
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.message).toContain("not charged");
+    expect(body.message).toContain("will be charged");
+    expect(body.message).not.toMatch(/[—–*]/);
+  });
+
+  it("makes no charge promise about the ENTITY survivors, which bill on success only", async () => {
+    // Tier 1 is per successful trace and free on a miss, so a blanket "you will
+    // be charged for these" would be false for an entity row that misses.
+    const body = await (
+      await post([rec("John Smith", 1), rec("Acme Holdings Llc", 2)])
+    ).json();
+    expect(body.message).toContain("not charged");
+    expect(body.message).not.toContain("will be charged");
+  });
+
+  it("reports nothing failed on the happy path, with the key still present", async () => {
+    // A key that appears only when something went wrong is one nobody writes a
+    // branch for.
+    H.submit = { success: true, jobId: "tf-1" };
+    const body = await (await post([rec("John Smith", 1)])).json();
+    expect(body.recordsFailed).toBe(0);
+    expect(body.recordsDirectTrace).toBe(1);
+  });
+
   it("leaves the queued tier 2 rows on the queue, not errored", async () => {
     // Only the person rows failed. Rewriting the tier 2 rows here would strand
     // work the cron is about to run and the customer is about to be billed for.

@@ -313,7 +313,12 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
   // Sized against IN-FLIGHT UNBILLED WORK too. This was a bare comparison that
   // reserved nothing: the real debit lands per record at settle time, so two
   // batches submitted back to back both passed against the same dollars.
-  const worst = worstCaseCost(newRecords, profile).total;
+  // The FULL cost object, not just its total. The gate below reserves the total, which is right:
+  // it runs before any vendor is asked, when every record might still run. The return at the end
+  // requotes from these same per-bucket accumulators when the person half dies, so the quote and
+  // the reserve can never drift apart into two derivations of one number.
+  const worstCase = worstCaseCost(newRecords, profile);
+  const worst = worstCase.total;
   const inFlight = await inFlightUnbilledCost(admin, profile.id, {
     tier1: chargePerTrace(profile),
     tier2: chargePerRecord(profile),
@@ -432,6 +437,9 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
   // Person rows -> single bulk Tracerfy CSV (fast path), built exactly as the
   // route builds it.
   let tracerfyBulkJobId: string | null = null;
+  // Set when the person CSV submit fails but other work survives. NOT derivable from
+  // `tracerfyBulkJobId` being null, which is also true when the batch had no person records.
+  let personSubmitFailed = false;
   if (personRecords.length > 0) {
     const esc = (v: string) => `"${(v || "").replace(/"/g, '""')}"`;
     const csvLines = ["address,city,state,first_name,last_name,mail_address,mail_city,mail_state"];
@@ -468,6 +476,20 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
           .eq("id", job.id);
         return { error: "submit_failed", message: submitResult.error || "Failed to submit bulk trace." };
       }
+
+      // SURVIVORS ONLY FROM HERE. The person rows are terminal errors: no vendor was asked about
+      // them, so they are not running and cannot be billed. Every count and every price in the
+      // return below is computed from what is left, or the caller is handed a success payload
+      // quoting work that will never happen.
+      personSubmitFailed = true;
+
+      // records_submitted is the DENOMINATOR of the match rate, read back by bulk_status. It was
+      // written before this failure and counts the person rows, so leaving it understates the
+      // match rate by exactly the rows nobody was asked about.
+      await admin
+        .from("trace_jobs")
+        .update({ records_submitted: entityRecords.length + tier2Records.length })
+        .eq("id", job.id);
     } else {
       tracerfyBulkJobId = submitResult.jobId;
       await admin.from("trace_jobs").update({ tracerfy_job_id: tracerfyBulkJobId }).eq("id", job.id);
@@ -483,16 +505,32 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     }
   }
 
+  // WHAT IS ACTUALLY RUNNING, WHICH IS NOT WHAT WAS ACCEPTED. See the person-submit failure
+  // branch above. Same vocabulary as the two REST routes' partial responses, deliberately.
+  const personsRunning = personSubmitFailed ? 0 : personRecords.length;
+
   return {
     job_id: job.id,
-    accepted: newRecords.length,
-    persons: personRecords.length,
+    accepted: personsRunning + entityRecords.length + tier2Records.length,
+    persons: personsRunning,
     entities: entityRecords.length,
     // Records with no owner of record, queued for a Full Property Trace. Named for what
     // happens to them rather than what does not: the `skipped` key it replaces said they were
     // free, and that stopped being true in phase 5c.
     full_property_trace: tier2Records.length,
-    committed_worst_case: Number(worst.toFixed(2)),
+    // THE FAILURE IS A FIELD, NOT A SENTENCE. This payload is read by a model, which may
+    // summarise prose away; a named count it can compare against `accepted` cannot be dropped
+    // silently. Always present and 0 on the happy path, so a caller can branch on it.
+    records_failed: personSubmitFailed ? personRecords.length : 0,
+    // REQUOTED FOR THE SURVIVORS, out of the same dollar accumulators the gate reserved from, so
+    // this can never drift from worstCaseCost's own arithmetic. The gate above still reserves the
+    // FULL amount, which is correct: it runs before the submit, when every record might still run.
+    committed_worst_case: Number(
+      (worstCase.entities + worstCase.blanks + (personSubmitFailed ? 0 : worstCase.persons)).toFixed(2),
+    ),
+    message: personSubmitFailed
+      ? `We could not send the ${personRecords.length} records that came with an owner name, so those were not traced and you were not charged for them. The rest are still running.`
+      : undefined,
   };
 }
 

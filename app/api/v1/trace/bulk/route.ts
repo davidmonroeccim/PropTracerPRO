@@ -338,6 +338,10 @@ export async function POST(request: Request) {
 
     // Submit person records to Tracerfy as a single bulk CSV (fast path).
     let tracerfyBulkJobId: string | null = null;
+    // Set when the person CSV submit fails but other work survives. NOT
+    // derivable from `tracerfyBulkJobId` being null, which is also true when the
+    // batch simply had no person records in it.
+    let personSubmitFailed = false;
     if (personRecords.length > 0) {
       const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
       const csvLines = [
@@ -388,6 +392,24 @@ export async function POST(request: Request) {
             { status: 500 }
           );
         }
+
+        // SURVIVORS ONLY FROM HERE. The person rows are terminal errors: no
+        // vendor was ever asked about them, so they are not running and they
+        // cannot be billed. Every count and every price below has to be computed
+        // from what is left, or the caller gets a 200 quoting work that will
+        // never happen and reconciles it against a bill that does not match.
+        personSubmitFailed = true;
+
+        // records_submitted is the DENOMINATOR of the match rate, read back by
+        // the status route and carried in the bulk_job.completed webhook. It was
+        // written before this failure and counts the person rows, so leaving it
+        // would understate the match rate by exactly the rows nobody was asked
+        // about -- the same reasoning the column's own comment gives, applied to
+        // the case that removes rows after the fact.
+        await adminClient
+          .from('trace_jobs')
+          .update({ records_submitted: entityRecords.length + tier2Records.length })
+          .eq('id', job.id);
       } else {
         tracerfyBulkJobId = submitResult.jobId;
         await adminClient
@@ -411,13 +433,27 @@ export async function POST(request: Request) {
       }
     }
 
+    // WHAT IS ACTUALLY RUNNING, WHICH IS NOT THE SAME AS WHAT WAS ACCEPTED.
+    //
+    // When the person CSV submit fails, those rows are written terminal as
+    // errors above and no vendor is ever asked about them. Reporting them here
+    // as in-progress, and pricing them, tells the caller a 200 about work that
+    // will never happen: they reconcile that quote against a bill short by
+    // exactly the person half, and the only way they notice is by doing the
+    // arithmetic themselves. Same vocabulary as the dashboard route's partial
+    // response, deliberately -- three surfaces describing one partial failure in
+    // three different sets of words is how the next reader decides they are
+    // three different situations.
+    const personsRunning = personSubmitFailed ? 0 : personRecords.length;
+    const personsFailed = personSubmitFailed ? personRecords.length : 0;
+
     return NextResponse.json({
       success: true,
       jobId: job.id,
       totalRecords: records.length,
       duplicatesRemoved: totalDeduped,
-      recordsToProcess: newRecords.length,
-      recordsDirectTrace: personRecords.length,
+      recordsToProcess: personsRunning + entityRecords.length + tier2Records.length,
+      recordsDirectTrace: personsRunning,
       recordsPendingResearch: entityRecords.length,
       // Rows with no owner of record, now queued for a Full Property Trace
       // rather than skipped. `recordsSkipped` is gone rather than zeroed out:
@@ -425,15 +461,27 @@ export async function POST(request: Request) {
       // alongside a reason of undefined invited a caller to keep reading a key
       // that had stopped meaning what it used to.
       recordsQueued: tier2Records.length,
-      estimatedCost,
+      // Records accepted and then dropped because the vendor could not be
+      // reached. Always present, 0 on the happy path: a key that appears only
+      // when something went wrong is one nobody writes a branch for.
+      recordsFailed: personsFailed,
+      // REQUOTED FOR THE SURVIVORS. Charging shape is unchanged: tier 1 per
+      // successful trace, tier 2 per record submitted.
+      estimatedCost:
+        (personsRunning + entityRecords.length) * tier1Rate + tier2Records.length * tier2Rate,
       status: 'processing',
       message: [
+        personsFailed > 0
+          ? `We could not send the ${personsFailed} records that came with an owner name, so those were not traced and you were not charged for them.`
+          : null,
         `Poll /api/v1/trace/bulk/status?job_id=${job.id} for results.`,
         entityRecords.length > 0
           ? `${entityRecords.length} entity-owned records are queued for a business trace.`
           : null,
+        // The one survivor bucket that is billed whatever it finds, so it is the
+        // one that can carry a charge statement without a condition on it.
         tier2Records.length > 0
-          ? `${tier2Records.length} records arrived with no owner name and are queued for a full property trace.`
+          ? `${tier2Records.length} records arrived with no owner name and are running a full property trace, which you will be charged for.`
           : null,
       ]
         .filter(Boolean)

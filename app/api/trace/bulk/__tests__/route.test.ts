@@ -589,6 +589,29 @@ describe("when the Tracerfy person submit fails", () => {
     expect(errored[0].input_owner_name).toBe("John Smith");
   });
 
+  it("corrects the job's records_submitted, which is the match-rate denominator", async () => {
+    // Written before the failure, counting the tier 1 rows. Left alone, the
+    // payload and the job row disagree about one job, and the status route and
+    // the webhook report the job's version.
+    await post([rec("John Smith", 1), rec(undefined, 2)]);
+    const corrected = H.ops.filter(
+      (o) =>
+        o.table === "trace_jobs" &&
+        o.op === "update" &&
+        (o.payload as Record<string, unknown>)?.records_submitted !== undefined
+    );
+    expect(corrected).toHaveLength(1);
+    expect(corrected[0].payload).toMatchObject({ records_submitted: 1 });
+  });
+
+  it("gets BOTH charge statements right in the same breath", async () => {
+    // The errored records are NOT billed and the surviving tier 2 records WILL
+    // be. Saying only one is how a customer is surprised by the other.
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.message).toContain("not charged");
+    expect(body.message).toContain("will be charged");
+  });
+
   it("STILL fails the job when nothing survives the failure", async () => {
     // The guard must not become a blanket refusal to ever fail a job. With no
     // tier 2 rows there is nothing left running, and this branch is exactly what

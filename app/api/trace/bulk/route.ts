@@ -388,6 +388,7 @@ export async function POST(request: Request) {
         dedupe_removed: totalDeduped,
         records_submitted: 0,
         records_queued: 0,
+        records_failed: 0,
         ...noKeyFields,
         cached_count: dedupeResult.cachedResults.length,
         estimated_cost: 0,
@@ -406,6 +407,7 @@ export async function POST(request: Request) {
         dedupe_removed: totalDeduped,
         records_submitted: tier2Records.length,
         records_queued: tier2Records.length,
+        records_failed: 0,
         ...noKeyFields,
         cached_count: dedupeResult.cachedResults.length,
         estimated_cost: estimatedCost,
@@ -478,6 +480,16 @@ export async function POST(request: Request) {
         );
       }
 
+      // records_submitted is the DENOMINATOR of the match rate, read back by the
+      // status route and carried in the bulk_job.completed webhook. It was
+      // written before this failure and counts the tier 1 rows, so leaving it
+      // would understate the match rate by exactly the rows nobody was asked
+      // about.
+      await adminClient
+        .from('trace_jobs')
+        .update({ records_submitted: tier2Records.length })
+        .eq('id', job.id);
+
       // PARTIAL. The job stays open because the queue is still working, and the
       // customer is told exactly which half failed rather than being handed a
       // blanket failure for a job that is still running and will still be
@@ -493,7 +505,15 @@ export async function POST(request: Request) {
         ...noKeyFields,
         cached_count: dedupeResult.cachedResults.length,
         estimated_cost: tier2Records.length * tier2Rate,
-        message: `We could not send the ${tier1Records.length} records that came with an owner name, so those were not traced and you were not charged for them. The other ${tier2Records.length} are running a full property trace and will finish on their own.`,
+        message: [
+          `We could not send the ${tier1Records.length} records that came with an owner name, so those were not traced and you were not charged for them.`,
+          `The other ${tier2Records.length} are running a full property trace, which you will be charged for.`,
+          noKeyRecords.length > 0
+            ? `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
     }
 
@@ -522,6 +542,7 @@ export async function POST(request: Request) {
       dedupe_removed: totalDeduped,
       records_submitted: tier1Records.length + tier2Records.length,
       records_queued: tier2Records.length,
+      records_failed: 0,
       ...noKeyFields,
       cached_count: dedupeResult.cachedResults.length,
       estimated_cost: estimatedCost,
