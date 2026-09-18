@@ -406,6 +406,19 @@ describe('the push is recorded on the trace row it was for', () => {
     expect(traceUpdates()).toEqual([]);
   });
 
+  it('records nothing for a credential check even when a row id is handed with it', async () => {
+    // THE ACTION IS WHAT SEPARATES THEM, not the presence of a trace id. A
+    // credential check and a push both answer `success: true`; only a push
+    // carries an action, and only a push put a contact anywhere. Without this,
+    // a caller who paired a check with the row it was checking FOR would stamp
+    // that row as having reached the CRM when nothing was ever sent.
+    await recordHighLevelOutcomes('user-1', [
+      { traceId: 'trace-1', outcome: { success: true } as Outcome },
+    ]);
+
+    expect(traceUpdates()).toEqual([]);
+  });
+
   it('still records the push when the credential verdict writes nothing', async () => {
     // A healthy push against an already-clear flag writes no profile row at
     // all. The trace record must not ride on that decision.
