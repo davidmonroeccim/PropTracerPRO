@@ -25,7 +25,11 @@ const H = vi.hoisted(() => ({
   profile: null as unknown as Record<string, unknown>,
   trace: null as unknown as Record<string, unknown>,
   jobStatus: null as unknown as Record<string, unknown>,
-  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  updates: [] as Array<{
+    table: string;
+    payload: Record<string, unknown>;
+    filters: Array<[string, ...unknown[]]>;
+  }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
   /** What the fire-and-forget HighLevel push resolves with. */
   pushResult: { success: true, contactId: "c-1", action: "created" } as Record<string, unknown>,
@@ -55,8 +59,16 @@ vi.mock("@/lib/supabase/admin", () => ({
     from: (table: string) => ({
       select: () => chainTo(table === "user_profiles" ? H.profile : H.trace),
       update: (payload: Record<string, unknown>) => {
-        H.updates.push({ table, payload });
-        return chainTo(null);
+        // The filters are recorded, not swallowed: a push record has to name
+        // the row it belongs to, and the payload alone cannot say which.
+        const filters: Array<[string, ...unknown[]]> = [];
+        H.updates.push({ table, payload, filters });
+        const node = chainTo(null) as Record<string, unknown>;
+        node.eq = (...args: unknown[]) => {
+          filters.push(["eq", ...args]);
+          return node;
+        };
+        return node;
       },
     }),
     rpc: (fn: string, args: Record<string, unknown>) => {
@@ -607,5 +619,39 @@ describe("trace/status route records the HighLevel push outcome against the cred
     expect(body.success).toBe(true);
     expect(body.status).toBe("success");
     expect(body.result.phones).toHaveLength(1);
+  });
+});
+
+/**
+ * AND THE PUSH ITSELF IS RECORDED ON THE ROW.
+ *
+ * The credential flag above says whether the KEY works. It cannot answer "did
+ * THIS trace reach the CRM", which is the question a customer asks and which
+ * was unanswerable for eight months because every caller dropped the contactId.
+ */
+describe("trace/status route records the push on the trace row", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("writes the contact id and the timestamp against that trace", async () => {
+    H.profile = {
+      ...H.profile,
+      highlevel_api_key: "key-1",
+      highlevel_location_id: "loc-1",
+    };
+    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
+    );
+    await settle();
+
+    const records = H.updates.filter(
+      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].payload.highlevel_contact_id).toBe("c-9");
+    expect(records[0].payload.highlevel_push_action).toBe("updated");
+    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
   });
 });

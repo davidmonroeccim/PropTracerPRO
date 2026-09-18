@@ -47,6 +47,15 @@ const H = vi.hoisted(() => ({
   historyRows: [] as Array<Record<string, unknown>>,
   profile: null as Record<string, unknown> | null,
   jobStatus: { success: false, pending: true } as Record<string, unknown>,
+  /** Stale SINGLE traces for stage 1. Empty by default so stage 1 does no work. */
+  staleSingles: [] as Array<Record<string, unknown>>,
+  /** What the mocked HighLevel client answers. */
+  pushResult: { success: true, contactId: "c-1", action: "created" } as Record<
+    string,
+    unknown
+  >,
+  /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
+  scheduled: [] as Array<() => unknown>,
 }));
 
 /** Records every query and resolves each terminal from H, so a test can drive
@@ -72,7 +81,10 @@ function recordingClient() {
         if (table === "trace_jobs" && rec?.op === "select") return { data: H.staleJobs, error: null };
         if (table === "trace_history" && rec?.op === "select") {
           const cols = String(rec.filters[0]?.[1] ?? "");
-          return { data: cols.includes("normalized_address") ? [] : H.historyRows, error: null };
+          return {
+            data: cols.includes("normalized_address") ? H.staleSingles : H.historyRows,
+            error: null,
+          };
         }
         return { data: [], error: null };
       };
@@ -105,12 +117,30 @@ vi.mock("@/lib/tracerfy/client", () => ({
   getJobStatus: vi.fn(async () => H.jobStatus),
   parseTracerfyResult: vi.fn((r: unknown) => r),
 }));
-vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
+vi.mock("@/lib/highlevel/client", () => ({
+  pushTraceToHighLevel: vi.fn(async () => H.pushResult),
+}));
+
+/**
+ * `after()` is captured, not executed. The credential health write and the push
+ * record are handed to it so they outlive the response.
+ */
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (fn: () => unknown) => {
+    H.scheduled.push(fn);
+  },
+}));
 vi.mock("@/lib/utils/auto-rebill", () => ({
   triggerAutoRebillIfNeeded: vi.fn(async () => {}),
 }));
 
 const { GET } = await import("@/app/api/cron/sweep-stale-traces/route");
+
+/** Drain everything `after()` was handed, in order. */
+async function flushDeferred(): Promise<void> {
+  while (H.scheduled.length > 0) await H.scheduled.shift()!();
+}
 
 function run(secret = "s3cret") {
   return GET(
@@ -134,6 +164,9 @@ beforeEach(() => {
   H.ops = [];
   H.staleJobs = [];
   H.historyRows = [];
+  H.staleSingles = [];
+  H.scheduled = [];
+  H.pushResult = { success: true, contactId: "c-1", action: "created" };
   H.profile = {
     subscription_tier: "wallet",
     is_acquisition_pro_member: false,
@@ -408,5 +441,69 @@ describe("a stale MIXED bulk job, whose Tracerfy half is ready", () => {
     H.historyRows = [{ property_trace_status: null, is_successful: null }];
     await run();
     expect(jobWrites().length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * STAGE 1 RECORDS ITS PUSH TOO.
+ *
+ * This is the path with the LEAST chance of anyone noticing anything: an hour
+ * after the fact, with no user on a page. If it pushes a contact and writes
+ * nothing on the row, "did this trace reach the CRM" is unanswerable for
+ * exactly the traces nobody was watching.
+ */
+describe("the stale single sweep records the push on the row it settled", () => {
+  it("writes the contact id and the timestamp against that trace", async () => {
+    H.staleSingles = [
+      {
+        id: "trace-1",
+        user_id: "user-1",
+        tracerfy_job_id: "tf-1",
+        normalized_address: "100 MAIN ST",
+        city: "Austin",
+        state: "TX",
+        zip: "78701",
+        charge: null,
+        tier: null,
+      },
+    ];
+    H.profile = {
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_products: [],
+      webhook_url: null,
+      highlevel_api_key: "key-1",
+      highlevel_location_id: "loc-1",
+    };
+    // parseTracerfyResult is mocked to identity in this file, so the row IS the
+    // parsed result.
+    H.jobStatus = {
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: "100 MAIN ST",
+          primary_phone: "5125550100",
+          phones: [{ number: "5125550100", type: "mobile" }],
+          emails: [],
+        },
+      ],
+    };
+    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
+
+    await run();
+    await flushDeferred();
+
+    const records = H.ops.filter(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "update" &&
+        o.payload !== undefined &&
+        "highlevel_pushed_at" in o.payload
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].payload!.highlevel_contact_id).toBe("c-9");
+    expect(records[0].payload!.highlevel_push_action).toBe("updated");
+    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
   });
 });

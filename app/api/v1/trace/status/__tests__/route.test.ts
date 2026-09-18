@@ -20,8 +20,17 @@ const H = vi.hoisted(() => ({
   integrationProfile: null as unknown as Record<string, unknown>,
   trace: null as unknown as Record<string, unknown>,
   jobStatus: null as unknown as Record<string, unknown>,
-  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  updates: [] as Array<{
+    table: string;
+    payload: Record<string, unknown>;
+    filters: Array<[string, ...unknown[]]>;
+  }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
+  /** What the fire-and-forget HighLevel push resolves with. */
+  pushResult: { success: true, contactId: "c-1", action: "created" } as Record<
+    string,
+    unknown
+  >,
 }));
 
 function chainTo(data: unknown) {
@@ -47,8 +56,16 @@ vi.mock("@/lib/supabase/admin", () => ({
       select: () =>
         chainTo(table === "user_profiles" ? H.integrationProfile : H.trace),
       update: (payload: Record<string, unknown>) => {
-        H.updates.push({ table, payload });
-        return chainTo(null);
+        // The filters are recorded, not swallowed: a push record has to name
+        // the row it belongs to, and the payload alone cannot say which.
+        const filters: Array<[string, ...unknown[]]> = [];
+        H.updates.push({ table, payload, filters });
+        const node = chainTo(null) as Record<string, unknown>;
+        node.eq = (...args: unknown[]) => {
+          filters.push(["eq", ...args]);
+          return node;
+        };
+        return node;
       },
     }),
     rpc: (fn: string, args: Record<string, unknown>) => {
@@ -70,12 +87,15 @@ vi.mock("@/lib/tracerfy/client", async (importOriginal) => {
 vi.mock("@/lib/utils/auto-rebill", () => ({
   triggerAutoRebillIfNeeded: vi.fn(async () => {}),
 }));
-vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
+vi.mock("@/lib/highlevel/client", () => ({
+  pushTraceToHighLevel: vi.fn(async () => H.pushResult),
+}));
 
 const fetchSpy = vi.fn(async () => new Response(null, { status: 200 }));
 
 beforeEach(() => {
   H.updates = [];
+  H.pushResult = { success: true, contactId: "c-1", action: "created" };
   H.rpcCalls = [];
   H.deductResult = true;
   fetchSpy.mockClear();
@@ -424,5 +444,39 @@ describe("v1 trace/status route publishes 65 of the stored 86 keys", () => {
     await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
 
     expect(Object.keys(row)).toHaveLength(86);
+  });
+});
+
+/**
+ * THE PUSH IS RECORDED ON THE TRACE ROW.
+ *
+ * The credential flag says whether the KEY works. It cannot answer "did THIS
+ * trace reach the CRM", which is the question a customer asks and which was
+ * unanswerable for eight months because every caller dropped the contactId.
+ */
+describe("v1 trace/status route records the push on the trace row", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("writes the contact id and the timestamp against that trace", async () => {
+    H.integrationProfile = {
+      ...H.integrationProfile,
+      highlevel_api_key: "key-1",
+      highlevel_location_id: "loc-1",
+    };
+    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
+
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+    );
+    await settle();
+
+    const records = H.updates.filter(
+      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].payload.highlevel_contact_id).toBe("c-9");
+    expect(records[0].payload.highlevel_push_action).toBe("updated");
+    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
   });
 });
