@@ -335,3 +335,67 @@ describe('the verdict itself, so the routing is readable without a database', ()
     expect(highLevelVerdict([])).toEqual({ kind: 'no_signal' });
   });
 });
+
+/**
+ * THE WRITE HAS TO SURVIVE THE RESPONSE.
+ *
+ * Five of the callers are fire-and-forget on a request path. On serverless a
+ * promise still running when the response flushes can be killed with it, and
+ * the old code only stood to lose a `console.error`. This code stands to lose
+ * the credential flag, which is the ENTIRE channel by which a user with a dead
+ * key finds out. A flag that usually lands is the same silent failure wearing a
+ * different hat.
+ *
+ * `after()` from next/server is the repo's existing answer to exactly this;
+ * `lib/suite/access.ts` has used it for the entitlement refresh for months, and
+ * the pattern there is the one copied here, including the fallback. Mock shape
+ * is lifted from `lib/suite/__tests__/access.test.ts`.
+ */
+describe('the health write is scheduled to outlive the response', () => {
+  it('hands the work to after() so it runs once the response has flushed', async () => {
+    const scheduled: Array<() => unknown> = [];
+    vi.doMock('next/server', () => ({
+      after: (fn: () => unknown) => {
+        scheduled.push(fn);
+      },
+    }));
+    vi.resetModules();
+    const mod = await import('@/lib/highlevel/credentialHealth');
+
+    await mod.recordHighLevelPushes('user-1', [Promise.resolve(TOKEN_DEAD as Outcome)]);
+
+    // Asserted as "after() received the work", not as "an update happened".
+    // The whole point is that the write is DEFERRED, and a test that only
+    // checks the row would pass just as well with the bare fire-and-forget
+    // this replaces.
+    expect(scheduled).toHaveLength(1);
+    expect(H.updates).toHaveLength(0);
+
+    await scheduled[0]();
+    expect(H.updates).toHaveLength(1);
+    expect(H.updates[0].payload.highlevel_invalid_reason).toBe('token');
+
+    vi.doUnmock('next/server');
+    vi.resetModules();
+  });
+
+  it('still records when after() is unavailable, because a cron has no request scope', async () => {
+    vi.doMock('next/server', () => ({
+      after: () => {
+        throw new Error('after() called outside a request scope');
+      },
+    }));
+    vi.resetModules();
+    const mod = await import('@/lib/highlevel/credentialHealth');
+
+    await mod.recordHighLevelPushes('user-1', [Promise.resolve(TOKEN_DEAD as Outcome)]);
+
+    // Degrades to running inline rather than dropping the write. Losing the
+    // flag outside a request scope would be worse than the scheduling we lose.
+    expect(H.updates).toHaveLength(1);
+    expect(H.updates[0].payload.highlevel_invalid_reason).toBe('token');
+
+    vi.doUnmock('next/server');
+    vi.resetModules();
+  });
+});

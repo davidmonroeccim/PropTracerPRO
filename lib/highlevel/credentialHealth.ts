@@ -1,3 +1,4 @@
+import { after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { HighLevelPushResult, HighLevelValidation } from '@/lib/highlevel/client';
 
@@ -145,7 +146,7 @@ export async function recordHighLevelOutcomes(
  * Returns a promise so a test can wait on it; callers are not expected to, and
  * it resolves rather than rejects whatever happens.
  */
-export function recordHighLevelPushes(
+function settleAndRecord(
   userId: string,
   pushes: ReadonlyArray<Promise<HighLevelOutcome>>
 ): Promise<void> {
@@ -164,4 +165,34 @@ export function recordHighLevelPushes(
     .catch((error) => {
       console.error('HighLevel credential health write failed:', error);
     });
+}
+
+/**
+ * THE WRITE HAS TO OUTLIVE THE RESPONSE, which is why this is not a bare
+ * floating promise.
+ *
+ * Five callers are fire-and-forget on a request path that must still return the
+ * customer's trace result. On serverless, work still running when the response
+ * flushes can be killed with it. The code this replaces only stood to lose a
+ * `console.error`; this stands to lose the credential flag, and that flag is
+ * the ENTIRE channel by which a user with a dead key finds out. A flag that
+ * usually lands is the same silent failure in a different hat.
+ *
+ * `after()` hands the work to the runtime to run once the response is flushed.
+ * It throws outside a request scope, so a cron or a script degrades to running
+ * inline: losing the scheduling is much better than losing the write. This is
+ * the pattern `lib/suite/access.ts` has used for the entitlement refresh, copied
+ * rather than reinvented.
+ */
+export function recordHighLevelPushes(
+  userId: string,
+  pushes: ReadonlyArray<Promise<HighLevelOutcome>>
+): Promise<void> {
+  const work = () => settleAndRecord(userId, pushes);
+  try {
+    after(work);
+    return Promise.resolve();
+  } catch {
+    return work();
+  }
 }
