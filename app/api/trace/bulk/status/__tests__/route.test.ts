@@ -35,6 +35,8 @@ const H = vi.hoisted(() => ({
     filters: Array<[string, ...unknown[]]>;
   }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
+  /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
+  scheduled: [] as Array<() => unknown>,
 }));
 
 /**
@@ -141,11 +143,29 @@ vi.mock("@/lib/utils/auto-rebill", () => ({
 }));
 vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
 
+/**
+ * `after()` is captured, not executed. The credential health write and the push
+ * record are handed to it so they outlive the response, so a test that does not
+ * run them is reading a race.
+ */
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (fn: () => unknown) => {
+    H.scheduled.push(fn);
+  },
+}));
+
+/** Drain everything `after()` was handed, in order. */
+async function flushDeferred(): Promise<void> {
+  while (H.scheduled.length > 0) await H.scheduled.shift()!();
+}
+
 const fetchSpy = vi.fn(async () => new Response(null, { status: 200 }));
 
 beforeEach(() => {
   H.updates = [];
   H.rpcCalls = [];
+  H.scheduled = [];
   H.deductResult = true;
   fetchSpy.mockClear();
   vi.stubGlobal("fetch", fetchSpy);
@@ -899,5 +919,47 @@ describe("the job summary says how many rows were skipped and why", () => {
     // No premature verdict: the processing branch makes no skip claim at all.
     expect(body.records_skipped).toBeUndefined();
     expect(body.skip_reason).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE PUSH IS RECORDED AGAINST THE ROW IT WAS FOR.
+ *
+ * This route resolves the matching trace_history row inside the settle loop and
+ * pushes from a list built earlier, so the id and the contacts are assembled in
+ * two different places. Without the id, the push happens and nothing on the row
+ * ever says so, which is the state "did this trace reach the CRM" was
+ * unanswerable from for eight months.
+ * ------------------------------------------------------------------ */
+describe("the bulk push records which row reached the CRM", () => {
+  it("carries the settled row's id into the push record", async () => {
+    H.profile = {
+      ...H.profile,
+      highlevel_api_key: "hl-key",
+      highlevel_location_id: "loc-1",
+    };
+
+    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
+      success: true,
+      contactId: "hl-1",
+      action: "created",
+    });
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(
+      new Request("http://localhost/api/trace/bulk/status?job_id=job-1") as never
+    );
+    await flushDeferred();
+
+    const records = H.updates.filter(
+      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    );
+    expect(records).toHaveLength(2);
+    for (const record of records) {
+      expect(record.payload.highlevel_contact_id).toBe("hl-1");
+      // The row the settle loop actually found, not undefined.
+      expect(record.filters).toContainEqual(["eq", "id", "hist-1"]);
+    }
   });
 });

@@ -15,8 +15,14 @@ const H = vi.hoisted(() => ({
   profile: null as unknown as Record<string, unknown>,
   job: null as unknown as Record<string, unknown>,
   rows: null as unknown as Array<Record<string, unknown>>,
-  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  updates: [] as Array<{
+    table: string;
+    payload: Record<string, unknown>;
+    filters: Array<[string, ...unknown[]]>;
+  }>,
   settleBulkJobSpy: vi.fn(),
+  /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
+  scheduled: [] as Array<() => unknown>,
 }));
 
 vi.mock("@/lib/api/auth", () => ({
@@ -29,13 +35,34 @@ vi.mock("@/lib/api/auth", () => ({
  *  that every case returned while a row was still 'processing', so the route
  *  never wrote a trace_jobs row and the stub never needed one. */
 const updateChain = (table: string) => (payload: Record<string, unknown>) => {
-  H.updates.push({ table, payload });
+  const filters: Array<[string, ...unknown[]]> = [];
+  H.updates.push({ table, payload, filters });
   const node: Record<string, unknown> = {};
-  for (const m of ["eq", "in", "or", "is"]) node[m] = () => node;
+  for (const m of ["eq", "in", "or", "is"])
+    node[m] = (...args: unknown[]) => {
+      filters.push([m, ...args]);
+      return node;
+    };
   node.then = (res: (v: unknown) => unknown) =>
     Promise.resolve({ data: null, error: null }).then(res);
   return node;
 };
+
+/**
+ * `after()` is captured, not executed. The credential health write and the push
+ * record are handed to it so they outlive the response.
+ */
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (fn: () => unknown) => {
+    H.scheduled.push(fn);
+  },
+}));
+
+/** Drain everything `after()` was handed, in order. */
+async function flushDeferred(): Promise<void> {
+  while (H.scheduled.length > 0) await H.scheduled.shift()!();
+}
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
@@ -86,6 +113,7 @@ vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
 
 beforeEach(() => {
   H.updates = [];
+  H.scheduled = [];
   H.settleBulkJobSpy.mockReset();
   H.settleBulkJobSpy.mockResolvedValue({ stalledErrorReason: null });
 });
@@ -488,5 +516,32 @@ describe("a row that already reached the CRM is not pushed again", () => {
     expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
     const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
     expect(arg.traceResult.owner_name).toBe("Fresh Owner");
+  });
+
+  it("records the push it does make against that row's own id", async () => {
+    // Without the id the push happens and nothing on the row ever says so, and
+    // the next finalize has no fact to skip on.
+    H.profile = { ...CONNECTED };
+    H.job = { ...DONE_JOB };
+    H.rows = [{ ...UNPUSHED_ROW }];
+
+    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+    vi.mocked(pushTraceToHighLevel).mockClear();
+    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
+      success: true,
+      contactId: "hl-new",
+      action: "created",
+    });
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    const records = H.updates.filter(
+      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].payload.highlevel_contact_id).toBe("hl-new");
+    expect(records[0].filters).toContainEqual(["eq", "id", "row-fresh"]);
   });
 });
