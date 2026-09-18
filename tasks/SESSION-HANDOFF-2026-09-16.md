@@ -70,7 +70,59 @@
 > grant EXECUTE to `anon` and `authenticated` BY NAME at CREATE time and `REVOKE FROM PUBLIC` does
 > not touch a named grant. Closed in ~2 min, audited clean. CLAUDE.md's template is corrected.
 >
-> **The three live HighLevel bugs below are STILL unfixed** and still affect customers today.
+> **AMENDED 2026-09-18, LATER THE SAME DAY. THE THREE HIGHLEVEL BUGS ARE FIXED AND PUSHED.**
+> `main` = `bba2966`, in sync with origin, 11 commits. Baselines: **1456 passing / 75 files / 0
+> failing**, `tsc` 0, eslint 47, build compiles. 35 mutations (21 implementer, 14 coordinator), all
+> killed. A fifth migration, `20260918_highlevel_credential_health.sql`, is APPLIED and read back.
+>
+> **The list of three was a FLOOR, not a ceiling (L-016). Grepping for the property found six more**,
+> and two of them were worse than anything on the list:
+>
+> - **The duplicate-search step had no `else`.** A failed search left `existingContactId` null and
+>   fell through to CREATE, so a credential failure silently made a SECOND copy of a contact the
+>   customer already had, and on a partly-broken credential that create SUCCEEDED.
+> - **PTP was DELETING customers' HighLevel tags on every update push.** GHL's Update Contact doc
+>   states verbatim that the `tags` field "will overwrite all current tags associated with the
+>   contact". PTP sent `tags: ['proptracerpro']` on every PUT. In GHL tags drive workflows, so this
+>   was silently breaking customers' automation, on a push that reported success. Tags now go on
+>   CREATE only. **NOT switched to the additive `POST /contacts/:id/tags`**: its additivity is
+>   implied by its name and response shape rather than documented, and swapping verified destruction
+>   for unverified behaviour is not a fix. Verify against a real account, then switch.
+>
+> **THE SCOPE FINDING, and it changes how any future HighLevel error must be read.**
+> `contacts.readonly` and `contacts.write` are SEPARATE GHL scopes and PTP's setup copy named only
+> "contacts", so a read-only token passed Test Connection and failed every push. Worse: **a missing
+> scope returns 401, identical to a revoked token.** Only the response body separates them
+> (`Invalid JWT` vs `The token is not authorized for this scope.`), and a wrong location is a 403.
+> Three remediations behind two statuses. Never classify a HighLevel failure on status alone.
+>
+> **THE ORGANISING RULE, which is L-007 pointed at pushes: a 401 is a CREDENTIAL failure, not a trace
+> failure.** A credential-class failure now flags the credential, so the five automatic push paths
+> (which have no user watching) reach the user on a page they will visit. A record failure (bad
+> payload) and a transient failure (rate limit) write NOTHING. And **"not dead" is not "alive"**: a
+> batch of only rate limits is no signal, not healthy, because clearing a red badge needs evidence
+> the key WORKS.
+>
+> **THE SAVE POLICY IS NARROWER THAN "REFUSE ANY 401", and David was told.** Refuse on `token` and
+> `location`; SAVE WITH A WARNING on `scope`, `transient` and `unknown`. The only check available is
+> a contacts READ and every product call is a WRITE, so a `contacts.write`-only token would be
+> blocked by a stricter rule. David's stated decision was "refuse on 401/403"; this narrows it on his
+> own reasoning for picking that option, which was that a good credential must not be blocked.
+>
+> **STILL OPEN AND NOT FIXED, recorded as R1 through R8 in `tasks/todo.md`:** the two newest crons
+> (`sweep-business-traces`, `sweep-property-traces`) STILL do not push at all, so **tier 2 results
+> never reach the CRM by this integration**. The false copy claiming otherwise was fixed in three
+> places; the capability gap is untouched and is a David decision. Also open: an entity still pushes
+> a garbage contact that SUCCEEDS (`owner_name.split()[0]` as first name); no `highlevel_contact_id`
+> is ever persisted so "did this reach the CRM" is unanswerable after the fact; only the first phone
+> and first email are ever sent.
+>
+> **NOT DONE, offered and not taken up:** checking whether any of the 6 live credentials are
+> currently dead, which would populate the new flag immediately rather than on their next push. It
+> means using customer tokens against HighLevel, so it needs David's go.
+
+**The three live HighLevel bugs below are FIXED as of 2026-09-18. The text is kept as the
+diagnosis.**
 >
 > **Both migrations are APPLIED to production and verified.** `property_record` and `tier` exist
 > on `trace_history`; `usage_records.unit_price` default is 0.15.
