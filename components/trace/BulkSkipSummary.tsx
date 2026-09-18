@@ -31,8 +31,28 @@
  * covers rows from both can only state the count; money belongs in the sentence
  * that knows which model the row is on.
  *
- * The heading that survives says the one thing true of all five: we could not
- * get contacts for these rows.
+ * ------------------------------------------------------------------------
+ * AND THE HEADING MUST NOT CLAIM A CATEGORY WIDER THAN ITS OWN NUMBER
+ * ------------------------------------------------------------------------
+ *
+ * The first replacement heading read "We could not get contacts for N of your
+ * records". True of every row counted, and false as a statement about the job.
+ * `summarizeSkips` counts only rows carrying a STATED REASON; a row a vendor was
+ * genuinely asked about returns null from rowSkipReason() and is excluded
+ * however empty it came back.
+ *
+ * So on a 100-record job with 40 matched, 48 genuine misses and 12 explained
+ * rows, that heading said we could not get contacts for 12 when the real figure
+ * was 60, and a customer reading it beside "Records Matched 40" concludes 88 of
+ * their records got contacts. The old "We skipped N" at least named a category
+ * that matched its number exactly; removing the false money claim had quietly
+ * widened the noun instead.
+ *
+ * The heading now scopes itself to what it holds: the rows we can EXPLAIN. The
+ * genuine misses are real and are not hidden, they are simply the difference
+ * between the matched count and the total, and this block has nothing to add
+ * about them. Widening the count instead was the other option and it is worse:
+ * the reasons would then explain only a fraction of the number above them.
  *
  * ------------------------------------------------------------------------
  * TWO RULES, BOTH UNCHANGED
@@ -71,7 +91,9 @@ export function BulkSkipSummary({
       data-testid="skipped-summary"
       className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
     >
-      <p className="font-medium">We could not get contacts for {count} of your records.</p>
+      <p className="font-medium">
+        We can explain why {count} of your records came back without contacts.
+      </p>
       {skipReason && <p className="mt-1">{skipReason}</p>}
     </div>
   );

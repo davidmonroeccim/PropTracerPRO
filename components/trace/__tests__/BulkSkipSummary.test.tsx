@@ -61,7 +61,7 @@ describe('when rows were skipped', () => {
   );
 
   it('says how many', () => {
-    expect(markup).toContain('We could not get contacts for 40 of your records');
+    expect(markup).toContain('We can explain why 40 of your records came back without contacts');
   });
 
   it('does not call them skipped, because one of the five kinds was not', () => {
@@ -86,7 +86,7 @@ describe('when rows were skipped', () => {
     const one = renderToStaticMarkup(
       <BulkSkipSummary recordsSkipped={1} skipReason={BLANK_OWNER_SKIP_REASON} />
     );
-    expect(one).toContain('We could not get contacts for 1 of your records');
+    expect(one).toContain('We can explain why 1 of your records came back without contacts');
   });
 
   it('carries a vendor-exhausted reason just as faithfully', () => {
@@ -103,7 +103,7 @@ describe('when rows were skipped', () => {
     // CLAUDE.md rule 7. A missing reason is a fact about the response, not a
     // licence to write a plausible sentence.
     const noReason = renderToStaticMarkup(<BulkSkipSummary recordsSkipped={3} skipReason={null} />);
-    expect(noReason).toContain('We could not get contacts for 3 of your records');
+    expect(noReason).toContain('We can explain why 3 of your records came back without contacts');
     expect(noReason).not.toContain('not charged');
     expect(noReason).not.toContain('owner');
   });
@@ -121,6 +121,21 @@ describe('when rows were skipped', () => {
     expect(visibleText(billed)).not.toContain('not charged');
     expect(visibleText(billed)).not.toMatch(/\bfree\b/i);
     expect(visibleText(billed)).not.toMatch(/\bskipped\b/i);
+  });
+
+  it('claims only the rows it counted, not every record that came back empty', () => {
+    // THE OVER-CLAIM THAT REPLACED THE OLD FALSE MONEY CLAIM. `records_skipped`
+    // counts only rows carrying a stated reason; a row a vendor was genuinely
+    // asked about returns null from rowSkipReason and is excluded however empty
+    // it came back. "We could not get contacts for 40 of your records" was
+    // therefore true of each counted row and false about the job: on a
+    // 100-record job with 40 matched and 48 genuine misses it announced 40 where
+    // the real figure was 60, and a customer reading it beside Records Matched
+    // concludes the rest got contacts.
+    // MUTATION: restore a heading that states the category without scoping it to
+    // what we can explain, and this goes red.
+    expect(markup).toContain('We can explain why');
+    expect(markup).not.toContain('We could not get contacts for');
   });
 
   it('carries the billed row its own charge statement, not an absence', () => {

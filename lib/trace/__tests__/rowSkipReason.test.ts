@@ -175,6 +175,50 @@ describe('every reason carries its own charge statement', () => {
       expect(reason, reason).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
     }
   });
+
+  /* ---------------------------------------------------------------- *
+   * NO SENTENCE MAY GIVE ADVICE THAT FAILS WHEN FOLLOWED.
+   *
+   * checkDuplicates() in lib/utils/deduplication.ts treats ANY
+   * trace_history row inside the DEDUPE.WINDOW_DAYS window as a
+   * duplicate, excluding only STALE 'processing' rows, and the address
+   * hash is normalizeAddress(address, city, state) with no owner in it.
+   * An exhausted row is written status 'error', so the stale escape
+   * does not reach it either.
+   *
+   * So "send this address again" is refused for every reason EXCEPT the
+   * one that asks for a missing address part, because supplying that
+   * part changes the hash and produces a genuinely new record.
+   * ---------------------------------------------------------------- */
+
+  it('never asks the customer to resend the SAME address, which dedup refuses', () => {
+    // Three sentences ended with a resend invitation and all three were false
+    // inside the window. One of them, the tier 2 dossier failure, became
+    // customer-visible for the first time in the commit that wired this
+    // accessor. MUTATION: put any of those invitations back and this goes red.
+    const sameAddressResend = [
+      rowSkipReason({ ai_research_status: BLANK_OWNER_SKIP_STATUS })!,
+      rowSkipReason({ ai_research_status: ENTITY_TRACE_FAILED_STATUS })!,
+      rowSkipReason({ property_trace_status: PROPERTY_TRACE_FAILED_STATUS })!,
+      rowSkipReason({ property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })!,
+    ];
+    for (const reason of sameAddressResend) {
+      expect(reason, reason).not.toMatch(/send it again|send them again|try again|upload it again/i);
+    }
+  });
+
+  it('KEEPS the one resend instruction that is true, and does not tidy it away', () => {
+    // The no-key row is the exception and the exception is the whole test: the
+    // missing street, city or state is PART of the dedup hash, so doing what
+    // this sentence asks produces a new record that runs. Deleting it for
+    // consistency with its four siblings would remove the only actionable
+    // remedy in the set.
+    // MUTATION: strip the resend line from PROPERTY_TRACE_NO_KEY_REASON and this
+    // goes red.
+    const noKey = rowSkipReason({ property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS })!;
+    expect(noKey).toMatch(/send it again/i);
+    expect(noKey).toContain('full property address');
+  });
 });
 
 /**

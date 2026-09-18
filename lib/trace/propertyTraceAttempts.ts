@@ -98,15 +98,33 @@ export const PROPERTY_TRACE_NO_REACH_STATUS = 'property_trace_no_reach';
  * The sentence a customer reads when the dossier vendor could not be reached.
  * No price, because the row is free: quoting a figure on a free outcome would be
  * a false statement about money.
+ *
+ * NO RESEND INVITATION. It ended "Send it again later and we will run it" until
+ * 2026-09-18, and phase 5c-3B is the commit that first showed this sentence to a
+ * customer at all, because the accessor below was wired to nothing before it.
+ * checkDuplicates() treats any trace_history row inside the 90 day window as a
+ * duplicate and the hash is address-only, and an exhausted row is written status
+ * 'error' rather than 'processing', so it is not excluded as stale either. The
+ * resend would have been silently dropped into "Duplicates Removed".
+ *
+ * See lib/trace/blankOwnerSkip.ts for the full reasoning.
  */
 export const PROPERTY_TRACE_FAILED_REASON =
-  `We could not reach the property records service for this address after ${MAX_PROPERTY_TRACE_ATTEMPTS} tries, so nothing was traced and you were not charged. Send it again later and we will run it.`;
+  `We could not reach the property records service for this address after ${MAX_PROPERTY_TRACE_ATTEMPTS} tries, so nothing was traced and you were not charged.`;
 
 /**
  * The sentence a customer reads when the row had no usable address. A different
  * thing from the failure above and it must not share its wording: this one is
  * something they can fix by resending the row, and that one is our side failing
  * to reach a vendor.
+ *
+ * IT IS THE ONE REASON THAT KEEPS ITS RESEND LINE, AND THAT IS DELIBERATE. Do
+ * not delete it for consistency with its four siblings. The dedup hash is
+ * normalizeAddress(address, city, state), so the very thing this sentence asks
+ * for, supplying the missing street, city or state, CHANGES the hash and
+ * produces a genuinely new record that runs. The others ask the customer to
+ * resend the same address, which hashes identically and is refused. The
+ * instruction here is true, which is the whole test.
  */
 export const PROPERTY_TRACE_NO_KEY_REASON =
   'This row was missing the street, city or state we need to look a property up, so nothing was traced and you were not charged. Send it again with the full property address and we will run it.';

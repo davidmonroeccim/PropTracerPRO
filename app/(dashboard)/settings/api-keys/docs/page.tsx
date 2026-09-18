@@ -409,14 +409,14 @@ export default function ApiDocsPage() {
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional in the schema, but a row without one cannot be traced.
+                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional. A row without one still runs, as a full property trace on a different billing model, which the note below covers.
               </p>
             </div>
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-              <p className="text-amber-900 text-sm font-semibold mb-1">Rows with no owner name are skipped, not traced</p>
+              <p className="text-amber-900 text-sm font-semibold mb-1">Rows with no owner name run a full property trace, and they are billed</p>
               <p className="text-amber-800 text-sm">
-                The file is still accepted and the row still comes back to you, but it is skipped with a plain-language reason and nothing is charged for it. It is never reported as a bare <code className="bg-amber-100 px-1 rounded">no_match</code>, because that would tell you we looked and found nobody when we never looked at all. Send the row again with the owner of record and it will run. The submit response counts them in <code className="bg-amber-100 px-1 rounded">recordsSkipped</code> and explains them in <code className="bg-amber-100 px-1 rounded">skippedReason</code>.
+                They used to be skipped and free. They are not any more. We look up the county property record to find the owner, then go after their contacts, so you do not need to supply the owner yourself. That work is charged for every record you send rather than only when we find contacts, so those rows cost the same whether or not anything comes back. The submit response counts them in <code className="bg-amber-100 px-1 rounded">recordsQueued</code>, which replaced <code className="bg-amber-100 px-1 rounded">recordsSkipped</code> and <code className="bg-amber-100 px-1 rounded">skippedReason</code>. Those two keys are gone rather than zeroed, because this endpoint no longer skips anything: a whole batch is rejected up front if any record is missing the street, city or state.
               </p>
             </div>
 
@@ -436,8 +436,8 @@ export default function ApiDocsPage() {
   "recordsToProcess": 95,
   "recordsDirectTrace": 80,
   "recordsPendingResearch": 12,
-  "recordsSkipped": 3,
-  "skippedReason": "No owner name came in for this address, so there was nothing to trace and you were not charged. Send it again with the owner of record and we will run it.",
+  "recordsQueued": 3,
+  "recordsFailed": 0,
   "estimatedCost": 13.80,
   "status": "processing",
   "message": "Poll /api/v1/trace/bulk/status?job_id=uuid for results."
@@ -513,8 +513,10 @@ export default function ApiDocsPage() {
       "result": null,
       "research": null,
       "contacts": null,
-      "skip_reason": "No owner name came in for this address, so there was nothing to trace and you were not charged. Send it again with the owner of record and we will run it.",
-      "charge": 0,
+      "property_record": { "assessed_value": 412000, "year_built": 1974 },
+      "tier": 2,
+      "skip_reason": "We found the property record for this address and saved it with your results, but we could not reach the service that looks up contacts, so no phone numbers or emails came back for it. You were charged for it, because a full property trace is charged for every record you send rather than only when contacts come back.",
+      "charge": 0.40,
       "ai_research_charge": 0,
       "business_trace_pending": false,
       "business_trace_job_id": null
@@ -528,7 +530,7 @@ export default function ApiDocsPage() {
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
               <p className="text-amber-900 text-sm font-semibold mb-1">Read skip_reason before you read status</p>
               <p className="text-amber-800 text-sm">
-                A skipped row settles to <code className="bg-amber-100 px-1 rounded">status: &quot;no_match&quot;</code> so the job can finish, but that is not what happened to it. <code className="bg-amber-100 px-1 rounded">skip_reason</code> is the field that tells you the truth, and it is the one to check first on any row that came back empty. When it is set, no vendor was ever asked and nothing was charged. Report that reason rather than calling it a no match. It is <code className="bg-amber-100 px-1 rounded">null</code> on every row a vendor was actually asked about.
+                Such a row settles to <code className="bg-amber-100 px-1 rounded">status: &quot;no_match&quot;</code> so the job can finish, but that is not what happened to it. <code className="bg-amber-100 px-1 rounded">skip_reason</code> is the field that tells you the truth, and it is the one to check first on any row that came back empty. Read it out as it stands rather than calling the row a no match. Do not assume it means the row was free: most of these rows were never traced and were not charged, but one of them is a full property trace that was charged and whose contact lookup could not be completed, and the sentence itself says which. It is <code className="bg-amber-100 px-1 rounded">null</code> on every row a vendor was actually asked about and answered for.
               </p>
             </div>
 

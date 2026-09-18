@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
-import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
+import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
 import { ENTITY_TRACE_FAILED_STATUS } from "@/lib/trace/entityTraceAttempts";
 
 /**
@@ -848,6 +848,40 @@ describe("the job summary says how many rows were skipped and why", () => {
     expect(body.records_skipped).toBe(2);
     expect(body.skip_reason).toContain("No owner name came in");
     expect(body.skip_reason).toContain("could not reach the service that looks up contacts");
+  });
+
+  it("counts each reason on a mixed job, so the free and billed rows are tellable apart", async () => {
+    // THE TWO-MODEL PROBLEM ARRIVING AT THE AGGREGATE. The sentences were joined
+    // with a space and nothing else, so a customer read "...you were not
+    // charged." immediately followed by "You were charged for it, because..."
+    // over one undifferentiated total, with no way to tell that 3 rows were free
+    // and 1 was billed. The heading gave up its money claim deliberately; this
+    // is what stops that leaving a gap.
+    // MUTATION: drop the per-group counts and this goes red.
+    H.jobRows = [
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: 0.4, ai_research_status: null, property_trace_status: "property_trace_no_reach" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(4);
+    expect(body.skip_reason).toContain("That happened to 3 of them.");
+    expect(body.skip_reason).toContain("That happened to 1 of them.");
+  });
+
+  it("adds no count when there is only one reason, because the total already says it", async () => {
+    // A single reason accounts for every row in records_skipped, so repeating
+    // that number beside a heading already carrying it reads as a second,
+    // different figure.
+    H.jobRows = [
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(2);
+    expect(body.skip_reason).toBe(BLANK_OWNER_SKIP_REASON);
+    expect(body.skip_reason).not.toContain("That happened to");
   });
 
   it("holds the job open for a queued tier 2 row rather than explaining it away", async () => {

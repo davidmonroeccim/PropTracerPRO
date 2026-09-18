@@ -32,9 +32,30 @@ export const BLANK_OWNER_SKIP_STATUS = 'skipped_no_owner';
 /**
  * The sentence a customer reads. Plain language, no price: the row is free, and
  * quoting any figure on a free outcome would be a false statement about money.
+ *
+ * IT USED TO END "Send it again with the owner of record and we will run it",
+ * AND THAT ADVICE FAILED WHEN FOLLOWED. checkDuplicates() in
+ * lib/utils/deduplication.ts treats ANY trace_history row inside the 90 day
+ * window as a duplicate, excluding only STALE 'processing' rows, and the address
+ * hash is normalizeAddress(address, city, state) with no owner in it. So the
+ * resend the sentence asked for produced the same hash, matched this very row,
+ * and was dropped into "Duplicates Removed" without running. The customer did
+ * what we told them and got nothing, with no explanation of why.
+ *
+ * This is the same standard app/api/trace/bulk/route.ts already applied when it
+ * stopped writing this status for an unusable-address row: a sentence must not
+ * carry advice that fails when followed. It explains and stops instead. There is
+ * no accurate replacement instruction to give: a single trace of the address
+ * WOULD re-run it (checkSingleDuplicate only treats a delivered result as a
+ * cache hit), but the MCP has no single-trace tool, so naming that route would
+ * be true on two surfaces and false on a third, which is the exact shape of
+ * error this phase exists to remove.
+ *
+ * PROPERTY_TRACE_NO_KEY_REASON keeps its resend line and is not an inconsistency
+ * to tidy up. See the note on it.
  */
 export const BLANK_OWNER_SKIP_REASON =
-  'No owner name came in for this address, so there was nothing to trace and you were not charged. Send it again with the owner of record and we will run it.';
+  'No owner name came in for this address, so there was nothing to trace and you were not charged.';
 
 /** True when this row was skipped for a blank owner rather than traced. */
 export function isBlankOwnerSkip(aiResearchStatus: string | null | undefined): boolean {

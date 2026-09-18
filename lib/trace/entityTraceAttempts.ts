@@ -50,9 +50,20 @@ export const ENTITY_TRACE_FAILED_STATUS = 'entity_trace_failed';
 /**
  * The sentence a customer reads. No price, because the row is free: quoting a
  * figure on a free outcome would be a false statement about money.
+ *
+ * NO RESEND INVITATION, and it is not an oversight. It ended "Send it again
+ * later and we will run it" until 2026-09-18. checkDuplicates() treats any
+ * trace_history row inside the 90 day window as a duplicate and the address hash
+ * carries no owner, so the resend matched this row and was dropped without
+ * running. An exhausted row is written status 'error', not 'processing', so the
+ * stale-row escape in that function does not reach it either. The customer
+ * followed the instruction and got a duplicate.
+ *
+ * See lib/trace/blankOwnerSkip.ts for the full reasoning and for why no accurate
+ * replacement instruction exists that is true on all three surfaces.
  */
 export const ENTITY_TRACE_FAILED_REASON =
-  `We could not reach the business records service for this owner after ${MAX_ENTITY_TRACE_ATTEMPTS} tries, so nothing was traced and you were not charged. Send it again later and we will run it.`;
+  `We could not reach the business records service for this owner after ${MAX_ENTITY_TRACE_ATTEMPTS} tries, so nothing was traced and you were not charged.`;
 
 /** The queued status for a given attempt. Attempt 1 is the bare 'queued'. */
 export function queuedStatusFor(attempt: number): string {

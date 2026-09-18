@@ -22,9 +22,56 @@ export const maxDuration = 60;
 // 200 simultaneous requests against Tracerfy.
 const POLL_CONCURRENCY = 25;
 
+/**
+ * THE SIZE FENCE, MIRRORING lib/suite/mcp-tools.ts bulkStatus.
+ *
+ * Restoring payload parity in 5c-3B put a 65-key `property_record` on every row
+ * of this response, on all three emitting exits, with no bound. That is the same
+ * uncapped shape the brief called "a very large response" on the MCP side and
+ * bounded there, so parity had quietly copied the flaw to a second surface: a
+ * 500-record tier 2 job became a 500-dossier JSON response under a 60 s
+ * maxDuration.
+ *
+ * Same numbers as the MCP twin, and an `offset` for the same reason: a job's
+ * results are a FIXED set, so a bare max of 200 leaves the last 300 rows of a
+ * 500-record job structurally unreachable by a customer who paid for them.
+ *
+ * THIS CHANGES AN EXISTING API SURFACE. A caller that reads `results` and
+ * ignores everything else now sees 25 rows where it used to see all of them.
+ * That is why `results_total`, `results_returned` and `results_offset` are
+ * always present rather than only when truncation happens: a consumer can
+ * compare two numbers and page, and a silently short array with no way to detect
+ * it is the failure this codebase treats as worse than a large response. The
+ * `bulk_job.completed` WEBHOOK is deliberately NOT paged, because it is a
+ * one-shot delivery into the customer's own system with nothing to page with,
+ * and truncating it would lose rows permanently.
+ */
+const RESULTS_DEFAULT_LIMIT = 25;
+const RESULTS_MAX_LIMIT = 200;
+
+/** One page of per-record results, plus the counts that make truncation visible. */
+function pageResults<T>(all: T[], url: URL) {
+  const rawLimit = Number(url.searchParams.get('limit'));
+  const rawOffset = Number(url.searchParams.get('offset'));
+  const limit = Math.min(
+    Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : RESULTS_DEFAULT_LIMIT, 1),
+    RESULTS_MAX_LIMIT
+  );
+  // A negative offset would slice from the END of the array and silently return
+  // the WRONG rows rather than failing, which is the shape of bug nobody reports.
+  const offset = Math.max(Number.isFinite(rawOffset) ? rawOffset : 0, 0);
+  return {
+    results_total: all.length,
+    results_returned: Math.min(Math.max(all.length - offset, 0), limit),
+    results_offset: offset,
+    results: all.slice(offset, offset + limit),
+  };
+}
+
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
+    const requestUrl = new URL(request.url);
+    const { searchParams } = requestUrl;
     const jobId = searchParams.get('job_id');
 
     if (!jobId) {
@@ -89,7 +136,7 @@ export async function GET(request: Request) {
           rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)
         ),
         error_message: traceJob.error_message,
-        results: rows.map(buildPerRecordResult),
+        ...pageResults(rows.map(buildPerRecordResult), requestUrl),
       });
     }
 
@@ -254,7 +301,7 @@ export async function GET(request: Request) {
         error: errorMessage,
         tracerfy_state: primaryStallReason,
         age_minutes: Math.round(jobAgeMinutes),
-        results: rows.map(buildPerRecordResult),
+        ...pageResults(rows.map(buildPerRecordResult), requestUrl),
       });
     }
 
@@ -348,7 +395,7 @@ export async function GET(request: Request) {
       records_submitted: traceJob.records_submitted,
       records_matched: recordsMatched,
       total_charge: totalCharge,
-      results: enrichedResults,
+      ...pageResults(enrichedResults, requestUrl),
     });
   } catch (error) {
     console.error('API v1 bulk status error:', error);

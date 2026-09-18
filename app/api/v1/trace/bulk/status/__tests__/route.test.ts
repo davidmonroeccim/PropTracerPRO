@@ -232,3 +232,106 @@ describe("the tier 2 queue holds the job open too", () => {
     expect(body.total_charge).toBeCloseTo(0.4, 10);
   });
 });
+
+/**
+ * THE SIZE FENCE ON THE v1 PAYLOAD.
+ *
+ * Restoring parity with the MCP twin in 5c-3B put a 65-key `property_record` on
+ * every row of this response, on all three emitting exits, with no bound. That is
+ * the same uncapped shape the brief called "a very large response" on the MCP
+ * side and bounded there, so parity had copied the flaw to a second surface: a
+ * 500-record tier 2 job became a 500-dossier response under a 60 s maxDuration.
+ *
+ * Capping an existing API surface is a behaviour change for callers that read
+ * `results` and nothing else, which is exactly why the three count fields are
+ * ALWAYS present rather than only on truncation. A short array a consumer cannot
+ * detect is the failure this codebase treats as worse than a big response.
+ */
+describe("the v1 per-record payload is paged", () => {
+  const completedJob = {
+    id: "job-1",
+    status: "completed",
+    records_submitted: 300,
+    records_matched: 300,
+    error_message: null,
+    created_at: new Date().toISOString(),
+  };
+
+  const manyRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `row-${i}`,
+      status: "no_match",
+      tracerfy_job_id: null,
+      normalized_address: `ROW ${i}`,
+      city: "Austin",
+      state: "TX",
+      charge: 0,
+      ai_research_status: null,
+      property_trace_status: "property_trace_done",
+    }));
+
+  const get = async (query: string) => {
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    return (
+      await GET(
+        new Request(`https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1${query}`)
+      )
+    ).json();
+  };
+
+  beforeEach(() => {
+    H.profile = { id: "user-abc", subscription_tier: "wallet", is_acquisition_pro_member: false };
+    H.job = completedJob;
+    H.rows = manyRows(300);
+  });
+
+  it("returns 25 rows by default rather than every row of the job", async () => {
+    // MUTATION: drop pageResults from the already-completed exit and this goes red.
+    const body = await get("");
+    expect(body.results).toHaveLength(25);
+  });
+
+  it("always reports the total, so a truncated array is never silent", async () => {
+    // The part that makes this survivable for an existing consumer: two numbers
+    // that disagree are detectable, a short array on its own is not.
+    const body = await get("");
+    expect(body.results_total).toBe(300);
+    expect(body.results_returned).toBe(25);
+    expect(body.results_offset).toBe(0);
+  });
+
+  it("clamps an oversized limit to the same 200 the MCP twin uses", async () => {
+    const body = await get("&limit=5000");
+    expect(body.results).toHaveLength(200);
+  });
+
+  it("reaches the rows past the max, so a 500-record job stays fully readable", async () => {
+    const body = await get("&limit=200&offset=200");
+    expect(body.results).toHaveLength(100);
+    expect(body.results[0].address).toBe("ROW 200");
+    expect(body.results_offset).toBe(200);
+  });
+
+  it("floors a negative offset instead of slicing from the end", async () => {
+    // A negative offset would silently return the WRONG rows rather than fail.
+    const body = await get("&offset=-5");
+    expect(body.results[0].address).toBe("ROW 0");
+    expect(body.results_offset).toBe(0);
+  });
+
+  it("ignores junk in the query rather than returning nothing", async () => {
+    const body = await get("&limit=abc&offset=abc");
+    expect(body.results).toHaveLength(25);
+    expect(body.results_offset).toBe(0);
+  });
+
+  it("pages the freshly-finalized exit too, not only the already-completed one", async () => {
+    // This route has three exits that emit results. A cap on one of them is not
+    // a cap: the first caller to finish a job hits a different one.
+    H.job = { ...completedJob, status: "processing" };
+    const body = await get("");
+    expect(body.status).toBe("completed");
+    expect(body.results).toHaveLength(25);
+    expect(body.results_total).toBe(300);
+  });
+});

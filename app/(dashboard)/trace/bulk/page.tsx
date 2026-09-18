@@ -21,19 +21,40 @@ import * as XLSX from 'xlsx';
  * client bundle. A test pins the two together.
  *
  * IT IS CHECKED AGAINST THE ROW COUNT OF THE FILE, WHICH IS DELIBERATELY THE
- * STRICTER NUMBER. The route counts records after deduplication, so a 600-row
- * file holding 200 duplicates is a legitimate 400-record job that this refuses.
+ * STRICTER NUMBER.
+ *
+ * WHERE THE GAP ACTUALLY IS, corrected on 2026-09-18. An earlier version of this
+ * comment said the route counts records after deduplication and used duplicates
+ * as the example. That is wrong, and a wrong rationale is worse than none
+ * because it is what the next person reads: app/api/trace/bulk/route.ts caps on
+ * `records.length` at :65, BEFORE removeBatchDuplicates at :90, so duplicates
+ * are not the gap at all.
+ *
+ * The real gap is INVALID rows. mapRows() below drops any row missing an
+ * address, city or state before the page posts anything, so a 520-row county
+ * export carrying 30 rows with no city is a legitimate 490-record job that this
+ * refuses. mapRows only ever drops rows, never adds them, so the parsed count is
+ * always at least the submitted count and this can never under-refuse.
+ *
  * That is the safe direction and it is chosen, not overlooked: a false refusal
  * is instant, visible and fixed by splitting the file, while a false acceptance
  * means waiting through a submit to be told no, which is the exact failure this
  * check exists to remove. It also refuses on the number the user is looking at.
- * The preview above says "N records", this says N is too many, and a refusal
- * quoting a count they cannot see would be worse than the strictness.
+ * The preview above says "N records", and a refusal quoting a count they cannot
+ * see would be worse than the strictness.
  */
 const MAX_RECORDS = 500;
 
-/** What the user is told when the file is over the cap. */
-const OVER_CAP_MESSAGE = `This file has more rows than we can take in one go. You can send up to ${MAX_RECORDS} records at a time, so split it into smaller files and send them one after another.`;
+/**
+ * What the user is told when the file is over the cap.
+ *
+ * IT MUST NOT TELL THEM THEIR JOB IS TOO BIG, because it might not be. Since the
+ * check is on rows and the cap is on records, a customer whose 490-record job was
+ * refused would otherwise read "you can send up to 500 records" and conclude the
+ * product cannot take 490. So the sentence names the cap and says this FILE has
+ * more rows than that, which is the fact we actually checked.
+ */
+const OVER_CAP_MESSAGE = `We can take up to ${MAX_RECORDS} records in one go, and this file has more rows than that. Split it into smaller files and send them one after another.`;
 
 // ─── Column Mapping ─────────────────────────────────────────────────────────
 
@@ -821,16 +842,21 @@ export default function BulkUploadPage() {
                   <p className="text-sm text-gray-500">Most This Can Cost</p>
                   <p className="text-2xl font-bold">${jobStats.estimated_cost.toFixed(2)}</p>
                 </div>
-                {/* THE OLD LABEL PAIRED "Skipped" WITH A NOT-CHARGED PROMISE,
-                    and the count this tile shows can now include a row that WAS
-                    charged: a full property trace whose property record was
-                    bought before the contact vendor failed. The label states
-                    what every one of them has in common and leaves the money to
-                    the sentence underneath, which is the only thing that knows
-                    which billing model each row was on. */}
+                {/* TWO THINGS THIS LABEL MUST NOT DO, AND IT TOOK TWO GOES.
+                    It may not promise the rows were free, which the original
+                    label did by pairing "Skipped" with a not-charged claim,
+                    because the count can include a full property trace whose
+                    record was bought before the contact vendor failed. And it
+                    may not name a category wider
+                    than the number under it, which its first replacement did:
+                    `records_skipped` holds only rows with a STATED REASON, so a
+                    label naming every empty row, showing 12 beside "Records
+                    Matched 40" on a 100-record job, told the customer 88 records
+                    got contacts when 60 did not. It names the subset it actually
+                    holds. */}
                 {(jobStats.records_skipped || 0) > 0 && (
                   <div className="bg-amber-50 rounded-lg p-4">
-                    <p className="text-sm text-gray-500">No contacts returned</p>
+                    <p className="text-sm text-gray-500">Records We Can Explain</p>
                     <p className="text-2xl font-bold text-amber-800">{jobStats.records_skipped}</p>
                   </div>
                 )}
@@ -932,12 +958,16 @@ export default function BulkUploadPage() {
                         <p className="text-sm text-gray-500">Total Charged</p>
                         <p className="text-2xl font-bold">${completeStats.total_charge.toFixed(2)}</p>
                       </div>
-                      {/* Same label as the processing tile, and for the same
-                          reason: this count can include a billed row whose
-                          contact lookup never completed. */}
+                      {/* Same label as the processing tile, and for the same two
+                          reasons: this count can include a billed row whose
+                          contact lookup never completed, and it is only the rows
+                          carrying a stated reason rather than every row that
+                          came back empty. It sits directly beside Records
+                          Matched, which is where a wider noun would have been
+                          read as the whole story. */}
                       {completeStats.records_skipped > 0 && (
                         <div className="bg-amber-50 rounded-lg p-4">
-                          <p className="text-sm text-gray-500">No contacts returned</p>
+                          <p className="text-sm text-gray-500">Records We Can Explain</p>
                           <p className="text-2xl font-bold text-amber-800">
                             {completeStats.records_skipped}
                           </p>

@@ -65,20 +65,41 @@ function summarizeSkips(rows: SkipRow[]): {
   records_skipped: number;
   skip_reason: string | null;
 } {
-  const reasons: string[] = [];
+  // Five different things land here and they are not the same thing to read: a
+  // blank owner, an entity trace that ran out of attempts, a dossier vendor we
+  // could not reach, a row with no usable address, and a billed row whose
+  // contact vendor never answered. A job carrying several says all of them.
+  const byReason = new Map<string, number>();
   let count = 0;
   for (const row of rows) {
     const reason = rowSkipReason(row);
     if (!reason) continue;
     count++;
-    // Five different things land here and they are not the same thing to read:
-    // a blank owner they can fix by resending, an entity trace that ran out of
-    // attempts, a dossier vendor we could not reach, a row with no usable
-    // address, and a billed row whose contact vendor never answered. A job
-    // carrying several says all of them.
-    if (!reasons.includes(reason)) reasons.push(reason);
+    byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
   }
-  return { records_skipped: count, skip_reason: reasons.length > 0 ? reasons.join(' ') : null };
+
+  const groups = [...byReason.entries()];
+  if (groups.length === 0) return { records_skipped: count, skip_reason: null };
+
+  // ONE REASON NEEDS NO COUNT: it accounts for every row in `records_skipped`,
+  // and repeating that number beside a heading already carrying it reads as a
+  // second, different figure.
+  if (groups.length === 1) return { records_skipped: count, skip_reason: groups[0][0] };
+
+  // SEVERAL REASONS DO, AND THIS IS THE TWO-MODEL PROBLEM ARRIVING AT THE
+  // AGGREGATE. The sentences were joined with a space and nothing else, so a
+  // mixed job rendered "...you were not charged." immediately followed by "You
+  // were charged for it, because..." over one undifferentiated total. Both
+  // sentences are true of their own rows and the customer had no way to tell how
+  // many rows each one covered, which on a job holding 13 free rows and 1 billed
+  // one is the difference they most need. The heading gave up its money claim
+  // deliberately; this is what stops that leaving a gap.
+  return {
+    records_skipped: count,
+    skip_reason: groups
+      .map(([reason, n]) => `${reason} That happened to ${n} of them.`)
+      .join(' '),
+  };
 }
 
 export async function GET(request: Request) {

@@ -100,11 +100,17 @@ describe('the finished job summary', () => {
     expect(SOURCE).not.toMatch(/Skipped[^\n]*not charged/);
   });
 
-  it('labels the tile with what every one of those rows has in common', () => {
-    // The money claim moved into the per-row reason sentence, which is the only
-    // thing that knows which billing model the row was on. The tile states the
-    // one fact true of all five kinds. Both phases use it, so two are expected.
-    expect(SOURCE.match(/No contacts returned/g) ?? []).toHaveLength(2);
+  it('labels the tile with the subset it actually holds, not a wider category', () => {
+    // TWO SEPARATE WRONGS, AND THE SECOND WAS INTRODUCED FIXING THE FIRST.
+    // The original label promised the rows were free, which stopped being true.
+    // Its replacement, "No contacts returned", was true of every counted row and
+    // false as a category: `records_skipped` holds only rows carrying a stated
+    // reason, so on a 100-record job with 40 matched, 48 genuine misses and 12
+    // explained rows it announced 12 where the real no-contact figure was 60,
+    // sitting directly beside "Records Matched 40".
+    // MUTATION: widen the label back and this goes red. Both phases use it.
+    expect(SOURCE.match(/Records We Can Explain/g) ?? []).toHaveLength(2);
+    expect(SOURCE).not.toContain('No contacts returned');
   });
 
   it('never writes its own copy of the reason', () => {
@@ -213,8 +219,20 @@ describe('the record cap, refused at selection time', () => {
   });
 
   it('states the cap in records and says what to do about it', () => {
-    expect(SOURCE).toContain('You can send up to ${MAX_RECORDS} records at a time');
-    expect(SOURCE).toContain('split it into smaller files');
+    expect(SOURCE).toContain('We can take up to ${MAX_RECORDS} records in one go');
+    expect(PROSE).toContain('Split it into smaller files');
+  });
+
+  it('does not tell a customer their job is over the limit when it may not be', () => {
+    // THE CHECK IS ON ROWS AND THE CAP IS ON RECORDS, and they are not the same
+    // number: mapRows drops any row missing an address, city or state before the
+    // page posts, so a 520-row export with 30 unusable rows is a legitimate
+    // 490-record job this refuses. The copy must therefore say THIS FILE has
+    // more rows than the cap, which is the fact actually checked, rather than
+    // "you can send up to 500 records", which a refused 490-record customer
+    // reads as a statement about their job.
+    expect(PROSE).toContain('this file has more rows than that');
+    expect(PROSE).not.toContain('This file has more rows than we can take');
   });
 });
 
