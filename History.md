@@ -15,11 +15,17 @@ back after the migration, `public.trace_history` grants `INSERT, UPDATE, DELETE`
 rewrite **every column on their own rows** from the browser console with the anon key that ships in
 the JS bundle. `charge`, `tier`, `is_successful`, `trace_result`, `property_record`.
 
-**The 2026-09-17 audit that called PTP clean was a FUNCTION-EXECUTE audit.** It answered its own
-question correctly and never asked this one. Recorded as L-014.
+**This is NOT a missed audit. It is the known, deliberately-deferred remainder.** The suite-wide
+table-grant class was found and partly fixed on 2026-07-16/17; the broad `REVOKE ... ON ALL TABLES`
+plus surgical re-grant was explicitly DEFERRED as backward-incompatible and "not flag-critical,
+profile and wallet tables already locked". That was reasonable then: the exposure was a user
+corrupting their own rows, and the wallet LEDGER, not the row, is the source of truth for money
+collected. Recorded as L-014.
 
-**5c-2 widened it.** A new column inherits the table's grants, so `property_trace_status` landed
-browser-writable, and it is not a fact about a row, it is the trigger the cron claims work from.
+**5c-2 is what expired that deferral.** A new column inherits the table's grants, so
+`property_trace_status` landed browser-writable like every other column. But it is not a fact about a
+row, it is the trigger the cron claims work from, which turns a data-integrity deferral into a
+free-vendor-work exploit.
 Writing `'queued'` into it enqueues paid vendor work. Combined with `deductOrZero` collapsing an empty
 wallet to 0 while still delivering, a user with no balance could self-enqueue unlimited tier 2
 traces against PTP's SHARED Tracerfy pool. **Not exploitable today: the cron is committed but not

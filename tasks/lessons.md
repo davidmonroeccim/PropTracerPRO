@@ -27,35 +27,47 @@ clear it.
 
 ---
 
-## L-014: A GRANT audit is not done until you check the TABLES too (2026-09-18)
+## L-014: A DEFERRAL is a decision with an expiry date, and new code can expire it (2026-09-18)
 
-**What happened.** Applying the 5c-2 queue migration, I read the ACL back afterwards as CLAUDE.md
-requires. The columns and index were exactly right. Then I read the TABLE's grants, which the
-migration does not touch and which I only checked because the template told me to look at
-privileges at all, and found `public.trace_history` granting
-`INSERT, UPDATE, DELETE` to **`anon` and `authenticated`**, table-wide. The anon key ships in the
-browser bundle.
+**I nearly recorded this lesson wrong, and the wrong version is instructive.** My first draft said a
+previous audit had MISSED that `public.trace_history` grants `INSERT, UPDATE, DELETE` to `anon` and
+`authenticated` table-wide. It did not miss it. Reading the actual remediation record rather than my
+summary of it, the suite-wide table-grant class was found, understood, and partly fixed on
+2026-07-16 and 17, and the broad `REVOKE ... ON ALL TABLES` plus surgical re-grant was **explicitly
+DEFERRED** as backward-incompatible and "not flag-critical, profile and wallet tables already
+locked". `trace_history` is not an oversight. It is the known, deliberately-deferred remainder.
 
-**Why the previous audit missed it.** The 2026-09-17 audit that declared PTP clean was a
-**function-EXECUTE** audit, prompted by a `SECURITY DEFINER` function coming back callable by
-`anon`. It answered "which functions can the browser call" correctly and completely. It never asked
-"which TABLES can the browser write", which is a different question with a different catalog view
-(`information_schema.role_table_grants`, not `pg_proc.proacl`). Two vuln classes share the word
-"grant" and an audit of one reads, in memory and in a handoff, like an audit of both.
+**And that deferral was reasonable when it was made.** With writes limited to `charge`,
+`is_successful`, `trace_result` and the like, the exposure was a user corrupting their own rows. Bad,
+but not theft: the wallet ledger is the source of truth for money collected, and `collectedChargeFor`
+reads the ledger rather than the row.
 
-**The rule.** "Audited clean" must name WHICH catalog it audited. When a finding is about EXECUTE on
-functions, write "function EXECUTE audited clean" and not "grants audited clean", because the second
-sentence retires a question nobody asked. And when you touch a table for any reason, read that
-table's grants once, not just the object you changed.
+**What changed is the table, not the grant.** Phase 5c-2 added `property_trace_status` to it. A new
+column inherits the table's existing grants automatically, so it landed browser-writable like every
+other column. But it is not a fact about a row: it is the **trigger the cron claims work from**.
+Writing `'queued'` into it enqueues paid vendor work. Combined with `deductOrZero` collapsing an
+empty wallet to 0 while still delivering, a user with no balance could self-enqueue unlimited tier 2
+traces against a Tracerfy pool SHARED with every other customer. A data-integrity deferral quietly
+became a free-vendor-work exploit, and nobody re-opened the decision because nobody had to: the
+migration only added columns.
 
-**The compounding half, and it is the dangerous one.** My migration added
-`property_trace_status` to that table. A new column inherits the table's existing grants
-automatically, so it landed browser-writable. It is not an ordinary data column: the cron claims work
-by reading it, so a browser write to it ENQUEUES PAID VENDOR WORK. Combined with `deductOrZero`
-collapsing an empty wallet to 0 while still delivering, a user with no balance could self-enqueue
-unlimited tier 2 traces against PTP's shared Tracerfy pool. **Adding a column to a table whose grants
-you have not read is a privilege decision, not a schema decision** -- and it is worst when the column
-is a trigger for work rather than a fact about a row.
+**The rules, and the second one is the real one.**
+
+- **Adding a column to a table whose grants you have not read is a privilege decision, not a schema
+  decision.** Read the table's grants when you touch it, not just the object you changed. Use
+  `has_table_privilege()` / `has_column_privilege()` as an admin: `information_schema.role_table_grants`
+  is filtered to grants the QUERYING role can see, so auditing as a low-privilege role returns zero
+  rows and a wide-open table looks clean. That filtering hid a different instance of this same class
+  for a month.
+- **When you defer a security fix, write down what the deferral DEPENDS ON, not just why it is safe
+  today.** "Not flag-critical, profile and wallet tables already locked" was true and is now
+  irrelevant, because the thing that changed was not the flag or the profile tables. A deferral whose
+  justification names only present conditions cannot tell you when it has expired, and the person who
+  expires it will be someone adding a column who never reads the security record at all.
+
+**And on recording lessons:** check the primary record before writing the post-mortem. I was about to
+blame an audit that had done its job, which would have taught the next reader to distrust a
+remediation that was actually sound, and would have buried the real finding.
 
 ---
 
