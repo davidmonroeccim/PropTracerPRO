@@ -6,6 +6,50 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### Full Property Trace, phase 5c-1: a vendor saying "not found" is an answer, not an outage
+
+Two prerequisite defects, both in `lib/tracerfy/client.ts`, both money defects. Bulk tier 2 would
+have inherited both, so neither could wait for the engine. Commit `55616b0`.
+
+- **A FastAppend "company not found" was billed as an outage and 502'd the customer.** The vendor
+  answers a genuine miss with HTTP 404 carrying a valid envelope, `hit:false, credits_deducted:0`.
+  The client checked `if (!response.ok)` and returned `contactFailure` BEFORE parsing the body, so
+  `executeRoute` set `pass2.failure` and the route returned 502 with `charge: 0`. A record whose
+  dossier had HIT, $0.20 already spent and the 86-field record in hand, was discarded unbilled.
+  `executeRoute`'s own comment says "the dossier spend above stands and the record is good"
+  immediately before throwing it away. At the handoff's measured rates (22 of 24 commercial parcels
+  are entities, FastAppend hits 13 of 22) that is roughly 9 in 22 entity records.
+- **L-008 had already recorded this exact lesson and the fix landed one layer too deep.**
+  `parseBusinessTraceResponse` handles `hit:false` correctly; the status check above it
+  short-circuited before reaching it. The discriminator is now the BODY. A body carrying a boolean
+  `hit` is an ANSWER and goes to the parser.
+- **A 5xx is the one exception, and it is checked first.** The plan's own sentence contradicted
+  itself here, saying "an ANSWER at any status" and then listing 5xx as a transport failure. Bound
+  to: the `hit` discriminator covers 2xx and 4xx, any 5xx is a failure regardless of body. A 5xx is
+  the vendor reporting that its own server failed, and L-007 says an outage is never billable. The
+  ruling can only under-bill, never over-bill. The reasoning is written into a comment at the gate
+  because the next reader will see two false-y signals and think they can be merged.
+- **The body is now read exactly once.** The old code called `.text()` on one branch and `.json()`
+  on the other, and a naive rewrite produces a "body already consumed" error that a permissive mock
+  never catches. The test mock enforces single-read.
+- **`getAnalytics()`'s type was fiction.** It declared `credits_remaining`, `credits_used`,
+  `total_jobs` and `total_records`; the API returns `balance`, `total_queues`, `properties_traced`,
+  `queues_pending` and `queues_completed`. Not one declared name exists. With zero call sites nobody
+  found out, and the failure mode was the silent kind: a guard reading `data.credits_remaining < 300`
+  evaluates `undefined < 300`, which is false, so it would have blocked nothing while looking
+  implemented. Fixed against the real response, with the test that would have caught it. No call site
+  added; its consumer belongs to 5c-3.
+
+1008 passing from 1000, 62 files, 0 failing. tsc 0. eslint 47. Build compiles. Three mutations run
+independently by the controller, all killed: reverting the discriminator to `!response.ok` (1 red),
+disabling the 5xx arm (1 red), and weakening the missing-`hit` guard into a billable miss (2 red).
+Task review returned zero findings at Critical, Important and Minor.
+
+Worth recording because it nearly cost the work: the implementer ran `git checkout --` on
+UNCOMMITTED changes to revert a temporary mutation and destroyed both fixes. It reapplied them and
+disclosed it. That is L-012 arriving a second time in a different costume; the lesson's rule is
+"commit before a mutation run", and the run that bit it was a mutation run on unsaved work.
+
 ### Full Property Trace, phase 5b: a refund is not a collection
 
 A third adversarial review found one new production defect. Two settle sites refund a historical

@@ -2804,9 +2804,49 @@ pay-as-you-go tier 2).
 The 402/refusal copy must say the cap in records, and the UI should refuse at selection time rather
 than after an upload the user waited on.
 
+## DAVID'S DECISIONS, 2026-09-18, taken before execution began
+
+These answer questions the plan left open. They are decisions, not recommendations.
+
+1. **Build on `main`**, same as phases 1 through 5b.
+
+2. **Task 10, long-job UX: CHECK-BACK TO HISTORY.** On poll exhaustion, stop the dead-end spinner
+   plus red error and hand the user the job id and a route to the History page, which already lists
+   bulk jobs with a status badge and a download once complete (`app/(dashboard)/history/page.tsx`).
+   Context that reframed this task, measured after the plan was written: at a 500 cap one job is
+   about 5 cron runs, roughly 5 minutes, which FITS inside today's 120 x 5 s ceiling. The ceiling
+   only breaks under contention, when two or three jobs share the 120-per-run budget. So this is a
+   smaller fire than the plan implies, and the fix is the UX one, not a bigger number.
+
+3. **Task 7, the Tracerfy balance refusal: REFUSE SILENTLY, NO ALERT.** PTP has no alerting channel.
+   No Sentry, no email provider, no Slack; `lib/suite/alert.ts` is a single tagged `console.error`
+   whose own docstring says to wire it to a real channel before production. David chose no alert over
+   a fake one. **Hard constraints: no string may claim anyone was notified, and the refusal must
+   never tell the customer to add funds.** It is PTP's balance that is short, not theirs.
+
+4. **NEW TASK 13: fix the advisory wallet check.** Found during pre-flight, not in the original plan.
+   The submit-time wallet check is read-only and reserves nothing (`app/api/trace/bulk/route.ts:103`
+   and `app/api/v1/trace/bulk/route.ts:132` are bare comparisons; neither route writes
+   `wallet_balance`). The real debit is per record at settle time,
+   `lib/trace/settleBulkJob.ts:150-176` via `deductOrZero` -> `deduct_wallet_balance`. So two jobs
+   submitted back to back both pass against the same dollars. Settlement fails closed
+   (`lib/wallet/deduct.ts:33-45`): a short wallet yields `insufficient_balance` and collects 0, so
+   no customer is harmed and no balance goes negative, which is why this was never noticed. **PTP
+   eats it.** At tier 2 that is up to 500 records of real vendor spend, about $150, collected at $0.
+   Size the submit check against in-flight unbilled work, exactly as the plan already requires for
+   the shared Tracerfy pool.
+
+### Controller ruling, task 1 (recorded because the plan contradicted itself)
+
+The plan says a body carrying `hit` is an answer "at any status" and one line later lists 5xx among
+transport failures. Bound to: **the `hit` discriminator applies to 2xx and 4xx only; any 5xx is a
+transport failure regardless of body.** A 5xx is the vendor reporting its own server failed, and
+L-007 says an outage is never billable. The ruling can only under-bill, never over-bill. If it is
+wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried instead of billed.
+
 ## TASKS
-- [ ] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status.
-- [ ] 2. P2: fix `getAnalytics` against the real response; test it.
+- [x] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status. **DONE `55616b0`**
+- [x] 2. P2: fix `getAnalytics` against the real response; test it. **DONE `55616b0`**
 - [ ] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time.
 - [ ] 4. Migration: two queue columns + the all-rungs partial index.
 - [ ] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5.
@@ -2817,3 +2857,4 @@ than after an upload the user waited on.
 - [ ] 10. Poll ceiling / long-job UX.
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
+- [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
