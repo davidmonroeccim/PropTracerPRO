@@ -304,7 +304,13 @@ describe("the three-way split", () => {
       ai_research_status: "queued",
       status: "processing",
     });
-    expect(historyRows()[0].property_trace_status ?? null).toBeNull();
+    // THE KEY MUST BE PRESENT, NOT MERELY NULLISH. This upsert touches only the
+    // keys it carries and the row is REUSED (UNIQUE(user_id, address_hash)), so
+    // an omitted key leaves a previous tier 2 terminal value in place and
+    // rowSkipReason() serves it over this tier 1 row. `?? null` alone was
+    // satisfied by the key being absent, which is the state the defect lived in.
+    expect(Object.keys(historyRows()[0])).toContain("property_trace_status");
+    expect(historyRows()[0].property_trace_status).toBeNull();
   });
 
   it("still sends a person straight to the Tracerfy bulk CSV", async () => {
@@ -313,7 +319,9 @@ describe("the three-way split", () => {
     expect(submitBulkTrace).toHaveBeenCalledTimes(1);
     expect(body.recordsDirectTrace).toBe(1);
     expect(historyRows()[0]).toMatchObject({ ai_research_status: null, status: "processing" });
-    expect(historyRows()[0].property_trace_status ?? null).toBeNull();
+    // Written, not merely absent. See the entity test above.
+    expect(Object.keys(historyRows()[0])).toContain("property_trace_status");
+    expect(historyRows()[0].property_trace_status).toBeNull();
   });
 
   it("never sends a blank-owner record to the person CSV", async () => {

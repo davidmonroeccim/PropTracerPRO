@@ -641,7 +641,13 @@ describe("skip_trace_bulk", () => {
     // business trace bills per successful trace and a miss is free. Landing it on
     // the tier 2 queue as well would bill it per record submitted, by a second
     // engine, for an owner it never needed discovering.
-    expect(rows[0].property_trace_status ?? null).toBeNull();
+    //
+    // ASSERTED ON THE KEY, NOT ON `?? null`. The upsert touches only the keys in
+    // its payload and the row is REUSED, so an omitted key leaves a previous
+    // tier 2 terminal value on the row for rowSkipReason() to serve. An absent
+    // key satisfied the old assertion, so it could not fail.
+    expect(Object.keys(rows[0])).toContain("property_trace_status");
+    expect(rows[0].property_trace_status).toBeNull();
     expect(submitBulkTrace).not.toHaveBeenCalled();
   });
 

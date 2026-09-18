@@ -12,7 +12,7 @@ import {
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { deductOrZero } from '@/lib/wallet/deduct';
-import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
+import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
 import { isTrackASource, pricePlanFor } from '@/lib/suite/pricing';
 import { rawPricePlanFor } from '@/lib/api/pricing';
 import {
@@ -109,6 +109,13 @@ const DOSSIER_STEP_KINDS: ReadonlySet<StepKind> = new Set<StepKind>([
 interface QueueRow {
   id: string;
   user_id: string;
+  /**
+   * The bulk job this row is CURRENTLY enqueued for. Re-pointed by every submit
+   * route, because the row is reused rather than re-inserted, so it is what
+   * separates this piece of paid work from the last one against the same
+   * address. The ledger probe below is scoped by it.
+   */
+  trace_job_id: string | null;
   normalized_address: string;
   city: string | null;
   state: string | null;
@@ -196,6 +203,39 @@ export async function GET(request: Request) {
         : rawPricePlanFor(rateProfile);
     pricePlanCache.set(key, plan);
     return plan;
+  };
+
+  /**
+   * When the bulk job this row now belongs to was created, or null when we
+   * cannot tell.
+   *
+   * WHAT IT IS FOR. It bounds the ledger probe below to THIS submit. A
+   * trace_history row is UNIQUE(user_id, address_hash) and is reused, so a second
+   * submit of the same address re-points `trace_job_id` and re-enqueues the row
+   * for a second, genuine piece of vendor work. A debit booked for the FIRST
+   * submit predates this job, so it cannot be the answer to whether this one has
+   * been collected -- and taking it as the answer is how the dossier gets bought
+   * again while nothing is charged for it.
+   *
+   * NULL MEANS UNBOUNDED, WHICH IS THE SAFE DIRECTION. An unreadable job can only
+   * cause a charge to be skipped; a wrong bound charges a customer twice.
+   *
+   * Cached per job for the same reason the price plan is: one read-only query
+   * repeated is the worst a race here can do.
+   */
+  const jobStartCache = new Map<string, string | null>();
+  const jobStartedAt = async (traceJobId: string | null): Promise<string | null> => {
+    if (!traceJobId) return null;
+    const cached = jobStartCache.get(traceJobId);
+    if (cached !== undefined) return cached;
+    const { data: job } = await adminClient
+      .from('trace_jobs')
+      .select('created_at')
+      .eq('id', traceJobId)
+      .single();
+    const startedAt = (job as { created_at?: string } | null)?.created_at ?? null;
+    jobStartCache.set(traceJobId, startedAt);
+    return startedAt;
   };
 
   /** One claimed row, start to finish. Never throws past its own catch. */
@@ -416,10 +456,34 @@ export async function GET(request: Request) {
       // against rows this queue also reaches, so a row can arrive here having
       // collected a fee and had it handed back. That nets to 0, and 0 is not a
       // collection: treating it as one gives the row away free.
-      const alreadyCollected = await collectedChargeFor(adminClient, row.id);
-      const charge =
-        alreadyCollected !== null && alreadyCollected > 0
-          ? alreadyCollected
+      //
+      // TWO READINGS OF ONE LEDGER, BECAUSE THE DECISION AND THE AMOUNT ARE
+      // DIFFERENT QUESTIONS.
+      //
+      // `inWindow` decides. Bounded to the bulk job this row is CURRENTLY
+      // enqueued for, and that bound is the whole difference between the crash
+      // window and a resubmit. Unbounded, it also answered for a debit booked
+      // weeks ago under a different job: the row is REUSED, so a second submit
+      // re-enqueues it, this cron re-buys the dossier out of the shared pool, and
+      // the probe reports the OLD collection so the deduct is skipped. Real
+      // vendor money out, $0.00 collected, and repeatable, because nothing in
+      // that state ever changes. The crash window this guard was written for --
+      // deduct, throw, requeue, re-claim -- happens inside ONE job, so a bound at
+      // that job's own start still catches it.
+      //
+      // `total` is the amount. `trace_history.charge` means what this row has
+      // collected in total, and three surfaces SUM it as what the customer paid,
+      // so persisting the windowed figure would drop an earlier submit's real
+      // debit from a column the ledger still holds.
+      const { total: collectedBefore, inWindow: collectedThisJob } =
+        await collectedChargesFor(
+          adminClient,
+          row.id,
+          await jobStartedAt(row.trace_job_id)
+        );
+      const deducted =
+        collectedThisJob !== null && collectedThisJob > 0
+          ? 0
           : // Deduct FIRST, then persist the amount that actually moved. The
             // amount comes off the plan, which is the one place the tier 2
             // per-record rate for this caller's column is resolved.
@@ -429,6 +493,17 @@ export async function GET(request: Request) {
               p_trace_history_id: row.id,
               p_description: FULL_PROPERTY_TRACE_DESCRIPTION,
             });
+
+      // The ledger's net for this row once this pass is accounted for: what it
+      // held coming in, plus whatever actually moved just now. One of those two
+      // is always zero. Rounded because two 2-decimal floats added give
+      // 0.30000000000000004 and this lands in a DECIMAL column shown as money.
+      //
+      // A row whose ledger could not be READ answers `total: null`, which lands
+      // here as the amount that moved this pass -- the same value the site wrote
+      // before any probe existed, and the safe one: never a zero over a row that
+      // has collected something.
+      const charge = Math.round(((collectedBefore ?? 0) + deducted) * 100) / 100;
 
       const result = traceResultFor(execution);
       const isSuccessful = hasContactData(result);
@@ -473,12 +548,12 @@ export async function GET(request: Request) {
           // What the vendors actually took, read from their own credit counters
           // rather than assumed from a price list.
           cost: execution.vendorSpend,
-          // MONEY FACTS. `charge` is the LEDGER's answer when the ledger had one
-          // and is written as-is: folding it would add money already recorded to
-          // money already on the row and count one debit twice. `tier` is NOT
-          // the ledger's to answer -- the ledger records money, not the billing
-          // model -- and a flat literal here would silently downgrade a receipt,
-          // so it comes from the fold, which never downgrades.
+          // MONEY FACTS. `charge` is the LEDGER's net for this row, written
+          // as-is: folding it onto the row's own column would add money already
+          // recorded to money already there and count one debit twice. `tier` is
+          // NOT the ledger's to answer -- the ledger records money, not the
+          // billing model -- and a flat literal here would silently downgrade a
+          // receipt, so it comes from the fold, which never downgrades.
           charge,
           tier: foldBillingWrite(row, {
             charge,

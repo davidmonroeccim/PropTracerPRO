@@ -206,6 +206,15 @@ interface JobStats {
   // and CompleteStats below is where they show up.
   records_skipped?: number;
   skipped_reason?: string;
+  // Records ACCEPTED and then never sent anywhere, because the Tracerfy submit
+  // for the owner-name half of the file failed. A different fact from
+  // records_skipped, which is about rows that carry a reason of their own, and
+  // the only number that reveals it: the route re-quotes records_submitted and
+  // estimated_cost down to the survivors, so every other figure on this page
+  // reads as a smaller job rather than a half-failed one. It was in the response
+  // and nowhere on the screen until 2026-09-18, so a customer whose person half
+  // died saw a finished job with no sign that 60 rows were never traced.
+  records_failed?: number;
   message?: string;
 }
 
@@ -860,6 +869,18 @@ export default function BulkUploadPage() {
                     <p className="text-2xl font-bold text-amber-800">{jobStats.records_skipped}</p>
                   </div>
                 )}
+                {/* THE HALF THAT NEVER LEFT THE BUILDING. Its own tile because
+                    nothing else on this page can reveal it: the route re-quotes
+                    Submitted for Tracing and Most This Can Cost down to the rows
+                    that survived, so a half-failed job looks exactly like a
+                    smaller one. The label says what happened and makes no claim
+                    about money, because the sentence below carries that. */}
+                {(jobStats.records_failed || 0) > 0 && (
+                  <div className="bg-amber-50 rounded-lg p-4">
+                    <p className="text-sm text-gray-500">Records We Could Not Send</p>
+                    <p className="text-2xl font-bold text-amber-800">{jobStats.records_failed}</p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -871,6 +892,15 @@ export default function BulkUploadPage() {
                 skipReason={jobStats?.skipped_reason}
               />
             </div>
+
+            {/* AND THE ROUTE'S OWN SENTENCE, WHICH THIS PHASE RENDERED NOWHERE.
+                On a half-failed submit it names which half died and says those
+                rows were not charged, which is the one place that money claim is
+                made. Shown only when there IS a failed half, so the no-key
+                message the happy path carries does not repeat the block above. */}
+            {(jobStats?.records_failed || 0) > 0 && jobStats?.message && (
+              <p className="text-sm text-gray-600 text-left">{jobStats.message}</p>
+            )}
 
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto" />
             <p className="text-gray-700 font-medium">Processing your upload...</p>
@@ -975,6 +1005,20 @@ export default function BulkUploadPage() {
                       )}
                     </>
                   )}
+                  {/* Same tile as the processing phase, and it belongs here more
+                      than there: this is the screen a customer reads as the
+                      account of what their upload did. Records Matched is
+                      counted out of the survivors only, so without this the
+                      rows that were never sent are simply absent from every
+                      number on the card. */}
+                  {(jobStats.records_failed || 0) > 0 && (
+                    <div className="bg-amber-50 rounded-lg p-4">
+                      <p className="text-sm text-gray-500">Records We Could Not Send</p>
+                      <p className="text-2xl font-bold text-amber-800">
+                        {jobStats.records_failed}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -992,12 +1036,17 @@ export default function BulkUploadPage() {
                 skipReason={completeStats?.skip_reason}
               />
 
-              {/* The route's own message, which today only ever talks about
-                  skipped rows. Shown only when the block above did not already
-                  say it, so the same fact is never on screen twice. */}
-              {!completeStats?.records_skipped && jobStats?.message && (
-                <p className="text-sm text-gray-600">{jobStats.message}</p>
-              )}
+              {/* The route's own message. On the happy path it only ever talks
+                  about skipped rows, so it is held back when the block above
+                  already said that and the same fact is never on screen twice.
+                  A HALF-FAILED SUBMIT IS NOT THAT CASE: the message then names
+                  which half was not sent and says those rows were not charged,
+                  which nothing else here says, and the old condition suppressed
+                  it whenever any row also carried a reason. */}
+              {jobStats?.message &&
+                ((jobStats.records_failed || 0) > 0 || !completeStats?.records_skipped) && (
+                  <p className="text-sm text-gray-600">{jobStats.message}</p>
+                )}
 
               <div className="flex gap-3">
                 {jobId && (

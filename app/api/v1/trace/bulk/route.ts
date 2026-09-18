@@ -284,9 +284,17 @@ export async function POST(request: Request) {
         input_owner_name: record.owner_name || null,
         ai_research_status: opts.aiResearchStatus,
         status: opts.status ?? ('processing' as const),
-        ...(opts.propertyTraceStatus
-          ? { property_trace_status: opts.propertyTraceStatus }
-          : {}),
+        // WRITTEN ON EVERY ROW, NULL INCLUDED, and it used to be omitted on a
+        // tier 1 row. The upsert only touches the keys in this payload and the
+        // row is REUSED rather than re-inserted (UNIQUE(user_id, address_hash)),
+        // so an omitted key leaves whatever the row already carried. A row that
+        // was tier 2 before -- reachable on this surface today, because
+        // checkDuplicates is inert without a session cookie -- then keeps its
+        // tier 2 terminal value while settling as tier 1, and rowSkipReason()
+        // asks tier 2 FIRST, so the customer is served a sentence about the
+        // other billing model's money. Same reasoning as ai_research_status
+        // above, in the opposite direction.
+        property_trace_status: opts.propertyTraceStatus ?? null,
       };
     };
 

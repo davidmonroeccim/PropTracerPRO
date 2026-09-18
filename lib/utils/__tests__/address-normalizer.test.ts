@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeAddress,
   createAddressHash,
+  usableZip,
   validateAddressInput,
 } from '../address-normalizer';
 
@@ -111,5 +112,55 @@ describe('validateAddressInput', () => {
     expect(validateAddressInput('123 Main St', 'H', 'TX').valid).toBe(false);
     expect(validateAddressInput('123 Main St', 'Houston', '').valid).toBe(false);
     expect(validateAddressInput('123 Main St', 'Houston', 'Texas').valid).toBe(false);
+  });
+});
+
+/*
+ * usableZip, added 2026-09-18.
+ *
+ * REJECTING A RECORD AND STORING A RECORD ARE DIFFERENT QUESTIONS, and the bulk
+ * dashboard route asks the second one. It does not validate per record, so a
+ * broken ZIP reaches the `zip` column, and as of phase 5c that column is handed
+ * to a vendor: a blank-owner row runs a dossier lookup keyed on street, city,
+ * state and zip. A zip that contradicts the other three is worse than no zip,
+ * and tier 2 bills per record submitted, so the customer pays for the miss.
+ */
+describe('usableZip', () => {
+  it('keeps a real 5-digit zip', () => {
+    expect(usableZip('77002')).toBe('77002');
+  });
+
+  it('trims a 9-digit zip to the 5 the column holds', () => {
+    expect(usableZip('77002-1234')).toBe('77002');
+  });
+
+  it('drops a zip Excel stripped the leading zero from', () => {
+    // The whole reason this exists. A Boston county file exports 02134 as 2134
+    // on every row, and the same happens across MA, NJ, CT, RI, NH, ME, VT
+    // and PR.
+    expect(usableZip('2134')).toBe('');
+  });
+
+  it('drops anything else that is not a zip, rather than storing it', () => {
+    expect(usableZip('abcde')).toBe('');
+    expect(usableZip('123')).toBe('');
+    expect(usableZip('7700212345')).toBe('');
+  });
+
+  it('answers empty for a row that simply has no zip', () => {
+    expect(usableZip(undefined)).toBe('');
+    expect(usableZip(null)).toBe('');
+    expect(usableZip('   ')).toBe('');
+  });
+
+  it('agrees with validateAddressInput about what a zip is', () => {
+    // MUTATION: give either one its own copy of the pattern and let them drift,
+    // and this goes red. One decides whether a caller is refused and the other
+    // decides what we store and send, so a disagreement means a record that
+    // passes validation carries a zip we discard, or the reverse.
+    for (const zip of ['77002', '77002-1234', '2134', 'abcde', '123', '']) {
+      const accepted = validateAddressInput('123 Main St', 'Houston', 'TX', zip).valid;
+      expect(usableZip(zip) !== '' || zip === '', zip).toBe(accepted);
+    }
   });
 });

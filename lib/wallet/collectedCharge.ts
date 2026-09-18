@@ -72,17 +72,69 @@ export async function collectedChargeFor(
   adminClient: SupabaseClient,
   traceHistoryId: string
 ): Promise<number | null> {
+  return (await collectedChargesFor(adminClient, traceHistoryId)).total
+}
+
+/** The two readings of one row's ledger. See collectedChargesFor. */
+export interface CollectedCharges {
+  /**
+   * Net collected over the row's WHOLE life, or null when the wallet has never
+   * touched it. This is what `trace_history.charge` means, so it is the number a
+   * settle writes.
+   */
+  total: number | null
+  /**
+   * Net collected since `since`, or null when nothing moved in that window. The
+   * same as `total` when no bound was given. This is the number that decides
+   * whether to charge.
+   */
+  inWindow: number | null
+}
+
+/**
+ * The same ledger, read twice: in total, and within one window.
+ *
+ * WHY THE TWO NUMBERS ARE DIFFERENT QUESTIONS, AND WHY ANSWERING BOTH WITH THE
+ * TOTAL IS A DEFECT. A trace_history row is UNIQUE(user_id, address_hash) and is
+ * REUSED rather than re-inserted, so a second submit of the same address
+ * re-enqueues THIS row for a second, genuine piece of vendor work. The total then
+ * holds the FIRST submit's debit. A caller that decides on the total reads
+ * "already collected", skips the deduct, and buys the dossier again for nothing,
+ * repeatably, because no part of that state ever changes. That is what the final
+ * phase 5c review found. The decision therefore has to be bounded to the piece of
+ * work in hand, while the amount PERSISTED stays the total, or the column stops
+ * agreeing with the money.
+ *
+ * ONE QUERY, TWO SUMS. The window is applied here rather than as a `gte`, because
+ * a bounded query cannot also answer the unbounded question and a row's ledger is
+ * a handful of rows. A row with no `created_at` is outside every window, which is
+ * what a NULL does in SQL.
+ *
+ * OMITTING `since` IS THE SAFE DIRECTION AND STAYS THE DEFAULT. Unbounded can
+ * only refuse a charge PTP is owed; a bound that is too narrow charges a customer
+ * twice. A caller that cannot resolve when its own work began must ask without
+ * one, and then both numbers are the same.
+ */
+export async function collectedChargesFor(
+  adminClient: SupabaseClient,
+  traceHistoryId: string,
+  since?: string | null
+): Promise<CollectedCharges> {
   // NO `type` FILTER, AND THAT IS THE FIX. This query used to end
   // `.eq('type', 'debit')`, which is precisely what made a refund invisible: a
   // credit that never comes back cannot be subtracted. `type` is SELECTED
   // instead, and the classification happens below where both signs are in view.
   const { data } = await adminClient
     .from('wallet_transactions')
-    .select('amount, type')
+    .select('amount, type, created_at')
     .eq('trace_history_id', traceHistoryId)
 
-  const ledger = data as Array<{ amount: number | string | null; type?: string | null }> | null
-  if (!ledger || ledger.length === 0) return null
+  const ledger = data as Array<{
+    amount: number | string | null
+    type?: string | null
+    created_at?: string | null
+  }> | null
+  if (!ledger || ledger.length === 0) return { total: null, inWindow: null }
 
   // EVERY DEBIT, NOT ONE OF THEM. Three settle sites write this answer into
   // `trace_history.charge` RAW rather than folding, on the grounds that the
@@ -109,11 +161,24 @@ export async function collectedChargeFor(
   // An unreadable amount counts as 0 rather than poisoning the total with NaN,
   // and the sum is rounded to cents because two floats added give
   // 0.30000000000000004 and this lands in a DECIMAL column shown as money.
-  const net = ledger.reduce((sum, row) => {
-    const n = typeof row.amount === 'number' ? row.amount : Number(row.amount)
-    const magnitude = Number.isFinite(n) ? n : 0
-    return sum + (row.type === 'debit' ? magnitude : -magnitude)
-  }, 0)
+  const net = (rows: typeof ledger): number | null => {
+    if (rows.length === 0) return null
+    const sum = rows.reduce((running, row) => {
+      const n = typeof row.amount === 'number' ? row.amount : Number(row.amount)
+      const magnitude = Number.isFinite(n) ? n : 0
+      return running + (row.type === 'debit' ? magnitude : -magnitude)
+    }, 0)
+    return Math.round(sum * 100) / 100
+  }
 
-  return Math.round(net * 100) / 100
+  return {
+    total: net(ledger),
+    inWindow: since
+      ? net(
+          ledger.filter(
+            (row) => typeof row.created_at === 'string' && row.created_at >= since
+          )
+        )
+      : net(ledger),
+  }
 }

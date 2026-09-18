@@ -122,6 +122,65 @@ describe('the finished job summary', () => {
   });
 });
 
+/*
+ * THE HALF-FAILED SUBMIT, WHICH THE ROUTE REPORTED HONESTLY AND THE PAGE DROPPED.
+ *
+ * When the Tracerfy submit for the owner-name half of a file fails, the route
+ * answers 200 with records_failed, re-quotes records_submitted and estimated_cost
+ * down to the survivors, and names which half died in `message`. None of that
+ * reached the screen: records_failed was not in the JobStats interface and was
+ * rendered nowhere, and `message` was shown only when NO row carried a skip
+ * reason. So a 100-record upload whose 60 owner-name rows were never sent showed
+ * Total Uploaded 100, Records Matched 12, and nothing at all about the 60.
+ *
+ * Because every other number is re-quoted to the survivors, no arithmetic on this
+ * page can recover the fact. The tile is the only place it can appear.
+ */
+describe('a submit where half the file was never sent', () => {
+  it('reads records_failed off the submit response at all', () => {
+    // MUTATION: drop the field from JobStats and this goes red. It was absent
+    // from the interface for the whole life of the defect, so the value arrived
+    // and was discarded at the type boundary.
+    expect(SOURCE).toContain('records_failed');
+  });
+
+  it('gives it a tile in BOTH phases, because both are read as the account', () => {
+    // The processing card is where a user lands the moment they submit; the
+    // complete card is what they read afterwards. A count on only one of them is
+    // a fact that disappears when the job finishes.
+    expect(SOURCE.match(/Records We Could Not Send/g) ?? []).toHaveLength(2);
+    expect(SOURCE).toContain('{jobStats.records_failed}');
+  });
+
+  it('never claims those rows were charged or not charged on the tile', () => {
+    // The money claim belongs to the route's sentence, which knows which half
+    // failed and under which billing model. A tile label that guessed would be a
+    // statement about the customer's money made by the wrong layer.
+    expect(PROSE).not.toMatch(/Records We Could Not Send[^<]*charged/);
+  });
+
+  it('stops suppressing the route sentence whenever any row carries a reason', () => {
+    // THE EXACT CONDITION THAT HID IT. `!completeStats?.records_skipped &&
+    // jobStats?.message` reads as "do not say the same thing twice", and it is
+    // right about the no-key message on the happy path. On a half-failed submit
+    // the message is a DIFFERENT fact, and five explained rows were enough to
+    // silence it.
+    // MUTATION: restore the bare `!completeStats?.records_skipped` guard and
+    // this goes red.
+    expect(PROSE).toContain(
+      "{jobStats?.message && ((jobStats.records_failed || 0) > 0 || !completeStats?.records_skipped) && ("
+    );
+  });
+
+  it('says it while the job is still running, not only once it finishes', () => {
+    // The processing phase rendered the message nowhere at all, and that is the
+    // screen the customer is looking at when the submit comes back.
+    expect(PROSE).toContain(
+      "{(jobStats?.records_failed || 0) > 0 && jobStats?.message && ("
+    );
+  });
+});
+
 describe('the pre-submit count', () => {
   it('counts every record, because every record is now traced', () => {
     // THE OLD SHAPE AND WHY IT WENT. This read "N of M records will be traced"

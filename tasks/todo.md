@@ -2881,15 +2881,38 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [x] 13. The submit wallet check must size against in-flight unbilled work. **DONE `c1556dd`.** Closes the back-to-back gap; the sub-second in-submit window is task 16.
 - [ ] 17. **PRODUCT GAP, found during 5c-3B. Not a copy problem, and deliberately not papered over.**
-      There is now no in-product path to re-run a FREE failed bulk row inside the 90-day dedup
-      window. Three of the five no-contacts reasons used to end "send it again and we will run it";
-      that advice fails, because the dedup hash is address-only and any existing row blocks the
-      resend. 5c-3B removed the invitation rather than leaving a false instruction, and kept it only
-      on the no-key reason, where supplying the missing city changes the hash so the resend genuinely
-      works. **So the customer is now told the truth and has no remedy.** The narrowest fix the
-      implementer identified: align `checkDuplicates` with the cache-hit test `checkSingleDuplicate`
-      already uses, which is why a SINGLE trace re-runs today and a bulk row does not. That is a
-      billing-adjacent decision and wants its own scoping, not a fold into a copy dispatch.
+      There is now no in-product path to re-run **a bulk row that came back without the contacts it
+      was submitted for**, inside the 90-day dedup window. Three of the five no-contacts reasons
+      used to end "send it again and we will run it"; that advice fails, because the dedup hash is
+      address-only and any existing row blocks the resend. 5c-3B removed the invitation rather than
+      leaving a false instruction, and kept it only on the no-key reason, where supplying the missing
+      street, city or state changes the hash so the resend genuinely works. **So the customer is now
+      told the truth and has no remedy.** The narrowest fix the implementer identified: align
+      `checkDuplicates` with the cache-hit test `checkSingleDuplicate` already uses, which is why a
+      SINGLE trace re-runs today and a bulk row does not. That is a billing-adjacent decision and
+      wants its own scoping, not a fold into a copy dispatch.
+
+      **SCOPE WIDENED 2026-09-18 by the final 5c review (F5). This task said "a FREE failed bulk
+      row", and that wording excluded the one population that is OUT OF POCKET.** A
+      `property_trace_no_reach` row is billed the full per-record rate: the dossier answered, we
+      charged, and the CONTACT vendor could not be reached, so the customer paid for a two-call
+      product and received one call. It has no path to the contacts either, and a tighter one than
+      the free rows: a single trace of the same address matches `CACHE_HIT_FILTER` on
+      `property_record IS NOT NULL` and is served back from the database rather than re-running the
+      contact leg (`lib/trace/billedRows.ts`), and a bulk resend is a dedup duplicate. Scoping this
+      task on the free rows alone would design a remedy that steps around the only shape where
+      money is involved. **Whatever is decided here has to answer for the billed no-reach row
+      explicitly, including whether re-running its contact leg is free.**
+      Sentence and code checked at the same time: `PROPERTY_TRACE_NO_REACH_REASON` states the charge,
+      says what the customer has, and invites no resend, so nothing in the copy promises a retry that
+      cannot happen. The gap is real and recorded; the customer is not being misled about it.
+
+      **RELATED, NOT THE SAME TASK.** `checkDuplicates` is also INERT on v1 and MCP, which have no
+      session cookie for its anon client (`lib/utils/deduplication.ts:20-30`). That is the same
+      helper and the same product decision, it applies to both tiers equally, and the final review's
+      F2 named making it real as one of the two available bets. The money half of F2 was fixed
+      in the cron instead, so the dedup half stays entirely inside this task rather than being half
+      done somewhere else.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and

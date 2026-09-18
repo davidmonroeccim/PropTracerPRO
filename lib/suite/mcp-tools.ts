@@ -403,7 +403,13 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       ai_research_status: aiResearchStatus,
       status,
       source: "mcp",
-      ...(propertyTraceStatus ? { property_trace_status: propertyTraceStatus } : {}),
+      // ON EVERY ROW, NULL INCLUDED. The upsert touches only the keys in this
+      // payload and the row is REUSED rather than re-inserted, so omitting this
+      // on a tier 1 row leaves a previous tier 2 terminal value in place.
+      // rowSkipReason() asks tier 2 first, so that stale value then tells the
+      // customer what the OTHER billing model charges on a row settled under
+      // this one. Same reason ai_research_status is written explicitly.
+      property_trace_status: propertyTraceStatus ?? null,
     };
   };
 

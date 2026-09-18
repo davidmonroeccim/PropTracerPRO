@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectedChargeFor } from "@/lib/wallet/collectedCharge";
+import { collectedChargeFor, collectedChargesFor } from "@/lib/wallet/collectedCharge";
 
 /**
  * WHAT `collectedChargeFor` PROMISES, AND WHY THE NUMBER HAS TO BE A TOTAL.
@@ -184,5 +184,91 @@ describe("collectedChargeFor nets what was handed back", () => {
     const select = calls.find(([m]) => m === "select");
     expect(String(select?.[1])).toContain("type");
     expect(String(select?.[1])).toContain("amount");
+  });
+});
+
+/*
+ * AND THE WINDOW, ADDED 2026-09-18 BY THE FINAL PHASE 5c REVIEW (F2).
+ *
+ * The total answers "what has this row collected", which is the right question
+ * for what to PERSIST and the wrong one for whether to CHARGE. A trace_history
+ * row is UNIQUE(user_id, address_hash) and is reused, so a second submit of the
+ * same address re-enqueues it for a second, genuine piece of vendor work. Decided
+ * on the total, the caller sees the FIRST submit's debit, skips the deduct, and
+ * buys the dossier again for nothing -- repeatably, because that state never
+ * changes. The window is what separates the crash window this guard was built for
+ * (deduct, throw, requeue, re-claim, all inside one job) from a resubmit.
+ */
+describe("collectedChargesFor bounds the decision without moving the total", () => {
+  const withTime = (row: LedgerRow, created_at: string) => ({ ...row, created_at });
+  const OLD = "2026-08-01T09:00:00.000Z";
+  const NOW = "2026-09-18T10:00:05.000Z";
+  const JOB_START = "2026-09-18T10:00:00.000Z";
+
+  it("answers both questions with the total when no window is given", async () => {
+    // The default has to stay the old behaviour exactly: unbounded can only
+    // refuse a charge, and a caller that cannot resolve its own start must be
+    // able to ask without one.
+    const { client } = admin([withTime(debit(0.4), OLD)]);
+    expect(await collectedChargesFor(client, "row-1")).toEqual({ total: 0.4, inWindow: 0.4 });
+  });
+
+  it("leaves an EARLIER submit's debit out of the window and in the total", async () => {
+    // MUTATION: return the total for both and this goes red. That single value
+    // is the F2 defect: the deduct is skipped on work PTP is actually doing.
+    const { client } = admin([withTime(debit(0.4), OLD)]);
+    expect(await collectedChargesFor(client, "row-1", JOB_START)).toEqual({
+      total: 0.4,
+      inWindow: null,
+    });
+  });
+
+  it("counts a debit booked inside the window, which is the crash window", async () => {
+    // Deduct, throw, requeue, re-claim, all within one job. This is the sequence
+    // the guard exists for and the narrowing must not break it.
+    const { client } = admin([withTime(debit(0.4), NOW)]);
+    expect(await collectedChargesFor(client, "row-1", JOB_START)).toEqual({
+      total: 0.4,
+      inWindow: 0.4,
+    });
+  });
+
+  it("nets a refund inside the window, and keeps both ends of the total", async () => {
+    // A window that summed debits alone would report money handed back as still
+    // collected, which is the same defect the type filter once caused.
+    const { client } = admin([
+      withTime(debit(0.4), OLD),
+      withTime(debit(0.4), NOW),
+      withTime(credit(0.4), NOW),
+    ]);
+    expect(await collectedChargesFor(client, "row-1", JOB_START)).toEqual({
+      total: 0.4,
+      inWindow: 0,
+    });
+  });
+
+  it("treats a row with no timestamp as outside every window, the way NULL is in SQL", async () => {
+    const { client } = admin([debit(0.4)]);
+    expect(await collectedChargesFor(client, "row-1", JOB_START)).toEqual({
+      total: 0.4,
+      inWindow: null,
+    });
+  });
+
+  it("answers null for both when the wallet has never touched the row", async () => {
+    const { client } = admin([]);
+    expect(await collectedChargesFor(client, "row-1", JOB_START)).toEqual({
+      total: null,
+      inWindow: null,
+    });
+  });
+
+  it("selects created_at, or every row falls outside every window", async () => {
+    // PostgREST returns only what the select names, so an unselected created_at
+    // arrives undefined on every row, the window matches nothing, and the guard
+    // charges a second time inside the crash window it was written for.
+    const { client, calls } = admin([withTime(debit(0.4), NOW)]);
+    await collectedChargesFor(client, "row-1", JOB_START);
+    expect(String(calls.find(([m]) => m === "select")?.[1])).toContain("created_at");
   });
 });

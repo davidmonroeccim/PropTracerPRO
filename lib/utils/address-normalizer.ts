@@ -64,6 +64,41 @@ export function createAddressHash(normalizedAddress: string): string {
 }
 
 /**
+ * The shape of a US ZIP, in ONE place.
+ *
+ * Read by the validator below and by usableZip(), which have to agree: one of them
+ * decides whether a caller gets an error and the other decides what we store and
+ * send to a vendor, and two copies of this pattern is how those two answers drift.
+ */
+const ZIP_SHAPE = /^\d{5}(-\d{4})?$/;
+
+/**
+ * The five-digit ZIP a row can be STORED and looked up with, or '' when what
+ * arrived is not a ZIP at all.
+ *
+ * WHY A MALFORMED ZIP BECOMES NO ZIP RATHER THAN BEING KEPT. Excel strips the
+ * leading zero from a ZIP column on export, so a county file for MA, NJ, CT, RI,
+ * NH, ME, VT or PR arrives with '2134' on every row. That row is still perfectly
+ * lookupable: `normalizeAddress` excludes the ZIP entirely, so the dedup key is
+ * unaffected, and the tier 2 dossier accepts address mode with NO zip and
+ * BACKFILLS the property's own zip on a hit (lib/routing/executeRoute.ts).
+ *
+ * Carrying '2134' through instead would send a zip that CONTRADICTS the street,
+ * city and state it travels with, which executeRoute.ts already records as worse
+ * than sending none, and tier 2 bills per record submitted -- so a miss we caused
+ * with our own mangled input is a miss the customer pays for. It would also block
+ * the backfill, because the backfill only fires when the caller had no zip, and
+ * leave a number in the `zip` column that is not one.
+ *
+ * NOT a fallback value and not invented data: '' is this row saying it has no
+ * zip, which is the truth, and the dossier is then free to teach us the real one.
+ */
+export function usableZip(zip?: string | null): string {
+  const trimmed = (zip || '').trim();
+  return ZIP_SHAPE.test(trimmed) ? trimmed.substring(0, 5) : '';
+}
+
+/**
  * Validates that an address has the minimum required fields.
  *
  * ZIP is OPTIONAL as of 2026-09-04. It is validated when supplied and never demanded.
@@ -93,7 +128,7 @@ export function validateAddressInput(
   if (!state || state.trim().length !== 2) {
     return { valid: false, error: 'State must be a 2-letter abbreviation' };
   }
-  if (zip !== undefined && zip.trim() !== '' && !/^\d{5}(-\d{4})?$/.test(zip.trim())) {
+  if (zip !== undefined && zip.trim() !== '' && !ZIP_SHAPE.test(zip.trim())) {
     return { valid: false, error: 'ZIP code must be 5 or 9 digits when supplied' };
   }
   return { valid: true };

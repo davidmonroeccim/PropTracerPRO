@@ -141,6 +141,20 @@ const noKeyRec = (n = 1) => ({
   zip: "75001",
 });
 
+/**
+ * A blank-owner record with a complete address and a BROKEN ZIP.
+ *
+ * '02134' is what a Boston county file holds and '2134' is what Excel writes out
+ * of it, on every row of the file, for MA, NJ, CT, RI, NH, ME, VT and PR alike.
+ */
+const mangledZipRec = (n = 1) => ({
+  owner_name: "",
+  address: `${n} Beacon St`,
+  city: "Boston",
+  state: "MA",
+  zip: "2134",
+});
+
 function post(records: unknown[]) {
   return POST(
     new Request("http://localhost/api/trace/bulk", {
@@ -277,6 +291,80 @@ describe("a blank-owner row no vendor can be asked about", () => {
     const body = await (await post([noKeyRec(1)])).json();
     expect(body.skipped_reason).toContain("not charged");
     expect(body.skipped_reason).toMatch(/street, city or state/);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * AND THE ROW THAT IS NOT THAT ROW, THOUGH IT WAS TREATED AS ONE.
+ *
+ * A complete street, city and state with a mangled ZIP is LOOKUPABLE. The tier
+ * split validated it with validateAddressInput, which carries a 5-or-9-digit
+ * ZIP rule, so the row was filed as no-key and told it was missing the street,
+ * city or state it plainly had -- then locked out of the resend that sentence
+ * invites, because address_hash excludes the ZIP entirely and a corrected
+ * resend hashes identically.
+ * ------------------------------------------------------------------ */
+
+describe("a blank-owner row whose only fault is its ZIP", () => {
+  it("is ENQUEUED for the full property trace, which is what this phase exists for", async () => {
+    // MUTATION: put the zip argument back on the tier split's
+    // validateAddressInput call and this goes red. Every MA, NJ, CT, RI, NH, ME,
+    // VT and PR file exported through Excel is this row, on every line.
+    await post([mangledZipRec(1)]);
+    expect(historyRows()).toHaveLength(1);
+    expect(historyRows()[0]).toMatchObject({
+      property_trace_status: queuedStatusFor(1),
+      status: "processing",
+    });
+    expect(historyRows()[0].property_trace_status).not.toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+  });
+
+  it("is quoted and counted as the billed work it now is", async () => {
+    const body = await (await post([mangledZipRec(1)])).json();
+    expect(body.records_submitted).toBe(1);
+    expect(body.records_queued).toBe(1);
+    expect(body.estimated_cost).toBeCloseTo(TIER2);
+  });
+
+  it("is never handed the no-key sentence, whose advice would fail here", async () => {
+    // The sentence ends "Send it again with the full property address and we
+    // will run it". For this row the address was already full, and the resend
+    // hashes to the same key and is dropped as a duplicate for 90 days, so
+    // following the instruction cannot work. It keeps its resend line only
+    // because the population that receives it can genuinely act on it.
+    const body = await (await post([mangledZipRec(1)])).json();
+    expect(body.records_skipped).toBe(0);
+    expect(body.skipped_reason).toBeUndefined();
+  });
+
+  it("drops the broken ZIP rather than sending it on to the dossier", async () => {
+    // A zip that contradicts the street, city and state it travels with is worse
+    // than none: the dossier accepts address mode with no zip and BACKFILLS the
+    // property's own on a hit, and tier 2 bills per record submitted, so a miss
+    // we caused with our own mangled input is one the customer pays for.
+    // MUTATION: store record.zip unfiltered and this goes red.
+    await post([mangledZipRec(1)]);
+    expect(historyRows()[0].zip).toBe("");
+  });
+
+  it("keeps a ZIP that is a ZIP, and trims a 9-digit one to 5", async () => {
+    // The guard may not become a blanket discard: a real zip is worth sending.
+    await post([
+      { owner_name: "", address: "1 Main St", city: "Dallas", state: "TX", zip: "75001" },
+      { owner_name: "", address: "2 Main St", city: "Dallas", state: "TX", zip: "75001-1234" },
+    ]);
+    expect(historyRows()[0].zip).toBe("75001");
+    expect(historyRows()[1].zip).toBe("75001");
+  });
+
+  it("still files a row genuinely missing a component as no-key", async () => {
+    // The narrowing is to the ZIP alone. A row with no city has nothing any
+    // vendor can be asked about and planRoute emits no step for it at all.
+    await post([noKeyRec(1)]);
+    expect(historyRows()[0]).toMatchObject({
+      property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
+      status: "no_match",
+    });
   });
 });
 
@@ -715,10 +803,21 @@ describe("a traced row", () => {
     });
   });
 
-  it("carries no property_trace_status, so the tier 2 cron never claims it", async () => {
+  it("writes property_trace_status NULL, so no stale tier 2 value survives on it", async () => {
+    // TWO FAILURES, AND THE SECOND ONE IS WHY THIS ASSERTS ON THE KEY ITSELF.
     // A tier 1 row that landed on the tier 2 queue would be charged per record
-    // submitted instead of per successful trace, and billed twice over.
+    // submitted instead of per successful trace, and billed twice over. And the
+    // upsert only touches the keys in this payload, on a row REUSED rather than
+    // re-inserted, so an OMITTED key leaves a previous tier 2 terminal value in
+    // place -- which rowSkipReason() asks about first and serves, telling the
+    // customer what the other billing model charges.
+    //
+    // `?? null` USED TO BE THE WHOLE ASSERTION AND IT COULD NOT FAIL: an absent
+    // key satisfies it exactly as well as a written null, which is why it stayed
+    // green for the entire life of the defect. MUTATION: delete the
+    // `property_trace_status: null` line from buildHistoryRow and this goes red.
     await post([rec("John Smith", 1)]);
-    expect(historyRows()[0].property_trace_status ?? null).toBeNull();
+    expect(Object.keys(historyRows()[0])).toContain("property_trace_status");
+    expect(historyRows()[0].property_trace_status).toBeNull();
   });
 });

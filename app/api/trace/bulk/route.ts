@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import {
   normalizeAddress,
   createAddressHash,
+  usableZip,
   validateAddressInput,
 } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
@@ -131,7 +132,9 @@ export async function POST(request: Request) {
     //   tier 2      no owner of record, but an address a vendor can be asked
     //               about. Queued for the cron, billed per RECORD SUBMITTED.
     //   no key      no owner of record AND no usable address. Nobody can be
-    //               asked, so it is terminal and free.
+    //               asked, so it is terminal and free. MISSING A COMPONENT THE
+    //               LOOKUP NEEDS, which is street, city or state, and nothing
+    //               else.
     //
     // THE THIRD BUCKET EXISTS BECAUSE THIS ROUTE DOES NOT VALIDATE PER RECORD,
     // and it is the only submit surface that does not: the v1 route and the MCP
@@ -155,12 +158,24 @@ export async function POST(request: Request) {
         tier1Records.push(record);
         continue;
       }
-      const usable = validateAddressInput(
-        record.address,
-        record.city,
-        record.state,
-        record.zip
-      );
+      // NO ZIP ARGUMENT, AND ITS ABSENCE IS THE POINT. This split asks one
+      // question: can a vendor be ASKED about this row. validateAddressInput
+      // also carries a ZIP rule, and joining that rule to this question filed a
+      // row with a perfectly good street, city and state as no-key over a
+      // mangled ZIP -- told it was missing a component it had, and locked out of
+      // a resend for 90 days, because `address_hash` is
+      // normalizeAddress(address, city, state) and excludes the ZIP entirely, so
+      // a corrected resend hashes identically and is dropped as a duplicate.
+      // Excel strips the leading zero from a ZIP column on export, so that hits
+      // every MA, NJ, CT, RI, NH, ME, VT and PR file wholesale.
+      //
+      // The ZIP is not load-bearing for the lookup either: the dossier accepts
+      // address mode with no zip and BACKFILLS the property's own on a hit. So a
+      // malformed one is dropped at the row write below rather than allowed to
+      // veto the row, and PROPERTY_TRACE_NO_KEY_STATUS is reserved for a row
+      // genuinely missing something the lookup needs -- which is also the only
+      // population its sentence's resend advice is true for.
+      const usable = validateAddressInput(record.address, record.city, record.state);
       if (usable.valid) tier2Records.push(record);
       else noKeyRecords.push(record);
     }
@@ -301,7 +316,23 @@ export async function POST(request: Request) {
         // The v1 route and the MCP submit both write this null for the same
         // reason.
         ai_research_status: null,
-        zip: (record.zip || '').substring(0, 5),
+        // THE MIRROR IMAGE, AND IT WAS MISSING. Same argument as the line above,
+        // for the other queue: this payload is the whole of what the upsert
+        // touches, the row is REUSED rather than re-inserted, and a tier 1 row
+        // that keeps a previous tier 2 terminal value serves that value's
+        // sentence. rowSkipReason() asks tier 2 FIRST, so a successful tier 1
+        // trace would tell the customer "you were charged for it, because a full
+        // property trace is charged for every record you send" on a row billed
+        // per successful trace, or "nothing was traced and you were not charged"
+        // on one that was. Two false money claims in opposite directions, out of
+        // the accessor built to prevent exactly that. The tier 2 and no-key
+        // writes below spread over this with their own value.
+        property_trace_status: null,
+        // ONLY WHEN IT IS A ZIP. A malformed one is dropped rather than stored:
+        // see usableZip(). This route does not validate per record, so the
+        // column is the only thing standing between an Excel-mangled '2134' and
+        // a dossier call that contradicts its own street, city and state.
+        zip: usableZip(record.zip),
         input_owner_name: record.owner_name || null,
         // Same tag as the job above, and on EVERY row including the skipped
         // ones: the crons read the row's tag, not the job's.

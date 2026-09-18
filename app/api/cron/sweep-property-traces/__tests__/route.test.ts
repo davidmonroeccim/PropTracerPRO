@@ -72,7 +72,16 @@ const H = vi.hoisted(() => ({
   // handed BACK and flips the sign of the probe's answer. PostgREST would never
   // omit a selected column; a stub that does is telling the route a lie no
   // database can tell it.
+  //
+  // SO IS `created_at`, AS OF 2026-09-18. The probe is scoped to the bulk job the
+  // row is currently enqueued for, and the stub below honours that `gte` filter
+  // the way PostgREST would. An entry with no timestamp is invisible to a bounded
+  // probe, exactly as a NULL created_at would be to SQL.
   priorDebits: [] as Array<Record<string, unknown>>,
+  // The trace_jobs row the worker reads to find out when this piece of work
+  // began. Null is an unreadable job, which must fall back to an unbounded probe:
+  // an unbounded probe can only skip a charge, a wrong bound charges twice.
+  jobRow: { created_at: "2026-09-18T10:00:00.000Z" } as Record<string, unknown> | null,
   // Consumed in order, one per atomic claim. Empty means every claim succeeds.
   // A `false` entry is another worker having taken the row first.
   claimOutcomes: [] as boolean[],
@@ -117,6 +126,12 @@ function recordingClient() {
 
       const settle = () => {
         if (table === "user_profiles") return { data: H.profile, error: null };
+        if (table === "trace_jobs") return { data: H.jobRow, error: null };
+        // EVERY ledger row for the trace_history row, unfiltered, which is what
+        // the real query asks for. collectedChargesFor applies the window itself
+        // because it has to answer both the bounded and the unbounded question
+        // off one read, so a stub that pre-filtered here would hide whether it
+        // does.
         if (table === "wallet_transactions") return { data: H.priorDebits, error: null };
         if (rec?.op === "select") return { data: H.queuedRows, error: null };
         // An update that asked for `.select('id')` and is awaited directly is
@@ -142,7 +157,14 @@ function recordingClient() {
         }
         return { data: null, error: null };
       };
-      node.single = async () => ({ data: H.profile, error: null });
+      // Two tables are read with `.single()`: the rate profile, and the bulk job
+      // whose creation time bounds the ledger probe. Answering both with the
+      // profile would hand the worker a job row with no created_at, which reads
+      // as an unreadable job and silently un-scopes the probe.
+      node.single = async () =>
+        table === "trace_jobs"
+          ? { data: H.jobRow, error: null }
+          : { data: H.profile, error: null };
 
       return {
         select: (...args: unknown[]) => {
@@ -179,10 +201,21 @@ const { GET } = await import("@/app/api/cron/sweep-property-traces/route");
 const { lookupDossier } = await import("@/lib/tracerfy/dossier");
 const { lookupBusinessTrace, lookupPersonTrace } = await import("@/lib/tracerfy/client");
 
+/** When the bulk job holding ROW was created, and two instants either side of it. */
+const JOB_CREATED_AT = "2026-09-18T10:00:00.000Z";
+/** A debit booked by THIS submit: the crash window, deduct then die. */
+const DURING_THIS_JOB = "2026-09-18T10:00:05.000Z";
+/** A debit booked by an EARLIER submit of the same reused row. */
+const BEFORE_THIS_JOB = "2026-08-01T09:00:00.000Z";
+
 /** A blank-owner bulk row: exactly what tier 2 exists for. */
 const ROW = {
   id: "row-1",
   user_id: "user-1",
+  // The job this row is CURRENTLY enqueued for. Every tier 2 row has one, and it
+  // is re-pointed by each submit, which is what makes it the right scope for the
+  // ledger probe.
+  trace_job_id: "job-1",
   normalized_address: "100 MAIN ST|DALLAS|TX",
   city: "DALLAS",
   state: "TX",
@@ -292,6 +325,7 @@ beforeEach(() => {
   H.rpcCalls = [];
   H.queuedRows = [{ ...ROW }];
   H.priorDebits = [];
+  H.jobRow = { created_at: JOB_CREATED_AT };
   H.claimOutcomes = [];
   H.staleRevertsByStatus = {};
   H.profile = {
@@ -682,7 +716,10 @@ describe("a row that has already been charged", () => {
     // Deliberately an amount NO current rate can produce. If the row comes out
     // carrying 0.05 it can only have read the ledger; if it comes out carrying a
     // plan rate it re-derived the price, which is the bug wearing a disguise.
-    H.priorDebits = [{ amount: 0.05, type: "debit" }];
+    //
+    // Booked DURING this job, which is what makes it the crash window rather
+    // than an earlier submit: deduct, throw, requeue, re-claim.
+    H.priorDebits = [{ amount: 0.05, type: "debit", created_at: DURING_THIS_JOB }];
   });
 
   it("cannot be charged a second time by this cron", async () => {
@@ -724,12 +761,84 @@ describe("a row that has already been charged", () => {
     // MUTATION: test `!== null` at the call site and this goes red at zero
     // deducts, delivering the record free while the row claims it collected.
     H.priorDebits = [
-      { amount: 0.05, type: "debit" },
-      { amount: 0.05, type: "credit" },
+      { amount: 0.05, type: "debit", created_at: DURING_THIS_JOB },
+      { amount: 0.05, type: "credit", created_at: DURING_THIS_JOB },
     ];
     await run();
     expect(deducts()).toHaveLength(1);
     expect(deducts()[0].args.p_amount).toBe(TIER2_WALLET);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * AND THE OTHER HALF OF "ONCE": ONCE PER PIECE OF WORK, NOT ONCE PER ADDRESS.
+ *
+ * trace_history is UNIQUE(user_id, address_hash), so a second submit of the same
+ * address does not insert a second row, it RE-ENQUEUES this one under a new job.
+ * That is a second, genuine piece of vendor work: the cron re-buys the $0.20
+ * dossier and re-spends the shared Tracerfy pool. An unbounded ledger probe
+ * answered it with the FIRST submit's debit, so the deduct was skipped and PTP
+ * collected $0.00 -- repeatably, because nothing in that state ever changes.
+ * Reachable today on v1 and MCP, where checkDuplicates is a documented no-op for
+ * want of a session cookie, and on the dashboard the day the 90 day window
+ * lapses.
+ * ------------------------------------------------------------------ */
+
+describe("a row re-enqueued by a LATER submit", () => {
+  beforeEach(() => {
+    // The first submit's debit, months old. The row has been settled and reused.
+    H.priorDebits = [{ amount: TIER2_WALLET, type: "debit", created_at: BEFORE_THIS_JOB }];
+    H.queuedRows = [{ ...ROW, charge: TIER2_WALLET, tier: 2 }];
+  });
+
+  it("is charged again, because the vendor work is being done again", async () => {
+    // MUTATION: drop the `since` argument from the collectedChargeFor call and
+    // this goes red at zero deducts. That is the shape the defect had: real
+    // vendor money out, nothing collected, every time the caller resubmits.
+    await run();
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args.p_amount).toBe(TIER2_WALLET);
+  });
+
+  it("adds the new collection to the receipt rather than restating the old one", async () => {
+    // The ledger now holds two debits against this row and
+    // `trace_history.charge` is summed as what the customer paid. Writing the
+    // probe's answer raw would report one of the two.
+    // MUTATION: write `charge: collected` instead of the fold and this goes red
+    // at 0.4, under-reporting by exactly the earlier submit.
+    await run();
+    expect(finalWrite()).toMatchObject({ charge: TIER2_WALLET * 2, tier: 2 });
+  });
+
+  it("reads the job it is currently enqueued for, which is what scopes the probe", async () => {
+    // The row is reused across submits, so `trace_job_id` is the only thing on it
+    // that says which piece of work this is.
+    await run();
+    const jobRead = H.ops.find((o) => o.table === "trace_jobs" && o.op === "select");
+    expect(jobRead).toBeDefined();
+    expect(
+      jobRead!.filters.some((f) => f[0] === "eq" && f[1] === "id" && f[2] === "job-1")
+    ).toBe(true);
+  });
+
+  it("selects created_at, because the window is decided from it", async () => {
+    // MUTATION: drop created_at from the ledger select and every row falls
+    // outside every window, which charges a customer twice in the crash window.
+    await run();
+    const probe = H.ops.find((o) => o.table === "wallet_transactions" && o.op === "select");
+    expect(String(probe!.filters[0][1])).toContain("created_at");
+  });
+
+  it("falls back to the WHOLE ledger when the job cannot be read", async () => {
+    // The safe direction, and it is not symmetric: an unbounded probe can only
+    // skip a charge PTP is owed, while a bound taken from a job we could not
+    // read could charge a customer twice for one piece of work.
+    // MUTATION: default the bound to "now", or to the row's claim time, and this
+    // goes red with a second debit against a customer who owes nothing.
+    H.jobRow = null;
+    await run();
+    expect(deducts()).toHaveLength(0);
+    expect(finalWrite()).toMatchObject({ charge: TIER2_WALLET });
   });
 });
 
