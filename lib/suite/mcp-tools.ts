@@ -2,14 +2,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { resolvePtpProfile, UNLINKED_MESSAGE } from "@/lib/suite/mcp-shared";
 import type { PtpProfile } from "@/lib/suite/mcp-shared";
-import { chargePerTrace } from "@/lib/suite/pricing";
+import { chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import { isLikelyBusiness } from "@/lib/trace/ownerClassification";
-import {
-  BLANK_OWNER_SKIP_REASON,
-  BLANK_OWNER_SKIP_STATUS,
-  skipReasonFor,
-} from "@/lib/trace/blankOwnerSkip";
+import { skipReasonFor } from "@/lib/trace/blankOwnerSkip";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
+import { isPropertyTracePending, queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
+import { TIER2_CAPACITY_REFUSAL, inFlightUnbilledCost, tracerfyCanRunTier2 } from "@/lib/trace/bulkPreflight";
 import { toPublicPropertyRecord } from "@/lib/trace/publicPropertyRecord";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
@@ -139,10 +137,15 @@ export function isEntityRecord(owner_name?: string): boolean {
 
 /** A record that arrived with no owner of record at all. It is a strict subset of isEntityRecord:
  *  every blank-owner record is a non-person, but not every non-person is blank. It matters because
- *  a blank-owner record has NO route on this surface. The engine that used to find an owner from an
- *  address alone is gone, so the record is accepted, skipped with a reason, and never charged
- *  (lib/trace/blankOwnerSkip.ts). Keep this as the one test, so the quote, the wallet gate and the
- *  submit split cannot disagree about which records are free. */
+ *  it selects a different TIER, and therefore a different billing model. A record with an owner is
+ *  tier 1, charged per SUCCESSFUL trace and free on a miss. A record without one is tier 2: a
+ *  Tracerfy dossier buys the county property record and names the owner, then one contact lookup
+ *  resolves them, and it is charged per RECORD SUBMITTED whether or not anything is found.
+ *
+ *  It used to mean "free", because the engine that finds an owner from an address alone had been
+ *  removed and the record was skipped instead of traced. Phase 5c built that engine. Keep this as
+ *  the one test, so the quote, the wallet gate and the submit split cannot disagree about which
+ *  records are priced which way. */
 export function isBlankOwnerRecord(owner_name?: string): boolean {
   return (owner_name || "").trim().length === 0;
 }
@@ -155,24 +158,27 @@ export function isBlankOwnerRecord(owner_name?: string): boolean {
  *  amount. The $0.15 AI research fee that used to be added on top of every entity record is gone
  *  with the engine that charged it, so there is no per-entity surcharge to reserve any more.
  *
- *  A BLANK-OWNER RECORD RESERVES NOTHING, because nothing can be charged for it: this surface has
- *  no tier 2 route yet, so the record is skipped with a reason instead of traced. Reserving the
- *  tier 2 per-record rate here would quote a caller for money the submit cannot spend and would
- *  402 a wallet that can actually afford the batch. When tier 2 is wired into this path, the blank
- *  arm becomes chargePerRecord(profile) and this comment is what has to change with it.
+ *  A BLANK-OWNER RECORD NOW RESERVES THE TIER 2 PER-RECORD RATE. It used to reserve nothing,
+ *  because this surface had no tier 2 route and the record was skipped rather than traced. Phase 5c
+ *  wired that route, so the record is submitted, queued and BILLED, and a gate that still reserved
+ *  nothing for it would let a caller commit to a batch their wallet cannot cover. Note the model
+ *  difference: tier 2 is not a worst case at all, it is simply the price, because it is owed per
+ *  record submitted rather than per success.
  *
- *  `persons` and `entities` are DOLLARS, not counts. This stays at or above what
+ *  `persons`, `entities` and `blanks` are DOLLARS, not counts. This stays at or above what
  *  app/api/v1/trace/bulk/route.ts reserves for the same batch; mcp-tools.test.ts fences that. */
 export function worstCaseCost(records: TraceRecord[], profile: PtpProfile) {
   const tier1Rate = chargePerTrace(profile);
+  const tier2Rate = chargePerRecord(profile);
   let persons = 0;
   let entities = 0;
+  let blanks = 0;
   for (const r of records) {
-    if (isBlankOwnerRecord(r.owner_name)) continue;
-    if (isEntityRecord(r.owner_name)) entities += tier1Rate;
+    if (isBlankOwnerRecord(r.owner_name)) blanks += tier2Rate;
+    else if (isEntityRecord(r.owner_name)) entities += tier1Rate;
     else persons += tier1Rate;
   }
-  return { persons, entities, total: persons + entities };
+  return { persons, entities, blanks, total: persons + entities + blanks };
 }
 
 /** Free, mandatory first step before any paid trace: dedups, splits person vs entity, and returns
@@ -186,7 +192,7 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   if (!profile) return UNLINKED_MESSAGE;
   const { unique, internalDuplicates } = removeBatchDuplicates(records);
   const cost = worstCaseCost(unique, profile);
-  const skipped = unique.filter((r) => isBlankOwnerRecord(r.owner_name)).length;
+  const blanks = unique.filter((r) => isBlankOwnerRecord(r.owner_name)).length;
   const entities = unique.filter(
     (r) => isEntityRecord(r.owner_name) && !isBlankOwnerRecord(r.owner_name),
   ).length;
@@ -194,12 +200,13 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
     submitted: records.length,
     after_dedup: unique.length,
     duplicates_removed: internalDuplicates,
-    persons: unique.length - entities - skipped,
+    persons: unique.length - entities - blanks,
     entities,
-    // Records with no owner of record. They are accepted and reported, never traced and never
-    // charged, so they contribute nothing to worst_case_cost.
-    skipped,
-    skipped_reason: skipped > 0 ? BLANK_OWNER_SKIP_REASON : null,
+    // Records with no owner of record. They run a Full Property Trace, which is charged per RECORD
+    // SUBMITTED rather than per successful trace, so they carry the tier 2 share of
+    // worst_case_cost. The key is named for what happens to them rather than what does not: it
+    // replaced `skipped`, which said they were free, and that stopped being true in phase 5c.
+    full_property_trace: blanks,
     worst_case_cost: Number(cost.total.toFixed(2)),
     wallet_balance: profile.wallet_balance,
     over_cap: unique.length > MAX_RECORDS,
@@ -269,31 +276,58 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
   // Three-way split through the SHARED classifiers -- the same single source of truth
   // worstCaseCost prices with, so the gate can never under-reserve. A person (non-empty
   // owner_name the classifier does NOT call a business) goes straight to Tracerfy; a named
-  // entity queues for the FastAppend business trace; a record with no owner of record has
-  // no vendor and is skipped with a reason, free.
+  // entity queues for the FastAppend business trace; a record with no owner of record queues
+  // for the Full Property Trace, which discovers the owner from the county record first.
+  //
+  // THE LAST BUCKET CHANGED MEANING IN PHASE 5c. It used to be skipped and free, because
+  // nothing could resolve an owner from an address alone. It is now queued in a SEPARATE
+  // column from the entity queue: `ai_research_status` settles tier 1, where a miss is free,
+  // and `property_trace_status` settles tier 2, where a miss is billed. A row on both would be
+  // settled twice under two billing models.
   const personRecords: AddressInput[] = [];
   const entityRecords: AddressInput[] = [];
-  const skippedRecords: AddressInput[] = [];
+  const tier2Records: AddressInput[] = [];
   for (const record of newRecords) {
-    if (isBlankOwnerRecord(record.owner_name)) skippedRecords.push(record);
+    if (isBlankOwnerRecord(record.owner_name)) tier2Records.push(record);
     else if (isEntityRecord(record.owner_name)) entityRecords.push(record);
     else personRecords.push(record);
   }
 
-  // Guard 3 (money fence): worst-case pre-flight, using the SAME formula the v1
-  // route uses -- every TRACEABLE record at the tier 1 per-success rate, which is
-  // the most either route can book now that the research fee is retired. A
-  // blank-owner record reserves nothing because it is skipped, not traced. The
-  // only difference from v1 is that the tier 1 rate here is grant-aware, and that
-  // is also the rate this surface settles at. Nothing is submitted or charged when
-  // the wallet cannot cover the worst case.
+  // Guard 3 (can PTP EXECUTE?): the Tracerfy credit pool is SHARED across every customer's
+  // jobs, so this is sized against what is already queued as well as what is being asked for.
+  // Asked BEFORE the wallet gate below, so a caller is never told to add funds for a job PTP
+  // could not have run: their wallet is fine, ours is what is short. Silent by David's decision
+  // of 2026-09-18 -- PTP has no alerting channel and he chose no alert over a fake one -- so
+  // nothing here claims anyone was told.
+  if (!(await tracerfyCanRunTier2(admin, tier2Records.length))) {
+    return { error: "capacity_unavailable", message: TIER2_CAPACITY_REFUSAL };
+  }
+
+  // Guard 4 (money fence): worst-case pre-flight, using the SAME formula the v1
+  // route uses -- every owned record at the tier 1 per-success rate, plus every
+  // blank-owner record at the tier 2 per-record rate. The only difference from v1
+  // is that both rates here are grant-aware, and those are also the rates this
+  // surface settles at. Nothing is submitted or charged when the wallet cannot
+  // cover it.
+  //
+  // Sized against IN-FLIGHT UNBILLED WORK too. This was a bare comparison that
+  // reserved nothing: the real debit lands per record at settle time, so two
+  // batches submitted back to back both passed against the same dollars.
   const worst = worstCaseCost(newRecords, profile).total;
-  if (profile.wallet_balance < worst) {
+  const inFlight = await inFlightUnbilledCost(admin, profile.id, {
+    tier1: chargePerTrace(profile),
+    tier2: chargePerRecord(profile),
+  });
+  if (profile.wallet_balance < worst + inFlight) {
     return {
       error: "insufficient_balance",
       worst_case_cost: Number(worst.toFixed(2)),
+      in_flight_cost: Number(inFlight.toFixed(2)),
       wallet_balance: profile.wallet_balance,
-      message: `Add funds: this batch could cost up to $${worst.toFixed(2)} but your wallet holds $${profile.wallet_balance.toFixed(2)}.`,
+      message:
+        inFlight > 0
+          ? `This batch could cost up to $${worst.toFixed(2)}, and you have another $${inFlight.toFixed(2)} of traces already running that have not been billed yet. Your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`
+          : `This batch could cost up to $${worst.toFixed(2)} but your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`,
     };
   }
 
@@ -321,11 +355,14 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       file_name: "MCP bulk submit",
       total_records: records.length,
       dedupe_removed: duplicatesRemoved,
-      // The rows a vendor is actually asked about. A blank-owner row is accepted
-      // and skipped, never traced and never charged, so counting it here would
-      // overstate the work and drag the match rate down by however many rows
-      // arrived without an owner. Same meaning as both bulk REST routes.
-      records_submitted: personRecords.length + entityRecords.length,
+      // The rows a vendor is actually asked about, which as of phase 5c is every
+      // row: a blank-owner row is queued for a Full Property Trace and billed per
+      // record submitted. It used to be excluded, because it was skipped and
+      // nobody was ever asked about it, and counting it then would have dragged
+      // the match rate down. Now the opposite holds -- leaving a billed row out
+      // understates the work the customer paid for. Same meaning as both bulk
+      // REST routes.
+      records_submitted: personRecords.length + entityRecords.length + tier2Records.length,
       records_matched: 0,
       status: "processing",
       source: "mcp",
@@ -344,6 +381,9 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     record: AddressInput,
     aiResearchStatus: string | null,
     status: "processing" | "no_match" = "processing",
+    /** The TIER 2 queue. A different column from aiResearchStatus on purpose: one row on
+     *  both is claimed by two crons and settled under two billing models. */
+    propertyTraceStatus?: string,
   ) => {
     const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
     return {
@@ -358,19 +398,23 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       ai_research_status: aiResearchStatus,
       status,
       source: "mcp",
+      ...(propertyTraceStatus ? { property_trace_status: propertyTraceStatus } : {}),
     };
   };
 
-  // Blank-owner rows land already finished, never queued, so no cron waits on them
-  // and nothing money-shaped is written: no charge, no ai_research_charge, no tier.
-  if (skippedRecords.length > 0) {
-    const skippedRows = skippedRecords.map((r) =>
-      buildHistoryRow(r, BLANK_OWNER_SKIP_STATUS, "no_match"),
+  // Blank-owner rows onto the TIER 2 queue, at attempt 1 of the ladder, which is the bare
+  // 'queued' sweep-property-traces claims on. Written before any vendor is asked anything so
+  // the cron can start the moment this returns. No tracerfy_job_id and no ai_research_status:
+  // both are how a tier 1 settle path finds its rows, and either would have this row billed
+  // per successful trace by an engine that does not know it is tier 2.
+  if (tier2Records.length > 0) {
+    const tier2Rows = tier2Records.map((r) =>
+      buildHistoryRow(r, null, "processing", queuedStatusFor(1)),
     );
-    for (let i = 0; i < skippedRows.length; i += BULK_BATCH_SIZE) {
+    for (let i = 0; i < tier2Rows.length; i += BULK_BATCH_SIZE) {
       await admin
         .from("trace_history")
-        .upsert(skippedRows.slice(i, i + BULK_BATCH_SIZE), { onConflict: "user_id,address_hash" });
+        .upsert(tier2Rows.slice(i, i + BULK_BATCH_SIZE), { onConflict: "user_id,address_hash" });
     }
   }
 
@@ -438,8 +482,10 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     accepted: newRecords.length,
     persons: personRecords.length,
     entities: entityRecords.length,
-    skipped: skippedRecords.length,
-    skipped_reason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : null,
+    // Records with no owner of record, queued for a Full Property Trace. Named for what
+    // happens to them rather than what does not: the `skipped` key it replaces said they were
+    // free, and that stopped being true in phase 5c.
+    full_property_trace: tier2Records.length,
     committed_worst_case: Number(worst.toFixed(2)),
   };
 }
@@ -558,14 +604,29 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   // literals: a retried entity row carries its attempt number in that column,
   // and a row whose attempts ran out is terminal rather than pending.
   const isPendingResearch = (r: TraceHistoryRow) => isEntityTracePending(r.ai_research_status);
+  // AND while any row still owes its FULL PROPERTY TRACE. Same shape as the
+  // entity gate above and deliberately not a second one: that gate is already
+  // load-bearing and correct, and two near-identical checks that differ slightly
+  // is how one of them rots. Asked of lib/trace/propertyTraceAttempts.ts rather
+  // than compared against literals, because a retried row carries its attempt
+  // number in the column and every terminal value must read as NOT pending or it
+  // holds the job open forever.
+  //
+  // Without this the job finalizes the moment the Tracerfy leg lands, while its
+  // tier 2 rows are still queued: the caller gets `completed` and a results
+  // payload that is short by however many rows they are about to be billed for.
+  const isPendingProperty = (r: TraceHistoryRow) =>
+    isPropertyTracePending((r as { property_trace_status?: string | null }).property_trace_status);
   const anyPendingResearch = rows.some(isPendingResearch);
+  const anyPendingProperty = rows.some(isPendingProperty);
   const anyPendingTrace = rows.some((r) => r.status === "processing");
-  if (anyPendingResearch || anyPendingTrace) {
+  if (anyPendingResearch || anyPendingProperty || anyPendingTrace) {
     return {
       status: "processing",
       job_id: job.id,
       records_submitted: job.records_submitted,
       records_pending_research: rows.filter(isPendingResearch).length,
+      records_pending_property_trace: rows.filter(isPendingProperty).length,
       records_pending_trace: rows.filter((r) => r.status === "processing").length,
     };
   }

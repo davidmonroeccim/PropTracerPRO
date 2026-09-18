@@ -106,7 +106,13 @@ vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/trace/bulkPreflight")>();
   return {
     ...actual,
-    tracerfyCanRunTier2: vi.fn(async () => H.canRunTier2),
+    // Faithful to the real contract: a batch with no tier 2 records asks no
+    // vendor and can never be refused. Without that short circuit here, a route
+    // that passed records.length instead of the tier 2 count would still look
+    // correct, because every batch would reach the pool question.
+    tracerfyCanRunTier2: vi.fn(async (_admin: unknown, n: number) =>
+      n <= 0 ? true : H.canRunTier2,
+    ),
     inFlightUnbilledCost: vi.fn(async () => H.inFlight),
   };
 });

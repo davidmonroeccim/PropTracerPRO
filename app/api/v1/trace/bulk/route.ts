@@ -5,13 +5,29 @@ import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
 import { isLikelyBusiness } from '@/lib/trace/ownerClassification';
-import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
+import { queuedStatusFor } from '@/lib/trace/propertyTraceAttempts';
+import {
+  TIER2_CAPACITY_REFUSAL,
+  inFlightUnbilledCost,
+  tracerfyCanRunTier2,
+} from '@/lib/trace/bulkPreflight';
+import { rawChargePerRecord } from '@/lib/api/pricing';
 import { getChargePerTrace } from '@/lib/constants';
 import type { AddressInput } from '@/types';
 
 export const maxDuration = 60;
 
-const MAX_RECORDS = 10000;
+/**
+ * THE CAP IS 500 RECORDS. David, 2026-09-18, measured against all 92 historical
+ * jobs: median 20, average 51, p90 100, p95 223, max 654, and exactly one job in
+ * the whole history exceeds 500.
+ *
+ * It is NOT the money guard -- the two pre-flight checks below are. Its job is
+ * bounding blast radius and stopping one caller eating the Tracerfy credit pool
+ * every other customer's jobs draw from. The same number now holds on all three
+ * submit surfaces instead of two different ones.
+ */
+const MAX_RECORDS = 500;
 
 export async function POST(request: Request) {
   try {
@@ -35,7 +51,10 @@ export async function POST(request: Request) {
 
     if (records.length > MAX_RECORDS) {
       return NextResponse.json(
-        { success: false, error: `Maximum ${MAX_RECORDS} records per request` },
+        {
+          success: false,
+          error: `You can send up to ${MAX_RECORDS} records per request. Split this batch into smaller ones and send them one after another.`,
+        },
         { status: 400 }
       );
     }
@@ -89,25 +108,38 @@ export async function POST(request: Request) {
       });
     }
 
-    // Step 3: Split records into three buckets.
+    // Step 3: Split records into three buckets, and the third one changed
+    // meaning on 2026-09-18.
     // - Person rows (owner_name looks like a human) go straight to Tracerfy in
     //   the bulk CSV submit, preserving the existing fast path.
     // - Entity rows (owner_name that looks like an LLC / trust / business) are
     //   queued for the sweep-entity-traces cron, which resolves them through a
     //   FastAppend business trace and then, if it gets a person's name and no
     //   contacts, submits its own single Tracerfy trace for that person.
-    // - Blank-owner rows have no route at all. The engine that used to find an
-    //   owner from an address alone is gone, so rather than queue them to a
-    //   cron that cannot resolve them, they are accepted and skipped with a
-    //   reason and nothing is charged. See lib/trace/blankOwnerSkip.ts.
+    // - Blank-owner rows used to have no route at all and were accepted,
+    //   skipped and never charged. Phase 5c built the route: a Tracerfy dossier
+    //   buys the county property record and names the owner, then one contact
+    //   lookup resolves them. David's decision, 2026-09-17: the row now runs
+    //   that Full Property Trace AUTOMATICALLY. So it is queued into
+    //   `property_trace_status` for sweep-property-traces, and it is BILLED,
+    //   per RECORD SUBMITTED rather than per successful trace.
+    //
+    // THE TWO QUEUES ARE SEPARATE COLUMNS AND A ROW BELONGS TO EXACTLY ONE.
+    // `ai_research_status` settles tier 1, where a miss is FREE.
+    // `property_trace_status` settles tier 2, where a miss is BILLED. A row on
+    // both would be settled twice, by two engines, under two billing models.
+    //
+    // No fourth bucket for an unusable address: this route validates every
+    // record above and rejects the whole batch, so a row with no city never
+    // reaches here. The dashboard route, which does not validate, has one.
     const personRecords: AddressInput[] = [];
     const entityRecords: AddressInput[] = [];
-    const skippedRecords: AddressInput[] = [];
+    const tier2Records: AddressInput[] = [];
 
     for (const record of newRecords) {
       const owner = (record.owner_name || '').trim();
       if (!owner) {
-        skippedRecords.push(record);
+        tier2Records.push(record);
       } else if (isLikelyBusiness(owner)) {
         entityRecords.push(record);
       } else {
@@ -115,31 +147,69 @@ export async function POST(request: Request) {
       }
     }
 
-    // The rows a vendor is actually asked about. Used twice, and it has to be
-    // the same number both times: it is what the wallet reserve is quoted on and
-    // what the job row claims was submitted.
-    const traceableCount = personRecords.length + entityRecords.length;
+    // The rows a vendor is actually asked about, which as of phase 5c is all of
+    // them. Used twice and it has to be the same number both times: it is what
+    // the wallet reserve is quoted on and what the job row claims was submitted.
+    const traceableCount = personRecords.length + entityRecords.length + tier2Records.length;
 
-    // Wallet balance covers the worst case, which is now ONE tier 1 charge per
-    // traceable record. The $0.15 research fee that used to be reserved on top
-    // of every entity record is gone with the engine that charged it: a
-    // FastAppend business trace bills the plan's tier 1 rate on success and
-    // nothing on a miss, exactly like a Tracerfy person trace. Skipped rows are
-    // excluded because they can never be charged.
-    const perTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
-    const estimatedCost = traceableCount * perTrace;
+    // TRACK B PRICING, AND IT MAY NOT BORROW TRACK A'S HELPERS. This is the
+    // /api/v1/* API-key surface: it derives RAW, from the profile's own columns,
+    // and deliberately does not consult the Suite Gateway grant snapshot.
+    // Reusing chargePerTrace() / chargePerRecord() here would move an existing
+    // API caller's tier 2 bill from $0.40 to $0.25, in the direction nobody
+    // reports. See lib/api/pricing.ts.
+    //
+    // Tier 1 is per SUCCESSFUL trace and free on a miss, so one charge per owned
+    // record is its worst case. Tier 2 is per RECORD SUBMITTED, so it is owed
+    // whether or not the county has a parcel at that address: not a worst case
+    // at all, just the price. Owner type selects the VENDOR, never the rate
+    // (L-005), so there is no entity term in either.
+    const tier1Rate = getChargePerTrace(
+      profile.subscription_tier,
+      profile.is_acquisition_pro_member
+    );
+    const tier2Rate = rawChargePerRecord(profile);
+    const estimatedCost =
+      (personRecords.length + entityRecords.length) * tier1Rate +
+      tier2Records.length * tier2Rate;
 
-    if (profile.wallet_balance < estimatedCost) {
+    const adminClient = createAdminClient();
+
+    // CAN PTP EXECUTE? Asked BEFORE the wallet question, so that a caller is
+    // never told to add funds for a job PTP could not have run. The Tracerfy
+    // credit pool is shared across every customer's jobs, so this is sized
+    // against what is already queued as well as what is being asked for. Silent
+    // by David's decision, 2026-09-18: no string here claims anyone was told,
+    // because PTP has no alerting channel and he chose no alert over a fake one.
+    if (!(await tracerfyCanRunTier2(adminClient, tier2Records.length))) {
+      return NextResponse.json(
+        { success: false, error: TIER2_CAPACITY_REFUSAL },
+        { status: 503 }
+      );
+    }
+
+    // CAN THE CALLER PAY? This used to be a bare comparison that reserved
+    // nothing: the route never writes `wallet_balance` and the real debit lands
+    // per record at settle time, so two jobs submitted back to back both passed
+    // against the same dollars. Settlement fails closed, so no customer was
+    // harmed and no balance went negative; PTP ate the vendor spend instead.
+    const inFlight = await inFlightUnbilledCost(adminClient, profile.id, {
+      tier1: tier1Rate,
+      tier2: tier2Rate,
+    });
+    if (profile.wallet_balance < estimatedCost + inFlight) {
       return NextResponse.json(
         {
           success: false,
-          error: `Insufficient wallet balance. Need $${estimatedCost.toFixed(2)} but have $${profile.wallet_balance.toFixed(2)}.`,
+          // This one names their funds, because this one IS their balance.
+          error:
+            inFlight > 0
+              ? `This batch could cost up to $${estimatedCost.toFixed(2)}, and you have another $${inFlight.toFixed(2)} of traces already running that have not been billed yet. Your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`
+              : `This batch could cost up to $${estimatedCost.toFixed(2)} but your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`,
         },
         { status: 402 }
       );
     }
-
-    const adminClient = createAdminClient();
 
     // Save webhook URL if provided (overrides profile setting for this job)
     if (webhookUrl) {
@@ -161,11 +231,14 @@ export async function POST(request: Request) {
         // meaning app/api/trace/bulk/route.ts writes here. This column is the
         // DENOMINATOR of the match rate: the v1 status route reports it, the
         // bulk_job.completed webhook carries it, and the history page divides
-        // records_matched by it. Counting a skipped blank-owner row here would
-        // overstate the work and understate the match rate by exactly the
-        // number of rows nobody was ever asked about. The skipped rows are
-        // still visible, as total_records minus this and as recordsSkipped in
-        // the response below.
+        // records_matched by it.
+        //
+        // As of phase 5c that INCLUDES the queued tier 2 rows. It used to
+        // exclude blank-owner rows because nobody was ever asked about them and
+        // counting them overstated the work. They are asked about now, and
+        // billed per record submitted, so the opposite is true: leaving them out
+        // would understate the work the customer paid for and overstate the
+        // match rate by exactly that many rows.
         records_submitted: traceableCount,
         records_matched: 0,
         status: 'processing',
@@ -186,7 +259,17 @@ export async function POST(request: Request) {
     // the sweep-entity-traces cron can aggregate per-record state.
     const buildHistoryRow = (
       record: AddressInput,
-      opts: { aiResearchStatus: string | null; status?: 'processing' | 'no_match' }
+      opts: {
+        aiResearchStatus: string | null;
+        status?: 'processing' | 'no_match';
+        /**
+         * The TIER 2 queue, and it is a different column from
+         * `aiResearchStatus` on purpose. Omitted on every tier 1 row: a row
+         * carrying both is claimed by two crons and settled under two billing
+         * models, one of which bills a miss and one of which does not.
+         */
+        propertyTraceStatus?: string;
+      }
     ) => {
       const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
       const addressHash = createAddressHash(normalizedAddress);
@@ -201,26 +284,37 @@ export async function POST(request: Request) {
         input_owner_name: record.owner_name || null,
         ai_research_status: opts.aiResearchStatus,
         status: opts.status ?? ('processing' as const),
+        ...(opts.propertyTraceStatus
+          ? { property_trace_status: opts.propertyTraceStatus }
+          : {}),
       };
     };
 
     const BATCH_SIZE = 500;
 
-    // Blank-owner rows land already finished. They are never queued, so the
-    // cron never sees them and they can never sit in 'queued' waiting for an
-    // engine that is gone. Nothing money-shaped is written: no charge, no
-    // ai_research_charge, no tier, because nothing was billed.
-    if (skippedRecords.length > 0) {
-      const skippedHistoryRows = skippedRecords.map((r) =>
-        buildHistoryRow(r, { aiResearchStatus: BLANK_OWNER_SKIP_STATUS, status: 'no_match' })
+    // TIER 2 ROWS, ONTO THEIR OWN QUEUE. Attempt 1 of the ladder, which is the
+    // bare 'queued' that sweep-property-traces claims on. `ai_research_status`
+    // stays null: that is the ENTITY queue and it settles a different billing
+    // model, so a row on both is billed twice by two engines.
+    //
+    // Written first, before any vendor is asked anything, so the cron can start
+    // on them the moment this handler returns and a failed person submit below
+    // cannot strand them. No tracerfy_job_id, which is what keeps every tier 1
+    // settle path away from them.
+    if (tier2Records.length > 0) {
+      const tier2HistoryRows = tier2Records.map((r) =>
+        buildHistoryRow(r, {
+          aiResearchStatus: null,
+          propertyTraceStatus: queuedStatusFor(1),
+        })
       );
-      for (let i = 0; i < skippedHistoryRows.length; i += BATCH_SIZE) {
-        const batch = skippedHistoryRows.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < tier2HistoryRows.length; i += BATCH_SIZE) {
+        const batch = tier2HistoryRows.slice(i, i + BATCH_SIZE);
         const { error: insertError } = await adminClient
           .from('trace_history')
           .upsert(batch, { onConflict: 'user_id,address_hash' });
         if (insertError) {
-          console.error('API v1 bulk trace - failed to insert skipped history batch:', insertError.message);
+          console.error('API v1 bulk trace - failed to insert tier 2 history batch:', insertError.message);
         }
       }
     }
@@ -317,8 +411,12 @@ export async function POST(request: Request) {
       recordsToProcess: newRecords.length,
       recordsDirectTrace: personRecords.length,
       recordsPendingResearch: entityRecords.length,
-      recordsSkipped: skippedRecords.length,
-      skippedReason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : undefined,
+      // Rows with no owner of record, now queued for a Full Property Trace
+      // rather than skipped. `recordsSkipped` is gone rather than zeroed out:
+      // this route no longer skips anything, and reporting a skip count of 0
+      // alongside a reason of undefined invited a caller to keep reading a key
+      // that had stopped meaning what it used to.
+      recordsQueued: tier2Records.length,
       estimatedCost,
       status: 'processing',
       message: [
@@ -326,8 +424,8 @@ export async function POST(request: Request) {
         entityRecords.length > 0
           ? `${entityRecords.length} entity-owned records are queued for a business trace.`
           : null,
-        skippedRecords.length > 0
-          ? `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`
+        tier2Records.length > 0
+          ? `${tier2Records.length} records arrived with no owner name and are queued for a full property trace.`
           : null,
       ]
         .filter(Boolean)

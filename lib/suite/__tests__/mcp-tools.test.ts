@@ -12,7 +12,8 @@ import {
   bulkStatus,
 } from "@/lib/suite/mcp-tools";
 import { PRICING } from "@/lib/constants";
-import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
+import { chargePerRecord } from "@/lib/suite/pricing";
+import { queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
@@ -34,6 +35,26 @@ vi.mock("@/lib/tracerfy/client", async (importOriginal) => {
 });
 vi.mock("@/lib/trace/settleBulkJob", () => ({ settleBulkJob: vi.fn() }));
 
+/** Levers for the two pre-flight checks. Defaults are the healthy case: PTP can run the job and
+ *  the caller owes nothing on work already accepted. */
+const H = vi.hoisted(() => ({ canRunTier2: true, inFlight: 0 }));
+
+// The two pre-flight checks are boundary-shaped in the same way: one reaches Tracerfy's
+// analytics endpoint over the network and the other runs an aggregate query this file's admin
+// stub is not built for. Both are covered for real in lib/trace/__tests__/bulkPreflight.test.ts,
+// so here they are levers. The real money fence for this surface, worstCaseCost, stays REAL.
+vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/trace/bulkPreflight")>();
+  return {
+    ...actual,
+    // Faithful to the real contract: a batch with no tier 2 records asks no vendor and can
+    // never be refused. Without that short circuit a submit passing the wrong count would
+    // still look correct.
+    tracerfyCanRunTier2: vi.fn(async (_admin: unknown, n: number) => (n <= 0 ? true : H.canRunTier2)),
+    inFlightUnbilledCost: vi.fn(async () => H.inFlight),
+  };
+});
+
 beforeEach(() => {
   // Default: history dedup passes everything through as new.
   vi.mocked(checkDuplicates).mockReset();
@@ -46,6 +67,10 @@ beforeEach(() => {
   // Default: settlement is a no-op (leaves rows untouched).
   vi.mocked(settleBulkJob).mockReset();
   vi.mocked(settleBulkJob).mockResolvedValue({ stalledErrorReason: null });
+  // Default pre-flight: PTP can run the job and the caller owes nothing on work
+  // already accepted. Both are reset per test so one refusal cannot leak forward.
+  H.canRunTier2 = true;
+  H.inFlight = 0;
 });
 
 /** POSTGREST COLUMN PROJECTION, EMULATED. A column the query never asked for does not come
@@ -227,11 +252,13 @@ describe("worstCaseCost", () => {
   const entityCeiling = (tier1Rate: number) => tier1Rate;
 
   /** The reserve app/api/v1/trace/bulk/route.ts computes for the same batch: every record that
-   *  has an owner of record, at the tier 1 rate. A blank-owner record contributes nothing there
-   *  because it is skipped rather than traced, so it must contribute nothing here either. The MCP
-   *  gate must never come out below this for the rate that surface settles at. */
-  const v1Reserve = (records: { owner_name?: string }[], tier1Rate: number) =>
-    records.filter((r) => !isBlankOwnerRecord(r.owner_name)).length * tier1Rate;
+   *  has an owner of record at the tier 1 rate, PLUS every blank-owner record at the tier 2
+   *  per-record rate. The blank arm was worth nothing until phase 5c, because the record was
+   *  skipped rather than traced; it is queued and billed now, so it has to be covered on both
+   *  surfaces. The MCP gate must never come out below this for the rate that surface settles at. */
+  const v1Reserve = (records: { owner_name?: string }[], tier1Rate: number, tier2Rate: number) =>
+    records.filter((r) => !isBlankOwnerRecord(r.owner_name)).length * tier1Rate +
+    records.filter((r) => isBlankOwnerRecord(r.owner_name)).length * tier2Rate;
 
   it("prices persons and named entities at the same tier 1 rate, with no research fee", () => {
     // MUTATION: add AI_RESEARCH.CHARGE_PER_RECORD back onto the entity arm and this goes red.
@@ -259,39 +286,60 @@ describe("worstCaseCost", () => {
       { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" },
       { address: "4 D St", city: "X", state: "TX", zip: "75001" },
     ];
-    // Non-grant profile: both surfaces use the same tier 1 rate, so the two reserves must match.
+    // Non-grant profile: both surfaces use the same two rates, so the reserves must match.
     const wallet = worstCaseCost(records, walletProfile);
-    expect(wallet.total).toBeGreaterThanOrEqual(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET));
-    expect(wallet.total).toBeCloseTo(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET));
+    expect(wallet.total).toBeGreaterThanOrEqual(
+      v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET, 0.4),
+    );
+    expect(wallet.total).toBeCloseTo(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS_WALLET, 0.4));
 
-    // Grant holder: the MCP settles at the lower grant rate, so that is the rate it must cover.
+    // Grant holder: the MCP settles at the lower grant rates, so those are what it must cover.
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     const grant = worstCaseCost(records, proProfile);
-    expect(grant.total).toBeGreaterThanOrEqual(v1Reserve(records, PRICING.CHARGE_PER_SUCCESS));
+    expect(grant.total).toBeGreaterThanOrEqual(
+      v1Reserve(records, PRICING.CHARGE_PER_SUCCESS, 0.25),
+    );
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 
-  // MONEY-GATE CORRECTNESS, the case that changed. An address-only record has NO route on this
-  // surface: the engine that used to find an owner from an address alone is gone, so the record
-  // is skipped with a reason and never charged. Reserving anything for it would quote a caller
-  // money the submit cannot spend and would 402 a wallet that can afford the real batch.
-  // MUTATION: price it as an entity (drop the isBlankOwnerRecord guard) and this goes red.
-  it("reserves NOTHING for an address-only record with no owner_name", () => {
+  // MONEY-GATE CORRECTNESS, AND THIS IS THE CASE PHASE 5c INVERTED. An address-only record used
+  // to reserve NOTHING, because it had no route: the engine that finds an owner from an address
+  // alone had been removed, so the record was skipped and never charged. 5c built that engine, so
+  // the record is now submitted, queued and billed per RECORD SUBMITTED. A gate still reserving
+  // zero would let a caller commit to a batch their wallet cannot cover.
+  // MUTATION: restore the `continue` that made the blank arm free and this goes red.
+  it("reserves the TIER 2 per-record rate for an address-only record", () => {
     const out = worstCaseCost(
       [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
     expect(out.persons).toBe(0);
     expect(out.entities).toBe(0);
-    expect(out.total).toBe(0);
+    expect(out.blanks).toBeCloseTo(0.4);
+    expect(out.total).toBeCloseTo(0.4);
+    // Not folded into either tier 1 arm: it is a different billing model, not a
+    // different vendor, and the two rates are genuinely different numbers.
+    expect(out.total).not.toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
   });
 
-  it("reserves nothing for a whitespace-only owner_name either", () => {
+  it("reserves it for a whitespace-only owner_name too", () => {
     const out = worstCaseCost(
       [{ owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }],
       walletProfile,
     );
-    expect(out.total).toBe(0);
+    expect(out.total).toBeCloseTo(0.4);
+  });
+
+  it("prices the blank arm grant-aware, like the rest of this surface", () => {
+    // L-009: with the flag off a grant counts for nothing and this assertion
+    // holds under a raw implementation too, so the flag is set and then cleared
+    // to show it is what makes the difference.
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const records = [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }];
+    expect(worstCaseCost(records, proProfile).total).toBeCloseTo(0.25);
+    expect(chargePerRecord(proProfile)).toBeCloseTo(0.25);
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    expect(worstCaseCost(records, proProfile).total).toBeCloseTo(0.4);
   });
 
   it("prices a business-name record at the bare tier 1 rate", () => {
@@ -319,8 +367,8 @@ describe("worstCaseCost", () => {
       { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
       { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
       { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
-      { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // skipped (no owner)
-      { owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }, // skipped (whitespace)
+      { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // tier 2 (no owner)
+      { owner_name: "   ", address: "5 E St", city: "X", state: "TX", zip: "75001" }, // tier 2 (whitespace)
     ];
     const expectedEntities = records.filter(
       (r) => isEntityRecord(r.owner_name) && !isBlankOwnerRecord(r.owner_name),
@@ -331,8 +379,11 @@ describe("worstCaseCost", () => {
     );
     expect(pricedAsEntities).toBe(expectedEntities); // 2
     expect(pricedAsEntities).toBe(2);
-    // And the two skipped records are priced at nothing, not folded into persons.
+    // The two blank-owner records are priced in their OWN arm, not folded into
+    // either tier 1 one. Folding them into persons or entities would bill them
+    // per successful trace, which is free on a miss, and a tier 2 miss is not.
     expect(out.persons).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(out.blanks).toBeCloseTo(2 * 0.4);
   });
 });
 
@@ -388,25 +439,25 @@ describe("skip_trace_quote", () => {
         ],
       }),
     );
-    // The address-only record is neither a person nor a traceable entity: it is SKIPPED, and
-    // reported as such with the reason, so the caller can see why it came back empty and free.
+    // The address-only record is neither a person nor a named entity: it is a TIER 2 record,
+    // reported under its own key so the caller can see it is being traced rather than skipped.
     expect(out.persons).toBe(1);
     expect(out.entities).toBe(2);
-    expect(out.skipped).toBe(1);
-    expect(out.skipped_reason).toBe(BLANK_OWNER_SKIP_REASON);
+    expect(out.full_property_trace).toBe(1);
     expect(out.after_dedup).toBe(4);
-    // And the skipped record costs nothing: three traceable records at the wallet tier 1 rate.
-    expect(out.worst_case_cost).toBeCloseTo(3 * PRICING.CHARGE_PER_SUCCESS_WALLET);
+    // And it costs the tier 2 per-record rate on top of the three tier 1 records, where it used
+    // to cost nothing. MUTATION: drop the blank arm from worstCaseCost and this goes red.
+    expect(out.worst_case_cost).toBeCloseTo(3 * PRICING.CHARGE_PER_SUCCESS_WALLET + 0.4);
   });
 
-  it("reports no skip reason when every record has an owner", () => {
+  it("counts no full property traces when every record has an owner", () => {
     const admin = adminStub({ profile: { id: "p1", subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: [], wallet_balance: 5 } });
     return skipTraceQuote(admin, "sub-1", {
       records: [{ owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }],
     }).then((raw) => {
       const out = expectQuote(raw);
-      expect(out.skipped).toBe(0);
-      expect(out.skipped_reason).toBeNull();
+      expect(out.full_property_trace).toBe(0);
+      expect(out.worst_case_cost).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
     });
   });
 });
@@ -533,14 +584,14 @@ describe("skip_trace_bulk", () => {
     expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 1, entities: 0 });
   });
 
-  it("SKIPS an address-only record (NO owner_name) instead of queueing it, and charges nothing", async () => {
-    // Submit-split side of the money-gate consistency, rewritten 2026-09-17. This record used to
-    // be queued to the AI Search cron, which went and found an owner from the web. That engine is
-    // gone, so queueing it now would park the row in 'queued' forever behind a cron that cannot
-    // resolve it, and hold the whole bulk job open. It is accepted, written terminal with the
-    // skip status, and never charged.
-    // MUTATION: route it to entityRecords (drop the isBlankOwnerRecord arm) and this goes red on
-    // both the counts and the ai_research_status of the upserted row.
+  it("ENQUEUES an address-only record (NO owner_name) for a Full Property Trace", async () => {
+    // Submit-split side of the money-gate consistency, and phase 5c inverted it. This record was
+    // accepted, written terminal with a skip status and never charged, because the engine that
+    // finds an owner from an address alone had been removed. 5c built it back properly: a
+    // Tracerfy dossier buys the county record and names the owner, then one contact lookup
+    // resolves them. So the record is queued and BILLED, per record submitted.
+    // MUTATION: restore the BLANK_OWNER_SKIP_STATUS write and this goes red on the counts, the
+    // queue column and the committed worst case alike.
     const { admin, captured } = submitAdminStub({ profile: linked });
     const out = await skipTraceBulk(admin, "sub-1", {
       records: [{ address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
@@ -551,26 +602,28 @@ describe("skip_trace_bulk", () => {
       accepted: 1,
       persons: 0,
       entities: 0,
-      skipped: 1,
-      skipped_reason: BLANK_OWNER_SKIP_REASON,
-      committed_worst_case: 0,
+      full_property_trace: 1,
     });
-    // Not submitted to Tracerfy either: no vendor is asked about this record at all.
+    // It commits real money now, where it used to commit zero.
+    expect((out as { committed_worst_case: number }).committed_worst_case).toBeGreaterThan(0);
+    // Still not in the person CSV: it has no owner to put in one.
     expect(submitBulkTrace).not.toHaveBeenCalled();
 
     const rows = captured.traceHistoryUpserts.flatMap((u) => u.batch) as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      ai_research_status: BLANK_OWNER_SKIP_STATUS,
-      status: "no_match",
+      property_trace_status: queuedStatusFor(1),
+      status: "processing",
       input_owner_name: null,
     });
-    // Nothing money-shaped is written, so the row is not a receipt and stays deletable.
+    // Nothing money-shaped at submit: the cron bills it when the dossier answers.
     for (const paid of ["charge", "ai_research_charge", "tier"]) {
       expect(Object.keys(rows[0])).not.toContain(paid);
     }
-    // And it is NOT queued, so no cron is left waiting on an engine that no longer exists.
-    expect(rows[0].ai_research_status).not.toBe("queued");
+    // And it is NOT on the ENTITY queue. That column settles tier 1, where a miss
+    // is free; this row is tier 2, where a miss is billed. A row on both is
+    // settled twice by two engines under two billing models.
+    expect(rows[0].ai_research_status ?? null).toBeNull();
   });
 
   it("still queues a NAMED entity for the business trace", async () => {
@@ -581,10 +634,78 @@ describe("skip_trace_bulk", () => {
       records: [{ owner_name: "Acme Holdings LLC", address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
       confirm: true,
     });
-    expect(out).toMatchObject({ accepted: 1, persons: 0, entities: 1, skipped: 0 });
+    expect(out).toMatchObject({ accepted: 1, persons: 0, entities: 1, full_property_trace: 0 });
     const rows = captured.traceHistoryUpserts.flatMap((u) => u.batch) as Array<Record<string, unknown>>;
     expect(rows[0]).toMatchObject({ ai_research_status: "queued", status: "processing" });
+    // On the ENTITY queue only. A named owner is tier 1 work: the FastAppend
+    // business trace bills per successful trace and a miss is free. Landing it on
+    // the tier 2 queue as well would bill it per record submitted, by a second
+    // engine, for an owner it never needed discovering.
+    expect(rows[0].property_trace_status ?? null).toBeNull();
     expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * THE TWO PRE-FLIGHT CHECKS. Different questions, different owners,
+   * different sentences, and they must never be merged.
+   * ---------------------------------------------------------------- */
+
+  it("refuses without writing anything when PTP's own credit pool is short", async () => {
+    // Billing a caller for a job we cannot run is the outcome this check exists to prevent, so
+    // it lands before the job row, before the history rows and before any vendor.
+    H.canRunTier2 = false;
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    expect(out).toMatchObject({ error: "capacity_unavailable" });
+    expect(captured.traceHistoryUpserts).toHaveLength(0);
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+  });
+
+  it("NEVER tells the caller to add funds when it is PTP's balance that is short", async () => {
+    // David, 2026-09-18, binding. Their wallet is fine; ours is the problem, and pointing them
+    // at a top-up takes money for a fix that changes nothing. Nothing may claim anyone was
+    // notified either, because PTP has no alerting channel.
+    // MUTATION: return the insufficient_balance payload here and this goes red.
+    H.canRunTier2 = false;
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    const message = (out as { message: string }).message.toLowerCase();
+    expect(message).not.toContain("add funds");
+    expect(message).not.toMatch(/your wallet|your balance/);
+    expect(message).not.toMatch(/notif|alerted|our team/);
+    expect((out as { error: string }).error).not.toBe("insufficient_balance");
+  });
+
+  it("does not ask the pool about a batch with no blank-owner records", async () => {
+    // A tier 1 only batch draws nothing from the dossier pool, so a short pool must not refuse
+    // it. MUTATION: pass newRecords.length instead of tier2Records.length and this goes red.
+    H.canRunTier2 = false;
+    const { admin } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    expect(out).not.toMatchObject({ error: "capacity_unavailable" });
+  });
+
+  it("sizes the wallet gate against work already accepted and not yet billed", async () => {
+    // Two batches submitted back to back both passed against the same dollars, because the gate
+    // reserved nothing and the real debit lands per record at settle time.
+    // MUTATION: drop the in-flight term and this goes red.
+    H.inFlight = 99.9;
+    const { admin, captured } = submitAdminStub({ profile: linked }); // wallet_balance 100
+    const out = await skipTraceBulk(admin, "sub-1", {
+      records: [{ owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" }],
+      confirm: true,
+    });
+    expect(out).toMatchObject({ error: "insufficient_balance" });
+    expect(captured.traceHistoryUpserts).toHaveLength(0);
   });
 });
 
@@ -650,6 +771,69 @@ describe("bulk_status", () => {
     const out = await bulkStatus(admin, "sub-1", { job_id: "missing" });
     expect(out).toMatchObject({ error: "not_found" });
     expect(settleBulkJob).not.toHaveBeenCalled();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * THE JOB MAY NOT FINISH OVER WORK THAT HAS NOT RUN.
+   *
+   * isPropertyTracePending() was written for this and had no caller
+   * until the submit routes learned to enqueue. Without the gate a
+   * MIXED job finalizes the moment its Tracerfy leg lands, while its
+   * tier 2 rows are still queued: the caller gets `completed` and a
+   * results payload short by exactly the rows they are about to be
+   * billed for, and a `completed` job is never polled again.
+   * ---------------------------------------------------------------- */
+
+  it("stays processing while a tier 2 row is still queued, even with everything else settled", async () => {
+    // MUTATION: delete the isPropertyTracePending arm and this goes red -- the
+    // job reports completed over a row no vendor has answered for yet.
+    const { admin, captured } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 2 },
+      rows: [
+        // The tier 1 half: finished and settled.
+        { id: "r1", status: "success", tracerfy_job_id: null, is_successful: true, charge: 0.25, ai_research_status: null },
+        // The tier 2 half: still on the queue, and NOT status 'processing', so
+        // the pre-existing gates cannot see it.
+        { id: "r2", status: "no_match", tracerfy_job_id: null, is_successful: false, charge: 0, ai_research_status: null, property_trace_status: "queued" },
+      ],
+    });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(out).toMatchObject({ status: "processing", records_pending_property_trace: 1 });
+    // And the job row is NOT written completed, which is what would stop it ever
+    // being polled again.
+    expect(captured.traceJobsUpdates).toHaveLength(0);
+  });
+
+  it("counts a RETRIED tier 2 row as pending, not just a first attempt", async () => {
+    // The attempt number rides in the column itself, so a literal comparison
+    // against 'queued' would read queued_3 as terminal and finish the job early.
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 1 },
+      rows: [
+        { id: "r1", status: "no_match", tracerfy_job_id: null, is_successful: false, charge: 0, ai_research_status: null, property_trace_status: "processing_3" },
+      ],
+    });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(out).toMatchObject({ status: "processing" });
+  });
+
+  it("finishes once every tier 2 row reaches a terminal value", async () => {
+    // The other side of the fence: a terminal value must read as NOT pending, or
+    // the job is held open forever and never reports at all.
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 1 },
+      rows: [
+        { id: "r1", status: "no_match", tracerfy_job_id: null, is_successful: false, charge: 0.4, ai_research_status: null, property_trace_status: "property_trace_done" },
+      ],
+    });
+    const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+    expect(out).toMatchObject({ status: "completed", job_id: "job-1" });
+    // And the tier 2 charge the cron booked is in the total, which a tier 1 only
+    // settle loop could never have seen.
+    expect(out).toMatchObject({ total_charge: 0.4 });
   });
 
   it("OWNERSHIP FENCE: a job owned by another user returns forbidden and settles nothing", async () => {
