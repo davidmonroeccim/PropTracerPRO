@@ -217,6 +217,11 @@ export default function IntegrationsPage() {
           ...profile,
           highlevel_api_key: null,
           highlevel_location_id: null,
+          // Mirrors the route: the diagnosis goes with the credential it
+          // described, so a fresh connection does not inherit a stale one.
+          highlevel_invalid_at: null,
+          highlevel_invalid_status: null,
+          highlevel_invalid_reason: null,
         });
         setHlApiKey('');
         setHlLocationId('');

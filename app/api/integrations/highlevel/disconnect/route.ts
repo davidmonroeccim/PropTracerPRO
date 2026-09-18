@@ -21,6 +21,13 @@ export async function POST() {
       .update({
         highlevel_api_key: null,
         highlevel_location_id: null,
+        // The health columns describe the credential being removed here, so
+        // they go with it. Left behind, they would attach the old key's
+        // diagnosis to whatever the user connects next, and the reason column
+        // names a specific fix, so a stale one is a wrong instruction.
+        highlevel_invalid_at: null,
+        highlevel_invalid_status: null,
+        highlevel_invalid_reason: null,
       })
       .eq('id', user.id);
 
