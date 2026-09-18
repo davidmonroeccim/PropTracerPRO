@@ -157,6 +157,21 @@ export const PROPERTY_TRACE_PROCESSING_STATUSES: string[] =
   PROPERTY_TRACE_ATTEMPTS.map(processingStatusFor);
 
 /**
+ * Every status a row still owing its Full Property Trace can be sitting in:
+ * waiting on a rung, or claimed by a worker on one.
+ *
+ * The set form of isPropertyTracePending() below, for the two callers that have
+ * to ask the DATABASE the question rather than a value in hand -- the bulk job
+ * completion gates and the shared-pool pre-flight. Derived from the same two
+ * arrays the predicate reads, so a rung added to the ladder reaches both
+ * automatically and they cannot answer differently about the same row.
+ */
+export const PROPERTY_TRACE_PENDING_STATUSES: string[] = [
+  ...PROPERTY_TRACE_QUEUED_STATUSES,
+  ...PROPERTY_TRACE_PROCESSING_STATUSES,
+];
+
+/**
  * Which attempt a status represents. Anything unrecognized reads as attempt 1,
  * which is the safe direction: it costs one extra retry, never an early give-up.
  */
@@ -176,10 +191,7 @@ export function attemptOf(status: string | null | undefined): number {
 export function isPropertyTracePending(status: string | null | undefined): boolean {
   const s = (status || '').trim();
   if (!s) return false;
-  return (
-    PROPERTY_TRACE_QUEUED_STATUSES.includes(s) ||
-    PROPERTY_TRACE_PROCESSING_STATUSES.includes(s)
-  );
+  return PROPERTY_TRACE_PENDING_STATUSES.includes(s);
 }
 
 /** True when the row ran out of attempts at the dossier vendor. */

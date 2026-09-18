@@ -97,10 +97,40 @@ export async function deductWallet(
  * into a row. Anywhere the customer is TOLD something about the failure, call
  * `deductWallet` instead: this signature cannot tell a short wallet from a
  * broken RPC, and saying the wrong one is the defect it was split to fix.
+ *
+ * WHY THIS ONE LOGS AND `deductWallet` DOES NOT. The return value collapses
+ * three outcomes into one number, and that is correct -- `collected` means the
+ * amount that moved, and nothing moved in either failure. What was wrong is
+ * that both failures were also SILENT. A settle path that takes this answer
+ * writes the row DELIVERED at `charge: 0`: shared-pool vendor credits spent,
+ * nothing collected, and no log, no counter and no warning anywhere. An empty
+ * wallet and a broken database produced byte-identical evidence.
+ *
+ * So the distinction the caller threw away is recorded here instead, at the one
+ * place that still knows it. A short wallet is an expected business outcome and
+ * is recorded as revenue we did not collect; an RPC error is OUR infrastructure
+ * failing and is named as such, with the vendor's own message. PTP has no
+ * alerting channel -- no Sentry, no email, no Slack, and David chose no alert
+ * over a fake one -- so these two lines are the entire surface an operator has.
+ *
+ * Callers of `deductWallet` already branch on the outcome themselves, which is
+ * why it stays quiet: logging there too would double every line.
  */
 export async function deductOrZero(
   client: RpcClient,
   args: DeductWalletArgs
 ): Promise<number> {
-  return (await deductWallet(client, args)).collected;
+  const result = await deductWallet(client, args);
+
+  if (result.outcome === 'error') {
+    console.error(
+      `[wallet] deduct FAILED for row ${args.p_trace_history_id ?? 'none'}: ${result.message}. Nothing was collected and the work was still delivered.`
+    );
+  } else if (result.outcome === 'insufficient_balance') {
+    console.error(
+      `[wallet] wallet short for row ${args.p_trace_history_id ?? 'none'}: $${args.p_amount} was not collected and the work was still delivered.`
+    );
+  }
+
+  return result.collected;
 }

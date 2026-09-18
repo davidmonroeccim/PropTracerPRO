@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deductOrZero } from "@/lib/wallet/deduct";
 
 /**
@@ -54,20 +54,71 @@ describe("deductOrZero", () => {
 });
 
 /* ====================================================================
- * CHARACTERIZATION, 2026-09-17. Passes today, and describes the defect:
- * a short wallet and a broken RPC are the same answer, so every caller
- * tells the customer the same thing about two different events. One of
- * them is our failure, not their balance.
+ * THE ANSWER IS THE SAME NUMBER AND THAT IS CORRECT. What was wrong was
+ * that it was the same EVENT.
+ *
+ * `collected` means "the amount that actually moved", and nothing moved
+ * in either case, so 0 is right for both and callers that only write the
+ * number into a row were never misled. What the two failures owe is
+ * different TREATMENT: a short wallet is an expected business outcome,
+ * and an RPC error is an infrastructure failure. Both were silent, so a
+ * row could settle DELIVERED at charge 0 -- shared-pool vendor credits
+ * spent, nothing collected -- with no log, no counter and no warning
+ * anywhere. PTP has no alerting channel, so a console line is the whole
+ * of what an operator can ever see.
  * ==================================================================== */
-describe("CHARACTERIZATION — the two failures are indistinguishable", () => {
-  it("answers 0 for both, with nothing to tell them apart", async () => {
+describe("the two failures reach an operator differently", () => {
+  const logs = () => vi.mocked(console.error).mock.calls.map((c) => c.map(String).join(" "));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("still answers 0 for both, because nothing moved either time", async () => {
     const short = await deductOrZero(clientReturning({ data: false, error: null }), ARGS);
     const broken = await deductOrZero(
       clientReturning({ data: null, error: { message: "connection reset" } }),
       ARGS
     );
-
     expect(short).toBe(broken);
     expect(short).toBe(0);
+  });
+
+  it("names an RPC failure as ours, carrying the error and the row", async () => {
+    // MUTATION: drop the outcome check and log one line for both, and the
+    // assertion below that the two lines differ goes red.
+    await deductOrZero(
+      clientReturning({ data: null, error: { message: "connection reset" } }),
+      ARGS
+    );
+    expect(logs()).toHaveLength(1);
+    expect(logs()[0]).toContain("connection reset");
+    expect(logs()[0]).toContain("trace-1");
+  });
+
+  it("records a short wallet separately, because it is not a failure of ours", async () => {
+    await deductOrZero(clientReturning({ data: false, error: null }), ARGS);
+    expect(logs()).toHaveLength(1);
+    expect(logs()[0]).toContain("trace-1");
+  });
+
+  it("does not let the two read as the same event", async () => {
+    // The point of the whole change. An operator with no alerting channel has
+    // only these lines to tell an empty wallet from a broken database.
+    await deductOrZero(clientReturning({ data: false, error: null }), ARGS);
+    const short = logs()[0];
+    vi.clearAllMocks();
+    await deductOrZero(
+      clientReturning({ data: null, error: { message: "connection reset" } }),
+      ARGS
+    );
+    expect(logs()[0]).not.toBe(short);
+  });
+
+  it("says nothing at all when the money moved", async () => {
+    // A log on the happy path would bury the two that matter.
+    await deductOrZero(clientReturning({ data: true, error: null }), ARGS);
+    expect(logs()).toHaveLength(0);
   });
 });

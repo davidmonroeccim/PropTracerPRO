@@ -1,14 +1,42 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normalizer';
+import {
+  normalizeAddress,
+  createAddressHash,
+  validateAddressInput,
+} from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
-import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
-import { chargePerTrace, TRACE_SOURCE } from '@/lib/suite/pricing';
+import {
+  PROPERTY_TRACE_NO_KEY_REASON,
+  PROPERTY_TRACE_NO_KEY_STATUS,
+  queuedStatusFor,
+} from '@/lib/trace/propertyTraceAttempts';
+import {
+  TIER2_CAPACITY_REFUSAL,
+  inFlightUnbilledCost,
+  tracerfyCanRunTier2,
+} from '@/lib/trace/bulkPreflight';
+import { chargePerRecord, chargePerTrace, TRACE_SOURCE } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
 
-const MAX_RECORDS = 10000;
+/**
+ * THE CAP IS 500 RECORDS. David, 2026-09-18, measured against all 92 historical
+ * jobs rather than guessed: median 20, average 51, p90 100, p95 223, max 654,
+ * and exactly ONE job in the whole history exceeds 500.
+ *
+ * Recorded honestly because it is the uncomfortable half: the one job it blocks
+ * is the only large job that ever worked (552 of 654 matched), and the other
+ * five over 200 records returned 2, 1, 1, 5 and 0. That was accepted knowingly.
+ *
+ * THE CAP IS NOT THE MONEY GUARD. The two pre-flight checks below are. Its job
+ * is bounding blast radius when a run goes wrong, and stopping one user eating
+ * the Tracerfy credit pool that every other customer's jobs draw from. The same
+ * number now holds on all three submit surfaces (lib/suite/mcp-tools.ts and the
+ * v1 route), instead of two different ones.
+ */
+const MAX_RECORDS = 500;
 
 export async function POST(request: Request) {
   try {
@@ -36,7 +64,10 @@ export async function POST(request: Request) {
 
     if (records.length > MAX_RECORDS) {
       return NextResponse.json(
-        { success: false, error: `Maximum ${MAX_RECORDS} records per upload` },
+        {
+          success: false,
+          error: `You can send up to ${MAX_RECORDS} records at a time. Split this file into smaller batches and send them one after another.`,
+        },
         { status: 400 }
       );
     }
@@ -78,39 +109,122 @@ export async function POST(request: Request) {
       });
     }
 
-    // Split the batch in two. A row with no owner of record has no route: the
-    // AI Search engine that used to find an owner from an address alone was
-    // removed on 2026-09-17, and the page's AI Research toggle went with it.
-    // Sending it to Tracerfy anyway means a CSV line with an empty first and
-    // last name, and bulk/status then deducts the tier 1 rate on whatever comes
-    // back. David's rule: accept the file, skip the row, say why, charge
-    // nothing. See lib/trace/blankOwnerSkip.ts, which the v1 bulk route and the
-    // MCP submit already use.
-    const traceableRecords: AddressInput[] = [];
-    const skippedRecords: AddressInput[] = [];
+    // SPLIT THE BATCH IN THREE, AND THE MIDDLE BUCKET IS WHAT PHASE 5c EXISTS
+    // FOR.
+    //
+    // Until 2026-09-17 a row with no owner of record had no route at all: the AI
+    // Search engine that used to find an owner from an address alone was
+    // removed, so the row was accepted, skipped with a reason, and charged
+    // nothing. Phase 5c built the engine that CAN do it. David's decision,
+    // 2026-09-17: a blank-owner bulk row now runs a Full Property Trace
+    // AUTOMATICALLY, the same as a single trace. A Tracerfy dossier buys the
+    // county property record and names the owner, then one contact lookup
+    // resolves them.
+    //
+    // So the row is ENQUEUED into `property_trace_status` for
+    // app/api/cron/sweep-property-traces, and it is BILLED, per record
+    // submitted. 273 of 1,270 historical bulk rows arrived this way, so this is
+    // a real change to what existing bulk users pay.
+    //
+    //   tier 1      owner of record present. Tracerfy person CSV, billed per
+    //               SUCCESSFUL trace, free on a miss.
+    //   tier 2      no owner of record, but an address a vendor can be asked
+    //               about. Queued for the cron, billed per RECORD SUBMITTED.
+    //   no key      no owner of record AND no usable address. Nobody can be
+    //               asked, so it is terminal and free.
+    //
+    // THE THIRD BUCKET EXISTS BECAUSE THIS ROUTE DOES NOT VALIDATE PER RECORD,
+    // and it is the only submit surface that does not: the v1 route and the MCP
+    // tool both reject the whole batch up front, so a row with no city cannot
+    // reach their queues. It can reach this one. planRoute() emits no step at
+    // all for such a parcel, so queueing it would spend five claim slots asking
+    // an unanswerable question; the cron already writes exactly this status for
+    // the same row shape when it meets one.
+    //
+    // NOTE ON THE SENTENCE IT GETS. It is NOT lib/trace/blankOwnerSkip.ts's.
+    // That one ends "send it again with the owner of record and we will run
+    // it", which for a row missing its city is advice that fails when followed.
+    // PROPERTY_TRACE_NO_KEY_REASON names the actual fix. BLANK_OWNER_SKIP_* is
+    // now HISTORICAL: still readable for the rows already carrying it, never
+    // written again for a merely missing owner.
+    const tier1Records: AddressInput[] = [];
+    const tier2Records: AddressInput[] = [];
+    const noKeyRecords: AddressInput[] = [];
     for (const record of newRecords) {
       if ((record.owner_name || '').trim()) {
-        traceableRecords.push(record);
-      } else {
-        skippedRecords.push(record);
+        tier1Records.push(record);
+        continue;
       }
+      const usable = validateAddressInput(
+        record.address,
+        record.city,
+        record.state,
+        record.zip
+      );
+      if (usable.valid) tier2Records.push(record);
+      else noKeyRecords.push(record);
     }
 
-    // Check wallet balance for all users. Skipped rows are excluded because
-    // they can never be charged.
-    const perTrace = chargePerTrace(profile);
-    const estimatedCost = traceableRecords.length * perTrace;
-    if (profile.wallet_balance < estimatedCost) {
+    // The rows a vendor is actually asked about, and therefore the rows that can
+    // be billed. Used three times and it has to be the same number every time:
+    // it is what the reserve is quoted on, what the job row claims was
+    // submitted, and the denominator of the match rate.
+    const tier1Rate = chargePerTrace(profile);
+    const tier2Rate = chargePerRecord(profile);
+    const estimatedCost = tier1Records.length * tier1Rate + tier2Records.length * tier2Rate;
+
+    const adminClient = createAdminClient();
+
+    /* ---------------------------------------------------------------- *
+     * THE TWO PRE-FLIGHT CHECKS. They ask different questions, they fail
+     * for opposite reasons, and they must never be merged.
+     *
+     * OURS FIRST, DELIBERATELY. If PTP cannot run the job, the customer
+     * must never be told to add funds for it: their wallet is fine, ours
+     * is the problem, and taking payment for a fix that changes nothing
+     * is the worse of the two wrong answers. Asking our question first
+     * means the 402 below can only ever fire on a job we could have run.
+     * ---------------------------------------------------------------- */
+
+    // CAN PTP EXECUTE? The Tracerfy credit pool is SHARED across every
+    // customer's jobs, so this is sized against what is already queued as well
+    // as what is being asked for. Silent by David's decision, 2026-09-18: PTP
+    // has no alerting channel and he chose no alert over a fake one, so nothing
+    // here claims anyone was told. lib/trace/bulkPreflight.ts logs for the
+    // operator, which is the only surface that exists.
+    if (!(await tracerfyCanRunTier2(adminClient, tier2Records.length))) {
+      return NextResponse.json(
+        { success: false, error: TIER2_CAPACITY_REFUSAL },
+        { status: 503 }
+      );
+    }
+
+    // CAN THE CUSTOMER PAY? This used to be a bare comparison that reserved
+    // nothing: this route never writes `wallet_balance`, and the real debit
+    // happens per record at settle time, so two jobs submitted back to back both
+    // passed against the same dollars. Settlement fails closed, so no customer
+    // was ever harmed and no balance went negative -- PTP just ate the vendor
+    // spend, which at tier 2 is up to 500 records of it. Sizing against
+    // in-flight unbilled work is what makes this a reserve.
+    const inFlight = await inFlightUnbilledCost(adminClient, user.id, {
+      tier1: tier1Rate,
+      tier2: tier2Rate,
+    });
+    if (profile.wallet_balance < estimatedCost + inFlight) {
       return NextResponse.json(
         {
           success: false,
-          error: `Insufficient wallet balance. Need $${estimatedCost.toFixed(2)} but have $${profile.wallet_balance.toFixed(2)}. Please add funds.`,
+          // THIS one names their funds, because this one IS their balance. The
+          // in-flight half is only mentioned when there is some, or the sentence
+          // would read as an unexplained surcharge.
+          error:
+            inFlight > 0
+              ? `This batch could cost up to $${estimatedCost.toFixed(2)}, and you have another $${inFlight.toFixed(2)} of traces already running that have not been billed yet. Your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`
+              : `This batch could cost up to $${estimatedCost.toFixed(2)} but your wallet holds $${profile.wallet_balance.toFixed(2)}. Add funds and send it again.`,
         },
         { status: 402 }
       );
     }
-
-    const adminClient = createAdminClient();
 
     // Create trace_jobs row
     const { data: job, error: jobError } = await adminClient
@@ -120,9 +234,13 @@ export async function POST(request: Request) {
         file_name: fileName || null,
         total_records: records.length,
         dedupe_removed: totalDeduped,
-        // Only the rows a vendor is actually asked about. A skipped row was
-        // never submitted, and counting it here would overstate the work.
-        records_submitted: traceableRecords.length,
+        // Only the rows a vendor is actually asked about, which as of phase 5c
+        // INCLUDES the queued tier 2 rows: they are billed per record
+        // submitted, so leaving them out would understate the work and
+        // overstate the match rate by exactly the number of rows the customer
+        // paid for. A no-key row is still excluded, because nobody is ever
+        // asked about it.
+        records_submitted: tier1Records.length + tier2Records.length,
         records_matched: 0,
         status: 'processing',
         // THE SOURCE TAG IS A PRICE DECISION, NOT A LABEL. This route settles
@@ -152,14 +270,24 @@ export async function POST(request: Request) {
     // v1 route does. Without it the skipped rows, which never get a
     // tracerfy_job_id, are invisible to the results CSV.
     const buildHistoryRow = (record: AddressInput) => {
-      const normalizedAddress = normalizeAddress(record.address, record.city, record.state);
+      // The `|| ''` guards are for the no-key bucket, whose whole definition is
+      // that one of these three is missing. They are not a substitute for
+      // validation: removeBatchDuplicates already normalizes every record ahead
+      // of this, so a genuinely absent field throws there first. These keep the
+      // row writable for the empty-string case, which is the one that reaches
+      // here.
+      const normalizedAddress = normalizeAddress(
+        record.address || '',
+        record.city || '',
+        record.state || ''
+      );
       return {
         user_id: user.id,
         trace_job_id: job.id,
         address_hash: createAddressHash(normalizedAddress),
         normalized_address: normalizedAddress,
-        city: record.city.toUpperCase(),
-        state: record.state.toUpperCase(),
+        city: (record.city || '').toUpperCase(),
+        state: (record.state || '').toUpperCase(),
         zip: (record.zip || '').substring(0, 5),
         input_owner_name: record.owner_name || null,
         // Same tag as the job above, and on EVERY row including the skipped
@@ -179,24 +307,58 @@ export async function POST(request: Request) {
       }
     };
 
-    // Blank-owner rows land already finished. No tracerfy_job_id, so the status
-    // route never picks them up to settle or bill, and nothing money-shaped is
-    // written: no charge, no ai_research_charge, no tier, because nothing was
-    // billed. The reason reaches the user through the response below and the
-    // skip_reason column of the results CSV.
-    if (skippedRecords.length > 0) {
+    // Rows nobody can be asked about land already finished. No tracerfy_job_id
+    // and no queue rung, so neither the status route nor the cron ever picks
+    // them up, and nothing money-shaped is written: no charge, no
+    // ai_research_charge, no tier, because nothing was billed and nothing was
+    // spent. The reason reaches the user through the response below and the
+    // skip_reason column of the results CSV, via propertyTraceSkipReason().
+    if (noKeyRecords.length > 0) {
       await insertHistoryRows(
-        skippedRecords.map((r) => ({
+        noKeyRecords.map((r) => ({
           ...buildHistoryRow(r),
-          ai_research_status: BLANK_OWNER_SKIP_STATUS,
+          property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
           status: 'no_match' as const,
         }))
       );
     }
 
-    // Nothing to trace. Close the job out here rather than leave the page
-    // polling a job no vendor will ever finish.
-    if (traceableRecords.length === 0) {
+    // TIER 2 ROWS, ONTO THE QUEUE. Attempt 1 of the ladder, which is the bare
+    // 'queued' the cron's claim window looks for. Written BEFORE the Tracerfy
+    // submit below so the cron can start on them the moment this handler
+    // returns, and so a failed person submit does not strand them.
+    //
+    // `status: 'processing'` because the row genuinely is in flight. It carries
+    // no tracerfy_job_id, which is what keeps every tier 1 settle path away
+    // from it: bulk/status finds its billable rows by that column, and a tier 2
+    // row settled there would be billed the tier 1 rate by the wrong engine.
+    // sweep-stale-traces cannot reach it either, because its single-trace stage
+    // filters on `trace_job_id IS NULL`.
+    if (tier2Records.length > 0) {
+      await insertHistoryRows(
+        tier2Records.map((r) => ({
+          ...buildHistoryRow(r),
+          property_trace_status: queuedStatusFor(1),
+          status: 'processing' as const,
+        }))
+      );
+    }
+
+    /** What the customer is told about rows nobody could be asked about. */
+    const noKeyFields =
+      noKeyRecords.length > 0
+        ? {
+            records_skipped: noKeyRecords.length,
+            skipped_reason: PROPERTY_TRACE_NO_KEY_REASON,
+          }
+        : { records_skipped: 0, skipped_reason: undefined };
+
+    // NOTHING LEFT TO WAIT FOR. Only true when there is no tier 1 CSV to submit
+    // AND nothing on the queue: a no-key row is finished the moment it is
+    // written. A QUEUED row is not, so a job holding one must stay open -- the
+    // cron has not touched it, and closing here would stop the page polling
+    // before results the customer is billed for ever arrive.
+    if (tier1Records.length === 0 && tier2Records.length === 0) {
       await adminClient
         .from('trace_jobs')
         .update({
@@ -212,22 +374,40 @@ export async function POST(request: Request) {
         total_records: records.length,
         dedupe_removed: totalDeduped,
         records_submitted: 0,
-        records_skipped: skippedRecords.length,
-        skipped_reason: BLANK_OWNER_SKIP_REASON,
+        records_queued: 0,
+        ...noKeyFields,
         cached_count: dedupeResult.cachedResults.length,
         estimated_cost: 0,
-        message: `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`,
+        message: `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`,
       });
     }
 
-    // Build Tracerfy CSV from the traceable records only.
+    // NO PERSON CSV TO BUILD. Every remaining row is queued, so there is no
+    // Tracerfy bulk submit to make and no tracerfy_job_id for this job. The
+    // cron owns the whole of it from here; the status route waits on the queue.
+    if (tier1Records.length === 0) {
+      return NextResponse.json({
+        success: true,
+        job_id: job.id,
+        total_records: records.length,
+        dedupe_removed: totalDeduped,
+        records_submitted: tier2Records.length,
+        records_queued: tier2Records.length,
+        ...noKeyFields,
+        cached_count: dedupeResult.cachedResults.length,
+        estimated_cost: estimatedCost,
+      });
+    }
+
+    // Build the Tracerfy person CSV from the TIER 1 records only. A tier 2 row
+    // has no owner to put in it: the dossier is what discovers one.
     const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
 
     const csvLines = [
       'address,city,state,first_name,last_name,mail_address,mail_city,mail_state',
     ];
 
-    for (const record of traceableRecords) {
+    for (const record of tier1Records) {
       // Split owner_name into first/last.
       const parts = (record.owner_name || '').trim().split(' ');
       const firstName = parts[0] || '';
@@ -267,9 +447,12 @@ export async function POST(request: Request) {
       .update({ tracerfy_job_id: submitResult.jobId })
       .eq('id', job.id);
 
-    // Insert pending trace_history rows for each traceable record
+    // Insert pending trace_history rows for each TIER 1 record. No
+    // property_trace_status on any of them: a tier 1 row that landed on the
+    // tier 2 queue would be billed per record submitted instead of per
+    // successful trace, and by two engines rather than one.
     await insertHistoryRows(
-      traceableRecords.map((record) => ({
+      tier1Records.map((record) => ({
         ...buildHistoryRow(record),
         tracerfy_job_id: submitResult.jobId,
         status: 'processing' as const,
@@ -281,14 +464,14 @@ export async function POST(request: Request) {
       job_id: job.id,
       total_records: records.length,
       dedupe_removed: totalDeduped,
-      records_submitted: traceableRecords.length,
-      records_skipped: skippedRecords.length,
-      skipped_reason: skippedRecords.length > 0 ? BLANK_OWNER_SKIP_REASON : undefined,
+      records_submitted: tier1Records.length + tier2Records.length,
+      records_queued: tier2Records.length,
+      ...noKeyFields,
       cached_count: dedupeResult.cachedResults.length,
       estimated_cost: estimatedCost,
       message:
-        skippedRecords.length > 0
-          ? `${skippedRecords.length} records arrived with no owner name and were skipped. ${BLANK_OWNER_SKIP_REASON}`
+        noKeyRecords.length > 0
+          ? `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
           : undefined,
     });
   } catch (error) {
