@@ -60,16 +60,26 @@ any incidental variation satisfies it: a timestamp, an id, an interpolated vendo
 thing you care about is WHICH of two categories an output belongs to, assert the category. A
 difference test cannot tell you that the difference is the one that matters.
 
-**This is now the fourth member of one family** and they are worth reading together, because each
-produces a green test that would stay green if the thing it guards were deleted:
+**This family now has five members** and they are worth reading together, because each produces a
+green test that would stay green if the thing it guards were deleted:
 - **L-009**, two branches identical by default because a flag collapses them.
 - **L-012**, a mutation that never applied, and a file that stopped loading.
 - **L-013**, an assertion satisfied by state left over from an earlier test.
 - **L-015**, an assertion satisfied by an incidental difference rather than the meaningful one.
+- **A RECIPROCAL guard asserted on only one side** (2026-09-18, 5c-3B). Two files deliberately differ
+  and each carries a comment explaining why. A test read each file for its OWN reason, so deleting
+  the other file's half of the explanation turned nothing red. The half most likely to be tidied away
+  by someone reading one file without the other was behind no assertion at all. **A test that reads
+  source is only as good as the specific sentence it names**, and a guard on a mutual relationship
+  has to assert both ends or it guards one.
 
-The common defence is the same in all four: **mutate the guard and watch it go red, and when it
-survives, do not assume the guard is fine because the test looks right.** Three of these four were
+The common defence is the same in all five: **mutate the guard and watch it go red, and when it
+survives, do not assume the guard is fine because the test looks right.** Four of these five were
 invisible to reading and were caught only by the mutation run.
+
+**And note where they were caught.** Every one of these was found by the person who WROTE the guard,
+running a mutation against their own work, not by a reviewer reading it. A reviewer reads the test and
+the code and sees them agree, which is exactly what a worthless test looks like from the outside.
 
 ---
 

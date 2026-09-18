@@ -2869,17 +2869,27 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 ## TASKS
 - [x] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status. **DONE `55616b0`**
 - [x] 2. P2: fix `getAnalytics` against the real response; test it. **DONE `55616b0`**
-- [~] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time. **ROUTES DONE `f9b15d7`; UI half is 5c-3B**
+- [x] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time. **DONE. Routes `f9b15d7`; UI refuses at parse time on raw rows, `fd73b39`**
 - [x] 4. Migration: two queue columns + the all-rungs partial index. **DONE `54f1b41`, APPLIED to production and read back 2026-09-18**
 - [x] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5. **DONE `54f1b41`**
 - [x] 6. Billing in the worker: answer = billable, failure = retry, fold never flat. **DONE `54f1b41` + `64cd577`**
 - [x] 7. Both pre-flight checks, with the two different failure owners. **DONE `c1556dd`, `lib/trace/bulkPreflight.ts`**
 - [x] 8. All three submit estimates. **DONE `f9b15d7` + `c1556dd`**
-- [ ] 9. Every string above.
-- [ ] 10. Poll ceiling / long-job UX.
-- [ ] 11. v1 payload parity + MCP limits.
+- [x] 9. Every string above. **DONE `fd73b39` + `2a443ea`.** Plus the API docs page, which the list omitted. See L-016.
+- [x] 10. Poll ceiling / long-job UX. **DONE `fd73b39`.** Check-back to History, per David's decision.
+- [x] 11. v1 payload parity + MCP limits. **DONE `fd73b39` + `627b78c`.** v1 default/max 500 (non-breaking), MCP 25/200, asymmetry documented both sides.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [x] 13. The submit wallet check must size against in-flight unbilled work. **DONE `c1556dd`.** Closes the back-to-back gap; the sub-second in-submit window is task 16.
+- [ ] 17. **PRODUCT GAP, found during 5c-3B. Not a copy problem, and deliberately not papered over.**
+      There is now no in-product path to re-run a FREE failed bulk row inside the 90-day dedup
+      window. Three of the five no-contacts reasons used to end "send it again and we will run it";
+      that advice fails, because the dedup hash is address-only and any existing row blocks the
+      resend. 5c-3B removed the invitation rather than leaving a false instruction, and kept it only
+      on the no-key reason, where supplying the missing city changes the hash so the resend genuinely
+      works. **So the customer is now told the truth and has no remedy.** The narrowest fix the
+      implementer identified: align `checkDuplicates` with the cache-hit test `checkSingleDuplicate`
+      already uses, which is why a SINGLE trace re-runs today and a bulk row does not. That is a
+      billing-adjacent decision and wants its own scoping, not a fold into a copy dispatch.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and

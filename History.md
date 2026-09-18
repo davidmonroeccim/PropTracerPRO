@@ -6,6 +6,57 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### Full Property Trace, phase 5c-3B: the surfaces stop describing a product that no longer exists
+
+Commits `fd73b39`, `2a443ea`, `01a0b32`, `627b78c`. 1277 passing from 1193, 67 files, 0 failing.
+
+Every string in the product was written when tier 1 was the only billing model: charged per
+successful trace, a miss is free. Tier 2 charges per record SUBMITTED, so a miss is billed. A
+sentence true of one is false of the other, and that single fact produced almost every defect here.
+
+- **The wiring gap was the real work, not the copy.** `propertyTraceSkipReason()` existed, was
+  tested, and was connected to nothing, so every tier 2 terminal value reached the customer as a bare
+  `no_match`. All four bulk surfaces now serve it through ONE accessor,
+  `lib/trace/rowSkipReason.ts`, which asks both queues: the results CSV, the session job summary, the
+  v1 REST payload and the MCP payload. Each previously called the tier 1 accessor alone.
+- **The billed reason had no charge statement, and finding that was the point of checking.** Of the
+  five reasons a row can come back empty, four are free and one is billed: the dossier answered, we
+  charged, and the contact vendor then failed. That fifth sentence said nothing about money and
+  relied on the reader noticing an absence, which only worked while the summary heading made the
+  money claim. **Removing that heading without fixing this would have moved a billed row from a false
+  money claim to no money claim, a regression hidden inside a fix.** It now says what was charged and
+  why, naming the model rather than a rate.
+- **Then the corrected headings over-claimed in the other direction.** "We could not get contacts for
+  N of your records" is true as a category and false against its own number: N counts only rows with
+  a stated reason, so a 100-record job with 40 matched read as 12 without contacts when 60 were. The
+  claim was narrowed rather than the count widened, because widening would leave the reasons
+  explaining a fraction of the number above them.
+- **Three reasons invited a resend that the 90-day dedup window silently refuses.** The hash is
+  address-only, so any existing row blocks it. That is the same defect class as the stale blank-owner
+  instruction corrected earlier in this phase: advice that fails when followed. The invitation was
+  removed where it is false and KEPT on the no-key reason, where supplying the missing city changes
+  the hash and the resend genuinely works. **The gap this leaves is real and is recorded as task 17
+  rather than papered over with a sentence:** a customer is now told the truth and has no remedy.
+- **The API docs page was still selling the old product** and was not on the plan's list: it told
+  callers blank-owner rows are skipped and free, that a skip reason means nothing was charged, and
+  showed two response keys 5c-3A had already deleted.
+- **v1's status route pages, and the paging is deliberately non-breaking.** Default and max are both
+  500, the submit cap, so an existing caller passing no query gets exactly what it gets today, pinned
+  by a test. MCP stays at 25/200. The asymmetry is documented on BOTH sides: the MCP limit exists
+  because its consumer is a model with a context budget, v1's because of bytes over the wire.
+- The cap refuses at parse time on the file's raw row count, deliberately stricter than the routes,
+  because we refuse on the number the user is looking at. Its recorded rationale was corrected: the
+  route caps BEFORE dedup, so the gap is invalid rows, not duplicates.
+
+**The copy rules are now enforced by tests** rather than by review attention, so no em-dash,
+en-dash or asterisk can re-enter a user-facing string silently.
+
+`lessons.md` gains L-016: an enumerated list stops the reader searching, so an incomplete one is
+worse than none. The docs page was missed by working the plan's list instead of grepping for the
+claims themselves, and the same failure produced an unnumbered enqueue task and a skip-reason
+instruction named in one place that survived in three others. All three gaps were mine, and in each
+case the missing piece was something known and left in prose.
+
 ### Full Property Trace, phase 5c-3A: blank-owner rows are traced, and a job cannot end over live work
 
 Commits `4336f5b`, `f9b15d7`, `c1556dd`, `c257062`, `76833aa`, then `e5a978c` and `2b327e9` from two
