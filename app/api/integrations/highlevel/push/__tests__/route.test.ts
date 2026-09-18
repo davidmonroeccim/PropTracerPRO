@@ -20,6 +20,8 @@ const H = vi.hoisted(() => ({
   traces: null as Array<Record<string, unknown>> | null,
   pushResults: [] as unknown[],
   pushCalls: 0,
+  /** Every update the route (or the credential recorder) wrote. */
+  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
 }));
 
 /** Minimal PostgREST-shaped builder: chainable, and awaitable at either terminator. */
@@ -46,6 +48,10 @@ vi.mock('@/lib/supabase/admin', () => ({
         if (table === 'user_profiles') return chain({ single: H.profile });
         if (table === 'trace_jobs') return chain({ single: H.job });
         return chain({ single: H.trace, list: H.traces });
+      },
+      update: (payload: Record<string, unknown>) => {
+        H.updates.push({ table, payload });
+        return chain({});
       },
     }),
   }),
@@ -126,6 +132,7 @@ beforeEach(() => {
   H.traces = [TRACE, TRACE, TRACE];
   H.pushResults = [CREATED];
   H.pushCalls = 0;
+  H.updates = [];
   vi.spyOn(console, 'error').mockImplementation(() => {}).mockClear();
 });
 
@@ -299,5 +306,89 @@ describe('the gates in front of all of that still hold', () => {
 
   it('rejects a request naming neither a trace nor a job', async () => {
     expect((await post({})).status).toBe(400);
+  });
+});
+
+/**
+ * THE BUTTON IS A PUSH SITE LIKE ANY OTHER, and it has to record the outcome
+ * against the credential too. Two reasons, neither optional:
+ *
+ *  - a manual push is often the FIRST thing a user does after setting the key
+ *    up, so it is the first chance anyone has to find out the key is dead;
+ *  - a manual push that WORKS has to clear a flag an earlier automatic push
+ *    set, or the badge stays red beside a push that just succeeded.
+ *
+ * These run through the real recorder and the same mocked admin client, so the
+ * assertions are on the values that reach user_profiles.
+ */
+describe('the manual push records what happened to the credential', () => {
+  const flagWrite = () =>
+    H.updates.find((u) => u.table === 'user_profiles' && 'highlevel_invalid_at' in u.payload);
+
+  it('flags the credential, with the reason, on a single credential failure', async () => {
+    H.pushResults = [CREDENTIAL_FAILURE];
+
+    await post({ trace_id: 't-1' });
+
+    const flag = flagWrite();
+    expect(flag).toBeDefined();
+    expect(flag?.payload.highlevel_invalid_reason).toBe('scope');
+    expect(flag?.payload.highlevel_invalid_status).toBe(401);
+    expect(flag?.payload.highlevel_invalid_at).not.toBeNull();
+  });
+
+  it('leaves the credential alone when only the record was refused', async () => {
+    H.pushResults = [RECORD_FAILURE];
+    await post({ trace_id: 't-1' });
+    expect(flagWrite()).toBeUndefined();
+  });
+
+  it('leaves the credential alone on a transient failure', async () => {
+    H.pushResults = [TRANSIENT_FAILURE];
+    await post({ trace_id: 't-1' });
+    expect(flagWrite()).toBeUndefined();
+  });
+
+  it('clears the flag when a push succeeds against a credential that was flagged', async () => {
+    H.profile = { ...PRO_PROFILE, highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+    H.pushResults = [CREATED];
+
+    await post({ trace_id: 't-1' });
+
+    const cleared = flagWrite();
+    expect(cleared).toBeDefined();
+    expect('highlevel_invalid_status' in (cleared?.payload ?? {})).toBe(true);
+    expect('highlevel_invalid_reason' in (cleared?.payload ?? {})).toBe(true);
+    expect(cleared?.payload.highlevel_invalid_at).toBeNull();
+    expect(cleared?.payload.highlevel_invalid_status).toBeNull();
+    expect(cleared?.payload.highlevel_invalid_reason).toBeNull();
+  });
+
+  it('writes nothing when a push succeeds against a credential nobody flagged', async () => {
+    H.pushResults = [CREATED];
+    await post({ trace_id: 't-1' });
+    expect(H.updates).toEqual([]);
+  });
+
+  it('flags the credential ONCE for a bulk job where every write was refused', async () => {
+    H.pushResults = [CREDENTIAL_FAILURE, CREDENTIAL_FAILURE, CREDENTIAL_FAILURE];
+
+    await post({ job_id: 'j-1' });
+
+    const flags = H.updates.filter(
+      (u) => u.table === 'user_profiles' && 'highlevel_invalid_at' in u.payload
+    );
+    expect(flags).toHaveLength(1);
+    expect(flags[0].payload.highlevel_invalid_reason).toBe('scope');
+  });
+
+  it('flags the credential on a partial bulk job, because one refusal is enough', async () => {
+    // 207 territory: some pushed, some did not. A credential complaint anywhere
+    // in the batch is still a credential complaint.
+    H.pushResults = [CREATED, CREDENTIAL_FAILURE, CREATED];
+
+    await post({ job_id: 'j-1' });
+
+    expect(flagWrite()?.payload.highlevel_invalid_reason).toBe('scope');
   });
 });
