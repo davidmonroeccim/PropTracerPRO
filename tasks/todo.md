@@ -3093,11 +3093,11 @@ single write that reaches the user later, on a page they will visit, and it cove
 
 ## TASKS
 
-- [ ] 1. **The client tells the truth about why it failed.** Return a discriminated failure
+- [x] 1. **DONE `c5a61dd`. The client tells the truth about why it failed.** Return a discriminated failure
       carrying the class above and the HTTP status. Fix the missing else at `client.ts:166-180` so a
       failed search cannot silently become a duplicate create. Log the status, which is currently
       never logged. Tests from scratch; there is no test file for this module.
-- [ ] 2. **The manual button stops reporting success on a failure.** Route: stop returning
+- [x] 2. **DONE `c5a61dd`. The manual button stops reporting success on a failure.** Route: stop returning
       `{success:false}` at 200, and stop hardcoding `success:true` on the bulk branch. Button: read
       the outcome rather than `response.ok`, and show `failed` on bulk. Covers both B and B.2.
 - [ ] 3. **"Connected" means the credential worked.** Save validates before it stores. Save stops
@@ -3136,7 +3136,14 @@ only thing that will prove any of them are worth having.
   `trace/status/route.ts:245-252` precedes `:285`). The user is billed, sees a successful trace, and
   has nothing in the CRM. Correct under the billing model, since the trace did succeed, but it is
   the reason the silent push failure is expensive rather than cosmetic.
-- **R5. UNVERIFIED, needs a live check.** `client.ts:191` sends `tags: ['proptracerpro']` in the PUT
+- **R5. RESOLVED AND FIXED, `a7962b6`. It was real and it was destructive.** HighLevel's Update
+  Contact doc states verbatim: "This field will overwrite all current tags associated with the
+  contact." So every update push deleted every other tag on that contact, and in HighLevel tags
+  drive workflows, so it broke the customer's automation too. Tags now sent on CREATE only. The
+  additive `POST /contacts/:contactId/tags` is deliberately NOT adopted yet: its additivity is
+  implied by its name and response shape rather than documented, and swapping verified destruction
+  for unverified behaviour is not a fix. Verify against a real account, then switch.
+- **R5-OLD, superseded, kept so the original wording is not restored.** `client.ts:191` sends `tags: ['proptracerpro']` in the PUT
   body. Whether GHL v2 MERGES or REPLACES the tag array decides whether pushing over an existing
   contact silently wipes the customer's own tags. This is GHL API semantics, not a repo fact, and
   it is not safe to assume either way.

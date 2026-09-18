@@ -6,6 +6,109 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### HighLevel push honesty, Phase A: the client says WHY, and the button stops lying
+
+Branch `fix/highlevel-push-honesty`, commits `1dc09ca` (plan), `c5a61dd` (Phase A), `a7962b6`
+(tags). **1367 passing from 1306, 70 files, 0 failing**, `npx tsc --noEmit` 0,
+`npx eslint app lib components` 47 (baseline), `npm run build` compiles. 7 mutations run
+independently by the coordinator on top of the implementer's 6; all killed, every total held,
+every restore sha256-verified.
+
+**Blast radius read from production, not from a document: 6 of 53 users** have both
+`highlevel_api_key` and `highlevel_location_id` set.
+
+**The handoff named three bugs. All three were confirmed against source, and grepping for the
+PROPERTY rather than working the list (L-016) found six more.** Two of the six are worse than
+anything on the list:
+
+- **The duplicate-search step had no `else`.** `client.ts` tested `searchRes.ok` and, on a failure,
+  left `existingContactId` null and fell through to the CREATE branch. So a credential failure on
+  search silently turned "update the existing contact" into "create a second copy", and if the
+  credential was only partly broken that duplicate SUCCEEDED. Now a refused search returns the
+  classified failure and never reaches create: a failed search means we do not know whether the
+  contact exists, and creating on unknown state is inventing a result.
+- **Saving erased a failure the user had already been shown.** `saveHighLevel` runs
+  `setTestResult(null)`, so pressing Test Connection, getting a red "Invalid API key", and pressing
+  Save cleared the banner and turned the badge green in the same tick. Recorded for Phase B.
+
+**THE ORGANISING DISTINCTION, and it is L-007 pointed at pushes: a 401 is a CREDENTIAL failure, not
+a trace failure.** `pushTraceToHighLevel` collapsed a dead key, a malformed record and a rate limit
+into the identical string `'Failed to create contact'`, and `response.status` never left the
+function or reached the log, so a customer reporting "nothing arrives in my CRM" was undiagnosable
+from outside. The result is now a discriminated union carrying `kind`
+(`credential` / `record` / `transient`) and the status, with the rule written at the gate because
+all three are `success:false` and the next reader will want to merge them.
+
+**A SCOPE FINDING THAT CHANGED THE DESIGN MID-FLIGHT.** Verified against HighLevel's live docs:
+`contacts.readonly` and `contacts.write` are SEPARATE scopes
+(https://marketplace.gohighlevel.com/docs/Authorization/Scopes/), and PTP's setup copy tells users
+to grant only "contacts". So a read-only token passes Test Connection (a GET) and fails every push
+(a PUT or POST). Worse for the classifier: **a missing scope returns 401, identical to a revoked
+token.** Only the response body separates them:
+
+| | status | message |
+|---|---|---|
+| revoked token | 401 | `Invalid JWT` |
+| missing scope | **401** | `The token is not authorized for this scope.` |
+| wrong location | 403 | `The token does not have access to this location.` |
+
+Three different remediations behind two statuses. A status-only design tells a user with an
+unticked scope to re-paste a token that is perfectly fine. The failure now carries a `reason`
+(`token` / `scope` / `location` / `unknown`) derived from the body, matched positive-only and
+case-insensitively, with **`unknown` as a first-class value**: the scope wording comes from a
+developer-forum report rather than official docs, so if HighLevel rewords it the correct behaviour
+is to degrade to a generic message, never to guess (repo rule 7).
+
+**THE BUTTON.** `push/route.ts` returned `{success:false}` inside an HTTP **200** and
+`PushToCrmButton` branched on `response.ok`, never reading `data.success`, so a 401 rendered a green
+check reading "Contact created". The bulk branch hardcoded `success: true` with `failed` computed
+and rendered nowhere, so a 50-record job where every write 401'd showed "0 contacts pushed" under a
+green check. Now: credential 502, record 422, transient 503, and 207 Multi-Status for a genuinely
+partial job. 502 rather than 401 deliberately, because a 401 on the wire makes the browser think the
+PTP session died, so a bad CRM key would read as a surprise logout.
+
+### The tags bug: PTP was deleting customers' HighLevel tags on every update
+
+Commit `a7962b6`. Found while verifying the scopes, and it is not on any prior list.
+
+HighLevel's Update Contact endpoint states verbatim: *"This field will overwrite all current tags
+associated with the contact."* (https://marketplace.gohighlevel.com/docs/ghl/contacts/update-contact/)
+PTP sent `tags: ['proptracerpro']` on every `PUT`, so **every update push deleted every other tag on
+that contact.** In HighLevel tags drive workflows, so this was silently breaking customers'
+automation triggers, on a push that reported success.
+
+Tags stay on CREATE, where there is no existing array to overwrite. **Deliberately NOT switched to
+the additive `POST /contacts/:contactId/tags`**, which HighLevel's own doc points to for exactly
+this: that endpoint's additivity is implied by its name and response shape rather than stated, and
+swapping verified destruction for unverified behaviour is not a fix.
+
+The assertion is that the `tags` key is **ABSENT** from the PUT body, not that it is an empty array
+and not that it differs from create. An empty array overwrites just the same, so the obvious
+"safe" form is still destructive. Both directions mutation-verified.
+
+### Checked and closed, so nobody rediscovers it as a vulnerability
+
+`anon` and `authenticated` hold INSERT on `user_profiles` columns including `subscription_tier`,
+`wallet_balance` and `is_acquisition_pro_member`, which looks exactly like the suite self-write
+class. **It cannot fire.** Trigger `on_auth_user_created` runs `handle_new_user` in the same
+transaction as the `auth.users` insert, so the profile row always pre-exists any JWT and an INSERT
+conflicts on the primary key (verified: 53 auth users, 53 profiles). Recorded rather than changed.
+**The dependency is the part a deferral usually omits (L-014): it is safe BECAUSE OF THAT TRIGGER.**
+If the trigger is ever dropped or moved into application code, the grant goes live and privileged
+columns become self-insertable at signup. Written into the header of
+`20260918_highlevel_credential_health.sql`.
+
+### A correction to my own plan, caught by the implementer
+
+The plan's classification table listed a wrong location as a `record`-class 404. It is a **403 and
+credential-class**. Anyone implementing from the table alone would have told a user with a wrong
+location ID that their payload was malformed. Corrected in the code; the table in `tasks/todo.md`
+is superseded by the amendment.
+
+---
+
+## 2026-09-18
+
 ### Phase 5c final fix: the four seams between the sub-phases
 
 Commit `cca815c`. 1306 passing from 1277, 67 files, 0 failing, `tsc` clean, eslint at its 47,
