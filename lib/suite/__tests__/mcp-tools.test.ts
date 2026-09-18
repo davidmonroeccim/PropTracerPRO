@@ -1409,3 +1409,130 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
     });
   });
 });
+
+/**
+ * THE SIZE FENCE ON bulk_status.
+ *
+ * It returned EVERY row of the job, each carrying a 65-key property record,
+ * JSON pretty-printed at 2-space indent, with no bound of any kind. The cap is
+ * 500 records a job, so the worst case was a single tool response of 500
+ * dossiers. list_traces, which returns strictly less per row, has been default
+ * 25 / max 200 all along.
+ */
+describe("bulk_status paging", () => {
+  const profile = {
+    id: "p1",
+    subscription_tier: "wallet",
+    is_acquisition_pro_member: false,
+    gateway_products: ["prop-tracer-pro"],
+    wallet_balance: 50,
+  };
+  const completedJob = {
+    id: "job-1",
+    user_id: "p1",
+    status: "completed",
+    records_submitted: 300,
+    records_matched: 300,
+  };
+  /** A job bigger than the default page and bigger than the max page. */
+  const manyRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => tier2Row({ id: `r-${i}`, normalized_address: `ROW ${i}` }));
+
+  it("returns 25 rows by default rather than all of them", async () => {
+    // MUTATION: drop the slice and this goes red.
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(300) });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+      results: unknown[];
+      results_total: number;
+      results_returned: number;
+    };
+    expect(out.results).toHaveLength(25);
+    // AND IT SAYS SO. A silently truncated payload is the failure this is meant
+    // to avoid, not a smaller version of it: the caller has to be able to tell
+    // that 275 rows they paid for are still waiting.
+    expect(out.results_total).toBe(300);
+    expect(out.results_returned).toBe(25);
+  });
+
+  it("clamps an oversized limit to the same 200 list_traces uses", async () => {
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(300) });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1", limit: 5000 })) as {
+      results: unknown[];
+    };
+    expect(out.results).toHaveLength(200);
+  });
+
+  it("clamps a zero or negative limit up to one row rather than returning none", async () => {
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(10) });
+    const zero = (await bulkStatus(admin, "sub-1", { job_id: "job-1", limit: 0 })) as {
+      results: unknown[];
+    };
+    expect(zero.results).toHaveLength(1);
+  });
+
+  it("reaches the rows past the max, so a 500-record job is fully readable", async () => {
+    // THE REASON THE OFFSET EXISTS. list_traces pages with `since`, which works
+    // on a list open at one end. A job's results are a FIXED set, so a bare max
+    // of 200 would leave the last 300 rows of a 500-record job unreachable: the
+    // customer pays for 500 records and can read 200. A tool that structurally
+    // cannot return what was bought is a worse defect than the size it fixes.
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(300) });
+    const out = (await bulkStatus(admin, "sub-1", {
+      job_id: "job-1",
+      limit: 200,
+      offset: 200,
+    })) as {
+      results: Array<{ address: string }>;
+      results_total: number;
+      results_returned: number;
+      results_offset: number;
+    };
+    expect(out.results).toHaveLength(100);
+    expect(out.results[0].address).toBe("ROW 200");
+    expect(out.results_total).toBe(300);
+    expect(out.results_returned).toBe(100);
+    expect(out.results_offset).toBe(200);
+  });
+
+  it("floors a negative offset instead of slicing from the end", async () => {
+    // A negative offset would silently return the WRONG rows rather than fail,
+    // which is the shape of bug nobody reports.
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(10) });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1", offset: -5 })) as {
+      results: Array<{ address: string }>;
+      results_offset: number;
+    };
+    expect(out.results[0].address).toBe("ROW 0");
+    expect(out.results_offset).toBe(0);
+  });
+
+  it("reports an offset past the end as zero rows and does not go negative", async () => {
+    const { admin } = statusAdminStub({ profile, job: completedJob, rows: manyRows(10) });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1", offset: 999 })) as {
+      results: unknown[];
+      results_total: number;
+      results_returned: number;
+    };
+    expect(out.results).toHaveLength(0);
+    expect(out.results_total).toBe(10);
+    expect(out.results_returned).toBe(0);
+  });
+
+  it("pages the freshly-finalized branch too, not only the already-completed one", async () => {
+    // bulkStatus has TWO exits that emit results. A cap on one of them is not a
+    // cap: the first caller to finish a job hits the other exit.
+    const { admin } = statusAdminStub({
+      profile,
+      job: { ...completedJob, status: "processing" },
+      rows: manyRows(300),
+    });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+      status: string;
+      results: unknown[];
+      results_total: number;
+    };
+    expect(out.status).toBe("completed");
+    expect(out.results).toHaveLength(25);
+    expect(out.results_total).toBe(300);
+  });
+});

@@ -38,7 +38,7 @@
  * customer bought.
  */
 
-import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
+import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 import { DOSSIER_EXPORT_KEYS, toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import type { AIResearchResult, TraceHistory, TraceResult } from '@/types';
 
@@ -122,7 +122,10 @@ export const EXPORT_COLUMNS: readonly string[] = [
   'deceased',
   'relatives',
   'property_type',
-  // 21. Why a row came back empty without being traced. Blank when it was traced.
+  // 21. Why a row came back with no contacts. Blank when there is nothing to
+  // explain. It is NOT only a "never traced" column any more: a tier 2 row whose
+  // property record was bought and whose contact vendor could not be reached
+  // fills it too, and says outright that it was charged.
   'skip_reason',
   // 22. THE OWNER OF RECORD, which had no column at all. `owner_name` above is
   // the resolved PERSON and falls back to the input; for a blank-owner tier 2
@@ -361,7 +364,10 @@ export function toExportValues(row: TraceHistory): unknown[] {
     research?.is_deceased ?? null,
     (research?.relatives ?? []).join('; '),
     research?.property_type ?? null,
-    skipReasonFor(row.ai_research_status),
+    // BOTH QUEUES, through the one accessor. Asking only the tier 1 column left
+    // this cell blank on every tier 2 terminal value, including the billed row
+    // whose contact vendor never answered.
+    rowSkipReason(row),
     result?.owner_name_2 ?? null,
     ...appendedPhoneColumns.map((_, i) => phones[i + LEGACY_PHONE_COLUMNS]?.number ?? null),
     ...phoneTypeColumns.map((_, i) => phones[i]?.type ?? null),

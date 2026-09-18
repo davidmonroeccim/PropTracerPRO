@@ -125,12 +125,22 @@ export const PROPERTY_TRACE_NO_KEY_REASON =
  * cache path serves back from the database rather than re-running, so a resend
  * would return this same row. It says what happened and what they have.
  *
+ * IT STATES THE CHARGE OUTRIGHT, AND THAT SECOND SENTENCE IS NOT DECORATION.
+ * Its four siblings all end in "you were not charged". This one cannot, so until
+ * phase 5c-3B it said nothing about money at all and left the customer to notice
+ * an absence. That only worked while something ELSE on the surface made the
+ * money claim. It does not any more: the job summary heading these five share
+ * now makes no charge claim of its own, precisely because four of them are free
+ * and this one is billed, so each sentence has to carry its own. A reader of
+ * this row would otherwise get silence on the one fact that cost them money.
+ *
  * No price, for the same reason as the other two: four rates exist and each
- * caller has exactly one of them. No claim that anyone was told, because nobody
- * was.
+ * caller has exactly one of them. So it names the MODEL, per record submitted,
+ * which is true of every tier 2 caller, rather than a figure that is true of
+ * one. No claim that anyone was told, because nobody was.
  */
 export const PROPERTY_TRACE_NO_REACH_REASON =
-  'We found the property record for this address and saved it with your results, but we could not reach the service that looks up contacts, so no phone numbers or emails came back for it.';
+  'We found the property record for this address and saved it with your results, but we could not reach the service that looks up contacts, so no phone numbers or emails came back for it. You were charged for it, because a full property trace is charged for every record you send rather than only when contacts come back.';
 
 /** The queued status for a given attempt. Attempt 1 is the bare 'queued'. */
 export function queuedStatusFor(attempt: number): string {
@@ -223,18 +233,20 @@ export function nextAfterFailedAttempt(attempt: number): {
  * lib/trace/blankOwnerSkip.ts, so the wording cannot drift between the API
  * payload, the CSV and the job summary.
  *
- * NOT YET WIRED TO ANY SURFACE, AND ONE OF THE THREE SENTENCES IS NOW LOAD
- * BEARING ON A BILLED ROW. Nothing enqueues into this column until the submit
- * routes learn to (phase 5c-3), so no customer can reach any of these states
- * today. The surfaces that serve a bulk row MUST call this alongside
- * skipReasonFor() when they do, and that is 5c-3's task 9.
+ * WIRED AS OF PHASE 5c-3B, AND NOT DIRECTLY. Every surface reaches it through
+ * rowSkipReason() in lib/trace/rowSkipReason.ts, which asks this function and
+ * skipReasonFor() about the same row and knows which answer wins. Call that one
+ * rather than this one from a surface: a surface that serves only this misses
+ * the tier 1 reasons, and a surface that serves only skipReasonFor() is the bug
+ * described below.
  *
- * Until they do, a PROPERTY_TRACE_NO_REACH row reaches the customer as a bare
- * `status = 'no_match'` on a row they were charged full price for, which is
- * exactly the claim this value exists to stop being made. The status column
- * carries the truth; this function is the only thing that says it out loud. The
- * same dependency is why blankOwnerSkip.ts says a skipped row "is never silent":
- * the pattern only works once the surface serves the reason.
+ * WHAT THE WIRING IS FOR. Until it existed, a PROPERTY_TRACE_NO_REACH row
+ * reached the customer as a bare `status = 'no_match'` on a row they were
+ * charged full price for, which is exactly the claim this value was created to
+ * stop being made. The status column carries the truth; this function is the
+ * only thing that says it out loud. The same dependency is why blankOwnerSkip.ts
+ * says a skipped row "is never silent": the pattern only works once the surface
+ * serves the reason.
  */
 export function propertyTraceSkipReason(status: string | null | undefined): string | null {
   if (status === PROPERTY_TRACE_FAILED_STATUS) return PROPERTY_TRACE_FAILED_REASON;

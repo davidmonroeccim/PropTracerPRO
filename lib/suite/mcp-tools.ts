@@ -4,7 +4,7 @@ import { resolvePtpProfile, UNLINKED_MESSAGE } from "@/lib/suite/mcp-shared";
 import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import { isLikelyBusiness } from "@/lib/trace/ownerClassification";
-import { skipReasonFor } from "@/lib/trace/blankOwnerSkip";
+import { rowSkipReason } from "@/lib/trace/rowSkipReason";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import { isPropertyTracePending, queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
 import { TIER2_CAPACITY_REFUSAL, inFlightUnbilledCost, tracerfyCanRunTier2 } from "@/lib/trace/bulkPreflight";
@@ -544,7 +544,36 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
 // The ownership fence below is the money-safety boundary: a caller can only ever
 // settle their OWN job.
 
-export const bulkStatusSchema = z.object({ job_id: z.string() });
+/**
+ * THE SIZE FENCE, AND WHY IT NEEDS AN OFFSET AS WELL AS A LIMIT.
+ *
+ * This tool returned EVERY row of the job, each carrying a 65-key property
+ * record, JSON pretty-printed at 2-space indent, with no bound of any kind. The
+ * cap is 500 records a job, so the worst case is a single tool response of 500
+ * dossiers. list_traces, which returns strictly less per row, has been default
+ * 25 / max 200 all along.
+ *
+ * So the limit mirrors list_traces exactly: same numbers, same clamp, because
+ * two neighbouring tools that bound themselves differently is how a caller
+ * learns one of them by surprise.
+ *
+ * THE OFFSET IS NOT MIRRORED FROM ANYWHERE, and it is the part worth explaining.
+ * list_traces pages with `since`, which works on a list ordered by time and open
+ * at one end. A job's results are a FIXED set, so a bare max of 200 would make
+ * the last 300 rows of a 500-record job unreachable on this surface: the caller
+ * pays for 500 records and can read 200 of them. A tool that structurally cannot
+ * return what the customer bought is a worse defect than the size it fixes, so
+ * results_total and results_returned come back alongside, and a caller that sees
+ * a gap knows to ask for the rest rather than having to infer it.
+ */
+export const BULK_STATUS_DEFAULT_LIMIT = 25;
+export const BULK_STATUS_MAX_LIMIT = 200;
+
+export const bulkStatusSchema = z.object({
+  job_id: z.string(),
+  limit: z.number().int().optional(),
+  offset: z.number().int().optional(),
+});
 
 /** Per-record payload, matching the v1 bulk/status route's buildPerRecordResult.
  *
@@ -577,19 +606,33 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // Which billing tier bought this row: 1 = per successful trace, 2 = per record submitted.
     // Null on a row written before migration 20260917 added the column.
     tier: row.tier ?? null,
-    // Why a row came back empty without being traced. Null on every row we
-    // actually asked a vendor about, so a status of no_match is never left to
-    // speak for itself when no vendor was ever called.
-    skip_reason: skipReasonFor(row.ai_research_status),
+    // Why a row came back with no contacts. Asked of BOTH queues through
+    // rowSkipReason(): serving only the tier 1 accessor left every tier 2
+    // terminal value speaking as a bare no_match, including the billed row whose
+    // contact vendor never answered.
+    skip_reason: rowSkipReason(row),
     charge: row.charge || 0,
     ai_research_charge: row.ai_research_charge || 0,
   };
 }
 
 export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw: unknown) {
-  const { job_id } = bulkStatusSchema.parse(raw);
+  const { job_id, limit: rawLimit, offset: rawOffset } = bulkStatusSchema.parse(raw);
   const profile = await resolvePtpProfile(admin, gatewaySub);
   if (!profile) return UNLINKED_MESSAGE;
+
+  // Clamped exactly as list_traces clamps its own. A negative offset would slice
+  // from the end of the array, which silently returns the wrong rows rather than
+  // failing, so it is floored at 0.
+  const limit = Math.min(Math.max(rawLimit ?? BULK_STATUS_DEFAULT_LIMIT, 1), BULK_STATUS_MAX_LIMIT);
+  const offset = Math.max(rawOffset ?? 0, 0);
+  /** One page of results, plus the two counts that say whether there are more. */
+  const page = (all: TraceHistoryRow[]) => ({
+    results_total: all.length,
+    results_returned: Math.min(Math.max(all.length - offset, 0), limit),
+    results_offset: offset,
+    results: all.slice(offset, offset + limit).map(buildPerRecordResult),
+  });
 
   // Load the job.
   const { data: jobData } = await admin.from("trace_jobs").select("*").eq("id", job_id).maybeSingle();
@@ -625,7 +668,7 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
       records_matched: job.records_matched,
       total_charge: Number(rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)),
       error_message: job.error_message ?? null,
-      results: rows.map(buildPerRecordResult),
+      ...page(rows),
     };
   }
 
@@ -689,6 +732,6 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
     records_submitted: job.records_submitted,
     records_matched: recordsMatched,
     total_charge: Number(totalCharge.toFixed(4)),
-    results: rows.map(buildPerRecordResult),
+    ...page(rows),
   };
 }

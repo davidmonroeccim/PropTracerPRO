@@ -783,4 +783,87 @@ describe("the job summary says how many rows were skipped and why", () => {
     expect(body.skip_reason).toContain("business records service");
     expect(body.skip_reason).not.toContain("No owner name came in");
   });
+
+  /* ---------------------------------------------------------------- *
+   * THE TIER 2 HALF, WHICH REACHED NOBODY UNTIL 5c-3B.
+   *
+   * This summary asked skipReasonFor() alone, which reads only the tier
+   * 1 column, so every terminal value on the property-trace queue
+   * counted as zero and explained nothing. The customer saw a bare
+   * no_match, and on one of the three that row had been CHARGED.
+   * ---------------------------------------------------------------- */
+
+  it("explains a tier 2 row whose dossier vendor could not be reached", async () => {
+    // MUTATION: point summarizeSkips back at skipReasonFor and this goes red,
+    // reporting 0 skipped on a job that plainly has one.
+    H.jobRows = [
+      { charge: null, ai_research_status: null, property_trace_status: "property_trace_failed" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(1);
+    expect(body.skip_reason).toContain("property records service");
+    expect(body.skip_reason).toContain("not charged");
+  });
+
+  it("explains a tier 2 row that carried no usable address", async () => {
+    H.jobRows = [
+      { charge: null, ai_research_status: null, property_trace_status: "property_trace_no_key" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(1);
+    expect(body.skip_reason).toContain("missing the street, city or state");
+    expect(body.skip_reason).toContain("not charged");
+  });
+
+  it("explains a BILLED tier 2 row without ever calling it free", async () => {
+    // THE ROW THE WHOLE STATUS EXISTS FOR. The property record was bought and
+    // charged per record submitted; only the contact vendor failed. Until this
+    // wiring the customer saw `no_match` on a row they had paid full price for,
+    // which claims we looked and found nobody.
+    // MUTATION: drop the propertyTraceSkipReason arm from rowSkipReason and this
+    // goes red.
+    H.jobRows = [
+      { charge: 0.4, ai_research_status: null, property_trace_status: "property_trace_no_reach" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(1);
+    expect(body.skip_reason).toContain("could not reach the service that looks up contacts");
+    // The two claims it must never make about a row that was billed.
+    expect(body.skip_reason).not.toContain("not charged");
+    expect(body.skip_reason).not.toMatch(/\bfree\b/i);
+    // And the one it must: silence here is what left the customer inferring it.
+    expect(body.skip_reason).toContain("You were charged for it");
+    // The charge is still reported, so the summary and the sentence agree.
+    expect(body.total_charge).toBeCloseTo(0.4, 10);
+  });
+
+  it("says both when a job carries a free reason and a billed one", async () => {
+    // A mixed job is the normal case, and it is the one where a single blanket
+    // money claim would be false in one direction or the other.
+    H.jobRows = [
+      { charge: null, ai_research_status: BLANK_OWNER_SKIP_STATUS },
+      { charge: 0.4, ai_research_status: null, property_trace_status: "property_trace_no_reach" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.records_skipped).toBe(2);
+    expect(body.skip_reason).toContain("No owner name came in");
+    expect(body.skip_reason).toContain("could not reach the service that looks up contacts");
+  });
+
+  it("holds the job open for a queued tier 2 row rather than explaining it away", async () => {
+    // A row mid-ladder has nothing to explain YET, and the job is not finished
+    // over it either. Both halves matter: rowSkipReason returns null for a
+    // non-terminal value, so even if this branch did carry a summary the row
+    // would not be in it, and the completion gate keeps the job processing so
+    // the page keeps polling for a result the customer is being billed for.
+    H.jobRows = [
+      { charge: null, ai_research_status: null, property_trace_status: "queued_2" },
+    ];
+    const body = await (await GET()).json();
+    expect(body.status).toBe("processing");
+    expect(body.records_pending_property_trace).toBe(1);
+    // No premature verdict: the processing branch makes no skip claim at all.
+    expect(body.records_skipped).toBeUndefined();
+    expect(body.skip_reason).toBeUndefined();
+  });
 });

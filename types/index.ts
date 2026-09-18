@@ -104,6 +104,18 @@ export interface TraceHistory {
    * tier 1 wallet rate and the tier 2 pro rate (lib/constants.ts:34-36).
    */
   tier: number | null;
+  /**
+   * The TIER 2 queue, driven by app/api/cron/sweep-property-traces. Its terminal
+   * values are also where a tier 2 row's customer-facing reason comes from, via
+   * lib/trace/rowSkipReason.ts, which is why the results CSV needs it declared
+   * here and not only on settleBulkJob's TraceHistoryRow.
+   *
+   * OPTIONAL, like its twin on TraceHistoryRow: every reader loads rows with
+   * select('*') so it is always present in production, but rows written before
+   * migration 20260918 carry no value and the test fixtures build this type by
+   * hand. Absent reads as nothing to explain.
+   */
+  property_trace_status?: string | null;
   created_at: string;
 }
 

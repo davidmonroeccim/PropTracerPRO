@@ -3,14 +3,37 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { BulkSkipSummary } from '@/components/trace/BulkSkipSummary';
 import { BLANK_OWNER_SKIP_REASON } from '@/lib/trace/blankOwnerSkip';
 import { ENTITY_TRACE_FAILED_REASON } from '@/lib/trace/entityTraceAttempts';
+import { PROPERTY_TRACE_NO_REACH_REASON } from '@/lib/trace/propertyTraceAttempts';
 
 /**
- * The job-summary half of David's blank-owner rule: accept the file, skip the
- * row with a reason, charge nothing, and say so on screen as well as in the CSV.
+ * The on-screen half of the rule that a row which came back empty is never left
+ * to speak as a bare no_match.
+ *
+ * WHAT THESE TESTS HAD TO CHANGE IN 5c-3B. They were written when every reason
+ * this component could carry belonged to a free row, so they asserted the
+ * heading said "We skipped N of your records" and that the block told the user
+ * they were not charged. Tier 2 broke both: a property_trace_no_reach row was
+ * not skipped, it was run and billed, and only the contact vendor failed. The
+ * heading now makes NO money claim and each reason sentence carries its own,
+ * which is what the two tests at the bottom of the second block pin.
  *
  * A static render is the whole harness, as it is for FullTraceDisclosure: this
  * component holds no state and runs no effects.
  */
+
+/**
+ * The words a customer actually reads, with the markup taken out.
+ *
+ * The "must not say" assertions below need this rather than the raw markup. The
+ * wrapper still carries data-testid="skipped-summary", which is an identifier
+ * other tests hold on to and which no customer ever sees, so a scan of the raw
+ * string finds the word "skipped" in every render and the assertion is either
+ * vacuously red or quietly weakened to let it through. Reading the visible text
+ * asks the question that matters: what does this tell the person looking at it.
+ */
+function visibleText(markup: string): string {
+  return markup.replace(/<[^>]*>/g, ' ');
+}
 
 describe('when nothing was skipped', () => {
   it('renders nothing at all', () => {
@@ -38,7 +61,14 @@ describe('when rows were skipped', () => {
   );
 
   it('says how many', () => {
-    expect(markup).toContain('We skipped 40 of your records');
+    expect(markup).toContain('We could not get contacts for 40 of your records');
+  });
+
+  it('does not call them skipped, because one of the five kinds was not', () => {
+    // A property_trace_no_reach row was traced and billed. The heading is shared
+    // by all five reasons, so it cannot use a word that is false for one of them.
+    // MUTATION: put "We skipped N of your records" back and this goes red.
+    expect(visibleText(markup)).not.toMatch(/\bskipped\b/i);
   });
 
   it('says why, in the words the API and the CSV use', () => {
@@ -56,7 +86,7 @@ describe('when rows were skipped', () => {
     const one = renderToStaticMarkup(
       <BulkSkipSummary recordsSkipped={1} skipReason={BLANK_OWNER_SKIP_REASON} />
     );
-    expect(one).toContain('We skipped 1 of your records');
+    expect(one).toContain('We could not get contacts for 1 of your records');
   });
 
   it('carries a vendor-exhausted reason just as faithfully', () => {
@@ -73,9 +103,34 @@ describe('when rows were skipped', () => {
     // CLAUDE.md rule 7. A missing reason is a fact about the response, not a
     // licence to write a plausible sentence.
     const noReason = renderToStaticMarkup(<BulkSkipSummary recordsSkipped={3} skipReason={null} />);
-    expect(noReason).toContain('We skipped 3 of your records');
+    expect(noReason).toContain('We could not get contacts for 3 of your records');
     expect(noReason).not.toContain('not charged');
     expect(noReason).not.toContain('owner');
+  });
+
+  it('never tells a BILLED row it was free, or that we skipped it', () => {
+    // THE ROW 5c-2 CREATED ITS STATUS FOR. The property record was bought and
+    // charged per record submitted, and only the contact lookup failed. Every
+    // other reason this component carries ends in "not charged", so the danger
+    // is the heading or a neighbouring line supplying that claim for this one.
+    // MUTATION: put a "not charged" or "we skipped" line back into the component
+    // and this goes red.
+    const billed = renderToStaticMarkup(
+      <BulkSkipSummary recordsSkipped={5} skipReason={PROPERTY_TRACE_NO_REACH_REASON} />
+    );
+    expect(visibleText(billed)).not.toContain('not charged');
+    expect(visibleText(billed)).not.toMatch(/\bfree\b/i);
+    expect(visibleText(billed)).not.toMatch(/\bskipped\b/i);
+  });
+
+  it('carries the billed row its own charge statement, not an absence', () => {
+    // The heading makes no money claim by design, so the sentence is the ONLY
+    // place this customer learns they paid for the row. A reason string that
+    // said nothing about money would leave them to infer it from silence.
+    const billed = renderToStaticMarkup(
+      <BulkSkipSummary recordsSkipped={5} skipReason={PROPERTY_TRACE_NO_REACH_REASON} />
+    );
+    expect(billed).toContain('You were charged for it');
   });
 });
 

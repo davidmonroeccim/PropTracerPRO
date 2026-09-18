@@ -7,9 +7,33 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import { BulkSkipSummary } from '@/components/trace/BulkSkipSummary';
 import { PRICING } from '@/lib/constants';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { chargePerRecord, chargePerTrace } from '@/lib/suite/pricing';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
+
+/**
+ * THE CAP, REFUSED HERE RATHER THAN AFTER A SUBMIT THE USER WAITED ON.
+ *
+ * Same 500 the three submit routes hold (app/api/trace/bulk/route.ts, its v1
+ * twin and lib/suite/mcp-tools.ts), kept as a local constant rather than
+ * imported, for the reason app/api/trace/bulk/download/route.ts keeps its own:
+ * importing a submit route would drag its whole vendor and billing graph into a
+ * client bundle. A test pins the two together.
+ *
+ * IT IS CHECKED AGAINST THE ROW COUNT OF THE FILE, WHICH IS DELIBERATELY THE
+ * STRICTER NUMBER. The route counts records after deduplication, so a 600-row
+ * file holding 200 duplicates is a legitimate 400-record job that this refuses.
+ * That is the safe direction and it is chosen, not overlooked: a false refusal
+ * is instant, visible and fixed by splitting the file, while a false acceptance
+ * means waiting through a submit to be told no, which is the exact failure this
+ * check exists to remove. It also refuses on the number the user is looking at.
+ * The preview above says "N records", this says N is too many, and a refusal
+ * quoting a count they cannot see would be worse than the strictness.
+ */
+const MAX_RECORDS = 500;
+
+/** What the user is told when the file is over the cap. */
+const OVER_CAP_MESSAGE = `This file has more rows than we can take in one go. You can send up to ${MAX_RECORDS} records at a time, so split it into smaller files and send them one after another.`;
 
 // ─── Column Mapping ─────────────────────────────────────────────────────────
 
@@ -130,7 +154,21 @@ function downloadTemplate() {
 
 // ─── Page Component ─────────────────────────────────────────────────────────
 
-type Phase = 'upload' | 'processing' | 'complete';
+/**
+ * 'checkback' IS THE FIX FOR A DEAD END, not a new feature.
+ *
+ * The poll below runs 120 times at 5 s, about ten minutes. When it ran out it
+ * set an error and stopped the spinner but never moved `phase`, so the page sat
+ * on the processing card showing a spinner AND a red error, with no button and
+ * no way out. The job carried on running server-side the whole time.
+ *
+ * David's decision, 2026-09-18: do not just raise the number. Hand the user the
+ * job id and send them to the history page, which already lists bulk jobs with a
+ * status badge and, once the job finishes, a results CSV and a Push to CRM
+ * button. A cron settles the job whether or not this page is open, so the handoff
+ * is honest rather than a shrug.
+ */
+type Phase = 'upload' | 'processing' | 'checkback' | 'complete';
 
 interface JobStats {
   job_id: string | null;
@@ -140,9 +178,11 @@ interface JobStats {
   cached_count: number;
   estimated_cost: number;
   // Rows accepted but never traced, and the reason. Both come straight off the
-  // submit response; the route derives the reason from skipReasonFor(), the one
-  // accessor the API, the MCP and the results CSV all use, so the wording on
-  // screen is the wording everywhere else.
+  // submit response. At SUBMIT time these can only be rows nobody could be asked
+  // about, because no vendor has run yet: the route sends
+  // PROPERTY_TRACE_NO_KEY_REASON, which says the row was missing the street,
+  // city or state, and that it was free. The finished job can carry more kinds,
+  // and CompleteStats below is where they show up.
   records_skipped?: number;
   skipped_reason?: string;
   message?: string;
@@ -154,7 +194,14 @@ interface CompleteStats {
   total_charge: number;
   // The same two facts read back off the FINISHED job rather than the submit,
   // because that is what the user is looking at when they ask why a row came
-  // back empty. Null reason means nothing was skipped.
+  // back empty. Null reason means there was nothing to explain.
+  //
+  // `records_skipped` IS NOT AN ALL-FREE COUNT ANY MORE. The status route builds
+  // it from rowSkipReason(), which answers for both queues, and one of the five
+  // answers belongs to a row that WAS charged: its property record was bought
+  // and only the contact lookup failed. So nothing on this page may label this
+  // number "not charged". The reason sentence carries the money fact, per row,
+  // because it is the only thing that knows which billing model the row was on.
   records_skipped: number;
   skip_reason: string | null;
 }
@@ -183,8 +230,18 @@ export default function BulkUploadPage() {
   const [completeStats, setCompleteStats] = useState<CompleteStats | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
 
-  // Per-trace rate (tier-aware)
+  // BOTH RATES, BECAUSE ONE UPLOAD CAN CARRY BOTH BILLING MODELS. A row with an
+  // owner of record is tier 1, charged per successful trace and free on a miss.
+  // A row without one runs a Full Property Trace, which is tier 2 and charged
+  // per record submitted. Quoting one rate over a mixed file understates or
+  // overstates it and, worse, implies the wrong model for half the rows.
+  //
+  // Both default to the Pay-As-You-Go column, which is the dearer one, so a
+  // profile that has not loaded yet can only ever over-quote.
   const [perTraceRate, setPerTraceRate] = useState<number>(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  const [perRecordRate, setPerRecordRate] = useState<number>(
+    PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET
+  );
 
   useEffect(() => {
     const loadRate = async () => {
@@ -198,6 +255,7 @@ export default function BulkUploadPage() {
           .single();
         if (data) {
           setPerTraceRate(chargePerTrace(data));
+          setPerRecordRate(chargePerRecord(data));
         }
       }
     };
@@ -276,8 +334,8 @@ export default function BulkUploadPage() {
             setError('CSV file is empty');
             return;
           }
-          if (results.data.length > 10000) {
-            setError('Maximum 10,000 records per upload');
+          if (results.data.length > MAX_RECORDS) {
+            setError(OVER_CAP_MESSAGE);
             return;
           }
           processFileData(results.meta.fields, results.data, file.name);
@@ -300,8 +358,8 @@ export default function BulkUploadPage() {
             setError('Excel file is empty');
             return;
           }
-          if (json.length > 10000) {
-            setError('Maximum 10,000 records per upload');
+          if (json.length > MAX_RECORDS) {
+            setError(OVER_CAP_MESSAGE);
             return;
           }
 
@@ -439,7 +497,12 @@ export default function BulkUploadPage() {
         }
       }
 
-      setError('Processing is taking longer than expected. Check back later.');
+      // OUT OF POLLS, NOT OUT OF JOB. Nothing here stops the work: the rows are
+      // on the queue and a cron settles them whether or not this page is open.
+      // So this is a handoff, not an error, and it must not be rendered as one.
+      // Moving `phase` is the whole fix for the old dead end, where the page
+      // kept a spinner and a red error on screen with no way forward.
+      setPhase('checkback');
       setLoading(false);
     } catch {
       setError('Failed to connect to server');
@@ -473,19 +536,35 @@ export default function BulkUploadPage() {
   const mappedFields = Object.values(mapping);
 
   /**
-   * Rows with no owner of record.
+   * Rows with no owner of record, which is to say the TIER 2 rows.
    *
-   * The page used to count these for the AI Research toggle, which went and
-   * found those owners on the open web. That engine and that toggle were
-   * removed on 2026-09-17 and nothing replaced them, so these rows now have no
-   * route at all: the bulk route accepts them, skips them with a reason and
-   * charges nothing. Counting them here is what stops a user discovering that
-   * after the upload instead of before it.
+   * WHAT THIS COUNT MEANS CHANGED COMPLETELY IN PHASE 5c, TWICE. It began as the
+   * count for the AI Research toggle, which went and found those owners on the
+   * open web; that engine was removed on 2026-09-17 and the rows were skipped
+   * and free. As of 5c-3A they are traced automatically: a Full Property Trace
+   * looks up the county record to find the owner, then goes after their contacts,
+   * and it is charged per RECORD SUBMITTED rather than per successful trace.
+   *
+   * So this is no longer the count of rows we will not do. It is the count of
+   * rows on the other billing model, and it is still shown before the upload for
+   * the same reason it always was: a customer should learn what a third of their
+   * file is going to cost them before they commit to it, not after.
    */
   const blankOwnerCount = allRecords.filter(
     (record) => !(record.owner_name || '').trim()
   ).length;
-  const traceableCount = allRecords.length - blankOwnerCount;
+  /** Rows that arrived with an owner of record. Tier 1, charged only on a hit. */
+  const ownedCount = allRecords.length - blankOwnerCount;
+
+  /**
+   * The most this upload can cost, with each half priced on its own model.
+   *
+   * Tier 1 is a genuine ceiling: those rows are free unless we find contacts.
+   * Tier 2 is simply the price, owed on every record sent. Adding them gives an
+   * upper bound that is honest for the file as a whole, and the sentences beside
+   * it say which half is which rather than letting one word cover both.
+   */
+  const maxCost = ownedCount * perTraceRate + blankOwnerCount * perRecordRate;
 
   return (
     <div className="space-y-6">
@@ -648,26 +727,55 @@ export default function BulkUploadPage() {
                           {blankOwnerCount} of these records have no owner name.
                         </p>
                         <p className="mt-1">
-                          We skip those and you are not charged for them. Add the owner of record
-                          to those rows and upload again if you want them traced.
+                          We run a full property trace on those. We look up the county record to
+                          find the owner, then go after their phone numbers and emails, so you do
+                          not need to add the owner yourself. Those rows are charged for every
+                          record you send, which means they cost the same whether or not we come
+                          back with contacts.
                         </p>
                       </div>
                     )}
                     <div className="flex items-center justify-between">
                       <div>
-                        {/* The count has to be the TRACEABLE one when some rows
-                            are being skipped. Saying "100 valid records ready to
-                            submit" directly above a banner saying 40 of them are
-                            skipped is two numbers describing the same upload and
-                            disagreeing. */}
+                        {/* ONE COUNT, BECAUSE EVERY ROW IS NOW TRACED. This used
+                            to switch to a "N of M will be traced" form whenever
+                            rows were being skipped, so that "100 valid records
+                            ready to submit" could not sit above a banner saying
+                            40 of them were dropped: two numbers, one upload,
+                            disagreeing. Nothing is dropped any more, so the two
+                            numbers are equal and the conditional was dead. The
+                            intent survives, and it is why the banner above
+                            describes the blank-owner rows as a SUBSET on a
+                            different billing model rather than quoting a rival
+                            total. */}
                         <p className="font-medium text-gray-900">
-                          {blankOwnerCount > 0
-                            ? `${traceableCount} of ${allRecords.length} records will be traced`
-                            : `${allRecords.length} valid records ready to submit`}
+                          {allRecords.length} records ready to submit
                         </p>
                         <p className="text-sm text-gray-500">
-                          Estimated max trace cost: ${(traceableCount * perTraceRate).toFixed(2)} (${perTraceRate.toFixed(2)} per successful match)
+                          Most this can cost: ${maxCost.toFixed(2)}
                         </p>
+                        {/* THE MODEL, NOT JUST THE MONEY. Each sentence covers
+                            one half of the file and says how that half is
+                            billed. The old single line quoted a per-match rate
+                            over the whole upload, which is the tier 1 model and
+                            is false of every blank-owner row, and one line
+                            covering both would be wrong for somebody whichever
+                            model it named. Only the halves that exist are shown,
+                            so a single-model upload reads as one plain
+                            sentence. */}
+                        {ownedCount > 0 && (
+                          <p className="text-sm text-gray-500">
+                            The {ownedCount} records with an owner name are $
+                            {perTraceRate.toFixed(2)} each, and you are only charged when we find
+                            contacts.
+                          </p>
+                        )}
+                        {blankOwnerCount > 0 && (
+                          <p className="text-sm text-gray-500">
+                            The {blankOwnerCount} with no owner name are ${perRecordRate.toFixed(2)}{' '}
+                            each, charged for every one you send.
+                          </p>
+                        )}
                       </div>
                       <div className="flex gap-3">
                         <Button variant="outline" onClick={handleReset}>
@@ -704,13 +812,25 @@ export default function BulkUploadPage() {
                   <p className="text-sm text-gray-500">Submitted for Tracing</p>
                   <p className="text-2xl font-bold">{jobStats.records_submitted}</p>
                 </div>
+                {/* RELABELLED FROM THE OLD ESTIMATED-MAX WORDING. The route
+                    builds this number from both rates, and for an upload that is
+                    entirely blank-owner rows it is not an estimate at all, it is
+                    the price. This label is true under either model: a ceiling
+                    for tier 1, and exactly right for tier 2. */}
                 <div className="bg-gray-50 rounded-lg p-4">
-                  <p className="text-sm text-gray-500">Estimated Max Cost</p>
+                  <p className="text-sm text-gray-500">Most This Can Cost</p>
                   <p className="text-2xl font-bold">${jobStats.estimated_cost.toFixed(2)}</p>
                 </div>
+                {/* THE OLD LABEL PAIRED "Skipped" WITH A NOT-CHARGED PROMISE,
+                    and the count this tile shows can now include a row that WAS
+                    charged: a full property trace whose property record was
+                    bought before the contact vendor failed. The label states
+                    what every one of them has in common and leaves the money to
+                    the sentence underneath, which is the only thing that knows
+                    which billing model each row was on. */}
                 {(jobStats.records_skipped || 0) > 0 && (
                   <div className="bg-amber-50 rounded-lg p-4">
-                    <p className="text-sm text-gray-500">Skipped, not charged</p>
+                    <p className="text-sm text-gray-500">No contacts returned</p>
                     <p className="text-2xl font-bold text-amber-800">{jobStats.records_skipped}</p>
                   </div>
                 )}
@@ -731,12 +851,55 @@ export default function BulkUploadPage() {
             {pollProgress ? (
               <p className="text-gray-500 text-sm">{pollProgress}</p>
             ) : (
-              <p className="text-gray-500 text-sm">This may take several minutes for large uploads. Please keep this page open.</p>
+              // IT NO LONGER ASKS THEM TO KEEP THE PAGE OPEN, because that was
+              // never true and is now the opposite of the advice one card over.
+              // The rows are on a queue a cron works, so closing this tab costs
+              // the customer nothing.
+              <p className="text-gray-500 text-sm">
+                This can take a few minutes on a big upload. You can leave this page if you want,
+                the work carries on without it and the results show up in your history.
+              </p>
             )}
 
             {error && (
               <p className="text-sm text-red-600 mt-4">{error}</p>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Check-back Phase */}
+      {phase === 'checkback' && (
+        <Card>
+          <CardHeader>
+            <CardTitle>This one is taking a while</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-gray-700">
+              Your upload is still running and we have stopped watching it from this page. Nothing
+              has gone wrong and nothing has stopped. The work carries on in the background whether
+              or not this page is open, so you can close it.
+            </p>
+            <p className="text-gray-700">
+              Open your history to see where the job has got to. Once it finishes you can download
+              the results there or push them straight to your CRM.
+            </p>
+            {/* The job id, because the history page lists jobs by file name and
+                time and a user with two uploads of the same file needs to be
+                able to tell them apart. */}
+            {jobId && (
+              <p className="text-sm text-gray-500">
+                Job reference <span className="font-mono">{jobId}</span>
+              </p>
+            )}
+            <div className="flex gap-3">
+              <Button onClick={() => { window.location.href = '/history'; }}>
+                Go to History
+              </Button>
+              <Button variant="outline" onClick={handleReset}>
+                Start New Upload
+              </Button>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -769,9 +932,12 @@ export default function BulkUploadPage() {
                         <p className="text-sm text-gray-500">Total Charged</p>
                         <p className="text-2xl font-bold">${completeStats.total_charge.toFixed(2)}</p>
                       </div>
+                      {/* Same label as the processing tile, and for the same
+                          reason: this count can include a billed row whose
+                          contact lookup never completed. */}
                       {completeStats.records_skipped > 0 && (
                         <div className="bg-amber-50 rounded-lg p-4">
-                          <p className="text-sm text-gray-500">Skipped, not charged</p>
+                          <p className="text-sm text-gray-500">No contacts returned</p>
                           <p className="text-2xl font-bold text-amber-800">
                             {completeStats.records_skipped}
                           </p>

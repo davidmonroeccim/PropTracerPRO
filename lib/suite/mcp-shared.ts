@@ -1,28 +1,35 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PRICING } from "@/lib/constants";
 
-/** Rates quoted here are the TIER 1 per-successful-trace rates, which is all these MCP tools bill.
- *  Owner type selects the vendor, not the price, so there is ONE rate per plan and no entity
- *  carve-out. BOTH plan rates are named, never one of them: quoting a single figure is how a
- *  Pay-As-You-Go caller gets told a Pro price. Read from the constants so the caveat can never
- *  drift from the ledger. Tier 2 per-record pricing is deliberately absent, because no MCP tool
- *  routes to it yet.
+/** TWO BILLING MODELS ARE QUOTED HERE, AND NEITHER SENTENCE MAY BE READ AS THE OTHER.
+ *
+ *  Tier 1 is a record that arrives WITH the owner of record: charged per successful trace, free on
+ *  a miss. Owner type selects the vendor, not the price, so there is ONE tier 1 rate per plan and
+ *  no entity carve-out. Tier 2 is a record that arrives with NO owner name: it runs a Full Property
+ *  Trace and is charged per RECORD SUBMITTED, so a miss is billed.
+ *
+ *  BOTH plan rates are named on both models, never one of them: quoting a single figure is how a
+ *  Pay-As-You-Go caller gets told a Pro price. All four are read from the constants so the caveat
+ *  can never drift from the ledger.
  *
  *  THE NO-MATCH SENTENCE IS A MONEY PROMISE. Claude quotes this before spending a user's wallet,
- *  so it must match lib/trace/settleBulkJob.ts and the two cron sweeps exactly.
+ *  so it must match lib/trace/settleBulkJob.ts, app/api/cron/sweep-property-traces and the two
+ *  cron sweeps exactly.
  *
- *  It became SIMPLER on 2026-09-17, and the reason matters. The old sentence carved out the blank
- *  or company owner case, because those records went through a $0.15 AI research step that was
- *  charged the moment an owner was identified, contacts or not. That engine is gone. A company
- *  owner now goes to a FastAppend business trace that bills the same tier 1 rate on success and
- *  nothing on a miss, so the carve-out is no longer true and would over-quote every entity record.
- *  A record with no owner name has no route here at all, so it is skipped and free. Do not add a
- *  research fee back into this sentence; nothing charges one. */
+ *  WHAT CHANGED ON 2026-09-18, and why the old shape was dangerous. This block used to say that a
+ *  record with no owner name "is not traced on this surface yet, so it comes back skipped with a
+ *  reason and costs nothing", and its own header said tier 2 pricing was deliberately absent
+ *  because nothing routed to it. Phase 5c-3A wired skip_trace_bulk's blank-owner bucket straight
+ *  onto the tier 2 queue. Both statements became false in the same commit, and the failure mode was
+ *  the worst available: Claude quoting "costs nothing" to a user immediately before spending their
+ *  wallet on exactly those records.
+ *
+ *  Do not collapse the two models back into one sentence, and do not add a research fee to either:
+ *  the $0.15 AI research step was retired on 2026-09-17 and nothing books it. */
 export const PTP_MCP_CAVEAT =
   "PropTracerPRO resolves contact info (phones, emails) from third-party data and can be incomplete or out of date. Verify before outreach, and use it only for lawful, permission-based contact. " +
-  `Give us the owner of record and you are charged per successful trace, $${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} on Pro or AcquisitionPRO and $${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go, drawn from your wallet. ` +
-  "A trace that finds nothing is free, whether the owner is a person or a company. " +
-  "A record with no owner name is not traced on this surface yet, so it comes back skipped with a reason and costs nothing.";
+  `Give us the owner of record and you are charged per successful trace, $${PRICING.CHARGE_PER_SUCCESS.toFixed(2)} on Pro or AcquisitionPRO and $${PRICING.CHARGE_PER_SUCCESS_WALLET.toFixed(2)} on Pay-As-You-Go, drawn from your wallet, and a trace that finds nothing is free whether the owner is a person or a company. ` +
+  `A record with no owner name runs a full property trace instead, which looks up the county record to find the owner and then goes after their contacts. That one is charged for every record you send, $${PRICING.TIER2_PER_RECORD_SUBMITTED_PRO.toFixed(2)} on Pro or AcquisitionPRO and $${PRICING.TIER2_PER_RECORD_SUBMITTED_WALLET.toFixed(2)} on Pay-As-You-Go, so those records cost the same whether or not contacts come back.`;
 
 type Extra = { authInfo?: { scopes: string[]; extra?: { userId?: string } } };
 

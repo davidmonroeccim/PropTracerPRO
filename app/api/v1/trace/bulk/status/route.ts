@@ -7,7 +7,8 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
-import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
+import { rowSkipReason } from '@/lib/trace/rowSkipReason';
+import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import type { TraceJob } from '@/types';
@@ -368,7 +369,10 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   const contacts = row.ai_research?.business_trace_contacts || null;
   // owner_contact_name is the resolved HUMAN behind input_owner_name (the entity asked about).
   // Kept identical to the MCP twin in lib/suite/mcp-tools.ts -- the two surfaces are
-  // line-for-line the same payload by design and must not diverge.
+  // line-for-line the same payload by design and must not diverge. They HAD diverged:
+  // property_record and tier were on the MCP twin only, and both comments went on
+  // claiming parity, which is why lib/trace/__tests__/payloadParity.test.ts now
+  // compares the two key sets instead of trusting either comment.
   const { owner_contact_name, owner_contact_source } = resolveOwnerContact(row);
   return {
     address: row.normalized_address,
@@ -382,9 +386,24 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     result: row.trace_result,
     research: row.ai_research,
     contacts,
-    // Why a row came back empty without being traced. Null on every row a vendor
-    // was actually asked about, so a no_match never has to speak for itself.
-    skip_reason: skipReasonFor(row.ai_research_status),
+    // THE PUBLIC PROPERTY RECORD: 65 of the 86 keys stored on the row. Filtered
+    // here because this payload is one an agent maps into a customer's own CRM,
+    // where a wrong estimated_value looks authoritative and outlives any caveat.
+    // Null on a tier 1 row, because an absence is reported as an absence.
+    //
+    // IT WAS MISSING ENTIRELY UNTIL 5c-3B, while this function's own comment
+    // claimed it was line for line identical to the MCP twin. A tier 2 bulk row
+    // is charged per record submitted specifically to buy this record, and the
+    // one surface an API-key caller polls did not return it.
+    property_record: toPublicPropertyRecord(row.property_record),
+    // Which billing tier bought this row: 1 = per successful trace, 2 = per
+    // record submitted. Null on a row written before migration 20260917. Never
+    // 0 and never a guess, because an unknown tier is an absence.
+    tier: row.tier ?? null,
+    // Why a row came back with no contacts. Asked of BOTH queues: serving only
+    // the tier 1 accessor left every tier 2 terminal value speaking as a bare
+    // no_match, including the billed row whose contact vendor never answered.
+    skip_reason: rowSkipReason(row),
     charge: row.charge || 0,
     ai_research_charge: row.ai_research_charge || 0,
   };

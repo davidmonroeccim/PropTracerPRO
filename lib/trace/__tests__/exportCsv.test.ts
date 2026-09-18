@@ -504,6 +504,44 @@ describe('the file itself', () => {
     expect(c.owner_name).toBe('');
   });
 
+  it('explains a TIER 2 row too, which the column was blank for until 5c-3B', () => {
+    // The cell read skipReasonFor(), the tier 1 accessor, on its own, so every
+    // terminal value on the property-trace queue produced an empty cell next to
+    // a bare no_match. MUTATION: point the cell back at skipReasonFor and this
+    // goes red.
+    const c = cells(
+      row({
+        input_owner_name: null,
+        status: 'no_match',
+        ai_research_status: null,
+        property_trace_status: 'property_trace_no_key',
+        charge: 0,
+      })
+    );
+    expect(c.skip_reason).toContain('missing the street, city or state');
+    expect(c.charge).toBe('0.00');
+  });
+
+  it('tells a BILLED tier 2 row it was charged, beside a charge the file can be summed on', () => {
+    // The row whose property record was bought before the contact vendor failed.
+    // The money column and the sentence have to agree: a non-zero charge next to
+    // a cell saying "you were not charged" is the contradiction this status was
+    // created to prevent.
+    const c = cells(
+      row({
+        input_owner_name: null,
+        status: 'no_match',
+        ai_research_status: null,
+        property_trace_status: 'property_trace_no_reach',
+        charge: 0.4,
+      })
+    );
+    expect(c.skip_reason).toContain('could not reach the service that looks up contacts');
+    expect(c.skip_reason).toContain('You were charged for it');
+    expect(c.skip_reason).not.toContain('not charged');
+    expect(c.charge).toBe('0.40');
+  });
+
   it('emits skip_reason and the research block on every job, blank when unused', () => {
     // Both conditionals are gone. A header that depends on the rows is a header
     // that changes shape between two downloads of the same product.

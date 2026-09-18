@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BLANK_OWNER_SKIP_REASON } from '@/lib/trace/blankOwnerSkip';
@@ -38,6 +39,18 @@ const SOURCE = readFileSync(
   'utf8'
 );
 
+/**
+ * The same source with every run of whitespace collapsed to one space.
+ *
+ * A sentence in JSX is wrapped by the formatter wherever the line ran out, so
+ * asserting on prose against the raw file means asserting on where Prettier
+ * happened to break it. Those assertions pass today and go red on a reformat
+ * that changed no copy at all, which trains the next person to loosen them.
+ * Structural assertions (identifiers, props, constants) stay on SOURCE, because
+ * there the exact text is the point.
+ */
+const PROSE = SOURCE.replace(/\s+/g, ' ');
+
 describe('the finished job summary', () => {
   it('reads the skipped count and reason back off the status response', () => {
     // MUTATION: drop either key from the completed branch and this goes red.
@@ -75,10 +88,23 @@ describe('the finished job summary', () => {
     expect(SOURCE).toContain('skipReason={jobStats?.skipped_reason}');
   });
 
-  it('labels the tile with the fact that nothing was charged for those rows', () => {
-    // The count alone reads as a failure. The user has to be told the rows were
-    // free, and the tile is where the number is.
-    expect(SOURCE).toContain('Skipped, not charged');
+  it('never labels that count "not charged", because one kind of row was', () => {
+    // IT USED TO, AND THE LABEL WAS RIGHT AT THE TIME: every row this count
+    // could contain was free. The status route now builds it from
+    // rowSkipReason(), which answers for both queues, and a
+    // property_trace_no_reach row was charged per record submitted before its
+    // contact lookup failed. A tile promising "not charged" over a number that
+    // can include it is a false statement about the customer's own money.
+    // MUTATION: put "Skipped, not charged" back on either tile and this goes red.
+    expect(SOURCE).not.toContain('Skipped, not charged');
+    expect(SOURCE).not.toMatch(/Skipped[^\n]*not charged/);
+  });
+
+  it('labels the tile with what every one of those rows has in common', () => {
+    // The money claim moved into the per-row reason sentence, which is the only
+    // thing that knows which billing model the row was on. The tile states the
+    // one fact true of all five kinds. Both phases use it, so two are expected.
+    expect(SOURCE.match(/No contacts returned/g) ?? []).toHaveLength(2);
   });
 
   it('never writes its own copy of the reason', () => {
@@ -91,12 +117,149 @@ describe('the finished job summary', () => {
 });
 
 describe('the pre-submit count', () => {
-  it('counts only the records that will actually be traced', () => {
-    // "100 valid records ready to submit" sat directly above a banner saying 40
-    // of them would be skipped. Two numbers, same upload, disagreeing.
-    // MUTATION: put allRecords.length back as the only count and this goes red.
-    expect(SOURCE).toContain('records will be traced');
-    expect(SOURCE).toContain('traceableCount');
+  it('counts every record, because every record is now traced', () => {
+    // THE OLD SHAPE AND WHY IT WENT. This read "N of M records will be traced"
+    // whenever rows were being skipped, so that a total could not sit above a
+    // banner saying 40 rows were dropped: two numbers, one upload, disagreeing.
+    // Phase 5c-3A made blank-owner rows run a full property trace, so nothing is
+    // dropped, the two numbers are equal and the conditional was dead copy.
+    // MUTATION: reintroduce a second, smaller total and this goes red.
+    expect(SOURCE).toContain('records ready to submit');
+    expect(SOURCE).not.toContain('records will be traced');
+    expect(SOURCE).not.toContain('traceableCount');
+  });
+
+  it('never says a blank-owner row is skipped or free', () => {
+    // The banner used to read "We skip those and you are not charged for them.
+    // Add the owner of record to those rows and upload again if you want them
+    // traced." All of it is false now, and the instruction is the worst part:
+    // the user no longer has to do anything.
+    expect(SOURCE).not.toContain('We skip those and you are not charged');
+    expect(SOURCE).not.toContain('upload again if you want them traced');
+  });
+
+  it('tells a blank-owner uploader the rows are billed whether or not we find anything', () => {
+    // This is the change to what existing bulk users PAY, and the upload screen
+    // is the last place they can act on it. 273 of 1,270 historical bulk rows
+    // arrived with no owner name.
+    expect(PROSE).toContain('charged for every record you send');
+    expect(PROSE).toContain('whether or not we come back with contacts');
+  });
+});
+
+describe('the cost estimate', () => {
+  it('prices the two halves of the file on their own models', () => {
+    // "per successful match" is the TIER 1 model and was quoted over the whole
+    // upload. A blank-owner row is tier 2, charged per record submitted, so one
+    // rate and one model covering both halves is wrong for somebody either way.
+    // MUTATION: drop either rate from the estimate and this goes red.
+    expect(SOURCE).toContain('perTraceRate');
+    expect(SOURCE).toContain('perRecordRate');
+    expect(SOURCE).toContain('ownedCount * perTraceRate + blankOwnerCount * perRecordRate');
+  });
+
+  it('reads the tier 2 rate off the caller profile rather than assuming one', () => {
+    // Four rates exist and each caller has exactly one of them.
+    expect(SOURCE).toContain('chargePerRecord');
+    expect(SOURCE).toContain('setPerRecordRate(chargePerRecord(data))');
+  });
+
+  it('no longer promises the whole file is charged only on a match', () => {
+    expect(SOURCE).not.toContain('per successful match');
+    expect(SOURCE).not.toContain('Estimated max trace cost');
+  });
+
+  it('says only what is true of both models on the tile', () => {
+    // An all-tier-2 upload's number is not an estimate and not a maximum, it is
+    // the price. "Most this can cost" is a ceiling for tier 1 and exactly right
+    // for tier 2.
+    expect(SOURCE).toContain('Most This Can Cost');
+    expect(SOURCE).not.toContain('Estimated Max Cost');
+  });
+});
+
+describe('the record cap, refused at selection time', () => {
+  it('refuses at the same number all three submit routes hold', () => {
+    // THE CAP LIVES IN FOUR PLACES AND CANNOT BE IMPORTED INTO THE FOURTH.
+    // Pulling a submit route into this page would drag its whole vendor and
+    // billing graph into a client bundle, so the page keeps a local constant,
+    // the same way the download route keeps its own. This is what stops the four
+    // drifting: a UI that refuses at a number the routes do not hold is either
+    // blocking work the product accepts, or waving through an upload the user
+    // then waits on only to be refused.
+    // MUTATION: change any one of the four and this goes red.
+    const caps = [
+      'app/(dashboard)/trace/bulk/page.tsx',
+      'app/api/trace/bulk/route.ts',
+      'app/api/v1/trace/bulk/route.ts',
+      'lib/suite/mcp-tools.ts',
+    ].map((path) => {
+      const source = readFileSync(join(process.cwd(), path), 'utf8');
+      const declared = source.match(/MAX_RECORDS = (\d+)/);
+      expect(declared, `no MAX_RECORDS in ${path}`).not.toBeNull();
+      return declared![1];
+    });
+
+    expect(new Set(caps).size, `the cap disagrees across surfaces: ${caps.join(', ')}`).toBe(1);
+    expect(caps[0]).toBe('500');
+  });
+
+  it('checks the file on BOTH parsers, not just the CSV one', () => {
+    // An .xlsx over the cap used to sail past a CSV-only guard and be refused by
+    // the route after the user had waited on a submit.
+    expect(SOURCE.match(/> MAX_RECORDS/g) ?? []).toHaveLength(2);
+    expect(SOURCE).not.toContain('10,000 records per upload');
+    expect(SOURCE).not.toContain('> 10000');
+  });
+
+  it('states the cap in records and says what to do about it', () => {
+    expect(SOURCE).toContain('You can send up to ${MAX_RECORDS} records at a time');
+    expect(SOURCE).toContain('split it into smaller files');
+  });
+});
+
+describe('the long-job handoff', () => {
+  it('leaves the processing card instead of stranding the user on it', () => {
+    // THE DEAD END. On poll exhaustion the page set an error and stopped the
+    // spinner but never moved `phase`, so it sat on the processing card showing
+    // a spinner AND a red error, with no button and no way back, while the job
+    // kept running server-side.
+    // MUTATION: put setError(...) back in place of the phase change and this
+    // goes red.
+    expect(SOURCE).toContain("setPhase('checkback')");
+    expect(SOURCE).not.toContain('Processing is taking longer than expected');
+  });
+
+  it('routes them to history, which already has the CSV and the CRM push', () => {
+    expect(SOURCE).toContain("window.location.href = '/history'");
+    expect(SOURCE).toContain('Go to History');
+  });
+
+  it('hands over the job id so two uploads of one file are tellable apart', () => {
+    expect(SOURCE).toContain('Job reference');
+  });
+
+  it('says plainly that the work continues without the page open', () => {
+    // It is true (a cron settles it) and it is what makes the handoff honest
+    // rather than a shrug. The processing card used to say the opposite.
+    expect(PROSE).toContain('carries on in the background');
+    expect(PROSE).not.toContain('Please keep this page open');
+  });
+
+  it('does not call it an error, because nothing failed', () => {
+    expect(PROSE).toContain('Nothing has gone wrong and nothing has stopped');
+  });
+});
+
+describe('copy that must never appear on this page', () => {
+  it('never claims anyone was notified, because PTP has no alerting channel', () => {
+    expect(SOURCE).not.toMatch(/notified|alerted|our team (is|has)|looking into it/i);
+  });
+
+  it('never tells the customer to add funds when the shortfall is ours', () => {
+    // The vendor-capacity refusal is PTP's problem, not their wallet's. This
+    // page renders the route's error text verbatim, so it must not add its own.
+    expect(SOURCE).not.toMatch(/add funds/i);
   });
 });
 

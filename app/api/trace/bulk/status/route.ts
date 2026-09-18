@@ -8,12 +8,18 @@ import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
-import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
+import { rowSkipReason, type SkipReasonRow } from '@/lib/trace/rowSkipReason';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
-/** A trace_history row, read down to the two columns this summary needs. */
-type SkipRow = { ai_research_status?: string | null };
+/**
+ * A trace_history row, read down to the columns this summary needs.
+ *
+ * BOTH QUEUE COLUMNS, not just the tier 1 one. A row's reason can live in
+ * either, and every select feeding this has to name both or the reason is lost
+ * on the way to the screen rather than in the function.
+ */
+type SkipRow = SkipReasonRow;
 
 /**
  * A row of this job, read down to what the completion gate and the job summary
@@ -31,21 +37,29 @@ type JobRow = SkipRow & {
 };
 
 /**
- * How many rows of this job were accepted but never traced, and why.
+ * How many rows of this job came back with no contacts for a reason worth
+ * saying, and what that reason is.
  *
- * David's rule for a blank-owner bulk row: accept the file, skip the row with a
- * reason, charge nothing, and make the reason visible in the job summary AND
- * the CSV. `bulk/download` does the CSV half. This is the job summary half, and
+ * David's rule: never hand a customer a bare `no_match` on a row nobody looked
+ * up. `bulk/download` does the CSV half. This is the job summary half, and
  * without it the dashboard shows those rows as a bare `no_match`, which reads
- * to a customer as "we looked and found nobody" when no vendor was ever asked.
+ * to a customer as "we looked and found nobody".
  *
- * The reason comes from skipReasonFor(), the SAME accessor the v1 status route
- * and the MCP tool serve per record, so the wording cannot drift between the
- * three surfaces and the CSV. A skipped row is free, and the reason says so.
+ * THE REASON NOW COMES FROM rowSkipReason(), WHICH ASKS BOTH QUEUES. It used to
+ * ask only skipReasonFor(), the tier 1 accessor, so every tier 2 terminal value
+ * counted as nothing and explained nothing. The same accessor serves the v1
+ * status route, the MCP tool and the CSV, so the wording cannot drift between
+ * the four.
  *
- * Only rows with a skip reason are counted. A row a vendor was actually asked
- * about returns null from skipReasonFor() and is never in this number, however
- * empty it came back.
+ * `records_skipped` IS NO LONGER AN ALL-FREE COUNT, and that is why nothing
+ * around it may promise the rows were free. Four of the five reasons are free
+ * rows. The fifth is PROPERTY_TRACE_NO_REACH: the property record was bought,
+ * the row was billed per record submitted, and only the contact half failed.
+ * Each reason sentence carries its own charge statement for exactly this reason,
+ * so the summary states a count and lets the sentences speak about money.
+ *
+ * Only rows with a reason are counted. A row a vendor was actually asked about
+ * returns null and is never in this number, however empty it came back.
  */
 function summarizeSkips(rows: SkipRow[]): {
   records_skipped: number;
@@ -54,13 +68,14 @@ function summarizeSkips(rows: SkipRow[]): {
   const reasons: string[] = [];
   let count = 0;
   for (const row of rows) {
-    const reason = skipReasonFor(row.ai_research_status);
+    const reason = rowSkipReason(row);
     if (!reason) continue;
     count++;
-    // Two different things land here: a blank owner the customer can fix by
-    // resending the row, and an entity trace that ran out of attempts, which is
-    // our side failing to reach a vendor. Both are free and they are not the
-    // same thing to read, so a job carrying both says both.
+    // Five different things land here and they are not the same thing to read:
+    // a blank owner they can fix by resending, an entity trace that ran out of
+    // attempts, a dossier vendor we could not reach, a row with no usable
+    // address, and a billed row whose contact vendor never answered. A job
+    // carrying several says all of them.
     if (!reasons.includes(reason)) reasons.push(reason);
   }
   return { records_skipped: count, skip_reason: reasons.length > 0 ? reasons.join(' ') : null };
@@ -114,9 +129,14 @@ export async function GET(request: Request) {
     // repriced constant would restate what the user was actually billed on every
     // past job. The stored charge is the amount the settle path wrote at the time.
     if (traceJob.status === 'completed' || traceJob.status === 'failed') {
+      // BOTH QUEUE COLUMNS. This branch is the one every poll after the first
+      // hits and the one a page reload lands on, so a column missing from this
+      // select is a reason the customer never sees no matter how right
+      // summarizeSkips is. `property_trace_status` was absent, which silently
+      // blanked the explanation on every finished tier 2 row.
       const { data: doneRows } = await adminClient
         .from('trace_history')
-        .select('charge, ai_research_status')
+        .select('charge, ai_research_status, property_trace_status')
         .eq('user_id', user.id)
         .eq('trace_job_id', traceJob.id);
 
