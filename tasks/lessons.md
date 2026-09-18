@@ -4,6 +4,43 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-016: An enumerated list stops the reader searching, so an incomplete one is worse than none (2026-09-18)
+
+**What happened, three times in one phase.** Phase 5c's plan enumerated the user-facing strings that
+had gone false, with line numbers. It read as exhaustive. It was not, and each gap was found by
+something other than the list:
+
+- The **API docs page** (`app/(dashboard)/settings/api-keys/docs/page.tsx`) still told callers that
+  blank-owner rows are skipped and free, that a `skip_reason` means nothing was charged, and showed
+  two response keys that had already been deleted. Squarely inside the task, absent from the list.
+  The implementer's own diagnosis: *"working the brief's enumerated list instead of grepping for the
+  claims themselves."*
+- The **enqueue itself** had no task number. It existed only in a sentence of prose, and it was the
+  capability the whole phase was for.
+- **`BLANK_OWNER_SKIP_REASON`'s instruction** was named in one place and survived in three others,
+  one of which became customer-visible for the first time in the commit that was supposedly fixing it.
+
+**The mechanism.** A list of five items with line numbers is an implicit promise that there are five.
+A careful worker then works the list carefully, and the care is spent on the wrong thing: verifying
+each named item rather than asking what else is true of the same kind. Handing someone a good list
+actively suppresses the search that would find item six. A vague instruction ("find every string that
+says a blank-owner row is free") produces a grep; a precise list produces five edits.
+
+**The rules.**
+- **Write the PREDICATE, then the list as examples.** "Every string claiming a blank-owner row is
+  skipped or free, including these five" costs four words and restores the search.
+- **When you are handed a list, grep for the property before you start.** If the grep agrees with the
+  list, you have lost a minute. If it does not, you have found the item that would have shipped.
+- **Say out loud whether a list is a floor or a ceiling.** Most lists in a plan are floors and every
+  one of them reads like a ceiling.
+
+Corollary for whoever writes the plan, and this one is mine: I produced all three of the gaps above,
+and in each case the missing piece was a thing I knew and did not write down, because prose felt
+sufficient. Anything load-bearing that lives only in a sentence will be missed by someone working a
+task list, and that is not their failure.
+
+---
+
 ## L-015: Asserting two outputs DIFFER is weaker than asserting what each one SAYS (2026-09-18)
 
 **What happened.** 5c-3A had to stop `deductOrZero` reporting a short wallet and an RPC error as the

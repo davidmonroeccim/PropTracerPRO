@@ -23,31 +23,47 @@ export const maxDuration = 60;
 const POLL_CONCURRENCY = 25;
 
 /**
- * THE SIZE FENCE, MIRRORING lib/suite/mcp-tools.ts bulkStatus.
+ * THE SIZE FENCE. ADDITIVE, AND DELIBERATELY NOT THE MCP'S NUMBERS.
  *
- * Restoring payload parity in 5c-3B put a 65-key `property_record` on every row
- * of this response, on all three emitting exits, with no bound. That is the same
- * uncapped shape the brief called "a very large response" on the MCP side and
- * bounded there, so parity had quietly copied the flaw to a second surface: a
- * 500-record tier 2 job became a 500-dossier JSON response under a 60 s
- * maxDuration.
+ * WHY IT EXISTS. Restoring payload parity in 5c-3B put a 65-key
+ * `property_record` on every row of this response, on all three emitting exits.
+ * Rows that were thin on a surface sized for thin rows became fat, and that is
+ * this phase's own doing rather than a pre-existing debt.
  *
- * Same numbers as the MCP twin, and an `offset` for the same reason: a job's
- * results are a FIXED set, so a bare max of 200 leaves the last 300 rows of a
- * 500-record job structurally unreachable by a customer who paid for them.
+ * WHY THE DEFAULT IS THE SUBMIT CAP AND NOT A PAGE SIZE. A bulk job is capped at
+ * 500 records on all three submit surfaces, so this response is ALREADY bounded
+ * at 500 rows by construction; the unbounded case was removed by the cap, not by
+ * a page size. Defaulting to a small page would bound it a second time at the
+ * cost of breaking every existing API-key consumer, which is a far larger harm
+ * than a large response. So paging here is ADDITIVE: a caller that reads
+ * `results` and passes no query sees exactly what it saw before, and a caller
+ * that wants pages can ask for them.
  *
- * THIS CHANGES AN EXISTING API SURFACE. A caller that reads `results` and
- * ignores everything else now sees 25 rows where it used to see all of them.
- * That is why `results_total`, `results_returned` and `results_offset` are
- * always present rather than only when truncation happens: a consumer can
- * compare two numbers and page, and a silently short array with no way to detect
- * it is the failure this codebase treats as worse than a large response. The
- * `bulk_job.completed` WEBHOOK is deliberately NOT paged, because it is a
- * one-shot delivery into the customer's own system with nothing to page with,
- * and truncating it would lose rows permanently.
+ * THE ASYMMETRY WITH lib/suite/mcp-tools.ts (25 default, 200 max) IS ON PURPOSE.
+ * Do not "fix" it by making the numbers match. The MCP limit exists because its
+ * consumer is a model with a context budget, where a 500-row payload crowds out
+ * the conversation. This limit exists because of bytes over the wire to a
+ * program that asked for them. Different reasons, genuinely different numbers.
+ * Two surfaces differing for a stated reason is fine; two surfaces differing for
+ * no reason is what this phase spent its time removing.
+ *
+ * THE ONE CASE WHERE AN EXISTING CALLER SEES A CHANGE. The 500 cap is new, so a
+ * job submitted before it can hold more rows: the brief measured exactly one in
+ * the whole history, at 654 records. Polling that job now returns 500 rows
+ * rather than 654. It is visible (`results_total` says 654) and recoverable
+ * (`offset=500` returns the rest), which is why a bound is still the right
+ * answer, but it is a change and it is recorded rather than discovered.
+ *
+ * `results_total`, `results_returned` and `results_offset` are ALWAYS present,
+ * not only when truncation happens: a silently short array a consumer cannot
+ * detect is the failure this codebase treats as worse than a large response.
+ *
+ * The `bulk_job.completed` WEBHOOK is deliberately NOT paged. It is a one-shot
+ * delivery into the customer's own system with nothing to page with, so
+ * truncating it would lose rows permanently.
  */
-const RESULTS_DEFAULT_LIMIT = 25;
-const RESULTS_MAX_LIMIT = 200;
+const RESULTS_DEFAULT_LIMIT = 500;
+const RESULTS_MAX_LIMIT = 500;
 
 /** One page of per-record results, plus the counts that make truncation visible. */
 function pageResults<T>(all: T[], url: URL) {

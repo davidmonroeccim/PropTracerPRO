@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getChargePerTrace, PRICING } from "@/lib/constants";
 
@@ -234,18 +236,22 @@ describe("the tier 2 queue holds the job open too", () => {
 });
 
 /**
- * THE SIZE FENCE ON THE v1 PAYLOAD.
+ * THE SIZE FENCE ON THE v1 PAYLOAD, AND IT IS ADDITIVE.
  *
  * Restoring parity with the MCP twin in 5c-3B put a 65-key `property_record` on
- * every row of this response, on all three emitting exits, with no bound. That is
- * the same uncapped shape the brief called "a very large response" on the MCP
- * side and bounded there, so parity had copied the flaw to a second surface: a
- * 500-record tier 2 job became a 500-dossier response under a 60 s maxDuration.
+ * every row of this response, on all three emitting exits. Rows that were thin on
+ * a surface sized for thin rows became fat.
  *
- * Capping an existing API surface is a behaviour change for callers that read
- * `results` and nothing else, which is exactly why the three count fields are
- * ALWAYS present rather than only on truncation. A short array a consumer cannot
- * detect is the failure this codebase treats as worse than a big response.
+ * The default limit is the 500-record SUBMIT CAP, not a page size, and the first
+ * test below is the reason: a bulk job cannot exceed 500 records on any submit
+ * surface, so this response is already bounded by construction, and defaulting to
+ * a small page would bound it a second time at the cost of breaking every
+ * existing API-key consumer. Paging is something a caller can now ASK for, not
+ * something done to them.
+ *
+ * The MCP twin stays at 25 / 200 and the numbers are deliberately different: that
+ * consumer is a model with a context budget, this one is a program receiving
+ * bytes it asked for.
  */
 describe("the v1 per-record payload is paged", () => {
   const completedJob = {
@@ -285,27 +291,43 @@ describe("the v1 per-record payload is paged", () => {
     H.rows = manyRows(300);
   });
 
-  it("returns 25 rows by default rather than every row of the job", async () => {
-    // MUTATION: drop pageResults from the already-completed exit and this goes red.
+  it("AN EXISTING CALLER SEES EXACTLY WHAT IT SAW BEFORE", async () => {
+    // THE WHOLE POINT OF THE DEFAULT. A consumer that reads `results` and passes
+    // no query string gets every row of the job, as it always did. Any job is at
+    // most 500 records on every submit surface, so the default covers all of
+    // them and the response is bounded by the cap rather than by a page size.
+    // MUTATION: set RESULTS_DEFAULT_LIMIT to a page size like 25 and this goes
+    // red, which is the silent breakage it exists to prevent.
     const body = await get("");
-    expect(body.results).toHaveLength(25);
+    expect(body.results).toHaveLength(300);
+    expect(body.results[0].address).toBe("ROW 0");
+    expect(body.results[299].address).toBe("ROW 299");
   });
 
-  it("always reports the total, so a truncated array is never silent", async () => {
-    // The part that makes this survivable for an existing consumer: two numbers
-    // that disagree are detectable, a short array on its own is not.
+  it("reports the totals anyway, so truncation is never silent when it does happen", async () => {
+    // Always present, not only when a page was taken: two numbers that disagree
+    // are detectable, a short array on its own is not.
     const body = await get("");
     expect(body.results_total).toBe(300);
-    expect(body.results_returned).toBe(25);
+    expect(body.results_returned).toBe(300);
     expect(body.results_offset).toBe(0);
   });
 
-  it("clamps an oversized limit to the same 200 the MCP twin uses", async () => {
-    const body = await get("&limit=5000");
-    expect(body.results).toHaveLength(200);
+  it("still lets a caller ASK for a page", async () => {
+    // Additive: the capability is there for a consumer that wants it, it is just
+    // not imposed on one that does not.
+    const body = await get("&limit=25");
+    expect(body.results).toHaveLength(25);
+    expect(body.results_total).toBe(300);
+    expect(body.results_returned).toBe(25);
   });
 
-  it("reaches the rows past the max, so a 500-record job stays fully readable", async () => {
+  it("clamps an oversized limit to the 500-record cap", async () => {
+    const body = await get("&limit=5000");
+    expect(body.results).toHaveLength(300);
+  });
+
+  it("reaches rows past a requested page, so nothing paid for is unreachable", async () => {
     const body = await get("&limit=200&offset=200");
     expect(body.results).toHaveLength(100);
     expect(body.results[0].address).toBe("ROW 200");
@@ -321,7 +343,7 @@ describe("the v1 per-record payload is paged", () => {
 
   it("ignores junk in the query rather than returning nothing", async () => {
     const body = await get("&limit=abc&offset=abc");
-    expect(body.results).toHaveLength(25);
+    expect(body.results).toHaveLength(300);
     expect(body.results_offset).toBe(0);
   });
 
@@ -329,9 +351,53 @@ describe("the v1 per-record payload is paged", () => {
     // This route has three exits that emit results. A cap on one of them is not
     // a cap: the first caller to finish a job hits a different one.
     H.job = { ...completedJob, status: "processing" };
-    const body = await get("");
+    const body = await get("&limit=25");
     expect(body.status).toBe("completed");
     expect(body.results).toHaveLength(25);
     expect(body.results_total).toBe(300);
+  });
+});
+
+/**
+ * The v1 default is DERIVED from the submit cap, not a coincidence that happens
+ * to share its digits, and the asymmetry with the MCP twin is a decision rather
+ * than drift. Both are asserted at the source, because both are the kind of thing
+ * a later reader "tidies up".
+ */
+describe("the two results limits, and why they differ", () => {
+  const read = (path: string) =>
+    readFileSync(join(process.cwd(), path), "utf8");
+
+  it("defaults to the same number the submit surfaces cap a job at", () => {
+    // IF THE CAP MOVES, THIS MUST MOVE WITH IT. The default is only non-breaking
+    // because no job can exceed it. Raise MAX_RECORDS to 1000 and leave this at
+    // 500 and the route starts silently truncating jobs it used to return whole,
+    // which is the exact harm the default was chosen to avoid.
+    const caps = [
+      "app/api/trace/bulk/route.ts",
+      "app/api/v1/trace/bulk/route.ts",
+      "lib/suite/mcp-tools.ts",
+    ].map((path) => read(path).match(/MAX_RECORDS = (\d+)/)![1]);
+
+    const status = read("app/api/v1/trace/bulk/status/route.ts");
+    const def = status.match(/RESULTS_DEFAULT_LIMIT = (\d+)/)![1];
+    const max = status.match(/RESULTS_MAX_LIMIT = (\d+)/)![1];
+
+    expect(new Set(caps).size, `submit caps disagree: ${caps.join(", ")}`).toBe(1);
+    expect(def, "the v1 default must cover a full-size job").toBe(caps[0]);
+    expect(max).toBe(caps[0]);
+  });
+
+  it("does NOT match the MCP twin, and says why in the source", () => {
+    // MUTATION: make the two surfaces share numbers "for consistency" and this
+    // goes red. The MCP bounds a model's context; this bounds bytes to a program
+    // that asked for them. Matching them would break v1 callers to solve a
+    // problem v1 does not have.
+    const mcp = read("lib/suite/mcp-tools.ts");
+    expect(mcp).toContain("BULK_STATUS_DEFAULT_LIMIT = 25");
+    expect(mcp).toContain("BULK_STATUS_MAX_LIMIT = 200");
+    // The reason has to be written down, or the difference reads as an oversight.
+    expect(mcp).toMatch(/context budget/);
+    expect(read("app/api/v1/trace/bulk/status/route.ts")).toMatch(/bytes over the wire/i);
   });
 });
