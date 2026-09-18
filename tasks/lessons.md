@@ -81,6 +81,14 @@ invisible to reading and were caught only by the mutation run.
 running a mutation against their own work, not by a reviewer reading it. A reviewer reads the test and
 the code and sees them agree, which is exactly what a worthless test looks like from the outside.
 
+**The uncomfortable part: this family recurred TWICE MORE in phase 5c after this lesson was written
+mid-phase.** The whole-phase review found three tests asserting `?? null`, satisfied by the key being
+ABSENT rather than null. Then the implementer fixing that finding wrote a new test asserting
+`toContain('records_failed')`, satisfied by the JSX rather than the interface field it meant to check,
+and caught it on its own mutation run. **Knowing the pattern did not prevent it.** The pattern is not
+a thing you avoid by remembering it; it is a thing you find by mutating. Treat "I have read L-015" as
+worth nothing and the mutation run as worth everything.
+
 ---
 
 ## L-013: A spy you never clear is a fence that cannot fail (2026-09-18)

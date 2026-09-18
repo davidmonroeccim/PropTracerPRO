@@ -2878,8 +2878,17 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [x] 9. Every string above. **DONE `fd73b39` + `2a443ea`.** Plus the API docs page, which the list omitted. See L-016.
 - [x] 10. Poll ceiling / long-job UX. **DONE `fd73b39`.** Check-back to History, per David's decision.
 - [x] 11. v1 payload parity + MCP limits. **DONE `fd73b39` + `627b78c`.** v1 default/max 500 (non-breaking), MCP 25/200, asymmetry documented both sides.
-- [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
+- [x] 12. Mutation-verify every money decision. Re-run by me, not taken from the report. **DONE, continuous: 21 mutations chosen and run independently by the controller across all four sub-phases, every one killed, every total held, every restore checksum-verified.**
 - [x] 13. The submit wallet check must size against in-flight unbilled work. **DONE `c1556dd`.** Closes the back-to-back gap; the sub-second in-submit window is task 16.
+- [ ] 18. **PARKED RESIDUALS from the final review's fix wave. None ship-blocking; recorded so they
+      are not rediscovered as bugs.** (a) A 9-digit ZIP with no dash is now DROPPED where the ideal is
+      to trim it to 5. Strictly better than before the fix, which rejected the whole row, but not as
+      good as it could be. (b) The no-key sentence can render TWICE when a half-failed submit also
+      carries no-key rows. (c) A stale comment at `app/api/trace/bulk/route.ts:557`. (d) Two money
+      residuals the re-reviewer judged non-blocking because they sit on a correct ledger and a correct
+      row receipt: `trace_job_id` attribution drift, and a one-pass race where a mid-flight resubmit
+      can swallow one deduct. (e) Still out of scope and still true: `checkDuplicates` is inert on
+      v1/MCP, and `validateAddressInput` still 400s a whole API batch on a mangled zip.
 - [ ] 17. **PRODUCT GAP, found during 5c-3B. Not a copy problem, and deliberately not papered over.**
       There is now no in-product path to re-run **a bulk row that came back without the contacts it
       was submitted for**, inside the 90-day dedup window. Three of the five no-contacts reasons
