@@ -5,6 +5,13 @@ const API_KEY = process.env.HIGHLEVEL_API_KEY;
 const LOCATION_ID = process.env.HIGHLEVEL_LOCATION_ID;
 const MEMBER_TAG = process.env.HIGHLEVEL_MEMBER_TAG || 'sp3-owner';
 
+/**
+ * The tag put on contacts PTP creates in the customer's CRM. Sent on CREATE
+ * only. Never send it on an update: HighLevel's PUT overwrites the whole tag
+ * array, so it would delete the customer's own tags. See the update branch.
+ */
+const CONTACT_TAG = 'proptracerpro';
+
 interface HighLevelContact {
   id: string;
   firstName?: string;
@@ -333,12 +340,29 @@ export async function pushTraceToHighLevel(params: {
     city: traceResult.mailing_city || params.propertyCity || undefined,
     state: traceResult.mailing_state || params.propertyState || undefined,
     postalCode: traceResult.mailing_zip || params.propertyZip || undefined,
-    tags: ['proptracerpro'],
   };
 
   try {
     if (existingContactId) {
-      // Update existing contact
+      // NO `tags` ON UPDATE, AND THIS IS NOT AN OVERSIGHT.
+      //
+      // HighLevel's Update Contact endpoint says, verbatim: "This field will
+      // overwrite all current tags associated with the contact."
+      // https://marketplace.gohighlevel.com/docs/ghl/contacts/update-contact/
+      //
+      // This function used to send `tags: ['proptracerpro']` on every update,
+      // which deleted every other tag the customer had on that contact. In
+      // HighLevel tags drive workflows, so it was also silently breaking their
+      // automation, on a push that reported success. Tags stay on CREATE below,
+      // where there is no existing array to overwrite.
+      //
+      // Re-tagging an existing contact needs the additive
+      // POST /contacts/:contactId/tags endpoint, which HighLevel's own update
+      // doc points to for exactly this. It is deliberately NOT used yet: that
+      // endpoint's additivity is implied by its name and response shape rather
+      // than stated in the docs, and swapping verified destruction for
+      // unverified behaviour is not a fix. Verify it against a real account
+      // first. Until then an existing contact keeps the tags it already has.
       const updateRes = await fetch(`${HIGHLEVEL.BASE_URL}/contacts/${existingContactId}`, {
         method: 'PUT',
         headers,
@@ -349,11 +373,13 @@ export async function pushTraceToHighLevel(params: {
 
       return { success: true, contactId: existingContactId, action: 'updated' };
     } else {
-      // Create new contact
+      // Create new contact. `tags` is safe HERE and only here: a contact being
+      // created has no existing tag array for it to overwrite. See the note on
+      // the update branch above for why it must never be sent on a PUT.
       const createRes = await fetch(`${HIGHLEVEL.BASE_URL}/contacts/`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ locationId, ...contactData }),
+        body: JSON.stringify({ locationId, ...contactData, tags: [CONTACT_TAG] }),
       });
 
       if (!createRes.ok) return failureFrom('create contact', createRes);

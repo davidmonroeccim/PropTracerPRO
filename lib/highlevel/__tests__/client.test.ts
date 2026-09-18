@@ -124,6 +124,46 @@ describe('the happy paths, so the failure tests below are not the only shape pro
     expect(calls[1].url).toContain('/contacts/contact-9');
   });
 
+  /**
+   * HighLevel's Update Contact endpoint OVERWRITES the whole tag array:
+   * "This field will overwrite all current tags associated with the contact."
+   * https://marketplace.gohighlevel.com/docs/ghl/contacts/update-contact/
+   *
+   * So every update push was deleting every tag the customer had on that
+   * contact. In HighLevel tags drive workflows, so it destroyed their
+   * automation triggers too, silently, on a push that reported success.
+   *
+   * Asserted as "the key is ABSENT", not as "tags is empty" and not as
+   * "tags differs from create". An empty array would still overwrite, and
+   * `toEqual` against a different value passes for the wrong reason the
+   * moment someone sends `tags: []` thinking it is the safe form.
+   */
+  it('sends NO tags key on update, because update overwrites the whole array', async () => {
+    legs = { search: ONE_MATCH(), update: json(200, {}) };
+
+    await push();
+
+    const put = calls[1];
+    expect(put.method).toBe('PUT');
+    expect(put.body).toBeDefined();
+    expect(Object.keys(put.body!)).not.toContain('tags');
+  });
+
+  /**
+   * The other half of the same rule, and it has to be asserted or the fix
+   * above is satisfied by deleting tagging altogether. On CREATE there is no
+   * existing tag array to overwrite, so the tag is correct there and must stay.
+   */
+  it('still tags on create, where there is nothing to overwrite', async () => {
+    legs = { search: json(200, { contacts: [] }), create: json(201, { contact: { id: 'new-1' } }) };
+
+    await push();
+
+    const post = calls[1];
+    expect(post.method).toBe('POST');
+    expect(post.body!.tags).toEqual(['proptracerpro']);
+  });
+
   it('skips the search and creates when there is nothing to search BY', async () => {
     // Not the same as a failed search. No phone and no email is a KNOWN state:
     // we cannot look, so creating is not a guess. The test below covers the
