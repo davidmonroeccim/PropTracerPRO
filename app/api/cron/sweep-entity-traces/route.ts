@@ -4,7 +4,7 @@ import { lookupBusinessTrace, submitSingleTrace } from '@/lib/tracerfy/client';
 import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
-import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
 import {
   ENTITY_QUEUED_STATUSES,
@@ -15,7 +15,7 @@ import {
   processingStatusFor,
 } from '@/lib/trace/entityTraceAttempts';
 import { PRICING, getChargePerTrace } from '@/lib/constants';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { chargePerTrace, isTrackASource } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
 
 /**
@@ -171,15 +171,17 @@ export async function GET(request: Request) {
   // paid $0.25 for person rows (raw, from the v1 status route) and $0.15 for
   // entity rows (grant-aware, from here). Same job, same work, two prices.
   //
-  // `source` is tagged 'mcp' by lib/suite/mcp-tools.ts on both the job and the
-  // row; a v1 bulk row carries none. So an untagged row is Track B, which is
-  // also the RAW and dearer derivation, making the fallback the safe direction.
+  // Which track a row belongs to is read off its `source` tag, and the tags and
+  // their meaning live in lib/suite/pricing.ts so this cron, its twin
+  // sweep-business-traces, and the routes that WRITE the tag cannot drift. An
+  // untagged row is Track B, which is also the RAW and dearer derivation,
+  // making the fallback the safe direction.
   const tier1RateCache = new Map<string, number>();
   const tier1RateFor = async (
     userId: string,
     source: string | null | undefined
   ): Promise<number> => {
-    const isTrackA = source === 'mcp';
+    const isTrackA = isTrackASource(source);
     const key = `${userId}:${isTrackA ? 'A' : 'B'}`;
     const cached = tier1RateCache.get(key);
     if (cached !== undefined) return cached;
@@ -410,9 +412,15 @@ export async function GET(request: Request) {
           // which would tell the customer the row was free while their wallet
           // says otherwise, and not today's rate, which would restate a past
           // charge at a price that may since have moved.
+          //
+          // `> 0`, NOT `!== null`. The probe answers the NET of the row's
+          // debits and credits. This file never refunds, but its two twins do
+          // -- against rows this cron also settles -- so a row can arrive here
+          // having collected a fee and had it handed back. That nets to 0, and
+          // 0 is not a collection: treating it as one gives the row away free.
           const alreadyCollected = await collectedChargeFor(adminClient, row.id);
           const charge =
-            alreadyCollected !== null
+            alreadyCollected !== null && alreadyCollected > 0
               ? alreadyCollected
               : // Deduct FIRST, then persist the amount that actually moved.
                 await deductOrZero(adminClient, {
@@ -435,8 +443,13 @@ export async function GET(request: Request) {
               email_count: fastAppendCredit.email_count,
               is_successful: true,
               cost: PRICING.COST_PER_RECORD,
+              // `charge` is the LEDGER's answer and is written as-is: folding
+              // it would add money already recorded to money already on the
+              // row. `tier` is NOT the ledger's to answer, and a flat 1
+              // silently downgrades a tier 2 receipt, so it comes from the
+              // fold, which never downgrades.
               charge,
-              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+              tier: foldBillingWrite(row, { charge, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE }).tier,
             })
             .eq('id', row.id);
           fastAppendCredited++;
@@ -459,13 +472,27 @@ export async function GET(request: Request) {
         if (!resolvedPerson) {
           // FastAppend answered and had no person for us. That is a real miss,
           // and under tier 1 a miss is free.
+          //
+          // FREE MEANS "COLLECT NOTHING FURTHER", NOT "THIS ROW WAS ALWAYS
+          // FREE". The row is REUSED, never re-inserted
+          // (UNIQUE(user_id, address_hash)), so it can already carry a tier 2
+          // receipt -- tier 2 bills per record SUBMITTED, which makes
+          // `is_successful = false, charge > 0` a row the customer PAID for. A
+          // flat `charge: 0, tier: 1` over it erased that receipt while
+          // wallet_transactions still referenced the row by FK. Folding a
+          // collection of 0 changes nothing on a row that never paid, and
+          // preserves one that did.
+          const billing = foldBillingWrite(row, {
+            charge: 0,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          });
           await adminClient
             .from('trace_history')
             .update({
               status: 'no_match',
               is_successful: false,
-              charge: 0,
-              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+              charge: billing.charge,
+              tier: billing.tier,
             })
             .eq('id', row.id);
           noMatch++;
@@ -486,14 +513,20 @@ export async function GET(request: Request) {
             `[sweep-entity-traces] Tracerfy submit failed for row ${row.id}: ${submitResult.error}`
           );
           // No FastAppend contacts (already established above) and the
-          // Tracerfy submit also failed -- mark no_match. Free either way.
+          // Tracerfy submit also failed -- mark no_match. Free either way, and
+          // folded for the same reason as the miss arm above: free means
+          // "collect nothing further", never "this row was always free".
+          const billing = foldBillingWrite(row, {
+            charge: 0,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          });
           await adminClient
             .from('trace_history')
             .update({
               status: 'no_match',
               is_successful: false,
-              charge: 0,
-              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+              charge: billing.charge,
+              tier: billing.tier,
             })
             .eq('id', row.id);
           noMatch++;

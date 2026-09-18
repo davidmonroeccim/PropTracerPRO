@@ -25,19 +25,60 @@ const H = vi.hoisted(() => ({
   // tracerfy_job_id, so the result loop cannot reach it).
   jobRows: [] as Array<Record<string, unknown>>,
   jobStatus: null as unknown as Record<string, unknown>,
-  updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  // `filters` records every filter method called on an update chain, in order.
+  // The trailing blanket sweep is identified by having no `trace_result`, and
+  // the guard that has to narrow it (excludeBilledRows) is a pair of `.or()`s
+  // plus an `.is()`, so the filters matter as much as the payload.
+  updates: [] as Array<{
+    table: string;
+    payload: Record<string, unknown>;
+    filters: Array<[string, ...unknown[]]>;
+  }>,
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
 }));
 
-function chainTo(data: unknown) {
+/**
+ * POSTGREST COLUMN PROJECTION, EMULATED. Adopted from the phase 4b stubs in
+ * lib/suite/__tests__/mcp-tools.test.ts.
+ *
+ * A column the query never asked for does not come back, and a stub that
+ * ignores `.select(...)` hides exactly that. This route's per-result settle
+ * FOLDS onto `charge` and `tier`; narrow its select to `id` and the fold folds
+ * onto `undefined`, writes only this settle's amount, and performs the precise
+ * erasure the fold exists to prevent -- while every assertion here stayed green.
+ * The select list is load-bearing production behaviour and has to be pinned.
+ *
+ * `*` passes everything through. Only keys the row actually carries are copied,
+ * so an absent column stays absent rather than becoming an explicit `undefined`.
+ */
+function projectRow(row: unknown, select: string): unknown {
+  if (row === null || row === undefined) return row;
+  if (select.trim() === "*") return row;
+  const columns = new Set(select.split(",").map((c) => c.trim()));
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+    if (columns.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+function project(data: unknown, select: string | undefined): unknown {
+  if (typeof select !== "string") return data;
+  return Array.isArray(data)
+    ? data.map((r) => projectRow(r, select))
+    : projectRow(data, select);
+}
+
+function chainTo(data: unknown, select?: string) {
+  const projected = project(data, select);
   const node: Record<string, unknown> = {};
   const self = () => node;
   node.eq = self;
   node.ilike = self;
-  node.limit = () => Promise.resolve({ data, error: null });
-  node.single = () => Promise.resolve({ data, error: null });
+  node.limit = () => Promise.resolve({ data: projected, error: null });
+  node.single = () => Promise.resolve({ data: projected, error: null });
   node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
-    Promise.resolve({ data, error: null }).then(res, rej);
+    Promise.resolve({ data: projected, error: null }).then(res, rej);
   return node;
 }
 
@@ -58,11 +99,25 @@ vi.mock("@/lib/supabase/admin", () => ({
               ? H.profile
               : typeof cols === "string" && cols.includes("ai_research_status")
                 ? H.jobRows
-                : H.historyRows
+                : H.historyRows,
+          // trace_jobs is read with select('*'); everything else names its
+          // columns and is projected through them.
+          cols
         ),
       update: (payload: Record<string, unknown>) => {
-        H.updates.push({ table, payload });
-        return chainTo(null);
+        const filters: Array<[string, ...unknown[]]> = [];
+        H.updates.push({ table, payload, filters });
+        const node: Record<string, unknown> = {};
+        const add =
+          (method: string) =>
+          (...args: unknown[]) => {
+            filters.push([method, ...args]);
+            return node;
+          };
+        for (const m of ["eq", "in", "or", "is", "ilike"]) node[m] = add(m);
+        node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+          Promise.resolve({ data: null, error: null }).then(res, rej);
+        return node;
       },
     }),
     rpc: (fn: string, args: Record<string, unknown>) => {
@@ -217,6 +272,177 @@ describe("bulk/status route totals only the wallet amount actually collected", (
     }
     expect(body.total_charge).toBeCloseTo(rate * 2, 10);
     expect(webhookBody().total_charge).toBeCloseTo(rate * 2, 10);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * RECEIPTS SURVIVE THIS SETTLE.
+ *
+ * Every row here is REUSED, not re-inserted -- UNIQUE(user_id, address_hash) --
+ * and wallet_transactions references it with ON DELETE NO ACTION. Under bulk
+ * tier 2 a billed miss is `tier = 2, charge > 0, is_successful = false`, which
+ * is exactly what both writes below land on: the per-result settle REPLACES
+ * `charge` with whatever this round collected, and the trailing sweep writes a
+ * flat `charge: 0, tier: 1` over every row still processing, by job id, having
+ * read none of them.
+ * ------------------------------------------------------------------ */
+describe("bulk/status never erases a receipt already on the row", () => {
+  const GET = async () => {
+    const mod = await import("@/app/api/trace/bulk/status/route");
+    return mod.GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+  };
+
+  beforeEach(() => {
+    // One result, so exactly one row settles through the per-result branch.
+    H.jobStatus = {
+      success: true,
+      pending: false,
+      results: [
+        {
+          address: "123 MAIN ST",
+          city: "Austin",
+          state: "TX",
+          first_name: "Jane",
+          last_name: "Doe",
+          primary_phone: "5125550100",
+        },
+      ],
+    };
+    // The row the loop finds already carries a $0.25 tier 2 receipt.
+    H.historyRows = [{ id: "hist-1", charge: 0.25, tier: 2 }];
+  });
+
+  it("site 288 (successful match): ACCUMULATES the new debit onto the old one", async () => {
+    await GET();
+    const settle = billingUpdates()[0].payload;
+    // MUTATION: write the bare `charge` instead of `billing.charge` and this
+    // goes red -- the first debit disappears from the row.
+    expect(settle.charge).toBe(0.5);
+    expect(settle.charge).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(settle.tier).toBe(2);
+  });
+
+  it("site 288 (no-match result): keeps the charge and the tier", async () => {
+    // A tier 1 miss collects nothing further. It does not make the row free.
+    H.jobStatus = {
+      success: true,
+      pending: false,
+      results: [{ address: "123 MAIN ST", city: "Austin", state: "TX" }],
+    };
+    await GET();
+    const settle = billingUpdates()[0].payload;
+    // MUTATION: unfold and this goes red -- a paid row is declared free.
+    expect(settle.charge).toBe(0.25);
+    expect(settle.tier).toBe(2);
+  });
+
+  /* ---------------------------------------------------------------- *
+   * SITE 302, THE BLANKET LEFTOVER SWEEP.
+   *
+   * STATUS IS NOT A RECEIPT. excludeBilledRows protects `charge` and `tier`;
+   * `status` and `is_successful` are DELIVERY facts. Behind the same guard, a
+   * billed tier 2 row that Tracerfy returned nothing for is skipped and keeps
+   * `status = 'processing'` -- and the very next statement marks the job
+   * `completed`, whose early-return means this job is never polled again. An
+   * hour later sweep-stale-traces stage 1 claims that row (status +
+   * created_at, no trace_job_id restriction) and settles it against whichever
+   * OTHER record of the shared Tracerfy batch carried a phone. Second charge,
+   * stranger's contacts on the customer's parcel, pushed to their CRM.
+   *
+   * Two statements. Money behind the guard, delivery in front of it.
+   * ---------------------------------------------------------------- */
+  const blanketStatements = () => {
+    const blanket = H.updates.filter(
+      (u) => u.table === "trace_history" && !("trace_result" in u.payload)
+    );
+    return {
+      guarded: blanket.filter((u) => u.filters.some((f) => f[0] === "or")),
+      unguarded: blanket.filter((u) => !u.filters.some((f) => f[0] === "or")),
+    };
+  };
+
+  it("site 302: the GUARDED statement carries the money and no delivery facts", async () => {
+    await GET();
+    const { guarded } = blanketStatements();
+    expect(guarded).toHaveLength(1);
+    // MUTATION: unwrap the excludeBilledRows() call and these go red.
+    expect(guarded[0].filters.filter((f) => f[0] === "or")).toHaveLength(2);
+    expect(
+      guarded[0].filters.some((f) => f[0] === "is" && f[1] === "property_record")
+    ).toBe(true);
+    // MONEY ONLY. Safe precisely because the guard means the statement cannot
+    // match a row that collected anything.
+    expect(guarded[0].payload.charge).toBe(0);
+    expect(guarded[0].payload.tier).toBe(1);
+    // MUTATION: move `status` into this payload and this goes red -- that is
+    // the change that strands a paid row.
+    expect(Object.keys(guarded[0].payload)).not.toContain("status");
+    expect(Object.keys(guarded[0].payload)).not.toContain("is_successful");
+  });
+
+  it("site 302: an UNGUARDED statement resolves every row, billed or not", async () => {
+    await GET();
+    const { unguarded } = blanketStatements();
+    // MUTATION: delete this statement, or wrap it in excludeBilledRows, and
+    // this goes red -- a billed row is then left in 'processing' inside a job
+    // this handler marks completed on the very next statement, where only
+    // sweep-stale-traces can reach it, and it settles that row against another
+    // property's contacts from the shared batch.
+    expect(unguarded).toHaveLength(1);
+    expect(unguarded[0].payload.status).toBe("no_match");
+    expect(unguarded[0].payload.is_successful).toBe(false);
+    // And it carries no money, or the guard above was pointless.
+    expect(Object.keys(unguarded[0].payload)).not.toContain("charge");
+    expect(Object.keys(unguarded[0].payload)).not.toContain("tier");
+  });
+
+  /* ---------------------------------------------------------------- *
+   * "UNGUARDED" MEANS NO RECEIPT GUARD. IT DOES NOT MEAN UNFILTERED.
+   *
+   * This statement is a BLANKET write keyed on (user, tracerfy_job_id): it
+   * names no row and reads none. The only thing separating "the leftovers" from
+   * "every row of this job" is `status = 'processing'`, and the per-result loop
+   * directly above has just moved the matched rows to 'success'.
+   *
+   * Without that filter this statement stamps `no_match, is_successful: false,
+   * phone/email counts untouched` over rows that were settled seconds earlier
+   * WITH REAL CONTACTS ON THEM -- and it does so after the money statement has
+   * already run, so the customer is charged and then told there was no match.
+   * Every surface reads the row as a failure while `charge` says they paid.
+   * ---------------------------------------------------------------- */
+  it("site 302: the UNGUARDED statement touches only rows still processing", async () => {
+    await GET();
+    const { unguarded } = blanketStatements();
+    // MUTATION: delete the `.eq('status','processing')` from this statement and
+    // this goes red -- the sweep resets the rows that just succeeded.
+    expect(
+      unguarded[0].filters.some(
+        (f) => f[0] === "eq" && f[1] === "status" && f[2] === "processing"
+      )
+    ).toBe(true);
+  });
+
+  /* ---------------------------------------------------------------- *
+   * THE ORDER OF THE TWO STATEMENTS IS LOAD-BEARING.
+   *
+   * Both select on `status = 'processing'`, and the delivery statement is what
+   * ENDS that status. Run delivery first and the money statement matches
+   * nothing: every unbilled leftover row keeps a NULL `charge` and an unstamped
+   * `tier` instead of being normalised to `charge: 0, tier: 1`.
+   *
+   * That is not cosmetic. `tier` is what isCacheHitRow's third arm reads, and a
+   * NULL `charge` is what excludeBilledRows' `charge.is.null` arm exists to
+   * catch. Neither statement says a word about the other, so nothing but this
+   * test stops a later edit from moving the delivery write above the money one.
+   * ---------------------------------------------------------------- */
+  it("site 302: the MONEY statement runs FIRST, while the rows are still processing", async () => {
+    await GET();
+    const { guarded, unguarded } = blanketStatements();
+    // MUTATION: swap the two statements in the source and this goes red.
+    expect(H.updates.indexOf(guarded[0])).toBeGreaterThanOrEqual(0);
+    expect(H.updates.indexOf(guarded[0])).toBeLessThan(H.updates.indexOf(unguarded[0]));
   });
 });
 

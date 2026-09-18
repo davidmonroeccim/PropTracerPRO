@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PRICING } from "@/lib/constants";
+import { PRICING, getChargePerTrace } from "@/lib/constants";
 import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
+import { TRACE_SOURCE, chargePerTrace, isTrackASource } from "@/lib/suite/pricing";
 
 /**
  * Money fences for the DASHBOARD bulk-trace submit route (Track A).
@@ -217,6 +218,63 @@ describe("what the user is told", () => {
     const body = await (await post([rec("John Smith", 1)])).json();
     expect(body.records_skipped).toBe(0);
     expect(body.skipped_reason).toBeUndefined();
+  });
+});
+
+/**
+ * THE SOURCE TAG IS A PRICE DECISION, NOT A LABEL.
+ *
+ * This route settles through app/api/trace/bulk/status, which prices with the
+ * GRANT-AWARE chargePerTrace() -- Track A. sweep-entity-traces picks its
+ * derivation from the row's `source` tag and reads an UNTAGGED row as Track B,
+ * the raw and dearer one. So the moment an entity row from this route reaches
+ * that cron, one batch bills two prices for the same work, split by owner type:
+ * exactly the thing L-005 says cannot happen.
+ *
+ * Nothing routes an entity row here today, which is why this is silent rather
+ * than live. Tagging the rows is what stops it being live later.
+ */
+describe("the track this job is priced on", () => {
+  it("tags the job row with its source", async () => {
+    await post([rec("John Smith", 1)]);
+    const job = H.ops.find((o) => o.table === "trace_jobs" && o.op === "insert");
+    // MUTATION: drop `source` from the insert and this goes red -- the crons
+    // read an untagged job as the raw Track B derivation.
+    expect(job!.payload).toMatchObject({ source: TRACE_SOURCE.WEB });
+  });
+
+  it("tags every trace_history row it writes, traced and skipped alike", async () => {
+    // The crons read the ROW's tag, not the job's, so a row that misses it is
+    // mispriced however the job is labelled.
+    await post([rec("John Smith", 1), rec("", 2)]);
+    expect(historyRows()).toHaveLength(2);
+    for (const row of historyRows()) {
+      expect(row.source).toBe(TRACE_SOURCE.WEB);
+    }
+  });
+
+  it("names a track the settle path actually prices on", async () => {
+    // Not a spelling check: bulk/status settles with the GRANT-AWARE
+    // chargePerTrace(), so the tag it writes has to be one the crons read as
+    // Track A. A typo'd tag reads as Track B and reintroduces the split in
+    // silence. L-009: this comparison is a tautology unless the flag is set,
+    // because hasSuiteAccess() is the only thing separating the two rates.
+    expect(isTrackASource(TRACE_SOURCE.WEB)).toBe(true);
+
+    const GRANT_HOLDER = {
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_products: ["prop-tracer-pro"],
+    };
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    try {
+      expect(chargePerTrace(GRANT_HOLDER)).toBe(PRICING.CHARGE_PER_SUCCESS);
+      expect(chargePerTrace(GRANT_HOLDER)).not.toBe(
+        getChargePerTrace(GRANT_HOLDER.subscription_tier, false)
+      );
+    } finally {
+      delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    }
   });
 });
 

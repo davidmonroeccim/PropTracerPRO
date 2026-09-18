@@ -7,7 +7,7 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
-import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
@@ -248,9 +248,14 @@ export async function GET(request: Request) {
       const inputCity = (rawResult.city || '').toUpperCase().trim();
       const inputState = (rawResult.state || '').toUpperCase().trim();
 
+      // `charge` and `tier` are selected because they are the RECEIPT this
+      // settle has to fold into, not overwrite. The row is reused rather than
+      // re-inserted (UNIQUE(user_id, address_hash)), so it may already carry a
+      // tier 2 charge booked against a wallet_transactions row that still
+      // references it.
       const { data: historyRows } = await adminClient
         .from('trace_history')
-        .select('id')
+        .select('id, charge, tier')
         .eq('user_id', user.id)
         .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
         .eq('status', 'processing')
@@ -258,7 +263,8 @@ export async function GET(request: Request) {
         .ilike('state', inputState)
         .limit(1);
 
-      const historyId = historyRows?.[0]?.id;
+      const historyRow = historyRows?.[0];
+      const historyId = historyRow?.id;
 
       if (historyId) {
         // Bill for a successful match FIRST -- all tiers use wallet deduction,
@@ -276,6 +282,16 @@ export async function GET(request: Request) {
             : 0;
         totalCharge += charge;
 
+        // ACCUMULATE, never replace. `totalCharge` above is what THIS poll
+        // collected and is reported as such; the row's `charge` column is the
+        // receipt for the address across every settle that ever touched it. On
+        // a miss `charge` is 0, and folding 0 leaves an existing receipt exactly
+        // where it is rather than declaring a paid row free.
+        const billing = foldBillingWrite(historyRow, {
+          charge,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+        });
+
         await adminClient
           .from('trace_history')
           .update({
@@ -285,22 +301,58 @@ export async function GET(request: Request) {
             email_count: parsed.emails?.length || 0,
             is_successful: isSuccessful,
             cost: PRICING.COST_PER_RECORD,
-            charge,
-            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+            charge: billing.charge,
+            tier: billing.tier,
           })
           .eq('id', historyId);
       }
     }
 
     // Mark any remaining processing rows as no_match (no result returned by Tracerfy)
+    //
+    // TWO STATEMENTS, AND THE SPLIT IS THE WHOLE POINT. **STATUS IS NOT A
+    // RECEIPT.** excludeBilledRows exists to protect `charge` and `tier`.
+    // `status` and `is_successful` are DELIVERY facts, and a paid row needs them
+    // MORE than an unpaid one, not less.
+    //
+    // Putting them behind the same guard strands the row: a billed tier 2 row
+    // Tracerfy returned nothing for fails the guard, keeps
+    // `status = 'processing'`, and the very next statement marks this job
+    // `completed` -- whose early-return at the top of this handler means the job
+    // is never polled again. An hour later sweep-stale-traces stage 1 claims
+    // that row (status + created_at) and settles it against
+    // `nonPaddingResults.find(r => r.primary_phone || ...)`, which for a SHARED
+    // bulk Tracerfy job is whichever OTHER property in the batch came back.
+    // Second charge on the same address, a stranger's phone and email written
+    // onto the customer's parcel, and both pushed to their GoHighLevel CRM.
+
+    // 1. THE MONEY, guarded. A blanket update reads no row, so it cannot fold;
+    //    instead it may only ever touch rows that have collected nothing, and
+    //    excludeBilledRows makes that true in the database rather than here, so
+    //    there is no read-then-write race. On those rows a flat `charge: 0` is a
+    //    no-op that normalises NULL, and the tier stamp records the billing
+    //    model. This runs FIRST, while the rows are still 'processing'.
+    await excludeBilledRows(
+      adminClient
+        .from('trace_history')
+        .update({
+          charge: 0,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+        })
+        .eq('user_id', user.id)
+        .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
+        .eq('status', 'processing')
+    );
+
+    // 2. THE DELIVERY FACTS, for every row. Unguarded on purpose: a row that was
+    //    paid for still has to be told it got no result, or it is left for a
+    //    cron that will sell it someone else's contacts.
     await adminClient
       .from('trace_history')
       .update({
         status: 'no_match',
         is_successful: false,
         cost: PRICING.COST_PER_RECORD,
-        charge: 0,
-        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
       })
       .eq('user_id', user.id)
       .eq('tracerfy_job_id', traceJob.tracerfy_job_id)

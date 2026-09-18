@@ -4,6 +4,63 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-18
+
+### Full Property Trace, phase 5b: a refund is not a collection
+
+A third adversarial review found one new production defect. Two settle sites refund a historical
+AI-research fee and then probe `collectedChargeFor` so they do not double-charge the row. The probe
+summed only `type = 'debit'`, and the refund is a CREDIT that could not name a row at all -- so the
+money handed back still counted as collected, the deduct was SKIPPED, and the customer got the
+contacts free while `trace_history.charge` reported an amount that was back in their wallet. Fixed
+at the DATABASE (migration `20260917_credit_wallet_balance_trace_link.sql`, applied and ACL-verified
+before this pass) rather than patched at the call sites, so no future refund site can get it wrong.
+
+- **`collectedChargeFor` returns a NET.** The `.eq('type','debit')` filter is gone -- that filter,
+  not the arithmetic, is what hid the refund. `type` is selected and classified in JS: a debit adds,
+  every other type subtracts (the column's CHECK allows four types and three of them ADD balance, so
+  an unanticipated one errs toward charging money genuinely owed rather than skipping a charge never
+  paid).
+- **Null and zero stayed different; the callers moved to `> 0`.** Null means the wallet never touched
+  the row, 0 means money moved both ways and settled back to nothing. Collapsing them in the helper
+  would lose a fact no caller can recover. But 0 is not a collection, so all FOUR probe sites now
+  test `collected !== null && collected > 0` -- including `sweep-entity-traces`, which never refunds
+  but settles rows its two twins do.
+- **Both refund sites pass `p_trace_history_id`.** The Stripe webhook was deliberately left alone:
+  its credits are genuine top-ups belonging to no row.
+- **No backfill, on purpose.** Pre-migration credits carry a NULL `trace_history_id` and can never be
+  back-linked. The 743 rows carrying `ai_research_charge > 0` are all settled and the fee is retired,
+  so this is forward-correctness only. Compensating for unlinked credits would mean guessing which
+  credit belongs to which row, and that is a guess about whether to charge a customer.
+- **`settleBulkJob`'s delivery statement gained `.eq('status','processing')`,** matching its two
+  siblings. A concurrent settle of the same Tracerfy job could otherwise succeed a row between the id
+  read and this write, and the statement would stamp `no_match` over real contacts.
+- **The fixture that hid the defect was production-shaped.** It set `ai_research_charge: 0.15` against
+  an EMPTY ledger -- a fee with no debit behind it, which nothing can produce. All three harnesses now
+  write the ledger from the wallet RPCs, and only when the call carries `p_trace_history_id`, so the
+  refund's new argument is load-bearing in the tests rather than cosmetic.
+- **The charge-receipt fence had a hole and it is closed.** `isFolded` matched any identifier ENDING
+  in `billing`/`Billing` and never checked what it was bound to. Proven: rename a local to `billing`,
+  delete its exemption, and the old fence passes 8/8 while the file clobbers receipts. Bindings are
+  now derived from the file's own assignments, PER COLUMN -- one identifier can hold a folded `tier`
+  beside a raw ledger `charge`, and a fence that cannot tell them apart either retires a live
+  exemption or demands a bogus one.
+- **The fence was extended to `tier`.** Measured first: every `tier` write in a `trace_history` update
+  is already folded or guarded, so the extension needs no exemption list. The tier tautology had been
+  caught by reviewers at three separate sites precisely because flattening a folded `tier` killed no
+  test anywhere.
+- **16 mutations run, 16 killed, 0 survivors,** with no anchor failures and no drop in the total test
+  count. A 0-red was found DURING verification -- `settleBulkJob`'s Tracerfy probe survived when
+  mutated on its own -- and is now covered.
+- Documented, not changed: `total_charge` is the LIFETIME receipt for a job's addresses rather than
+  that job's cost (one job can report 0.15 then 0.40), and the `source` upsert overwrites, so an MCP
+  address resubmitted from the dashboard flips to `web` and leaves `mcp_spend_today`.
+
+Gates: `npx vitest run` **1000 passing / 61 files / 0 failing** (from 982) · `npx tsc --noEmit` **0** ·
+`npx eslint app lib components` **47, unchanged** · `npx next build` **compiled**. Nothing committed.
+
+---
+
 ## 2026-09-17
 
 ### Full Property Trace, phase 5a fix pass: four mutations that produced zero red
@@ -1074,3 +1131,72 @@ page and into its own render-tested component.
 **Verification.** 844 tests / 55 files / 0 failing (up from 772 / 53). `tsc --noEmit` clean. eslint
 47 problems, unchanged. `npm run build` compiles. Twenty mutations applied one at a time with a full
 suite between each, all twenty red; the table is in `tasks/todo.md`.
+
+## 2026-09-17 — Phase 5b: the four PHASE 5 LIABILITY files. No feature, nothing visible
+
+- **Seven writes that erased receipts now fold or exclude.** `foldBillingWrite` where the row is in
+  hand (`settleBulkJob:257,308`, `bulk/status:288`, `sweep-entity:467,495`, `sweep-business:201`);
+  the two blanket multi-row updates that read no row at all (`settleBulkJob:333`,
+  `bulk/status:302`) stop writing `charge`/`tier` entirely and are narrowed by `excludeBilledRows`.
+  Both arms are the pattern `sweep-stale-traces:332` already held, not a second one.
+- **`sweep-business-traces` stopped billing the rows it must not touch.** Its upgrade guard was
+  `!is_successful`, which is the exact shape of a billed tier 2 row, so it replaced a $0.25 receipt
+  with the $0.15 tier 1 rate and downgraded the tier without ever going loud. The guard is now
+  `isCacheHitRow`, which is strictly narrower and still admits the 1,301 historical rows the arm
+  exists for.
+- **`tier1RateFor` takes `source` in both crons.** `sweep-business-traces` priced every row
+  grant-aware, so a gateway-grant holder settling a v1 job paid $0.15 for the entity row and $0.25
+  for its person siblings. Same job, same work, two prices.
+- **`app/api/trace/bulk/route.ts` tags its job and every row `source: 'web'`.** It settles
+  grant-aware while writing no tag, and an untagged row reads as the raw Track B derivation. The tag
+  values and the Track A predicate now live in `lib/suite/pricing.ts` so writer and readers cannot
+  drift.
+- **Two of the four `ALLOWED_RAW_WRITES` exemptions are gone**, and the two that remain earn it on a
+  new ground: they write an amount READ BACK OUT OF THE LEDGER, where folding would double-count one
+  debit. "Tier 1 only" is no longer an acceptable reason for an entry.
+
+**Verification.** 955 tests / 59 files / 0 failing (up from 933 / 58). 21 characterization tests
+written FIRST and green against unfixed code; 13 went red on the fix, plus the stale-exemption fence
+as the 14th. `tsc --noEmit` clean. eslint 47 problems, unchanged. `npm run build` compiles. Fifteen
+mutations applied one at a time with a full suite between each, all fifteen red, zero survivors; the
+table is in `tasks/todo.md`. The L-009 flag was probed directly rather than assumed: with the flag
+line removed the rate mutation SURVIVES, which is what makes setting it load-bearing.
+
+## 2026-09-17 — Phase 5b corrections: the phase had introduced a double-billing defect
+
+Adversarial review found that phase 5b, as first written, created a critical defect. Corrected before
+any commit. Root cause of both major findings: **status is not a receipt.** `excludeBilledRows`
+protects `charge` and `tier`; putting `status`, `is_successful` and `trace_result` behind it is how
+both defects happened.
+
+- **A billed tier 2 row with no vendor result was stranded in `processing`** by the guarded blanket
+  update, inside a job the route then marked `completed` and never polled again. An hour later
+  `sweep-stale-traces` stage 1 claimed it (no `trace_job_id` filter) and settled it against whichever
+  OTHER record of the SHARED Tracerfy batch carried a phone: a second $0.25 on one address, a
+  stranger's phone and email on the customer's parcel, and both pushed to their CRM. Every blanket
+  update is now TWO statements — money behind the guard, delivery in front of it — in all THREE
+  places, including `sweep-stale-traces` itself, the reference implementation, which had the same
+  flaw. Stage 1 also gained `.is('trace_job_id', null)`.
+- **`sweep-business-traces` declined to deliver as well as to bill.** Two gates now: `shouldDeliver`
+  (status, trace_result, counts, `records_matched`) and the strictly narrower `shouldBill` (refund,
+  deduct, charge/tier). Without it the CSV showed blank contacts for a row v1 and the MCP reported
+  as having them.
+- **Two mutations had survived, both the select list.** Adopted the phase 4b PostgREST
+  column-projection stubs; `bulk/status` narrowing to `.select('id')` went 0 → 2 red, and
+  `sweep-business-traces` dropping `charge` went 0 → 3 red.
+- **`collectedChargeFor` now SUMS every debit** instead of `.limit(1)` returning an arbitrary one,
+  and `sweep-business-traces` gained the ledger probe its twins had. Consequence: that file writes
+  the ledger total RAW (folding a ledger answer double-counts) and is back on `ALLOWED_RAW_WRITES`
+  on the ledger ground, reversing part of the earlier entry.
+- **The tier exemption was closed.** Three ledger sites wrote `tier` flat, silently downgrading a
+  tier 2 receipt; they now take `tier` from `foldBillingWrite`. Two incoherent test fixtures (a row
+  showing $0.25 against a single $0.05 ledger debit) were made consistent.
+- `chargeReceipt.test.ts` gained a third safe form (guarded), a canary for it, and a new fence that
+  keeps DELIVERY columns out of any `excludeBilledRows` guard — that fence is what found the defect
+  in `sweep-stale-traces`.
+
+**Verification.** 982 tests / 61 files / 0 failing (pre-review 955/59, baseline 933/58). `tsc
+--noEmit` clean. eslint 47 problems, unchanged. `npm run build` compiles. 26 mutations, all applied
+under an exact-anchor check with the total test count watched for a drop, all 26 red — but ONE
+survived first at 0 red (a flat tier on settleBulkJob's FastAppend branch, a tautology because every
+fixture there had no tier at all); a test now covers it. Table in `tasks/todo.md`.

@@ -18,7 +18,7 @@ import { getJobStatus, parseTracerfyResult, type TracerfyErrorReason } from '@/l
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
-import { TRACE_TIER } from '@/lib/trace/billedRows';
+import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { PRICING } from '@/lib/constants';
 import type { TraceResult, AIResearchResult } from '@/types';
 
@@ -142,9 +142,13 @@ export async function settleBulkJob(
       // is charged a second time for the same answer. Two files, one row, two
       // debits, and no unusual failure required. The ledger is the check because
       // it is written in the same transaction as the money.
+      //
+      // `> 0`, NOT `!== null`. The probe answers the NET of this row's debits
+      // and credits, so a row whose debits were all refunded comes back as 0 --
+      // money collected and handed straight back -- and 0 is not a collection.
       const alreadyCollected = await collectedChargeFor(admin, row.id);
       const charge =
-        alreadyCollected !== null
+        alreadyCollected !== null && alreadyCollected > 0
           ? alreadyCollected
           : await deductOrZero(admin, {
               p_user_id: userId,
@@ -153,6 +157,10 @@ export async function settleBulkJob(
               p_description: 'Bulk skip trace - entity row (post-research)',
             });
 
+      // `charge` is the LEDGER's answer and is written as-is: folding it would
+      // add money already recorded to money already on the row. `tier` is NOT
+      // the ledger's to answer, and a flat 1 silently downgrades a tier 2
+      // receipt, so it comes from the fold, which never downgrades.
       await admin
         .from('trace_history')
         .update({
@@ -163,7 +171,7 @@ export async function settleBulkJob(
           is_successful: true,
           cost: PRICING.COST_PER_RECORD,
           charge,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          tier: foldBillingWrite(row, { charge, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE }).tier,
         })
         .eq('id', row.id);
 
@@ -191,6 +199,15 @@ export async function settleBulkJob(
           p_amount: priorResearchCharge,
           p_description:
             'Refund: AI research folded into the successful trace charge',
+          // THE REFUND NAMES THE ROW IT REFUNDS, and the probe below is the
+          // reason. It sums wallet_transactions for this row; an unlinked credit
+          // is invisible to it, so the money just handed back would still read
+          // as collected, the deduct would be skipped, and the customer would
+          // get the contacts free while `charge` reported an amount that had
+          // been returned. Migration 20260917 added this parameter for this
+          // call. The Stripe webhook's credits are genuine top-ups belonging to
+          // no row and must keep passing four arguments.
+          p_trace_history_id: row.id,
         });
       }
       // Same guard as the Tracerfy branch, and it has to be here too: the cron
@@ -201,9 +218,14 @@ export async function settleBulkJob(
       // the row still carrying ai_research_charge > 0, which zeroes itself once
       // it runs, and the cron never refunds. A row the cron charged can still be
       // owed that refund.
+      //
+      // AND THE REFUND IS SUBTRACTED FROM THIS ANSWER, which is the point of
+      // linking it. `> 0`, not `!== null`: a row whose only debit was the
+      // research fee this arm just handed back nets to 0, and 0 is not a
+      // collection -- skipping the deduct on it gives the contacts away.
       const alreadyCollected = await collectedChargeFor(admin, row.id);
       const charge =
-        alreadyCollected !== null
+        alreadyCollected !== null && alreadyCollected > 0
           ? alreadyCollected
           : await deductOrZero(admin, {
               p_user_id: userId,
@@ -221,9 +243,11 @@ export async function settleBulkJob(
           email_count: fastAppendCredit.email_count,
           is_successful: true,
           cost: PRICING.COST_PER_RECORD,
+          // Ledger amount raw, tier from the fold. Same split as the branch
+          // above: the ledger knows what moved, it does not know the model.
           charge,
           ai_research_charge: 0,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          tier: foldBillingWrite(row, { charge, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE }).tier,
         })
         .eq('id', row.id);
 
@@ -245,6 +269,19 @@ export async function settleBulkJob(
       // really was done. If FastAppend lands later via sweep-business-traces,
       // that cron hands it back and applies the tier 1 per-success charge
       // instead.
+      //
+      // FREE MEANS "COLLECT NOTHING FURTHER", NOT "THIS ROW WAS ALWAYS FREE".
+      // This row is REUSED, never re-inserted (UNIQUE(user_id, address_hash)),
+      // so it can already carry a tier 2 receipt: tier 2 bills per record
+      // SUBMITTED, which makes `is_successful = false, charge > 0` a PAID row.
+      // A flat `charge: 0, tier: 1` over it erased the receipt while
+      // wallet_transactions still referenced it. Folding a collection of 0
+      // changes nothing on a row that never paid and preserves one that did.
+      const billing = foldBillingWrite(row, {
+        charge: 0,
+        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      });
+
       await admin
         .from('trace_history')
         .update({
@@ -254,8 +291,8 @@ export async function settleBulkJob(
           email_count: 0,
           is_successful: false,
           cost: PRICING.COST_PER_RECORD,
-          charge: 0,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: billing.charge,
+          tier: billing.tier,
         })
         .eq('id', row.id);
 
@@ -264,7 +301,7 @@ export async function settleBulkJob(
       row.phone_count = 0;
       row.email_count = 0;
       row.is_successful = false;
-      row.charge = 0;
+      row.charge = billing.charge;
     }
   } else {
     // Shared bulk Tracerfy job — match results back to person rows by
@@ -296,6 +333,16 @@ export async function settleBulkJob(
             })
           : 0;
 
+      // ACCUMULATE, never replace. Two settles against one reused row are two
+      // real debits in wallet_transactions, and writing only the second drops
+      // the first out of SUM(trace_history.charge) -- the number both status
+      // routes and the MCP report as total_charge. On a miss `charge` is 0, and
+      // folding 0 leaves an existing receipt exactly where it is.
+      const billing = foldBillingWrite(match, {
+        charge,
+        tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      });
+
       await admin
         .from('trace_history')
         .update({
@@ -305,8 +352,8 @@ export async function settleBulkJob(
           email_count: parsed.emails?.length || 0,
           is_successful: isSuccessful,
           cost: PRICING.COST_PER_RECORD,
-          charge,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: billing.charge,
+          tier: billing.tier,
         })
         .eq('id', match.id);
 
@@ -316,31 +363,80 @@ export async function settleBulkJob(
       match.phone_count = parsed.phones?.length || 0;
       match.email_count = parsed.emails?.length || 0;
       match.is_successful = isSuccessful;
-      match.charge = charge;
+      match.charge = billing.charge;
     }
 
     // Mark any remaining still-processing person rows in this shared
     // bucket as no_match — Tracerfy returned its final set and these rows
     // got no result.
+    //
+    // TWO STATEMENTS, AND THE SPLIT IS THE WHOLE POINT. **STATUS IS NOT A
+    // RECEIPT.** excludeBilledRows exists to protect `charge` and `tier`.
+    // `status` and `is_successful` are DELIVERY facts, and a paid row needs
+    // them MORE than an unpaid one, not less.
+    //
+    // Putting them behind the same guard strands the row: a billed tier 2 row
+    // that got no vendor result fails the guard, keeps `status = 'processing'`,
+    // and both callers then finalize the job around it -- after which nothing
+    // polls it again. An hour later sweep-stale-traces stage 1 claims it
+    // (status + created_at) and settles it against
+    // `nonPaddingResults.find(r => r.primary_phone || ...)`, which for a SHARED
+    // bulk Tracerfy job is whichever OTHER property in the batch came back.
+    // Second charge on the same address, a stranger's phone and email written
+    // onto the customer's parcel, and both pushed to their CRM.
     const stillProcessing = bucketRows.filter((r) => r.status === 'processing');
     if (stillProcessing.length > 0) {
+      const ids = stillProcessing.map((r) => r.id);
+
+      // 1. THE MONEY, guarded. A blanket update cannot carry a per-row folded
+      //    amount, so instead it may only ever touch rows that have collected
+      //    nothing: excludeBilledRows makes that true in the database rather
+      //    than here, so there is no read-then-write race. On those rows a flat
+      //    `charge: 0` is a no-op that normalises NULL, and the tier stamp
+      //    records the billing model that produced them.
+      await excludeBilledRows(
+        admin
+          .from('trace_history')
+          .update({
+            charge: 0,
+            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          })
+          .in('id', ids)
+      );
+
+      // 2. THE DELIVERY FACTS, for every row. Unguarded on purpose: a row that
+      //    was paid for still has to be told it got no result, or it is left
+      //    for a cron that will sell it someone else's contacts.
+      //
+      //    `.eq('status', 'processing')` MATCHES ITS TWO SIBLINGS in
+      //    bulk/status and sweep-stale-traces, and it is not decoration here
+      //    either. `ids` was read at the top of this function and the statement
+      //    runs some vendor round-trips later. Within ONE request a row that
+      //    succeeded cannot be in the list -- the per-result loop only matches
+      //    rows still 'processing' and updates the local copy -- but nothing
+      //    stops a CONCURRENT settle of the same Tracerfy job from succeeding a
+      //    row between the read and this write. Without the filter this
+      //    statement then stamps `no_match, is_successful: false` over a row
+      //    that has real contacts on it, and the guarded money statement above
+      //    has already declined to touch it. The filter makes the statement a
+      //    no-op on any row that moved on, in the database rather than here.
       await admin
         .from('trace_history')
         .update({
           status: 'no_match',
           is_successful: false,
           cost: PRICING.COST_PER_RECORD,
-          charge: 0,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
         })
-        .in(
-          'id',
-          stillProcessing.map((r) => r.id)
-        );
+        .in('id', ids)
+        .eq('status', 'processing');
+
       for (const r of stillProcessing) {
         r.status = 'no_match';
         r.is_successful = false;
-        r.charge = 0;
+        // `charge` is deliberately left alone. The v1 status route and the MCP
+        // bulk_status both SUM it off these in-memory rows to report
+        // total_charge, and zeroing it here would under-report a receipt the
+        // guarded statement above deliberately did not touch.
       }
     }
   }

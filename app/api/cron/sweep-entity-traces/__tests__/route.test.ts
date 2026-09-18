@@ -48,9 +48,15 @@ const H = vi.hoisted(() => ({
   }>,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
   queuedRows: [] as Array<Record<string, unknown>>,
-  // wallet_transactions debits already booked against the row being processed.
+  // wallet_transactions rows already booked against the row being processed.
   // A non-empty array is the state a row is in after a previous run deducted
   // and then died before it could write the result back.
+  //
+  // `type` IS LOAD-BEARING AND EVERY ENTRY MUST CARRY IT. collectedChargeFor
+  // nets debits against credits, so a row with no `type` reads as money handed
+  // BACK and flips the sign of the probe's answer. PostgREST would never omit a
+  // selected column; a stub that does is telling the route a lie no database
+  // can tell it.
   priorDebits: [] as Array<Record<string, unknown>>,
   claimOk: true,
   profile: {
@@ -511,7 +517,7 @@ describe("a row that has already been charged", () => {
     // Deliberately an amount NO current rate can produce. If the row comes out
     // carrying 0.05 it can only have read the ledger; if it comes out carrying a
     // plan rate it re-derived the price, which is the bug wearing a disguise.
-    H.priorDebits = [{ amount: 0.05 }];
+    H.priorDebits = [{ amount: 0.05, type: "debit" }];
   });
 
   it("cannot be charged a second time by this cron", async () => {
@@ -537,16 +543,18 @@ describe("a row that has already been charged", () => {
   it("asks the ledger about THIS row, not the user's debits in general", async () => {
     // Keyed on trace_history_id. Keyed on user_id it would refuse to charge any
     // second row of a bulk job, which is the opposite failure and just as bad.
-    H.priorDebits = [{ amount: 0.05 }];
+    H.priorDebits = [{ amount: 0.05, type: "debit" }];
     await run();
     const probe = H.ops.find((o) => o.table === "wallet_transactions" && o.op === "select");
     expect(probe).toBeDefined();
     expect(
       probe!.filters.some((f) => f[0] === "eq" && f[1] === "trace_history_id" && f[2] === "row-1")
     ).toBe(true);
-    expect(probe!.filters.some((f) => f[0] === "eq" && f[1] === "type" && f[2] === "debit")).toBe(
-      true
-    );
+    // ...and NOT narrowed to debits. The probe used to end `.eq('type','debit')`
+    // and that filter is what hid a refund from it: a credit the query never
+    // returns cannot be subtracted. `type` is selected and classified in JS now.
+    // MUTATION: put the filter back and this goes red.
+    expect(probe!.filters.some((f) => f[0] === "eq" && f[1] === "type")).toBe(false);
   });
 
   it("still charges a row the ledger has never seen", async () => {
@@ -556,6 +564,29 @@ describe("a row that has already been charged", () => {
     await run();
     expect(deducts()).toHaveLength(1);
     expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
+
+  it("still charges a row whose every debit was handed back", async () => {
+    // A REFUND IS NOT A COLLECTION. This file never refunds, but its two twins
+    // do -- sweep-business-traces and lib/trace/settleBulkJob both hand back a
+    // historical research fee -- and they refund rows THIS cron also settles.
+    // So a row can reach here having collected a fee and had it returned, and
+    // the ledger nets to zero. Zero is not money in our pocket.
+    //
+    // MUTATION: sum the debits alone in collectedChargeFor, or test `!== null`
+    // instead of `> 0` at the call site, and this goes red at zero deducts --
+    // the row is delivered free and recorded as having paid $0.05.
+    H.priorDebits = [
+      { amount: 0.05, type: "debit" },
+      { amount: 0.05, type: "credit" },
+    ];
+    await run();
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    expect(finalWrite()).toMatchObject({
+      charge: PRICING.CHARGE_PER_SUCCESS_WALLET,
+      is_successful: true,
+    });
   });
 
   it("does not probe the ledger on a row it is not about to charge", async () => {
@@ -610,6 +641,95 @@ describe("the vendor named a principal but gave no contacts", () => {
     expect(deducts()).toHaveLength(0);
     expect(body.noMatch).toBe(1);
     expect(finalWrite()).toMatchObject({ status: "no_match", charge: 0, tier: 1 });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * RECEIPTS SURVIVE THIS SWEEP.
+ *
+ * Every row this cron settles is a REUSED row: UNIQUE(user_id, address_hash)
+ * guarantees one per (user, address), and wallet_transactions references it
+ * with ON DELETE NO ACTION. Under bulk tier 2 a billed miss looks like
+ * `tier = 2, charge > 0, is_successful = false`, and both free-miss arms below
+ * target precisely that shape.
+ *
+ * Writing a flat `charge: 0, tier: 1` over it does two things at once: the row
+ * reads unbilled to excludeBilledRows, so the next submit's delete raises 23503
+ * and the address 500s forever; and the tier downgrade kills isCacheHitRow's
+ * third arm, so the customer re-buys the same absence.
+ * ------------------------------------------------------------------ */
+describe("a row that already carries a tier 2 receipt", () => {
+  beforeEach(() => {
+    H.queuedRows = [{ ...ROW, charge: 0.25, tier: 2 }];
+  });
+
+  it("site 467 (FastAppend named nobody): keeps the charge and the tier", async () => {
+    // A tier 1 miss is free, and free means "collect nothing further", never
+    // "declare the row was always free".
+    H.businessTrace = { success: true, hit: false, contacts: null };
+    await run();
+
+    expect(deducts()).toHaveLength(0);
+    // MUTATION: write `charge: 0, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE` flat
+    // instead of the folded values and this goes red on both lines.
+    expect(finalWrite().charge).toBe(0.25);
+    expect(finalWrite().tier).toBe(2);
+  });
+
+  it("site 495 (Tracerfy submit failed): keeps the charge and the tier", async () => {
+    H.businessTrace = {
+      success: true,
+      hit: true,
+      contacts: {
+        ownerName: "Testowner Placeholder",
+        phones: [],
+        emails: [],
+        mailingAddress: null,
+      },
+    };
+    H.submit = { success: false, jobId: null, error: "Tracerfy 503" };
+    await run();
+
+    expect(deducts()).toHaveLength(0);
+    // MUTATION: same as site 467 -- unfold either value and this goes red.
+    expect(finalWrite().charge).toBe(0.25);
+    expect(finalWrite().tier).toBe(2);
+  });
+
+  /**
+   * Site 438 is the SAFE one and it stays raw on purpose. It resolves the
+   * amount from the LEDGER (collectedChargeFor) before writing, so folding on
+   * top would add the ledger amount to a row that may already carry it and
+   * double-count one debit. It is also the arm that ends `is_successful = true`,
+   * which is isCacheHitRow's FIRST arm, so the tier stamp costs nothing there.
+   * This is the exemption ALLOWED_RAW_WRITES keeps for this file.
+   */
+  it("site 438 writes the ledger TOTAL raw, and still never downgrades the tier", async () => {
+    H.businessTrace = {
+      success: true,
+      hit: true,
+      contacts: {
+        ownerName: "Testowner Placeholder",
+        phones: [{ number: "5550000101", type: "mobile" }],
+        emails: [],
+        mailingAddress: null,
+      },
+    };
+    // A CONSISTENT fixture: the row is a billed tier 2 miss ($0.25 collected
+    // per record SUBMITTED) and the ledger holds that debit PLUS a $0.25 tier 1
+    // contact charge a previous attempt booked before it died. Both are real,
+    // and the row has collected $0.50. A fixture whose row and ledger disagree
+    // freezes behaviour rather than proving it safe.
+    H.priorDebits = [{ amount: 0.25, type: "debit" }, { amount: 0.25, type: "debit" }];
+    await run();
+
+    // The ledger TOTAL, written as-is. Folding would give 0.25 + 0.50 = 0.75
+    // and invent money -- which is why this site keeps its exemption.
+    expect(finalWrite().charge).toBe(0.5);
+    // ...but `tier` is not the ledger's to answer. A flat 1 here downgrades a
+    // tier 2 receipt, and the exemption was argued for `charge` alone.
+    expect(finalWrite().tier).toBe(2);
+    expect(finalWrite().is_successful).toBe(true);
   });
 });
 

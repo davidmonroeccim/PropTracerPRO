@@ -5,7 +5,7 @@ import { normalizeAddress, createAddressHash } from '@/lib/utils/address-normali
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { submitBulkTrace } from '@/lib/tracerfy/client';
 import { BLANK_OWNER_SKIP_REASON, BLANK_OWNER_SKIP_STATUS } from '@/lib/trace/blankOwnerSkip';
-import { chargePerTrace } from '@/lib/suite/pricing';
+import { chargePerTrace, TRACE_SOURCE } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
 
 const MAX_RECORDS = 10000;
@@ -125,6 +125,15 @@ export async function POST(request: Request) {
         records_submitted: traceableRecords.length,
         records_matched: 0,
         status: 'processing',
+        // THE SOURCE TAG IS A PRICE DECISION, NOT A LABEL. This route settles
+        // through app/api/trace/bulk/status, which prices with the GRANT-AWARE
+        // chargePerTrace() -- Track A. The two cron sweeps pick their
+        // derivation from this tag and read an UNTAGGED row as Track B, the raw
+        // and dearer one, so an entity row from this job would be billed $0.25
+        // while its person siblings settled at $0.15 in the same batch. That is
+        // the owner-type price split L-005 rules out. Tagged the same way
+        // lib/suite/mcp-tools.ts tags its own job and rows.
+        source: TRACE_SOURCE.WEB,
       })
       .select()
       .single();
@@ -153,6 +162,9 @@ export async function POST(request: Request) {
         state: record.state.toUpperCase(),
         zip: (record.zip || '').substring(0, 5),
         input_owner_name: record.owner_name || null,
+        // Same tag as the job above, and on EVERY row including the skipped
+        // ones: the crons read the row's tag, not the job's.
+        source: TRACE_SOURCE.WEB,
       };
     };
 

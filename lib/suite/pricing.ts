@@ -3,6 +3,35 @@ import { PRICE, type PricePlan } from "@/lib/routing/ownerRoute";
 import { effectiveIsPro, type EntitlementProfile } from "./entitlements";
 
 /**
+ * What goes in `trace_jobs.source` / `trace_history.source`, and what it MEANS.
+ *
+ * The tag is not a label, it is a PRICE DECISION. PTP has two rate derivations
+ * and the split is deliberate: Track A (session UI and MCP) is GRANT-AWARE and
+ * prices with chargePerTrace() below; Track B (the /api/v1/* API-key surface) is
+ * RAW and prices with getChargePerTrace(). The two cron sweeps settle rows whose
+ * siblings were settled by a status route, so if a cron picks the wrong
+ * derivation, ONE batch bills two prices for the same work, split by owner type
+ * -- the exact thing L-005 rules out, since owner type selects the vendor and
+ * never the price.
+ *
+ * A row written before this tag existed, and every v1 row, carries NULL. That
+ * reads as Track B, which is also the dearer derivation, so the fallback errs in
+ * the safe direction: an entity row is never cheaper than the person row sitting
+ * beside it in the same job.
+ */
+export const TRACE_SOURCE = {
+  /** Suite MCP submissions (lib/suite/mcp-tools.ts). */
+  MCP: "mcp",
+  /** The signed-in dashboard (app/api/trace/**). */
+  WEB: "web",
+} as const;
+
+/** True when this row's source tag says it was submitted on a Track A surface. */
+export function isTrackASource(source: string | null | undefined): boolean {
+  return source === TRACE_SOURCE.MCP || source === TRACE_SOURCE.WEB;
+}
+
+/**
  * Per-successful-trace charge for a SESSION-side or cron flow, grant-aware.
  * Track A only: the /api/v1/* API-key surface keeps the raw getChargePerTrace (that is Track B).
  * A grant can only LOWER the rate (CHARGE_PER_SUCCESS_WALLET -> CHARGE_PER_SUCCESS); it can never

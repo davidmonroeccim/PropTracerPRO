@@ -38,6 +38,18 @@ export async function GET(request: Request) {
       // that was billed tier 2 must not be rewritten as an unbilled tier 1.
       .select('id, user_id, tracerfy_job_id, normalized_address, city, state, zip, charge, tier')
       .eq('status', 'processing')
+      // SINGLE TRACES ONLY, AND THIS IS THE LINE THAT MAKES THAT TRUE. Without
+      // it the heading above was a comment rather than a filter: a stale BULK
+      // row matched status + created_at just as well, and this loop finalizes a
+      // row against `nonPaddingResults.find(r => r.primary_phone || ...)`. For a
+      // single trace that is the answer. For a bulk row the Tracerfy job is
+      // SHARED across the whole batch, so it is whichever OTHER property came
+      // back carrying a phone -- billing the customer a second time and writing
+      // a stranger's contacts onto their parcel, which then go to their CRM.
+      //
+      // A bulk row is settled by its own job's status route and by
+      // lib/trace/settleBulkJob. It is never this sweep's to claim.
+      .is('trace_job_id', null)
       .lt('created_at', cutoff.toISOString())
       .limit(50);
 
@@ -318,29 +330,48 @@ export async function GET(request: Request) {
 
         // Mark remaining processing rows as no_match.
         //
-        // NOTE THE GUARD, AND DO NOT REMOVE IT. This is a BLANKET update over
-        // every row still processing on this job, and it used to write
-        // `charge: 0, tier: 1` flat. On a row that had been billed, that erases
-        // the receipt wholesale while the wallet_transactions row still points
-        // at it. Bulk rows are all tier 1 today so nothing is known to hit it,
-        // but bulk tier 2 lands in phase 5 and this would be waiting for it.
+        // TWO STATEMENTS, AND THE SPLIT IS THE WHOLE POINT. **STATUS IS NOT A
+        // RECEIPT.** excludeBilledRows exists to protect `charge` and `tier`.
+        // `status` and `is_successful` are DELIVERY facts, and a paid row needs
+        // them MORE than an unpaid one, not less.
         //
-        // `charge` and `tier` are no longer written here at all. A row that was
-        // never charged already reads as unbilled, so writing a 0 over it buys
-        // nothing; a row that WAS charged must keep what it collected.
-        // excludeBilledRows is the same guard every delete site uses.
+        // This blanket used to write `charge: 0, tier: 1` flat, which erased a
+        // receipt wholesale while the wallet_transactions row still pointed at
+        // it. Guarding it fixed that and introduced the opposite bug: a billed
+        // tier 2 row failed the guard, was skipped entirely, and kept
+        // `status = 'processing'` inside a job marked completed on the very next
+        // statement. Nothing re-sweeps it -- stage 2 only claims jobs still
+        // 'processing', and stage 1 is restricted to rows with no parent job --
+        // so it is stranded and every surface reports it as still running.
+
+        // 1. THE MONEY, guarded. A blanket update reads no row, so it cannot
+        //    fold; instead the guard makes it impossible for the statement to
+        //    match a row that collected anything, which is stronger. On the rows
+        //    it can reach, `charge: 0` normalises NULL and the tier stamp
+        //    records the billing model. Runs FIRST, while they are 'processing'.
         await excludeBilledRows(
           adminClient
             .from('trace_history')
             .update({
-              status: 'no_match',
-              is_successful: false,
-              cost: PRICING.COST_PER_RECORD,
+              charge: 0,
+              tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
             })
             .eq('user_id', job.user_id)
             .eq('tracerfy_job_id', job.tracerfy_job_id)
             .eq('status', 'processing')
         );
+
+        // 2. THE DELIVERY FACTS, for every row. Unguarded on purpose.
+        await adminClient
+          .from('trace_history')
+          .update({
+            status: 'no_match',
+            is_successful: false,
+            cost: PRICING.COST_PER_RECORD,
+          })
+          .eq('user_id', job.user_id)
+          .eq('tracerfy_job_id', job.tracerfy_job_id)
+          .eq('status', 'processing');
 
         // Mark job as completed
         await adminClient

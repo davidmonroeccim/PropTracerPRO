@@ -80,6 +80,49 @@ PTP convention is `uuid` PKs, so this is rarely needed. If a column uses `SERIAL
 GRANT USAGE, SELECT ON SEQUENCE public.your_table_id_seq TO authenticated, service_role;
 ```
 
+### ⚠ `REVOKE ... FROM PUBLIC` DOES NOT SECURE A NEW FUNCTION ON SUPABASE
+
+Learned the hard way on 2026-09-17 while adding an argument to `credit_wallet_balance`. The
+migration revoked from `PUBLIC` and granted to `service_role`, exactly as this template says. The
+function came back reading:
+
+```
+postgres=X/postgres | anon=X/postgres | authenticated=X/postgres | service_role=X/postgres
+```
+
+A `SECURITY DEFINER` function that ADDS WALLET BALANCE, taking `p_user_id` and `p_amount`, callable
+by `anon` — and the anon key ships in the browser bundle. Caught by reading the ACL back, revoked
+about two minutes later, audited clean (0 transactions in the window, ledger identical).
+
+**Why:** Supabase ships `ALTER DEFAULT PRIVILEGES` that grant `EXECUTE` on new `public` functions to
+`anon` and `authenticated`. Those land as **explicit grants to named roles** at CREATE time, and
+`REVOKE ... FROM PUBLIC` does not touch an explicit grant to a named role. See
+`supabase/migrations/20260717_repair_default_privileges.sql`, which exists because of the same
+machinery.
+
+**So every new function needs all three, by name:**
+
+```sql
+REVOKE ALL ON FUNCTION public.your_fn(...) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.your_fn(...) FROM anon;           -- REQUIRED, not belt-and-braces
+REVOKE ALL ON FUNCTION public.your_fn(...) FROM authenticated;  -- REQUIRED
+GRANT EXECUTE ON FUNCTION public.your_fn(...) TO service_role;
+-- then GRANT back to authenticated ONLY if the browser genuinely must call it.
+```
+
+**And always read the ACL back.** A migration reporting success tells you nothing about who can call
+the result:
+
+```sql
+select p.oid::regprocedure::text,
+       coalesce(array_to_string(p.proacl,' | '),'PUBLIC-DEFAULT') as acl
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.proname = 'your_fn';
+```
+
+Remember a **new argument signature is a new function** and inherits nothing, so this applies to
+adding a parameter to an existing RPC, not just to a brand-new one.
+
 ### Notes
 
 - **Existing PTP objects** (tables, functions, sequences created before 2026-10-30) keep their grants — no changes needed.

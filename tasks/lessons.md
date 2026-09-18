@@ -298,3 +298,37 @@ test in the suite can tell those apart unless it sets the flag itself.
 
 Every test asserting those two paths differ MUST set the flag inside the test. This is the third
 time this one flag has produced a test asserting a tautology. See L-009, earned twice in phase 4.
+
+---
+
+## L-012: A mutation harness that keys temp files on `basename` will eat your work (2026-09-18)
+
+**What happened.** Verifying phase 5b I mutated three files at once and backed each up to
+`/tmp/$(basename $f).bak`. Two of them were `app/api/cron/sweep-business-traces/route.ts` and
+`app/api/cron/sweep-entity-traces/route.ts`. In a Next.js app **every route file is named
+`route.ts`**, so the second backup silently overwrote the first. The restore then wrote the wrong
+file into one path and errored on the other, destroying ~440 lines of uncommitted work and leaving
+a second file still mutated.
+
+**Why it was survivable, and it was luck.** `npm run build` had run after the implementer finished,
+and Next embeds full original source in its sourcemaps. The file came back out of
+`.next/server/chunks/*.js.map` intact, 20,202 bytes, verified against known markers (2
+`p_trace_history_id`, the `alreadyCollected > 0` guard, `shouldDeliver`/`shouldBill`, 7
+`isCacheHitRow`) before writing it back. A stale build, or no build, and it was gone. **That is not
+a safety net, it is an accident.**
+
+**The rules.**
+- Never key a temp file on `basename` in this repo. Sanitise the full path
+  (`echo "$f" | tr '/' '~'`) or use `git stash`.
+- **Checksum the restore.** Store a `shasum` next to each backup and fail loudly if the restored
+  file does not match. A silent bad restore looks exactly like a good one.
+- Commit before a mutation run, or accept that the run can destroy the work it is verifying.
+
+**The second half, and it is the same failure in a different place.** In the same session two
+mutations reported clean suites that were NOT results: one `sed` never matched its anchor, and one
+edit broke a file so badly that 80 tests silently stopped loading (the total dropped from 933 to
+853 while reporting "853 passed"). **A mutation that did not apply, a file that will not load, and
+a genuinely surviving guard are indistinguishable from the pass/fail line alone.** Every mutation
+must assert its anchor matched exactly once, and every run must confirm the TOTAL test count did
+not drop. Cf. L-009: this is the same lesson as a test whose two branches are equal by default,
+moved from the test to the tool that checks the test.
