@@ -561,10 +561,11 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
  * reconcile the two. THIS limit exists because the consumer is a MODEL with a
  * context budget: a 500-row payload of 65-key records crowds out the
  * conversation it is supposed to inform, so a small default and an explicit ask
- * for more is the right shape. The v1 limit exists because of BYTES OVER THE
- * WIRE to a program that asked for them, where a small default would instead
- * break every existing caller silently. Different reasons produce different
- * numbers honestly; matching them would serve neither consumer.
+ * for more is the right shape: a context budget is the binding constraint here.
+ * The v1 limit exists because of bytes over the wire to a program that asked for
+ * them, where a small default would instead break every existing caller
+ * silently. Different reasons produce different numbers honestly; matching them
+ * would serve neither consumer.
  *
  * THE OFFSET IS NOT MIRRORED FROM ANYWHERE, and it is the part worth explaining.
  * list_traces pages with `since`, which works on a list ordered by time and open

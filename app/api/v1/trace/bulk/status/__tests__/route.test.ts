@@ -396,8 +396,16 @@ describe("the two results limits, and why they differ", () => {
     const mcp = read("lib/suite/mcp-tools.ts");
     expect(mcp).toContain("BULK_STATUS_DEFAULT_LIMIT = 25");
     expect(mcp).toContain("BULK_STATUS_MAX_LIMIT = 200");
-    // The reason has to be written down, or the difference reads as an oversight.
-    expect(mcp).toMatch(/context budget/);
-    expect(read("app/api/v1/trace/bulk/status/route.ts")).toMatch(/bytes over the wire/i);
+
+    // THE REASON HAS TO BE WRITTEN DOWN ON BOTH SIDES, or the difference reads as
+    // an oversight to whoever opens one file without the other. An earlier
+    // version of this test checked each file for its OWN reason only, which let a
+    // mutation delete v1's account of why the MCP differs while staying green:
+    // the half most likely to be "tidied up" was the half nothing guarded.
+    const v1 = read("app/api/v1/trace/bulk/status/route.ts");
+    for (const source of [mcp, v1]) {
+      expect(source).toMatch(/context budget/);
+      expect(source).toMatch(/bytes over the wire/i);
+    }
   });
 });
