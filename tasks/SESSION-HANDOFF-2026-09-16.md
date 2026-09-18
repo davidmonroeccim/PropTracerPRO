@@ -21,10 +21,46 @@
 > | 4b. Dossier reaches the CRM | **DONE, PUSHED** |
 > | 5a. Export carries everything purchased | **DONE, PUSHED** (`32c29f3`) |
 > | 5b. Status is not a receipt; refunds link | **DONE, PUSHED** (`a3752e2`) |
-> | 5c. Bulk tier 2 | **NOT STARTED.** Plan in `tasks/todo.md`, "PLAN: Phase 5c (2026-09-18)" |
+> | 5c. Bulk tier 2 | **DONE, PUSHED** (`4f694e8`). Full Property Trace is complete end to end. |
 >
-> **Amended 2026-09-18.** `main` at `a3752e2`, in sync with origin. Baselines: **1000 passing / 61
-> files / 0 failing**, `tsc` 0, eslint 47, build compiles.
+> **AMENDED 2026-09-18, END OF DAY. PHASE 5c IS COMPLETE AND PUSHED. `main` = `4f694e8`, in sync
+> with origin, 23 commits.** Baselines: **1306 passing / 67 files / 0 failing**, `tsc` 0,
+> eslint 47, build compiles. Final whole-phase review verdict: SHIP.
+>
+> **WHAT WENT LIVE, and it is a commercial change, not just a feature.** A bulk row arriving with NO
+> owner name used to be skipped and free. It is now enqueued, runs a Full Property Trace
+> automatically, and is billed **per record SUBMITTED**, so a miss is billed. 273 of 1,270 historical
+> bulk rows. **Existing bulk customers now pay for rows that used to be free.** The 2026-09-17 user
+> notification covers this explicitly ("we've never charged for it before and we've never explained
+> it either"); that gate was checked before push, not assumed.
+>
+> **A FOURTH MIGRATION IS APPLIED AND VERIFIED**, plus a security one:
+> `20260918_property_trace_queue.sql` (the tier 2 queue columns and an all-rungs partial index), and
+> `20260918_lock_trace_history_writes.sql`.
+>
+> **SECURITY, CLOSED 2026-09-18.** `public.trace_history` granted INSERT/UPDATE/DELETE to `anon` AND
+> `authenticated` table-wide, so any signed-in user could rewrite `charge` from the browser console.
+> It was the KNOWN, deliberately-deferred remainder of the July suite remediation; 5c-2 expired that
+> deferral by adding a column the cron claims WORK from, which made it a free-vendor-work exploit.
+> Both roles are now SELECT-only, verified with `has_table_privilege` AS ADMIN (never
+> `information_schema.role_table_grants`, which is filtered by querying role). See L-014.
+>
+> **WHAT IS OPEN, all numbered in `tasks/todo.md`, none shipping-blocking:** task 16 (the wallet
+> reserve closes back-to-back double-submits but not the sub-second window inside ONE submit; needs a
+> transactional hold, i.e. a migration), task 17 (no in-product way to re-run a failed bulk row inside
+> the 90-day dedup window, and it now covers the BILLED `no_reach` shape where the customer is out of
+> pocket), task 18 (parked cosmetics plus two money residuals judged non-blocking).
+>
+> **THE NEXT PIECE OF WORK, scoped 2026-09-18 and not started: feed `planRoute` a parcel id.** The
+> dossier takes EITHER `apn + county + state` OR `address + city + state`, and the two keys **fail
+> independently** (Napa hit on APN and missed on address; Salt Lake did the reverse). `planRoute`
+> ALREADY emits both steps and stops at the first hit. Nothing has ever populated `parcelIdLocal`.
+> **The ids come from the property-registry, NOT from the customer** — proven by the saved test set in
+> `tasks/research-scripts/run-research.ts`, whose rows are registry-shaped (`parcel_id_local`,
+> `county`, and a zip comment about what UT counties publish). So this needs no CSV change, no new
+> validation and no second dedup key; the row stays keyed on its address. The real unknowns are that
+> **PTP has no registry wiring today** (`SUITE_GATEWAY_URL` is configured, no registry call exists in
+> `app` or `lib`) and that registry coverage varies by county.
 >
 > **A THIRD migration is applied to production and verified:**
 > `20260917_credit_wallet_balance_trace_link.sql` — `credit_wallet_balance` gained a 5th optional
