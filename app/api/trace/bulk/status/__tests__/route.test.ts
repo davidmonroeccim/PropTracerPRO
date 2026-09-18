@@ -224,9 +224,33 @@ function webhookBody() {
   return call ? JSON.parse(call[1].body) : null;
 }
 
+/**
+ * WHERE `total_charge` COMES FROM, AND WHY IT MOVED ON 2026-09-18.
+ *
+ * It used to be what THIS poll's loop collected. That number can only ever see
+ * the Tracerfy leg, and since phase 5c a bulk job also carries tier 2 rows that
+ * sweep-property-traces bills on its own. A job finishing after those rows
+ * settled would have reported the money it collected this poll, which is zero,
+ * while the customer's wallet said otherwise.
+ *
+ * So it is now the SUM OF THE STORED PER-ROW CHARGES, read back after the loop
+ * has written them. That is still only money that actually moved -- the row
+ * write persists what deductOrZero returned, not what was intended -- so the
+ * fence below is the same fence. It is also exactly what the already-completed
+ * branch at the top of the handler reports, so the two branches stopped
+ * answering the same question two different ways.
+ *
+ * The `jobRows` fixtures in each test therefore carry the charges the loop just
+ * wrote, which is what the database holds by the time the read happens.
+ */
 describe("bulk/status route totals only the wallet amount actually collected", () => {
   it("records and reports 0 when deduct_wallet_balance returns false", async () => {
     H.deductResult = false;
+    // Nothing moved, so nothing is on the rows to read back.
+    H.jobRows = [
+      { charge: 0, ai_research_status: null },
+      { charge: 0, ai_research_status: null },
+    ];
 
     const { GET } = await import("@/app/api/trace/bulk/status/route");
     const res = await GET(
@@ -259,6 +283,12 @@ describe("bulk/status route totals only the wallet amount actually collected", (
 
   it("records and reports the full total when the deducts succeed", async () => {
     H.deductResult = true;
+    // Both deducts moved, so both rows carry their charge when they are read
+    // back for the job summary.
+    H.jobRows = [
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+    ];
 
     const { GET } = await import("@/app/api/trace/bulk/status/route");
     const res = await GET(
@@ -272,6 +302,153 @@ describe("bulk/status route totals only the wallet amount actually collected", (
     }
     expect(body.total_charge).toBeCloseTo(rate * 2, 10);
     expect(webhookBody().total_charge).toBeCloseTo(rate * 2, 10);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE JOB MAY NOT FINISH OVER WORK THAT HAS NOT RUN.
+ *
+ * A MIXED job carries tier 1 rows this route settles and tier 2 rows
+ * sweep-property-traces is still working. The tier 2 rows are invisible
+ * to the result loop, because a queued row never gets a
+ * tracerfy_job_id, so before phase 5c-3 this route would mark the job
+ * completed the moment Tracerfy answered. The branch at the top of the
+ * handler short-circuits a completed job, so it is never polled again:
+ * the customer keeps a summary and a downloadable CSV that are short by
+ * exactly the rows they are about to be billed for.
+ * ------------------------------------------------------------------ */
+
+describe("a job whose tier 2 rows are still queued", () => {
+  it("stays processing rather than completing over them", async () => {
+    // MUTATION: delete the isPropertyTracePending gate and this goes red.
+    H.jobRows = [
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+      { charge: null, ai_research_status: null, property_trace_status: "queued" },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const res = await GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+    const body = await res.json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending_property_trace).toBe(1);
+    // The job row is NOT written completed, which is what would stop it ever
+    // being polled again.
+    const completed = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(completed).toHaveLength(0);
+  });
+
+  it("still settles the tier 1 rows on that same poll", async () => {
+    // Waiting on the job is not a reason to leave a paid Tracerfy row at
+    // 'processing'. sweep-stale-traces would later claim such a row and settle
+    // it against whichever OTHER property in the shared batch came back with a
+    // phone. Only the JOB-level completion waits.
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"));
+
+    expect(billingUpdates().length).toBeGreaterThan(0);
+    expect(H.rpcCalls.filter((c) => c[0] === "deduct_wallet_balance").length).toBe(2);
+  });
+
+  it("completes once every tier 2 row is terminal, counting its matches and money", async () => {
+    // The other side of the fence. A terminal value must read as NOT pending or
+    // the job is held open forever, and the tier 2 charge the cron booked has to
+    // reach the total: the result loop above can never see it.
+    H.jobRows = [
+      { charge: PRICING.CHARGE_PER_SUCCESS_WALLET, ai_research_status: null },
+      {
+        charge: 0.4,
+        ai_research_status: null,
+        property_trace_status: "property_trace_done",
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const res = await GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+    const body = await res.json();
+
+    expect(body.status).toBe("completed");
+    expect(body.total_charge).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET + 0.4, 10);
+    // Two tier 1 matches from the result loop plus the one tier 2 row that found
+    // contacts. MUTATION: count only the loop's matches and this goes red.
+    expect(body.records_matched).toBe(3);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
+ * TWO.
+ *
+ * It used to mean the submit had nothing to send, and the submit route
+ * closed such a job itself. Since phase 5c it is also the normal shape
+ * of a job whose rows are ALL tier 2: no person CSV, the cron owns every
+ * row, and this route is the only thing that can notice when it is done.
+ * The old branch returned a bare 'processing' unconditionally, which
+ * would park that job at processing for good.
+ * ------------------------------------------------------------------ */
+
+describe("a job whose rows are all tier 2", () => {
+  beforeEach(() => {
+    H.job = { ...H.job, tracerfy_job_id: null, records_submitted: 1 };
+  });
+
+  it("reports processing while the queue still owes work", async () => {
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued_2" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending_property_trace).toBe(1);
+  });
+
+  it("FINISHES the job once the queue drains, instead of polling forever", async () => {
+    // MUTATION: restore the unconditional `return processing` for a job with no
+    // tracerfy_job_id and this goes red. Without it the job never completes, the
+    // page polls to exhaustion, and History shows it processing for good.
+    H.jobRows = [
+      {
+        charge: 0.4,
+        ai_research_status: null,
+        property_trace_status: "property_trace_done",
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+    // The money the cron booked reaches the summary. A per-poll total could only
+    // ever have reported 0 here, on a job the customer really was charged for.
+    expect(body.total_charge).toBeCloseTo(0.4, 10);
+    const completed = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(completed).toHaveLength(1);
+  });
+
+  it("asks no vendor at all, because there is no Tracerfy job to poll", async () => {
+    H.jobRows = [{ charge: null, ai_research_status: null, property_trace_status: "queued" }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"));
+
+    expect(H.rpcCalls.filter((c) => c[0] === "deduct_wallet_balance")).toHaveLength(0);
   });
 });
 

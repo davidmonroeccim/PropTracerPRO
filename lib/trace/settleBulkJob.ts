@@ -54,6 +54,15 @@ export type TraceHistoryRow = {
   property_record?: unknown;
   // 1 = billed per successful trace, 2 = billed per record submitted.
   tier?: number | null;
+  // Added by migration 20260918. The TIER 2 queue, driven by
+  // app/api/cron/sweep-property-traces. Nothing in this file settles it -- it is
+  // declared here because every bulk STATUS surface loads this type with
+  // select('*') and has to ask isPropertyTracePending() about it before calling
+  // a job finished. A job that finalizes over a queued row reports short on rows
+  // the customer is about to be billed for, and a completed job is never polled
+  // again. Optional for the same reason as the two above: rows written before
+  // the migration carry no value, and absent reads as not pending.
+  property_trace_status?: string | null;
 };
 
 export type SettleBulkJobArgs = {

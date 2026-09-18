@@ -9,6 +9,7 @@ import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -188,10 +189,28 @@ export async function GET(request: Request) {
     // attempt number in that column. A row skipped for having no owner name,
     // and a row whose attempts ran out, are NOT pending: both carry a terminal
     // status, which is what stops them holding a job open forever.
+    //
+    // AND WHILE ANY ROW STILL OWES ITS FULL PROPERTY TRACE. Same shape as the
+    // entity gate above and deliberately not a different one: that gate is
+    // already load-bearing and correct, and two near-identical checks that
+    // differ slightly is how one of them rots. Asked of
+    // lib/trace/propertyTraceAttempts.ts rather than compared against literals,
+    // because a retried row carries its attempt number in the column.
+    //
+    // A tier 2 row is written `status: 'processing'` at submit, so the arm below
+    // catches it too. That overlap is not a reason to drop this one: the cron
+    // writes the row's delivery status the moment the dossier answers, while the
+    // queue column is what says whether the ROW is finished, and the two part
+    // company on exactly the row that matters. Without this the job finalizes
+    // over rows the customer is about to be billed for, and a completed job is
+    // never polled again.
     const anyPendingResearch = rows.some((r) => isEntityTracePending(r.ai_research_status));
+    const anyPendingProperty = rows.some((r) =>
+      isPropertyTracePending(r.property_trace_status)
+    );
     const anyPendingTrace = rows.some((r) => r.status === 'processing');
 
-    if (anyPendingResearch || anyPendingTrace) {
+    if (anyPendingResearch || anyPendingProperty || anyPendingTrace) {
       return NextResponse.json({
         success: true,
         status: 'processing',
@@ -199,6 +218,9 @@ export async function GET(request: Request) {
         records_submitted: traceJob.records_submitted,
         records_pending_research: rows.filter((r) =>
           isEntityTracePending(r.ai_research_status)
+        ).length,
+        records_pending_property_trace: rows.filter((r) =>
+          isPropertyTracePending(r.property_trace_status)
         ).length,
         records_pending_trace: rows.filter((r) => r.status === 'processing').length,
         // Surface stall diagnostics so callers know Tracerfy is the bottleneck

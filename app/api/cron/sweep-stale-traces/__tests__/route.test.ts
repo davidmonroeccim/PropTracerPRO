@@ -284,3 +284,67 @@ describe("stage 2 resolves every row of a stale bulk job", () => {
     expect(H.ops.indexOf(guarded[0])).toBeLessThan(H.ops.indexOf(unguarded[0]));
   });
 });
+
+/**
+ * A STALE BULK JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
+ * TWO, AND THE SECOND ONE IS BILLED.
+ *
+ * Until phase 5c it could only be a submit that failed silently, so failing the
+ * job after the 60-minute cutoff was the honest answer. Since the submit routes
+ * learned to enqueue, it is also the normal shape of a job whose rows are ALL
+ * tier 2: there is no person CSV, sweep-property-traces owns every row, and the
+ * job legitimately outlives that cutoff whenever the queue is under contention.
+ *
+ * Failing THAT job is the worst outcome available here. Its rows are billed as
+ * each dossier answers, so the customer would be charged for a job this cron
+ * told them had failed, while the cron actually doing the work carried on.
+ */
+describe("a stale bulk job carrying tier 2 rows", () => {
+  const jobWrites = () =>
+    H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+
+  beforeEach(() => {
+    H.staleJobs = [
+      { id: "job-1", user_id: "user-1", tracerfy_job_id: null, records_submitted: 2 },
+    ];
+  });
+
+  it("is LEFT ALONE while its queue still owes work", async () => {
+    // MUTATION: drop the isPropertyTracePending check and this goes red -- the
+    // job is failed out from under the cron that is still working it.
+    H.historyRows = [
+      { property_trace_status: "queued_2", is_successful: null },
+      { property_trace_status: "property_trace_done", is_successful: true },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(0);
+  });
+
+  it("is COMPLETED, not failed, once its queue has drained", async () => {
+    // The status route finalizes this job when it is polled. A customer who
+    // closed the tab never polls it, so without this the job sits at processing
+    // for good. MUTATION: fall through to the 'No Tracerfy job ID' failure and
+    // this goes red.
+    H.historyRows = [
+      { property_trace_status: "property_trace_done", is_successful: true },
+      { property_trace_status: "property_trace_no_key", is_successful: false },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(1);
+    expect(jobWrites()[0].payload).toMatchObject({ status: "completed", records_matched: 1 });
+    expect(jobWrites()[0].payload?.error_message).toBeUndefined();
+  });
+
+  it("still fails a job that has no tier 2 rows at all", async () => {
+    // The original case, unchanged: the submit never reached a vendor and there
+    // is nothing behind the job. The guard must not become a blanket refusal to
+    // ever fail anything.
+    H.historyRows = [{ property_trace_status: null, is_successful: null }];
+    await run();
+    expect(jobWrites()).toHaveLength(1);
+    expect(jobWrites()[0].payload).toMatchObject({
+      status: "failed",
+      error_message: "No Tracerfy job ID",
+    });
+  });
+});

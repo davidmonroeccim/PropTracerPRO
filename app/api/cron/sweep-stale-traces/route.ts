@@ -7,6 +7,7 @@ import { deductOrZero } from '@/lib/wallet/deduct';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import type { TraceResult, TracerfyResult } from '@/types';
 
 /**
@@ -217,7 +218,51 @@ export async function GET(request: Request) {
         bulkSwept++;
 
         if (!job.tracerfy_job_id) {
-          // No job ID — mark as failed
+          // A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
+          // TWO. Until phase 5c it could only be a submit that failed silently,
+          // so failing it after the timeout was the honest answer. Now it is
+          // also the normal shape of a job whose rows are ALL tier 2: there is
+          // no person CSV, sweep-property-traces owns every row, and the job
+          // legitimately outlives this cutoff whenever the queue is under
+          // contention.
+          //
+          // Failing that job would be the worst available outcome. Its rows are
+          // billed as the dossier answers, so the customer would be charged for
+          // a job this cron told them failed, while the cron that is actually
+          // working it carries on.
+          const { data: jobRows } = await adminClient
+            .from('trace_history')
+            .select('property_trace_status, is_successful')
+            .eq('user_id', job.user_id)
+            .eq('trace_job_id', job.id);
+          const rows = (jobRows || []) as Array<{
+            property_trace_status: string | null;
+            is_successful: boolean | null;
+          }>;
+          const tier2Rows = rows.filter((r) => r.property_trace_status);
+
+          if (tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status))) {
+            // Still real work in flight. Not stale, so leave it entirely alone.
+            continue;
+          }
+
+          if (tier2Rows.length > 0) {
+            // The queue has drained and the status route was never polled to
+            // notice. Finish it the way that route would: COMPLETED, not failed.
+            // The rows already carry their own results and their own receipts.
+            await adminClient
+              .from('trace_jobs')
+              .update({
+                status: 'completed',
+                records_matched: rows.filter((r) => r.is_successful).length,
+                completed_at: new Date().toISOString(),
+              })
+              .eq('id', job.id);
+            continue;
+          }
+
+          // No tier 2 rows at all: the original case, unchanged. The submit
+          // never reached a vendor and the job has nothing behind it.
           await adminClient
             .from('trace_jobs')
             .update({ status: 'failed', error_message: 'No Tracerfy job ID', completed_at: new Date().toISOString() })

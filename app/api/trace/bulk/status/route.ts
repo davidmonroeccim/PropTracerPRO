@@ -9,10 +9,26 @@ import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 /** A trace_history row, read down to the two columns this summary needs. */
 type SkipRow = { ai_research_status?: string | null };
+
+/**
+ * A row of this job, read down to what the completion gate and the job summary
+ * need. Structurally a SkipRow, so summarizeSkips takes it unchanged.
+ *
+ * `property_trace_status` is the TIER 2 queue. It is the only column that says
+ * whether a row still owes work: a queued row's `status` is 'processing' at
+ * submit but the cron writes a delivery status the moment the dossier answers,
+ * and the row is not finished then.
+ */
+type JobRow = SkipRow & {
+  charge: number | null;
+  is_successful: boolean | null;
+  property_trace_status?: string | null;
+};
 
 /**
  * How many rows of this job were accepted but never traced, and why.
@@ -123,12 +139,78 @@ export async function GET(request: Request) {
       });
     }
 
-    // Still processing — check Tracerfy
+    /**
+     * Every row of this job, read once, for the completion gate below.
+     *
+     * It is the SAME query the skip summary used to run on its own at the end of
+     * the handler, widened rather than duplicated: one read that answers whether
+     * the job is finished, what it collected and how many rows matched.
+     */
+    const readJobRows = async (): Promise<JobRow[]> => {
+      const { data } = await adminClient
+        .from('trace_history')
+        .select('charge, is_successful, ai_research_status, property_trace_status')
+        .eq('user_id', user.id)
+        .eq('trace_job_id', traceJob.id);
+      return (data || []) as JobRow[];
+    };
+
+    /**
+     * Write the job terminal and report it.
+     *
+     * total_charge SUMS THE STORED PER-ROW CHARGES rather than what this poll
+     * happened to collect, which is the only number that can include the tier 2
+     * charges sweep-property-traces booked. It is also what the already-completed
+     * branch at the top of this handler reports, so both branches now answer the
+     * same question with the same arithmetic.
+     */
+    const finalize = async (rows: JobRow[], tier1Matched: number) => {
+      const recordsMatched =
+        tier1Matched + rows.filter((r) => r.property_trace_status && r.is_successful).length;
+      await adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'completed',
+          records_matched: recordsMatched,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', traceJob.id);
+      return {
+        recordsMatched,
+        totalCharge: Number(
+          rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)
+        ),
+      };
+    };
+
+    // A JOB WITH NO TRACERFY JOB ID IS NOT NECESSARILY AN EMPTY ONE ANY MORE.
+    // Until phase 5c it meant the submit had nothing to send, and the submit
+    // route closed such a job itself. Now it also means EVERY row of the job is
+    // tier 2: there is no person CSV to poll, the cron owns all of it, and this
+    // is the only place that can notice when it is done. Returning a bare
+    // 'processing' here, as this branch used to, would park that job at
+    // processing forever.
     if (!traceJob.tracerfy_job_id) {
+      const rows = await readJobRows();
+      if (rows.some((r) => isPropertyTracePending(r.property_trace_status))) {
+        return NextResponse.json({
+          success: true,
+          status: 'processing',
+          job_id: traceJob.id,
+          records_pending_property_trace: rows.filter((r) =>
+            isPropertyTracePending(r.property_trace_status)
+          ).length,
+        });
+      }
+      const { recordsMatched, totalCharge } = await finalize(rows, 0);
       return NextResponse.json({
         success: true,
-        status: 'processing',
+        status: 'completed',
         job_id: traceJob.id,
+        records_submitted: traceJob.records_submitted,
+        records_matched: recordsMatched,
+        total_charge: totalCharge,
+        ...summarizeSkips(rows),
       });
     }
 
@@ -358,27 +440,38 @@ export async function GET(request: Request) {
       .eq('tracerfy_job_id', traceJob.tracerfy_job_id)
       .eq('status', 'processing');
 
-    // Update job as completed
-    await adminClient
-      .from('trace_jobs')
-      .update({
-        status: 'completed',
-        records_matched: recordsMatched,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', traceJob.id);
+    // THE JOB IS NOT FINISHED JUST BECAUSE TRACERFY IS. The rows above are the
+    // tier 1 half; a MIXED job also carries tier 2 rows the cron is still
+    // working, and they are invisible to the loop above because a queued row
+    // never gets a tracerfy_job_id. Marking the job completed here would strand
+    // them: the branch at the top of this handler short-circuits a completed
+    // job, so it is never polled again and the customer keeps a result that is
+    // short by exactly the rows they are about to be billed for, on a CSV they
+    // may reasonably treat as final.
+    //
+    // The tier 1 rows are still settled above on every poll, which is
+    // deliberate and not optional: a row left at 'processing' is one
+    // sweep-stale-traces would later settle against another property's
+    // contacts. Only the JOB-level completion waits.
+    const jobRows = await readJobRows();
+    if (jobRows.some((r) => isPropertyTracePending(r.property_trace_status))) {
+      return NextResponse.json({
+        success: true,
+        status: 'processing',
+        job_id: traceJob.id,
+        records_submitted: traceJob.records_submitted,
+        records_pending_property_trace: jobRows.filter((r) =>
+          isPropertyTracePending(r.property_trace_status)
+        ).length,
+        age_minutes: Math.round(jobAgeMinutes),
+      });
+    }
 
-    // The rows accepted but never traced. They are invisible to the loop above
-    // because a skipped row never gets a tracerfy_job_id, so they have to be
-    // read off the job. One query, once, on the poll that finalizes the job;
-    // every later poll gets the same numbers out of the branch at the top.
-    const { data: jobRows } = await adminClient
-      .from('trace_history')
-      .select('ai_research_status')
-      .eq('user_id', user.id)
-      .eq('trace_job_id', traceJob.id);
+    const finalized = await finalize(jobRows, recordsMatched);
+    recordsMatched = finalized.recordsMatched;
+    totalCharge = finalized.totalCharge;
 
-    const skips = summarizeSkips((jobRows || []) as SkipRow[]);
+    const skips = summarizeSkips(jobRows);
 
     // Fire-and-forget: auto-rebill if balance dropped below threshold.
     // Gated on what we ATTEMPTED, not what we collected: if every deduct failed
