@@ -584,6 +584,9 @@ export async function POST(request: Request) {
       // `profile` is the select('*') at the top of this route, so the two
       // credential columns are already in hand and no admin re-read is needed.
       await pushSettledTrace({
+        // Deferred: the customer is waiting on this response and must not wait
+        // on HighLevel too.
+        timing: 'deferred',
         userId: user.id,
         resolveCredential: async () => profile,
         trace: {

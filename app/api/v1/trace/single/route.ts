@@ -515,6 +515,9 @@ export async function POST(request: Request) {
       //    `profile` came from the ADMIN client in validateApiKey via
       //    select('*'), so the two credential columns are already in hand.
       await pushSettledTrace({
+        // Deferred: the customer is waiting on this response and must not wait
+        // on HighLevel too.
+        timing: 'deferred',
         userId: profile.id,
         resolveCredential: async () => profile,
         trace: {

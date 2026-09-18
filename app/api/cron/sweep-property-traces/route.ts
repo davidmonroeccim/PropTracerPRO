@@ -617,10 +617,15 @@ export async function GET(request: Request) {
       // are built from Tracerfy's batch array and a tier 2 row has no
       // tracerfy_job_id at all.
       //
-      // AWAITED. The credential has to be read before anything can be handed to
-      // after(), so a floating call could be cut off before the work was even
-      // scheduled. The push itself still outlives the response.
+      // INLINE, NOT DEFERRED, AND THAT IS THE RACE IT CLOSES. Deferring to
+      // after() would let this cron write the row terminal and return before
+      // the push record lands. The parent bulk job can finalize on the very
+      // next poll, and app/api/v1/trace/bulk/status skips a row by its RECORDED
+      // push, so a finalize landing in that window pushes the same contact
+      // again. Nobody is waiting on a cron, so there is nothing to protect by
+      // deferring.
       await pushSettledTrace({
+        timing: 'inline',
         userId: row.user_id,
         resolveCredential: () => highLevelCredentialFor(row.user_id),
         trace: {

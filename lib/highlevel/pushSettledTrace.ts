@@ -1,5 +1,8 @@
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
+import {
+  recordHighLevelOutcomes,
+  recordHighLevelPushes,
+} from '@/lib/highlevel/credentialHealth';
 import type { TraceResult } from '@/types';
 
 /**
@@ -64,8 +67,7 @@ export interface SettledTraceRow {
  *
  * AWAITED BY ITS CALLERS, and that is deliberate. The credential has to be
  * resolved before anything can be handed to `after()`, so a floating call could
- * be cut off before the work was even scheduled. Once scheduled, the push
- * itself outlives the response.
+ * be cut off before the work was even scheduled.
  */
 export async function pushSettledTrace(params: {
   userId: string;
@@ -79,6 +81,23 @@ export async function pushSettledTrace(params: {
   trace: SettledTraceRow;
   result: TraceResult | null;
   isSuccessful: boolean;
+  /**
+   * WHEN THE PUSH RUNS, AND BOTH ANSWERS ARE RIGHT SOMEWHERE. Required rather
+   * than defaulted, because the two callers want opposite things and a default
+   * would silently give one of them the wrong one.
+   *
+   * 'deferred'  hand it to after() so it runs once the response has flushed.
+   *             Right on a request path: the customer is waiting for their
+   *             trace result and must not wait for HighLevel as well.
+   * 'inline'    await the push and the record before returning. Right in a
+   *             cron, where nobody is waiting, and where deferring opens a real
+   *             race: the row is written terminal, the parent bulk job can
+   *             finalize on the very next poll, and a v1 finalize that reads
+   *             the row before highlevel_pushed_at has landed pushes the same
+   *             contact a second time. The skip that prevents that rests on the
+   *             recorded push being THERE, so the cron has to finish writing it.
+   */
+  timing: 'deferred' | 'inline';
 }): Promise<void> {
   const { userId, trace, result, isSuccessful } = params;
 
@@ -89,18 +108,30 @@ export async function pushSettledTrace(params: {
   const locationId = credential?.highlevel_location_id;
   if (!apiKey || !locationId) return;
 
-  await recordHighLevelPushes(userId, [
-    {
-      traceId: trace.id,
-      push: pushTraceToHighLevel({
-        apiKey,
-        locationId,
-        traceResult: result,
-        propertyAddress: trace.address || undefined,
-        propertyCity: trace.city || undefined,
-        propertyState: trace.state || undefined,
-        propertyZip: trace.zip || undefined,
-      }),
-    },
-  ]);
+  const push = pushTraceToHighLevel({
+    apiKey,
+    locationId,
+    traceResult: result,
+    propertyAddress: trace.address || undefined,
+    propertyCity: trace.city || undefined,
+    propertyState: trace.state || undefined,
+    propertyZip: trace.zip || undefined,
+  });
+
+  if (params.timing === 'inline') {
+    // recordHighLevelOutcomes never throws, and a push that rejects would be a
+    // bug in the client rather than a vendor refusal, so it is caught here the
+    // same way the deferred path catches it: nothing reached the CRM, so
+    // nothing is recorded and the credential is told nothing.
+    const outcome = await push.catch((error) => {
+      console.error('HighLevel push threw:', error);
+      return undefined;
+    });
+    await recordHighLevelOutcomes(userId, [
+      outcome === undefined ? undefined : { traceId: trace.id, outcome },
+    ]);
+    return;
+  }
+
+  await recordHighLevelPushes(userId, [{ traceId: trace.id, push }]);
 }

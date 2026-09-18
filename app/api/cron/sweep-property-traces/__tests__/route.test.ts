@@ -1260,6 +1260,19 @@ describe("a settled tier 2 row reaches the customer's CRM", () => {
     expect(Number.isNaN(Date.parse(String(records[0].highlevel_pushed_at)))).toBe(false);
   });
 
+  it("finishes the push before the run returns, rather than deferring it", async () => {
+    // NOT after(). This cron writes the row terminal and returns; the parent
+    // bulk job can finalize on the very next poll, and the v1 finalize skips a
+    // row by its RECORDED push. Deferring would let that poll land in the
+    // window before highlevel_pushed_at exists and push the same contact twice.
+    // Nobody is waiting on a cron, so there is nothing to protect by deferring.
+    await run();
+
+    expect(H.scheduled).toEqual([]);
+    // Recorded WITHOUT flushing anything.
+    expect(pushRecords()).toHaveLength(1);
+  });
+
   it("does not push when the user has no HighLevel credential", async () => {
     H.profile = {
       subscription_tier: "wallet",
