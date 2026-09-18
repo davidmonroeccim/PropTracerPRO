@@ -2868,9 +2868,14 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
-- [ ] 14. **SECURITY, found 2026-09-18, must close before 5c ships.** `trace_history` grants
+- [x] 14. **SECURITY, found 2026-09-18. CLOSED, applied to production and verified 2026-09-18.** `trace_history` grants
       INSERT/UPDATE/DELETE to `anon` and `authenticated` table-wide, so any signed-in user can rewrite
       every column on their own rows from the browser. 5c-2's `property_trace_status` inherited that
       and is a work trigger, so a browser write enqueues paid vendor work. Fix is verified safe:
       all 17 writing files use `createAdminClient`; the two browser files never write. REVOKE
       INSERT/UPDATE/DELETE from anon + authenticated, keep SELECT. See History.md 2026-09-18 and L-014.
+      **DONE:** migration `20260918_lock_trace_history_writes.sql`, applied and read back. anon and
+      authenticated are now SELECT-only; service_role untouched; 3 policies, 3,836 rows and RLS all
+      unchanged. Two residuals left on purpose and named in the migration header: the now-dead
+      INSERT/UPDATE policies (re-granting the verb would silently re-open the hole, so prefer
+      dropping them next time this table is worked) and anon's retained SELECT.
