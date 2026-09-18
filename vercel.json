@@ -11,6 +11,10 @@
     {
       "path": "/api/cron/sweep-entity-traces",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-property-traces",
+      "schedule": "* * * * *"
     }
   ]
 }

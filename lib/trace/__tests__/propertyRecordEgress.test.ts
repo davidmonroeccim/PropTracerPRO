@@ -67,6 +67,12 @@ const RAW_SITES: Record<string, Record<string, { count: number; why: string }>> 
       why: 'The webhook ARGUMENT, filtered inside dispatchTraceCompleted.',
     },
   },
+  'app/api/cron/sweep-property-traces/route.ts': {
+    'property_record: execution.property } : {}),': {
+      count: 1,
+      why: 'THE BULK TIER 2 PERSIST. Storage stays raw: all 86 keys, verbatim. It is spread conditionally because a dossier MISS returns null and this row may be a reused row already holding a record the customer paid for -- writing that null would destroy the product and flip isBilledRow() to false. Nothing leaves PTP from this file: a cron has no response body and bulk has never dispatched trace.completed.',
+    },
+  },
   'app/(dashboard)/trace/single/page.tsx': {
     'property_record: statusData.property_record ?? null,': {
       count: 1,

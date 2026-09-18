@@ -81,6 +81,8 @@ const ALLOWED_RAW_WRITES: Record<string, string> = {
     "TWO remaining raw writes, both the same ledger-probe pattern as the entity cron: collectedChargeFor() answers with money that has already moved, so folding it onto the row would double-count that same debit. Its miss path, its shared-bulk match and its blanket leftover sweep all fold or are guarded now.",
   "app/api/cron/sweep-business-traces/route.ts":
     "ONE raw write, and it EARNED this entry on 2026-09-17 by gaining the collectedChargeFor probe its two twins already had. Once a site asks the ledger, the ledger total is authoritative and folding its answer onto the row's own column counts the same debit twice. `tier` is still taken from foldBillingWrite, because the ledger does not know the billing model.",
+  "app/api/cron/sweep-property-traces/route.ts":
+    "ONE raw write, the same ledger-probe pattern as its three twins: collectedChargeFor() is asked BEFORE the deduct, so on a row a killed run already paid for, the value written is money that has already moved and folding it onto the row would count that debit twice. The reachable sequence is this cron's own catch -- deduct, throw, requeue, re-claim -- which is why the probe is here and not only in the files that settle alongside it. `tier` comes from foldBillingWrite because the ledger records money, not the billing model, and this is the one queue where a flat literal would be a tier 2 DOWNGRADE.",
 };
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
