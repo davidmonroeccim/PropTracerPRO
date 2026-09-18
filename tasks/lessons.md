@@ -4,6 +4,54 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-017: `information_schema.column_privileges` cannot answer "will a NEW column be covered" (2026-09-18)
+
+**What happened.** Adding three columns to `user_profiles` for the HighLevel credential flag, I did
+the L-014 thing correctly and read the table's grants before writing the migration. I queried
+`information_schema.column_privileges`, got one row per column per verb, and concluded the table used
+COLUMN-level grants. From that I reasoned that a new column would be invisible to `authenticated`
+unless I granted SELECT explicitly, and that the integrations page's `select('*')` would otherwise
+42501 for all 53 users. I wrote that into the migration header as the justification for the GRANT.
+
+**All of it was wrong, and the migration was already applied before I caught it.** That view expands
+a TABLE-wide grant into one row per column, so a table-wide grant and 28 individual column grants are
+indistinguishable in it. The authority is the ACL itself:
+
+```sql
+select unnest(relacl)::text from pg_class where oid='public.user_profiles'::regclass;
+--   anon=ardDxtm/postgres   authenticated=ardDxtm/postgres   service_role=arwdDxtm/postgres
+```
+
+`a`=INSERT `r`=SELECT `w`=UPDATE `d`=DELETE `D`=TRUNCATE `x`=REFERENCES `t`=TRIGGER `m`=MAINTAIN.
+SELECT and INSERT were table-wide all along, so the new columns were covered the instant they
+existed and my GRANT was a no-op.
+
+**How I caught it, and this is the transferable part.** Not by re-reading my reasoning, which was
+internally consistent. By **reading the ACL back after applying** and finding one value I could not
+explain: `has_column_privilege(..., 'INSERT')` returned TRUE on a column I had never granted INSERT
+on. I could have shrugged at that, since it was harmless. Chasing the one unexplained value is what
+exposed the whole misreading. **An audit that returns something you did not predict has found
+something, even when what it found is benign.**
+
+**What survived the correction, and why it is worth separating.** The guarantee that actually
+mattered held: UPDATE is absent for `anon` and `authenticated`, so the flag cannot be cleared from
+the browser. I had the right outcome for a wrong reason. That is the dangerous shape, because the
+green result hides the bad reasoning, and the next person inherits the reasoning rather than the
+outcome. Getting the right answer is not evidence the method was sound.
+
+**The rules.**
+- For "is this grant table-wide or column-scoped", read `relacl`. `information_schema` cannot tell
+  you, and the question only ever matters when you are ADDING a column.
+- This is a cousin of the known trap that `information_schema.role_table_grants` is filtered by the
+  querying role. Same family: the convenience view silently loses the distinction you came for.
+- **Read the ACL back after applying, and account for every value you did not predict.** The
+  unexplained TRUE is the finding.
+- The same read also turned up a table-wide DELETE to `anon` and `authenticated`, blocked today only
+  by RLS carrying zero DELETE policies. I would not have looked at DELETE at all if I had trusted my
+  first answer, because my first answer never mentioned it.
+
+---
+
 ## L-016: An enumerated list stops the reader searching, so an incomplete one is worse than none (2026-09-18)
 
 **What happened, three times in one phase.** Phase 5c's plan enumerated the user-facing strings that
