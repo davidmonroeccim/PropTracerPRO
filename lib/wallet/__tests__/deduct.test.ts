@@ -86,26 +86,37 @@ describe("the two failures reach an operator differently", () => {
   });
 
   it("names an RPC failure as ours, carrying the error and the row", async () => {
-    // MUTATION: drop the outcome check and log one line for both, and the
-    // assertion below that the two lines differ goes red.
     await deductOrZero(
       clientReturning({ data: null, error: { message: "connection reset" } }),
       ARGS
     );
     expect(logs()).toHaveLength(1);
+    expect(logs()[0]).toContain("deduct FAILED");
     expect(logs()[0]).toContain("connection reset");
     expect(logs()[0]).toContain("trace-1");
   });
 
-  it("records a short wallet separately, because it is not a failure of ours", async () => {
+  it("records a short wallet as a short wallet, NOT as a failure of ours", async () => {
+    // THE ASSERTION THAT HAS TO BE ABOUT THE CLASSIFICATION, NOT THE WORDING.
+    // An earlier version of this test only compared the two lines to each other,
+    // and a mutation that routed BOTH outcomes through the failure branch
+    // survived it: the lines still differed, because the vendor message differed.
+    // They were then both saying our database broke, which for a customer who
+    // simply ran out of balance is the false statement this split exists to stop.
+    // MUTATION: send insufficient_balance through the error branch and this goes
+    // red.
     await deductOrZero(clientReturning({ data: false, error: null }), ARGS);
     expect(logs()).toHaveLength(1);
+    expect(logs()[0]).toContain("wallet short");
+    expect(logs()[0]).not.toContain("deduct FAILED");
     expect(logs()[0]).toContain("trace-1");
+    // And it never reports a vendor message it does not have.
+    expect(logs()[0]).not.toContain("undefined");
   });
 
   it("does not let the two read as the same event", async () => {
-    // The point of the whole change. An operator with no alerting channel has
-    // only these lines to tell an empty wallet from a broken database.
+    // An operator with no alerting channel has only these lines to tell an empty
+    // wallet from a broken database.
     await deductOrZero(clientReturning({ data: false, error: null }), ARGS);
     const short = logs()[0];
     vi.clearAllMocks();
