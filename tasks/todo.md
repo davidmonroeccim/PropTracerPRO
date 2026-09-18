@@ -2774,6 +2774,18 @@ header calls the no-match sentence a money promise. Tool descriptions at
 address validation (the session route does not validate per record, so a row with no city still
 cannot be looked up); it must stop being written for a missing owner.
 
+> **CORRECTION, 2026-09-18, during 5c-3A.** The sentence above is STALE, not wrong-headed: it was
+> written before 5c-2 existed, when `BLANK_OWNER_SKIP_REASON` was the only constant available for
+> that row. It is now the WRONG constant for it. Its text is *"No owner name came in for this
+> address... Send it again with the owner of record and we will run it"*, and for a row missing its
+> city that advice is FALSE, because doing what it says will not make the row run. 5c-2 created
+> `PROPERTY_TRACE_NO_KEY_REASON`, which says the true thing, and it is already what the cron writes
+> for the identical row shape (`sweep-property-traces/route.ts:320`). **Ruling: the session route
+> validates blank-owner rows with `validateAddressInput`, keeps failures out of both the estimate and
+> the Tracerfy pre-flight, and writes them `PROPERTY_TRACE_NO_KEY_STATUS`.** One row shape, one
+> answer, whichever layer notices. `BLANK_OWNER_SKIP_*` then has no live writer on these routes and
+> survives only to keep serving the 273 rows already carrying it, so treat it as HISTORICAL.
+
 ### The 10-minute poll ceiling breaks
 `page.tsx:393` is 120 attempts x 5 s. A cron-driven job over ~1,200 records exceeds it and
 *"Processing is taking longer than expected"* becomes the normal outcome, not an error. Raise it,
@@ -2868,6 +2880,12 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
+- [ ] 15. **THE ENQUEUE, and the plan never numbered it.** The submit routes must stop SKIPPING
+      blank-owner rows and start enqueueing them into `property_trace_status`. Today
+      `app/api/trace/bulk/route.ts:92` pushes them to `skippedRecords` and writes
+      `ai_research_status: BLANK_OWNER_SKIP_STATUS`. This is the actual capability change 5c exists
+      for, 273 of 1,270 historical rows, and every other 5c-3 task is downstream of it. Called out
+      because "the submit routes learn to in 5c-3" appears only in prose.
 - [x] 14. **SECURITY, found 2026-09-18. CLOSED, applied to production and verified 2026-09-18.** `trace_history` grants
       INSERT/UPDATE/DELETE to `anon` and `authenticated` table-wide, so any signed-in user can rewrite
       every column on their own rows from the browser. 5c-2's `property_trace_status` inherited that
