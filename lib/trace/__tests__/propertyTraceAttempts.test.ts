@@ -3,6 +3,7 @@ import {
   MAX_PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_FAILED_STATUS,
   PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_STATUS,
   PROPERTY_TRACE_PROCESSING_STATUSES,
   PROPERTY_TRACE_QUEUED_STATUSES,
   PROPERTY_TRACE_SETTLED_STATUS,
@@ -40,7 +41,19 @@ const EVERY_VALUE = [
   PROPERTY_TRACE_SETTLED_STATUS,
   PROPERTY_TRACE_FAILED_STATUS,
   PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_STATUS,
 ];
+
+/** The values that mean the row is finished, however it finished. */
+const TERMINAL_VALUES = [
+  PROPERTY_TRACE_SETTLED_STATUS,
+  PROPERTY_TRACE_FAILED_STATUS,
+  PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_STATUS,
+];
+
+/** The two terminal values that describe a row nobody was charged for. */
+const FREE_TERMINAL_VALUES = [PROPERTY_TRACE_FAILED_STATUS, PROPERTY_TRACE_NO_KEY_STATUS];
 
 describe("the property-trace queue's values", () => {
   it("all fit the VARCHAR(24) the migration declares", () => {
@@ -131,11 +144,7 @@ describe("what is still pending", () => {
   it("reads every terminal value as NOT pending, so the parent job can settle", () => {
     // MUTATION: make any terminal value read as pending and a finished bulk job
     // reports 'processing' forever.
-    for (const status of [
-      PROPERTY_TRACE_SETTLED_STATUS,
-      PROPERTY_TRACE_FAILED_STATUS,
-      PROPERTY_TRACE_NO_KEY_STATUS,
-    ]) {
+    for (const status of TERMINAL_VALUES) {
       expect(isPropertyTracePending(status), status).toBe(false);
     }
   });
@@ -165,12 +174,54 @@ describe("the sentence a customer reads", () => {
     expect(reason).not.toBe(propertyTraceSkipReason(PROPERTY_TRACE_FAILED_STATUS));
   });
 
-  it("quotes no price, because both outcomes are free", () => {
+  it("explains a row whose contacts service could not be reached", () => {
+    const reason = propertyTraceSkipReason(PROPERTY_TRACE_NO_REACH_STATUS);
+    expect(reason).toBeTruthy();
+    // It says what we DID get, and that the contacts step did not complete. It
+    // must not assert we looked and found nobody, which is the claim the whole
+    // status exists to stop making.
+    expect(reason).toContain("property record");
+    expect(reason).toMatch(/could not reach/i);
+  });
+
+  it("never tells a BILLED row it was free", () => {
+    // The other two sentences say "not charged" and are true. This row WAS
+    // charged: the dossier answered and tier 2 bills per record submitted.
+    // Reusing their wording would be a false statement about the customer's own
+    // money, in the opposite direction from the usual one.
+    // MUTATION: point PROPERTY_TRACE_NO_REACH_STATUS at either of the other two
+    // reasons and this goes red.
+    const reason = propertyTraceSkipReason(PROPERTY_TRACE_NO_REACH_STATUS)!;
+    expect(reason).not.toContain("not charged");
+    expect(reason).not.toMatch(/\bfree\b/i);
+    for (const free of FREE_TERMINAL_VALUES) {
+      expect(reason).not.toBe(propertyTraceSkipReason(free));
+    }
+  });
+
+  it("claims nobody was notified, because nobody was", () => {
+    // PTP has no alerting channel and David chose no alert over a fake one. A
+    // sentence promising that somebody is looking into it would be a lie about
+    // a capability that does not exist.
+    for (const status of EVERY_VALUE) {
+      const reason = propertyTraceSkipReason(status);
+      if (!reason) continue;
+      expect(reason).not.toMatch(/notified|alerted|our team|we have been told|looking into/i);
+    }
+  });
+
+  it("quotes no price, on any outcome", () => {
     // Four prices exist and each caller has exactly one of them, so naming a
     // number here would name the wrong one for somebody -- and quoting any
     // figure on a free outcome is a false statement about money.
-    for (const status of [PROPERTY_TRACE_FAILED_STATUS, PROPERTY_TRACE_NO_KEY_STATUS]) {
-      expect(propertyTraceSkipReason(status)).not.toMatch(/\$|\d+\s*cent/);
+    for (const status of EVERY_VALUE) {
+      expect(propertyTraceSkipReason(status) ?? "").not.toMatch(/\$|\d+\s*cent/);
+    }
+  });
+
+  it("says a FREE outcome was free, on both of the free ones", () => {
+    for (const status of FREE_TERMINAL_VALUES) {
+      expect(propertyTraceSkipReason(status), status).toContain("not charged");
     }
   });
 
@@ -182,9 +233,9 @@ describe("the sentence a customer reads", () => {
     expect(propertyTraceSkipReason(null)).toBeNull();
   });
 
-  it("carries no em-dash, asterisk or emoji, because a customer reads it", () => {
-    for (const status of [PROPERTY_TRACE_FAILED_STATUS, PROPERTY_TRACE_NO_KEY_STATUS]) {
-      expect(propertyTraceSkipReason(status)).not.toMatch(/[—–*]/);
+  it("carries no em-dash, en-dash, asterisk or emoji, because a customer reads it", () => {
+    for (const status of EVERY_VALUE) {
+      expect(propertyTraceSkipReason(status) ?? "").not.toMatch(/[—–*]/);
     }
   });
 });

@@ -30,7 +30,8 @@
 --    'entity_trace_failed' at 19 characters (lib/trace/entityTraceAttempts.ts
 --    says so in as many words). A tier 2 queue needs its own terminal and
 --    retry values, and there is no room left to name them legibly. The new
---    column is VARCHAR(24); its longest value is 'property_trace_failed' at 21.
+--    column is VARCHAR(24); its longest value is 'property_trace_no_reach'
+--    at 23.
 --
 -- 3. TWO BILLING MODELS IN ONE STATE MACHINE IS HOW `tier` GETS CONFUSED. The
 --    entity queue settles TIER 1 rows: billed per SUCCESSFUL trace, a miss is

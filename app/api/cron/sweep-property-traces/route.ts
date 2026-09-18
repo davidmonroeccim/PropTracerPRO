@@ -19,6 +19,7 @@ import {
   MAX_PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_STATUS,
   PROPERTY_TRACE_QUEUED_STATUSES,
   PROPERTY_TRACE_SETTLED_STATUS,
   attemptOf,
@@ -132,7 +133,14 @@ export async function GET(request: Request) {
   let billed = 0;
   let propertyRecords = 0;
   let contactsResolved = 0;
+  // The vendor ANSWERED and has no record of this owner. Free, final, and a
+  // complete answer the customer paid to receive.
   let noContacts = 0;
+  // The vendor could NOT BE ASKED. Billed all the same, because the dossier
+  // answered and tier 2 is per record submitted, but a different fact from the
+  // line above and deliberately not summed into it: this counter is the outage
+  // signal, and PTP has no other one.
+  let contactsUnreachable = 0;
   let skippedNoKey = 0;
   let errored = 0;
   let staleReverted = 0;
@@ -359,15 +367,25 @@ export async function GET(request: Request) {
        * it is billable and it must not go back on the ladder: a retry would
        * re-buy a dossier we already own, out of a Tracerfy credit pool that is
        * SHARED across every customer's jobs and holds about 1,069 dossier hits
-       * in total. One contact-vendor outage across one 500-record job would
-       * spend that pool four times over and take every other user's job down
-       * with it.
+       * in total. Retrying one contact-vendor outage across one 500-record job
+       * would put four more dossier hits on every record, about 2,000 against
+       * that 1,069, so the retries alone would exhaust the pool and take every
+       * other user's job down with it.
        *
        * This is a DELIBERATE divergence from app/api/trace/single, which returns
        * 502 and charges nothing on a contact-vendor failure. A single trace can
        * be resubmitted by the customer immediately and for free, so leaving it
        * unbilled costs nobody anything. A queued bulk row cannot: the only way
        * to run it again is to re-buy the dossier.
+       *
+       * DECLINING TO RETRY IS NOT PERMISSION TO MISLABEL, AND THE TWO ARE
+       * INDEPENDENT. The cost argument above forces the no-retry and nothing
+       * else. It says nothing about what the row should then SAY, and settling a
+       * contact OUTAGE with the same values as a genuine contact MISS satisfies
+       * L-007 at this gate and defeats it one statement later: the customer pays
+       * full price for a two-call product, receives one call, and is told we
+       * looked and found nobody. contactsUnreached below is what keeps the two
+       * apart, on the row and in this cron's own counters.
        * -------------------------------------------------------------- */
       const dossierAnswered = execution.steps.some(
         (step) =>
@@ -415,10 +433,32 @@ export async function GET(request: Request) {
       const result = traceResultFor(execution);
       const isSuccessful = hasContactData(result);
 
+      // DID WE FINISH ASKING? A CONTACT step with outcome 'failed' is the vendor
+      // we could not reach, and it is a different fact from `hit: false`, which
+      // is the vendor telling us it has no record of this owner. Both arrive
+      // here with no contacts, which is exactly why this is read off the STEP
+      // rather than off the absence of contacts.
+      //
+      // Asked of the contact steps specifically, not of `execution.success`,
+      // for the same reason the gate above is: `success` is a whole-route
+      // verdict that a dossier step can also set.
+      const contactsUnreached = execution.steps.some(
+        (step) => !DOSSIER_STEP_KINDS.has(step.kind) && step.outcome === 'failed'
+      );
+
       await adminClient
         .from('trace_history')
         .update({
-          property_trace_status: PROPERTY_TRACE_SETTLED_STATUS,
+          // TERMINAL EITHER WAY, AND BILLED EITHER WAY, BUT NOT THE SAME CLAIM.
+          // The row is not retried, so this column is the only durable record
+          // that the second of the two calls never happened. `status` stays
+          // 'no_match' because that column is CHECK-constrained and is what lets
+          // the parent bulk job finish; the honest sentence rides on this one,
+          // through propertyTraceSkipReason(), exactly as blankOwnerSkip.ts
+          // already does for a row nobody looked up.
+          property_trace_status: contactsUnreached
+            ? PROPERTY_TRACE_NO_REACH_STATUS
+            : PROPERTY_TRACE_SETTLED_STATUS,
           property_trace_claimed_at: null,
           // DELIVERY FACTS. A billed row needs these MORE than an unpaid one,
           // not less: `is_successful = false, charge > 0` is the normal,
@@ -465,7 +505,19 @@ export async function GET(request: Request) {
 
       billed++;
       if (execution.property) propertyRecords++;
-      if (isSuccessful) contactsResolved++;
+      if (contactsUnreached) {
+        // THE OPERATOR HALF, AND IT MATTERS AS MUCH AS THE CUSTOMER HALF. PTP
+        // has no alerting channel and David chose no alert over a fake one, so
+        // this cron's counters and its log lines are the ONLY place a contact
+        // vendor going down can ever surface. Without these, a 500-record job
+        // bills full rate through a whole outage and reports `errored: 0` with
+        // nothing written anywhere. sweep-entity-traces logs its own contact
+        // failure even though that path is free; this one is not free.
+        console.error(
+          `[sweep-property-traces] contacts unreachable for row ${row.id}, which was billed because the dossier answered: ${execution.error || 'the contact step failed'}`
+        );
+        contactsUnreachable++;
+      } else if (isSuccessful) contactsResolved++;
       else noContacts++;
     } catch (err) {
       errored++;
@@ -578,6 +630,7 @@ export async function GET(request: Request) {
       propertyRecords,
       contactsResolved,
       noContacts,
+      contactsUnreachable,
       skippedNoKey,
       errored,
       exhausted,

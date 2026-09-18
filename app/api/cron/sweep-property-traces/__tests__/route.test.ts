@@ -5,6 +5,7 @@ import {
   MAX_PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_FAILED_STATUS,
   PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_STATUS,
   PROPERTY_TRACE_SETTLED_STATUS,
   isPropertyTracePending,
   propertyTraceSkipReason,
@@ -254,6 +255,16 @@ const finalWrite = () => historyWrites()[historyWrites().length - 1];
 
 const deducts = () => H.rpcCalls.filter((c) => c.fn === "deduct_wallet_balance");
 
+/**
+ * Everything this run wrote to console.error, flattened to strings.
+ *
+ * PTP has NO alerting channel by David's explicit decision, so these lines and
+ * the response counters are the only place an operator can ever learn that a
+ * vendor went down. That makes them behaviour worth asserting rather than noise.
+ */
+const errorLogs = (): string[] =>
+  vi.mocked(console.error).mock.calls.map((args) => args.map(String).join(" "));
+
 /** The claim window's own select. */
 const claimQuery = () =>
   H.ops.find(
@@ -297,8 +308,11 @@ beforeEach(() => {
   vi.mocked(lookupDossier).mockClear();
   vi.mocked(lookupBusinessTrace).mockClear();
   vi.mocked(lookupPersonTrace).mockClear();
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  vi.spyOn(console, "log").mockImplementation(() => {});
+  // mockClear AFTER the spy, not instead of it: vi.spyOn returns the SAME spy on
+  // a second call, so without this the log assertions below read every previous
+  // test's output as well as their own.
+  vi.spyOn(console, "error").mockImplementation(() => {}).mockClear();
+  vi.spyOn(console, "log").mockImplementation(() => {}).mockClear();
 });
 
 describe("auth", () => {
@@ -450,17 +464,25 @@ describe("the dossier could not be asked", () => {
 });
 
 /**
- * THE DELIBERATE DIVERGENCE FROM app/api/trace/single.
+ * THE DELIBERATE DIVERGENCE FROM app/api/trace/single, AND THE LIMIT OF IT.
  *
  * That route returns 502 and charges nothing when the CONTACT vendor fails,
  * because a customer can resubmit a single trace immediately and for free. A
  * queued bulk row cannot: the only way to run it again is to re-buy a $0.20
  * dossier out of a Tracerfy credit pool that is SHARED across every customer's
- * jobs and holds roughly 1,069 dossier hits in total. One contact-vendor outage
- * across one 500-record job would spend that pool four times over.
+ * jobs and holds roughly 1,069 dossier hits in total. Retrying one contact
+ * vendor outage across one 500-record job would put four more dossier hits on
+ * every record, about 2,000 against that 1,069, so the retries alone would
+ * exhaust the pool.
  *
  * So the gate is the DOSSIER, not the whole route: once the record is bought, it
  * is billed and delivered and the row does not go back on the ladder.
+ *
+ * THAT ARGUMENT FORCES THE NO-RETRY AND NOTHING ELSE. It says nothing about what
+ * the row should then SAY, and the two are independent. A contact OUTAGE settled
+ * with the same values as a genuine contact MISS tells a customer who paid full
+ * price for a two-call product, and got one call, that we looked and found
+ * nobody. The last three tests here are the ones that hold that line.
  */
 describe("the dossier answered but the CONTACT vendor could not be asked", () => {
   beforeEach(() => {
@@ -469,8 +491,8 @@ describe("the dossier answered but the CONTACT vendor could not be asked", () =>
 
   it("bills the record that was bought and settles the row terminally", async () => {
     // MUTATION: gate on `execution.success` instead of the dossier steps and
-    // this goes red three ways at once -- no deduct, no settled status, and the
-    // row back on the ladder to re-buy a dossier it already owns.
+    // this goes red three ways at once -- no deduct, no settle, and the row back
+    // on the ladder to re-buy a dossier it already owns.
     const body = await (await run()).json();
 
     expect(deducts()).toHaveLength(1);
@@ -478,7 +500,6 @@ describe("the dossier answered but the CONTACT vendor could not be asked", () =>
     expect(body.billed).toBe(1);
     expect(body.errored).toBe(0);
     expect(finalWrite()).toMatchObject({
-      property_trace_status: PROPERTY_TRACE_SETTLED_STATUS,
       status: "no_match",
       is_successful: false,
       charge: TIER2_WALLET,
@@ -487,6 +508,74 @@ describe("the dossier answered but the CONTACT vendor could not be asked", () =>
     expect(finalWrite().property_record).toBe(H.dossier.property);
     // Not retried. A retry would re-buy the record we are holding.
     expect(finalWrite().property_trace_status).not.toBe("queued_2");
+    expect(isPropertyTracePending(String(finalWrite().property_trace_status))).toBe(false);
+  });
+
+  it("does NOT record it as a genuine miss, because we never finished asking", async () => {
+    // THE HONESTY LINE. Billing it is right and not retrying it is right, and
+    // neither of those buys the right to label an outage as a result. This row
+    // and a real contact miss are otherwise byte-identical -- same status, same
+    // is_successful, same charge, same empty trace_result -- so the terminal
+    // status is the ONLY thing that can tell them apart afterwards.
+    // MUTATION: write PROPERTY_TRACE_SETTLED_STATUS unconditionally and this
+    // goes red.
+    const body = await (await run()).json();
+
+    expect(finalWrite().property_trace_status).toBe(PROPERTY_TRACE_NO_REACH_STATUS);
+    expect(finalWrite().property_trace_status).not.toBe(PROPERTY_TRACE_SETTLED_STATUS);
+    expect(body.contactsUnreachable).toBe(1);
+    // NOT counted as a miss. Summing the two would hide the outage in a number
+    // that looks normal.
+    expect(body.noContacts).toBe(0);
+  });
+
+  it("is distinguishable from a real contact miss on the row itself", async () => {
+    // Run both outcomes through the same cron and compare what is persisted. A
+    // customer and an operator can only ever see the row.
+    await run();
+    const outage = finalWrite().property_trace_status;
+
+    H.ops = [];
+    H.rpcCalls = [];
+    H.queuedRows = [{ ...ROW }];
+    H.entityContacts = { ...CONTACTS_MISS };
+    await run();
+    const genuineMiss = finalWrite().property_trace_status;
+
+    expect(genuineMiss).toBe(PROPERTY_TRACE_SETTLED_STATUS);
+    expect(outage).not.toBe(genuineMiss);
+    // ...and each carries its own sentence, one of which must never say the row
+    // was free, because it was not.
+    expect(propertyTraceSkipReason(String(outage))).toBeTruthy();
+    expect(propertyTraceSkipReason(String(genuineMiss))).toBeNull();
+  });
+
+  it("leaves the operator a log line naming the row and the vendor error", async () => {
+    // PTP has no alerting channel by David's explicit decision, so this cron's
+    // counters and logs are the only place an outage can ever surface. A
+    // 500-record job billing full rate through a FastAppend outage must not
+    // produce zero log lines.
+    // MUTATION: delete the console.error and this goes red.
+    await run();
+    const logged = errorLogs().filter((line) => line.includes("contacts unreachable"));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("row-1");
+    expect(logged[0]).toContain("FastAppend 503");
+  });
+});
+
+describe("a genuine contact miss", () => {
+  it("settles as a normal billed miss, with no outage signal raised", async () => {
+    // The other side of the fence above: the vendor ANSWERED and has no record
+    // of this owner. That is a complete answer, it is billed, and it must not
+    // trip the outage counter or write an outage log line.
+    H.entityContacts = { ...CONTACTS_MISS };
+    const body = await (await run()).json();
+
+    expect(body.noContacts).toBe(1);
+    expect(body.contactsUnreachable).toBe(0);
+    expect(finalWrite().property_trace_status).toBe(PROPERTY_TRACE_SETTLED_STATUS);
+    expect(errorLogs().filter((line) => line.includes("contacts unreachable"))).toHaveLength(0);
   });
 });
 

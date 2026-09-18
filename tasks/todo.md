@@ -2732,6 +2732,16 @@ also what keeps it deletable under lib/trace/billedRows.ts."* Under tier 2 a row
 AND billed (dossier answered, contacts never reachable). Exhaustion must not zero a receipt. Reuse
 `foldBillingWrite`; never a flat write. **Phase 5b's rule applies unchanged: STATUS IS NOT A RECEIPT.**
 
+> **CORRECTION, 2026-09-18, after 5c-2 was built and reviewed.** The parenthetical above is not
+> reachable the way it reads. "Contacts never reachable" was imagined as a row that climbs the retry
+> ladder and exhausts on the contact leg. As built, a contact-vendor failure does NOT go on the
+> ladder at all: the dossier already answered, so the row is billed and settled terminal in one pass.
+> Only a DOSSIER failure climbs and exhausts, and that case is never billed. The exhausted-AND-billed
+> state does still occur, by a different route: a reused row that already carries a receipt from an
+> earlier settle. So **the guard is correct and must stay** (`foldBillingWrite`, never a flat write,
+> exhaustion never zeroes a receipt) and it is this SENTENCE that was wrong about why. Recorded
+> rather than deleted so nobody re-derives the ladder that was never built.
+
 ## 5c-3. THE SURFACES. Visible: all of it. This is the phase David judges.
 
 ### The two balance checks are DIFFERENT and must never be merged

@@ -35,10 +35,21 @@
  *   settled     property_trace_done
  *   exhausted   property_trace_failed
  *   no key      property_trace_no_key
+ *   no contacts property_trace_no_reach
  *
- * The column is VARCHAR(24); the longest value here is 'property_trace_failed'
- * at 21 characters. Keep any new value inside that, and see the width test in
- * __tests__/propertyTraceAttempts.test.ts.
+ * The column is VARCHAR(24); the longest value here is
+ * 'property_trace_no_reach' at 23 characters. Keep any new value inside that,
+ * and see the width test in __tests__/propertyTraceAttempts.test.ts.
+ *
+ * THREE TERMINAL VALUES RATHER THAN ONE, AND THE THIRD IS THE ONE WORTH
+ * EXPLAINING. A row whose dossier answered is billed and settled whatever the
+ * contact half did, so 'property_trace_done' and 'property_trace_no_reach' carry
+ * identical money. What they do not carry is the same CLAIM. A genuine contact
+ * miss means we asked and the vendor has no record of this owner; a contact
+ * OUTAGE means we never completed the asking. Settling both as one value tells a
+ * customer who paid full price for a two-call product, and received one call,
+ * that we looked and found nobody. That is a result presenting as an answer when
+ * it is not one, which is the thing this project is least allowed to do.
  *
  * MONEY. Nothing on the FAILURE paths is billable. A vendor we could not ask is
  * our outage, not the customer's miss (L-007), and a row with no usable lookup
@@ -74,6 +85,16 @@ export const PROPERTY_TRACE_FAILED_STATUS = 'property_trace_failed';
 export const PROPERTY_TRACE_NO_KEY_STATUS = 'property_trace_no_key';
 
 /**
+ * `property_trace_status` for a row whose dossier ANSWERED and was billed, but
+ * whose CONTACT vendor could not be reached at all.
+ *
+ * Terminal, and billed, and NOT the same state as a contact miss. The row is not
+ * retried (a retry re-buys the dossier it is already holding), so this value is
+ * the only durable record that the second call never happened.
+ */
+export const PROPERTY_TRACE_NO_REACH_STATUS = 'property_trace_no_reach';
+
+/**
  * The sentence a customer reads when the dossier vendor could not be reached.
  * No price, because the row is free: quoting a figure on a free outcome would be
  * a false statement about money.
@@ -89,6 +110,27 @@ export const PROPERTY_TRACE_FAILED_REASON =
  */
 export const PROPERTY_TRACE_NO_KEY_REASON =
   'This row was missing the street, city or state we need to look a property up, so nothing was traced and you were not charged. Send it again with the full property address and we will run it.';
+
+/**
+ * The sentence a customer reads when the property record was bought but the
+ * contact service could not be reached.
+ *
+ * THIS ONE MUST NOT SAY "you were not charged", WHICH THE OTHER TWO DO. This row
+ * WAS charged: the dossier answered and tier 2 bills per record submitted. A
+ * sentence that called it free would be a false statement about the customer's
+ * own money, in the opposite direction from the usual one.
+ *
+ * It also must not say we found nothing, because we never finished asking, and
+ * it must not invite a resend: the row is now a billed tier 2 row, which every
+ * cache path serves back from the database rather than re-running, so a resend
+ * would return this same row. It says what happened and what they have.
+ *
+ * No price, for the same reason as the other two: four rates exist and each
+ * caller has exactly one of them. No claim that anyone was told, because nobody
+ * was.
+ */
+export const PROPERTY_TRACE_NO_REACH_REASON =
+  'We found the property record for this address and saved it with your results, but we could not reach the service that looks up contacts, so no phone numbers or emails came back for it.';
 
 /** The queued status for a given attempt. Attempt 1 is the bare 'queued'. */
 export function queuedStatusFor(attempt: number): string {
@@ -169,13 +211,22 @@ export function nextAfterFailedAttempt(attempt: number): {
  * lib/trace/blankOwnerSkip.ts, so the wording cannot drift between the API
  * payload, the CSV and the job summary.
  *
- * NOT YET WIRED TO ANY SURFACE. Nothing enqueues into this column until the
- * submit routes learn to (phase 5c-3), so no customer can reach either state
- * today. The surfaces that serve a bulk row must call this alongside
+ * NOT YET WIRED TO ANY SURFACE, AND ONE OF THE THREE SENTENCES IS NOW LOAD
+ * BEARING ON A BILLED ROW. Nothing enqueues into this column until the submit
+ * routes learn to (phase 5c-3), so no customer can reach any of these states
+ * today. The surfaces that serve a bulk row MUST call this alongside
  * skipReasonFor() when they do, and that is 5c-3's task 9.
+ *
+ * Until they do, a PROPERTY_TRACE_NO_REACH row reaches the customer as a bare
+ * `status = 'no_match'` on a row they were charged full price for, which is
+ * exactly the claim this value exists to stop being made. The status column
+ * carries the truth; this function is the only thing that says it out loud. The
+ * same dependency is why blankOwnerSkip.ts says a skipped row "is never silent":
+ * the pattern only works once the surface serves the reason.
  */
 export function propertyTraceSkipReason(status: string | null | undefined): string | null {
   if (status === PROPERTY_TRACE_FAILED_STATUS) return PROPERTY_TRACE_FAILED_REASON;
   if (status === PROPERTY_TRACE_NO_KEY_STATUS) return PROPERTY_TRACE_NO_KEY_REASON;
+  if (status === PROPERTY_TRACE_NO_REACH_STATUS) return PROPERTY_TRACE_NO_REACH_REASON;
   return null;
 }
