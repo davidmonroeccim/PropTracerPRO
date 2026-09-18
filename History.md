@@ -6,6 +6,86 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### Full Property Trace reaches the CRM
+
+Commits `eba223c` (migration), `09371fe`, `1def747`, `eadc678`, `16abb6c`, `5841673`.
+**1493 passing from 1456, 75 files, 0 failing**, `tsc` 0, eslint 47, build compiles. A sixth
+migration, `20260918_trace_highlevel_push_record.sql`, APPLIED and read back.
+
+**FIRST, A CORRECTION TO WHAT I TOLD DAVID.** I reported the gap as "Full Property Trace results
+never reach the CRM", blamed on `sweep-business-traces` and `sweep-property-traces` not reading the
+credential columns. That was wrong three ways, and the corrected version is what drove the design:
+
+- **`sweep-business-traces` is TIER 1**, a FastAppend recovery path. Naming it was a misattribution.
+- **"Never" was false.** v1 BULK pushed tier 2 already, because it iterates ROWS of the job rather
+  than Tracerfy's batch array. The manual button also worked for a tier 2 single.
+- **My follow-up guess was also wrong.** I said the single production tier 2 row settled via
+  `trace/status` and therefore pushed. `trace/single` settles tier 2 INLINE and `trace/status`
+  returns early on a terminal status, so it never saw it.
+
+**The corrected gap was WIDER than the original claim:** automatic push fired for tier 2 on exactly
+ONE of five surfaces.
+
+**THE ROOT CAUSE, one sentence: push was attached to JOB settlement, which reads Tracerfy's batch
+array, not to ROW settlement.** A settled tier 2 row has `tracerfy_job_id: null`, so every push list
+built that way was blind to it. v1 bulk worked because it iterates rows. The fix is therefore one
+idea and not five patches: **push where the row settles.** `sweep-property-traces` alone covers
+session bulk, v1 bulk AND MCP bulk, since all three enqueue into the same queue column.
+
+**THE GUARD IS THE PART THAT PROTECTS CUSTOMERS AND IT IS `isSuccessful && result`.** The implementer
+found a shape my brief did not have: besides `property_trace_no_reach`, a contact-vendor MISS also
+settles with a NON-NULL `trace_result` carrying the owner of record and EMPTY phones and emails.
+**Under a bare `trace_result != null` both would push a nameless, contactless contact into a
+customer's CRM.** Coordinator-verified: dropping the `is_successful` half turns 4 tests red.
+
+**FIVE MUTATIONS SURVIVED ON THE FIRST RUN and were reported, not buried.** All seven push sites were
+wired to record the trace id; only two were fenced. Stripping the id from the other five turned
+nothing red, meaning those sites could have pushed to a CRM and recorded nothing, green forever.
+Fixed with one assertion per site and re-killed. **This is L-016 inside the mutation run** and it is
+now L-018: when a change touches N call sites, the mutation count is a function of N, not of the
+brief, and a well-tested shared helper does not fence its callers.
+
+**TWO EQUIVALENT MUTANTS, correctly NOT claimed as kills.** One of the implementer's and one of
+mine: removing the `!result` half of the guard survives every test, because the shape it guards
+(`isSuccessful` true with a null result) cannot be constructed without a type error. Verified by
+running `npx tsc --noEmit` on the mutant and reading the TS2322, rather than by asserting it.
+Reported as equivalent with evidence instead of being "fixed" by a test that casts its way into an
+impossible state.
+
+**THE CRON PUSHES INLINE, NOT DEFERRED, and this is the opposite of Phase B.** Deferring through
+`after()` let the cron write the row terminal and return before `highlevel_pushed_at` landed. The
+parent job can finalize on the very next poll, and the double-push skip READS that timestamp, so
+deferring raced the fact the skip rests on. Request paths still defer, because a customer must not
+wait on HighLevel. Both answers are right somewhere, so `timing` is a REQUIRED parameter rather than
+a defaulted one.
+
+**Task 5 was already closed by task 1, and the evidence is a grep rather than an argument.**
+`sweep-stale-traces` updates `trace_jobs` ONLY in its all-tier-2 branch and touches no
+`trace_history` row, so there is nothing there to push; by the time it runs the queue has drained and
+every successful row was pushed at settle. **No push was added there**, which would have
+double-pushed.
+
+**The push is now recorded at all seven sites** (`highlevel_contact_id`, `highlevel_pushed_at`,
+`highlevel_push_action`), so "did this trace reach the CRM" is answerable for the first time since
+January, double-push avoidance rests on a fact about the row rather than a filter matching a code
+path, and a retry becomes writable. **The columns only record from now on**: 2,742 historical traces
+belonging to the six credentialed users stay null, which is correct and must never be rendered as a
+claim that they did not reach the CRM.
+
+**Also fixed:** the manual JOB button selected rows by `tracerfy_job_id`, which a tier 2 row does not
+have, so a mixed job pushed only its tier 1 half silently and an all-tier-2 job said "No successful
+results to push". It now selects by `trace_job_id`. **`effectiveIsPro` was left untouched**: David
+considered opening the manual push to pay-as-you-go, who pay $0.40 against Pro's $0.25, and decided
+it stays a Pro benefit.
+
+**OPEN, flagged by the implementer, not decided:** MCP bulk is now asymmetric. Its tier 2 rows reach
+the CRM through the shared cron, while its tier 1 rows still do not, because the MCP finalize path
+has no push at all. Note the boundary this touches: the 09-16 handoff records that the Suite Gateway
+owns the CRM push for MCP callers via `crm_push_owners`, so PTP pushing MCP-submitted rows directly
+is a change of ownership, not just a gap being filled.
+
+---
+
 ### HighLevel push honesty, Phase B: the credential tells the truth
 
 Commits `d53eaa2`, `f89eb21`, `3b9f3c7`, `fcae3fc`. **1456 passing from 1367, 75 files, 0 failing**,

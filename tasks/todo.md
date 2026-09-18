@@ -3210,20 +3210,20 @@ surface that iterates ROWS instead, which is exactly why it is the one that work
 
 ## TASKS
 
-- [ ] 1. **Push where the row SETTLES, not where the job finalizes.** One shared helper, called from
+- [x] 1. **DONE `09371fe` + `1def747`. Push where the row SETTLES, not where the job finalizes.** One shared helper, called from
       the three row-settlement points: `sweep-property-traces` (which covers session bulk, v1 bulk AND
       MCP bulk, since all three enqueue into the same column), plus the two inline single routes.
       Reuse `recordHighLevelPushes` so every new push also feeds credential health.
-- [ ] 2. **Stop v1 bulk double-pushing.** Once the cron owns tier 2, `v1/trace/bulk/status:398-404`
+- [x] 2. **DONE `09371fe`. Stop v1 bulk double-pushing.** Once the cron owns tier 2, `v1/trace/bulk/status:398-404`
       must skip rows the cron already pushed. Filter on the row having gone through the tier 2 queue,
       not on `tier`, because that is the property that actually decides ownership. NOTE: a double push
       is an UPDATE not a duplicate (the client searches first), and post-tags-fix an update is nearly
       idempotent, so this is correctness and waste, not damage.
-- [ ] 3. **The manual JOB button silently excludes every tier 2 row.**
+- [x] 3. **DONE `09371fe`. The manual JOB button silently excluded every tier 2 row.**
       `integrations/highlevel/push/route.ts:160-166` filters `.eq('tracerfy_job_id', job.tracerfy_job_id)`
       and a tier 2 row has none. A mixed job pushes only its tier 1 half with no mention; an all-tier-2
       job reports "No successful results to push". Select the job's rows by `trace_job_id`.
-- [ ] 4. **`sweep-stale-traces` can finalize an all-tier-2 job with NO push, permanently.**
+- [x] 4. **CLOSED BY TASK 1, verified by grep, no code added (adding a push there would double-push).** `sweep-stale-traces` can finalize an all-tier-2 job with NO push, permanently.
       `:278-291` writes `status:'completed'` once the property queue drains, and
       `trace/bulk/status:153` then early-returns forever, so no later poll can ever push it.
 

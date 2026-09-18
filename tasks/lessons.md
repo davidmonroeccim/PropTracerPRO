@@ -4,6 +4,47 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-018: Wiring N call sites and testing two of them is L-016 inside the mutation run (2026-09-18)
+
+**What happened.** Making Full Property Trace reach the CRM required every push site to record which
+trace it pushed. Seven sites were wired correctly. The implementer's own tests covered two. Then the
+mutation run: strip the trace id from site three, four, five, six, seven, and **five mutations
+SURVIVED in a row**. Every one of those sites would have pushed to a customer's CRM and recorded
+nothing, and the suite would have stayed green forever.
+
+**Why this is not just "write more tests".** The work was CORRECT. Reading the diff shows seven
+sites, all wired, all identical in shape. The tests that existed passed and were about the right
+thing. Nothing in the code or the tests looked wrong, because nothing WAS wrong. What was missing
+was a fence, and a missing fence is invisible in exactly the way L-015 keeps describing: you cannot
+see it by reading, only by breaking the thing and watching nothing happen.
+
+**The mechanism, and it is L-016 moved from the plan into the verification.** L-016 says an
+enumerated list suppresses the search that would find item six. This is the same failure one level
+down: having wired seven sites, the implementer mutated the sites the BRIEF named rather than asking
+"what is the set of things that could individually break here, and is each one fenced?" The brief
+said "record at EVERY push site". The tests covered the two the brief discussed by name.
+
+**The rules.**
+- **When a change touches N call sites, the mutation count is a function of N, not of the brief.**
+  Mutate every site, not a representative one. "They are all the identical two-line shape" is the
+  claim under test, not a reason to skip it.
+- **A shared helper does not fence its callers.** Testing the helper thoroughly proves the helper
+  works. It proves nothing about whether site five passes it the right arguments, and that is a
+  different defect with the same symptom: silence.
+- Corollary for whoever writes the brief, and it is mine again: I wrote "record at EVERY push site"
+  and then listed the mutations to run, and my list named five of the seven. The predicate was right
+  and the list under it was short, which is precisely the L-016 shape I had already written down.
+
+**The counterweight, so this does not become "mutate everything forever".** In the same run, two
+mutations were correctly identified as EQUIVALENT: removing a type guard changed no runtime
+behaviour because a second guard subsumed it, and the mutant was caught by `tsc` rather than by a
+test. Verified by running `npx tsc --noEmit` on the mutant and reading the TS2322. **An equivalent
+mutant must be reported as equivalent with its evidence, never counted as a kill and never "fixed"
+by manufacturing a test that casts its way into an impossible state.** See
+[[feedback_no_impossible_edge_cases]].
+
+---
+
 ## L-017: `information_schema.column_privileges` cannot answer "will a NEW column be covered" (2026-09-18)
 
 **What happened.** Adding three columns to `user_profiles` for the HighLevel credential flag, I did
