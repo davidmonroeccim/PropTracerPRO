@@ -3,7 +3,58 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import type { HighLevelFailureKind, HighLevelPushResult } from '@/lib/highlevel/client';
 import type { TraceResult } from '@/types';
+
+type PushFailure = Extract<HighLevelPushResult, { success: false }>;
+
+/**
+ * What the CALLER should do, expressed as a status code.
+ *
+ * Deliberately not 401 or 403 for a credential failure: those two are this
+ * route's own auth answers (:14 and :36 below), and a 401 on the wire makes a
+ * browser think the PTP session died, so a bad HighLevel key would read as a
+ * surprise logout. 502 says what is true: the request was fine and the user is
+ * authorised here, but the upstream CRM refused us.
+ */
+const STATUS_FOR_KIND: Record<HighLevelFailureKind, number> = {
+  credential: 502, // the upstream refused our credential; the user must reconnect it
+  record: 422, // this payload is the problem and nothing else is
+  transient: 503, // the standard retryable status
+};
+
+/**
+ * Which failure a mixed batch should be REPORTED as. The most common one, and a
+ * tie goes to credential: "3 records had bad payloads" and "your key is dead"
+ * need different answers from the user, and the dead key is the one that will
+ * keep failing until someone acts on it.
+ */
+const KIND_PRECEDENCE: HighLevelFailureKind[] = ['credential', 'record', 'transient'];
+
+function dominantFailure(failures: PushFailure[]): PushFailure {
+  const counts = new Map<HighLevelFailureKind, number>();
+  for (const f of failures) counts.set(f.kind, (counts.get(f.kind) ?? 0) + 1);
+
+  // Walk in precedence order and only ever take a STRICTLY larger count, so an
+  // equal count leaves the earlier (more urgent) kind in place.
+  let winner = KIND_PRECEDENCE[0];
+  for (const kind of KIND_PRECEDENCE.slice(1)) {
+    if ((counts.get(kind) ?? 0) > (counts.get(winner) ?? 0)) winner = kind;
+  }
+  // The first failure OF the winning kind: its `error` already carries the
+  // remediation sentence, so there is no second copy of that copy to drift.
+  return failures.find((f) => f.kind === winner) ?? failures[0];
+}
+
+/** The classification a failure carries, flattened for the JSON body. */
+function failureBody(failure: PushFailure, error?: string) {
+  return {
+    success: false as const,
+    kind: failure.kind,
+    ...(failure.kind === 'credential' ? { reason: failure.reason } : {}),
+    error: error ?? failure.error,
+  };
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -70,6 +121,12 @@ export async function POST(request: NextRequest) {
         propertyZip: trace.zip || undefined,
       });
 
+      // A `{ success: false }` body used to leave here as an HTTP 200, which
+      // made every `!response.ok` check downstream report a success.
+      if (!result.success) {
+        return NextResponse.json(failureBody(result), { status: STATUS_FOR_KIND[result.kind] });
+      }
+
       return NextResponse.json(result);
     }
 
@@ -105,7 +162,7 @@ export async function POST(request: NextRequest) {
       }
 
       let pushed = 0;
-      let failed = 0;
+      const failures: PushFailure[] = [];
 
       for (const trace of traces) {
         const result = await pushTraceToHighLevel({
@@ -121,11 +178,51 @@ export async function POST(request: NextRequest) {
         if (result.success) {
           pushed++;
         } else {
-          failed++;
+          failures.push(result);
         }
       }
 
-      return NextResponse.json({ success: true, pushed, failed, total: traces.length });
+      const failed = failures.length;
+      const total = traces.length;
+
+      if (failed === 0) {
+        return NextResponse.json({ success: true, pushed, failed, total });
+      }
+
+      // `failed` used to be counted here and rendered nowhere, under a
+      // hardcoded `success: true`. A 50 record job where every write 401'd came
+      // back as a green check reading "0 contacts pushed".
+      const failure = dominantFailure(failures);
+
+      if (pushed === 0) {
+        return NextResponse.json(
+          {
+            ...failureBody(
+              failure,
+              `None of the ${total} contacts reached HighLevel. ${failure.error}`
+            ),
+            pushed,
+            failed,
+            total,
+          },
+          { status: STATUS_FOR_KIND[failure.kind] }
+        );
+      }
+
+      // 207 Multi-Status: the parts genuinely had different outcomes. The body,
+      // not the transport code, is what says so.
+      return NextResponse.json(
+        {
+          ...failureBody(
+            failure,
+            `${pushed} of ${total} pushed. ${failed} failed. ${failure.error}`
+          ),
+          pushed,
+          failed,
+          total,
+        },
+        { status: 207 }
+      );
     }
   } catch (error) {
     console.error('CRM push error:', error);

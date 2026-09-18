@@ -130,6 +130,146 @@ export async function createHighLevelContact(data: {
   }
 }
 
+/** Which of three things a failed push means is broken. See classifyStatus. */
+export type HighLevelFailureKind = 'credential' | 'record' | 'transient';
+
+/**
+ * WHICH credential problem it is. The status cannot tell you: a missing scope
+ * and a revoked token are BOTH 401 in HighLevel, and only the body's `message`
+ * separates them. `unknown` is a first-class answer, not a fallback bucket.
+ */
+export type HighLevelCredentialReason = 'token' | 'scope' | 'location' | 'unknown';
+
+export type HighLevelPushResult =
+  | { success: true; contactId?: string; action: 'created' | 'updated' }
+  | {
+      success: false;
+      kind: 'credential';
+      reason: HighLevelCredentialReason;
+      status: number;
+      error: string;
+    }
+  | { success: false; kind: 'record'; status: number; error: string }
+  | { success: false; kind: 'transient'; status?: number; error: string };
+
+/**
+ * THE CLASSIFICATION GATE. All three kinds are `success: false` and the next
+ * reader will want to merge them into one boolean. Do not. They differ in who
+ * has to act, and that is the only thing the caller can key handling on:
+ *
+ *   credential  401, 403        the stored key is dead for EVERY future push,
+ *                               not just this one. The account owner has to
+ *                               reconnect. No retry will ever help.
+ *   transient   429, any >= 500 nothing is broken. A retry is the right answer,
+ *               network throw   and telling the user to fix their key is a lie.
+ *   record      everything else this one payload was refused. The credential is
+ *               (400, 404, 422) fine and every other record will still push.
+ *
+ * Collapsing them sends "your API key is dead" and "this one address was
+ * malformed" down the same pipe, which is the defect this type exists to stop.
+ */
+function classifyStatus(status: number): HighLevelFailureKind {
+  if (status === 401 || status === 403) return 'credential';
+  if (status === 429 || status >= 500) return 'transient';
+  return 'record';
+}
+
+/**
+ * Pull HighLevel's `message` out of an error body. The body may not be JSON at
+ * all (a proxy's HTML error page, an empty string), and `message` is sometimes
+ * an array of strings. Anything we cannot read is null, never a guess.
+ */
+function errorMessageOf(body: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const message = (parsed as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+    if (Array.isArray(message)) {
+      const parts = message.filter((p): p is string => typeof p === 'string');
+      return parts.length > 0 ? parts.join(' ') : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WHY THIS IS NOT DERIVED FROM THE STATUS. A token missing the contacts.write
+ * scope returns 401, exactly like a revoked token, and PTP's own setup copy
+ * tells users to grant "contacts" while contacts.readonly and contacts.write
+ * are SEPARATE scopes. So a read-only token is a likely real-world shape: it
+ * passes Test Connection (a GET) and fails every push (a PUT or POST). Telling
+ * that user to re-paste their token sends them down the wrong path.
+ *
+ * Matching is positive-only and best-effort. The scope wording below comes from
+ * a developer-forum report rather than HighLevel staff or the official docs, so
+ * if they reword it the correct behaviour is to degrade to `unknown` and show a
+ * generic credential failure. Mislabelling an unrecognised 401 as a revoked
+ * token would be inventing a result (repo rule 7).
+ */
+function credentialReasonOf(status: number, body: string): HighLevelCredentialReason {
+  const message = errorMessageOf(body)?.toLowerCase();
+  if (!message) return 'unknown';
+
+  if (status === 403 && message.includes('access to this location')) return 'location';
+  if (status === 401 && message.includes('scope')) return 'scope';
+  if (
+    status === 401 &&
+    (message.includes('invalid jwt') ||
+      message.includes('invalid token') ||
+      message.includes('jwt expired'))
+  ) {
+    return 'token';
+  }
+  return 'unknown';
+}
+
+/** What the customer reads. Each sentence names the remediation for its reason. */
+const CREDENTIAL_MESSAGE: Record<HighLevelCredentialReason, string> = {
+  token: 'HighLevel rejected your API key. Reconnect HighLevel in Settings.',
+  scope:
+    'Your HighLevel token is missing the contacts.write permission. Reconnect it with that scope granted.',
+  location:
+    'Your HighLevel token does not have access to that location. Check the location ID in Settings.',
+  unknown: 'HighLevel refused the credential. Check your HighLevel connection in Settings.',
+};
+
+const RECORD_MESSAGE = 'HighLevel would not accept this contact.';
+/** Covers 429, every 5xx and a thrown network error: in all three HighLevel is simply not taking it. */
+const TRANSIENT_MESSAGE = 'HighLevel is not accepting pushes right now. Try again shortly.';
+
+type HighLevelPushFailure = Extract<HighLevelPushResult, { success: false }>;
+
+/** Turn a non-ok response into a classified failure, and log the status while we have it. */
+async function failureFrom(stage: string, response: Response): Promise<HighLevelPushFailure> {
+  const body = await response.text();
+  const status = response.status;
+  const kind = classifyStatus(status);
+
+  let failure: HighLevelPushFailure;
+  if (kind === 'credential') {
+    const reason = credentialReasonOf(status, body);
+    failure = { success: false, kind, reason, status, error: CREDENTIAL_MESSAGE[reason] };
+  } else if (kind === 'record') {
+    failure = { success: false, kind, status, error: RECORD_MESSAGE };
+  } else {
+    failure = { success: false, kind, status, error: TRANSIENT_MESSAGE };
+  }
+
+  // The status is the whole point. Before this, a 401, a 422 and a 429 all
+  // logged the identical string 'Failed to create contact'.
+  console.error(`HighLevel ${stage} failed:`, { ...failure, body });
+  return failure;
+}
+
+/** A thrown fetch is always transient: we never reached HighLevel, so nothing is known to be broken. */
+function networkFailure(stage: string, cause: unknown): HighLevelPushFailure {
+  console.error(`HighLevel ${stage} failed:`, { kind: 'transient', cause });
+  return { success: false, kind: 'transient', error: TRANSIENT_MESSAGE };
+}
+
 /**
  * Pushes a trace result to the user's HighLevel CRM as a contact.
  * Searches for an existing contact by phone/email first; updates if found, creates if not.
@@ -143,7 +283,7 @@ export async function pushTraceToHighLevel(params: {
   propertyCity?: string;
   propertyState?: string;
   propertyZip?: string;
-}): Promise<{ success: boolean; contactId?: string; action?: 'created' | 'updated'; error?: string }> {
+}): Promise<HighLevelPushResult> {
   const { apiKey, locationId, traceResult } = params;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -168,14 +308,19 @@ export async function pushTraceToHighLevel(params: {
       const searchUrl = `${HIGHLEVEL.BASE_URL}/contacts/?locationId=${locationId}&query=${encodeURIComponent(searchQuery)}`;
       const searchRes = await fetch(searchUrl, { method: 'GET', headers });
 
-      if (searchRes.ok) {
-        const searchData: SearchResponse = await searchRes.json();
-        if (searchData.contacts?.length > 0) {
-          existingContactId = searchData.contacts[0].id;
-        }
+      // A REFUSED SEARCH STOPS THE PUSH. It must not fall through to create.
+      // This test used to have no else, so a 401 here left existingContactId
+      // null and the code created a SECOND copy of a contact the customer
+      // already had. A refused search means we do not know whether the contact
+      // exists, and creating on unknown state is inventing a result.
+      if (!searchRes.ok) return failureFrom('contact search', searchRes);
+
+      const searchData: SearchResponse = await searchRes.json();
+      if (searchData.contacts?.length > 0) {
+        existingContactId = searchData.contacts[0].id;
       }
     } catch (err) {
-      console.error('HighLevel contact search error:', err);
+      return networkFailure('contact search', err);
     }
   }
 
@@ -200,11 +345,7 @@ export async function pushTraceToHighLevel(params: {
         body: JSON.stringify(contactData),
       });
 
-      if (!updateRes.ok) {
-        const errText = await updateRes.text();
-        console.error('HighLevel update contact error:', errText);
-        return { success: false, error: 'Failed to update contact' };
-      }
+      if (!updateRes.ok) return failureFrom('update contact', updateRes);
 
       return { success: true, contactId: existingContactId, action: 'updated' };
     } else {
@@ -215,17 +356,12 @@ export async function pushTraceToHighLevel(params: {
         body: JSON.stringify({ locationId, ...contactData }),
       });
 
-      if (!createRes.ok) {
-        const errText = await createRes.text();
-        console.error('HighLevel create contact error:', errText);
-        return { success: false, error: 'Failed to create contact' };
-      }
+      if (!createRes.ok) return failureFrom('create contact', createRes);
 
       const createData = await createRes.json();
       return { success: true, contactId: createData.contact?.id, action: 'created' };
     }
   } catch (error) {
-    console.error('HighLevel push error:', error);
-    return { success: false, error: 'Service unavailable' };
+    return networkFailure(existingContactId ? 'update contact' : 'create contact', error);
   }
 }
