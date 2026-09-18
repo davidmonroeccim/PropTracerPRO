@@ -4,7 +4,10 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
 import type { HighLevelFailureKind, HighLevelPushResult } from '@/lib/highlevel/client';
-import { recordHighLevelOutcomes } from '@/lib/highlevel/credentialHealth';
+import {
+  recordHighLevelOutcomes,
+  type HighLevelOutcomeEntry,
+} from '@/lib/highlevel/credentialHealth';
 import type { TraceResult } from '@/types';
 
 type PushFailure = Extract<HighLevelPushResult, { success: false }>;
@@ -99,7 +102,7 @@ export async function POST(request: NextRequest) {
     if (trace_id) {
       const { data: trace } = await adminClient
         .from('trace_history')
-        .select('trace_result, normalized_address, city, state, zip, is_successful')
+        .select('id, trace_result, normalized_address, city, state, zip, is_successful')
         .eq('id', trace_id)
         .eq('user_id', user.id)
         .single();
@@ -127,7 +130,7 @@ export async function POST(request: NextRequest) {
       // just happened here, and a success has to clear a flag an earlier
       // automatic push set. Awaited because nothing downstream depends on the
       // order and it never throws.
-      await recordHighLevelOutcomes(user.id, [result]);
+      await recordHighLevelOutcomes(user.id, [{ traceId: trace.id, outcome: result }]);
 
       // A `{ success: false }` body used to leave here as an HTTP 200, which
       // made every `!response.ok` check downstream report a success.
@@ -143,7 +146,7 @@ export async function POST(request: NextRequest) {
       // Verify job belongs to user
       const { data: job } = await adminClient
         .from('trace_jobs')
-        .select('tracerfy_job_id, status')
+        .select('status')
         .eq('id', job_id)
         .eq('user_id', user.id)
         .single();
@@ -156,12 +159,22 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Job not completed' }, { status: 400 });
       }
 
-      // Get all successful traces for this job
+      // EVERY successful row of the job, selected by the job's OWN foreign key.
+      //
+      // This used to filter on `tracerfy_job_id`, which is Tracerfy's batch id.
+      // A Full Property Trace row never has one -- it is nulled the moment the
+      // row settles -- so a MIXED job pushed only its tier 1 half and said
+      // nothing about the rest, and an all-tier-2 job answered "No successful
+      // results to push" while holding a full set of paid-for contacts.
+      // `trace_job_id` is carried by every row of the job whatever its tier.
+      //
+      // `id` is selected so each push can be recorded against the row it came
+      // from. The user scope stays on the query as well as on the job lookup.
       const { data: traces } = await adminClient
         .from('trace_history')
-        .select('trace_result, normalized_address, city, state, zip')
+        .select('id, trace_result, normalized_address, city, state, zip')
         .eq('user_id', user.id)
-        .eq('tracerfy_job_id', job.tracerfy_job_id)
+        .eq('trace_job_id', job_id)
         .eq('is_successful', true)
         .not('trace_result', 'is', null);
 
@@ -171,7 +184,7 @@ export async function POST(request: NextRequest) {
 
       let pushed = 0;
       const failures: PushFailure[] = [];
-      const outcomes: HighLevelPushResult[] = [];
+      const outcomes: HighLevelOutcomeEntry[] = [];
 
       for (const trace of traces) {
         const result = await pushTraceToHighLevel({
@@ -184,7 +197,7 @@ export async function POST(request: NextRequest) {
           propertyZip: trace.zip || undefined,
         });
 
-        outcomes.push(result);
+        outcomes.push({ traceId: trace.id, outcome: result });
 
         if (result.success) {
           pushed++;

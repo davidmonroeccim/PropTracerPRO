@@ -400,7 +400,16 @@ export async function GET(request: Request) {
       : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
     // Collect successful results for HighLevel push
-    const successfulResults: { parsed: TraceResult; rawResult: TracerfyResult }[] = [];
+    // `traceId` is filled in below, once the matching trace_history row has been
+    // found: the entry is pushed here so the order of the webhook payload is
+    // unchanged, and the SAME object is completed a few statements later. It is
+    // what lets the HighLevel push at the bottom of this route record which row
+    // reached the CRM.
+    const successfulResults: {
+      parsed: TraceResult;
+      rawResult: TracerfyResult;
+      traceId?: string;
+    }[] = [];
 
     for (const rawResult of results) {
       const parsed = parseTracerfyResult(rawResult);
@@ -408,10 +417,13 @@ export async function GET(request: Request) {
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
       const attemptedCharge = isSuccessful ? perTraceCharge : 0;
 
-      if (isSuccessful) {
+      const successEntry = isSuccessful
+        ? { parsed, rawResult, traceId: undefined as string | undefined }
+        : null;
+      if (successEntry) {
         recordsMatched++;
         attemptedTotal += attemptedCharge;
-        successfulResults.push({ parsed, rawResult });
+        successfulResults.push(successEntry);
       }
 
       // Find the matching trace_history row by tracerfy_job_id + address match
@@ -437,6 +449,10 @@ export async function GET(request: Request) {
 
       const historyRow = historyRows?.[0];
       const historyId = historyRow?.id;
+      // The same object that is already in successfulResults. Without this the
+      // push at the bottom of this route has contacts and no idea which row
+      // they came off, so it could not record that the row reached the CRM.
+      if (successEntry) successEntry.traceId = historyId;
 
       if (historyId) {
         // Bill for a successful match FIRST -- all tiers use wallet deduction,
@@ -602,16 +618,17 @@ export async function GET(request: Request) {
       if (profile.highlevel_api_key && profile.highlevel_location_id) {
         recordHighLevelPushes(
           user.id,
-          successfulResults.map(({ parsed, rawResult }) =>
-            pushTraceToHighLevel({
+          successfulResults.map(({ parsed, rawResult, traceId }) => ({
+            traceId,
+            push: pushTraceToHighLevel({
               apiKey: profile.highlevel_api_key,
               locationId: profile.highlevel_location_id,
               traceResult: parsed,
               propertyAddress: rawResult.address,
               propertyCity: rawResult.city,
               propertyState: rawResult.state,
-            })
-          )
+            }),
+          }))
         );
       }
     }

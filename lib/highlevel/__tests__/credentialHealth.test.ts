@@ -60,7 +60,19 @@ vi.mock('@/lib/supabase/admin', () => ({
 const { recordHighLevelOutcomes, recordHighLevelPushes, highLevelVerdict } = await import(
   '@/lib/highlevel/credentialHealth'
 );
-type Outcome = NonNullable<Parameters<typeof recordHighLevelOutcomes>[1][number]>;
+type Entry = NonNullable<Parameters<typeof recordHighLevelOutcomes>[1][number]>;
+type Outcome = Entry['outcome'];
+
+/**
+ * The credential verdict does not depend on WHICH row a push was for, so the
+ * tests about it hand the outcomes over without a trace id. The tests that are
+ * about the row call recordHighLevelOutcomes directly with full entries.
+ */
+const record = (userId: string, outcomes: Outcome[]) =>
+  recordHighLevelOutcomes(
+    userId,
+    outcomes.map((outcome) => ({ outcome }))
+  );
 
 const SUCCESS = { success: true, contactId: 'c-1', action: 'created' } as const;
 
@@ -140,7 +152,7 @@ describe('a credential-class failure marks the credential dead, with the reason'
     ['location', LOCATION_DEAD, 403],
     ['unknown', UNKNOWN_DEAD, 401],
   ] as const)('reason %s is stored, not inferred from the status', async (reason, failure, status) => {
-    await recordHighLevelOutcomes('user-1', [failure as Outcome]);
+    await record('user-1', [failure as Outcome]);
 
     const updates = profileUpdates();
     expect(updates).toHaveLength(1);
@@ -161,8 +173,8 @@ describe('a credential-class failure marks the credential dead, with the reason'
   it('401 alone does not decide the reason: two 401s store two different reasons', async () => {
     // The point of the reason column. A revoked token and a missing scope are
     // BOTH 401 and need different instructions from the user.
-    await recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome]);
-    await recordHighLevelOutcomes('user-1', [SCOPE_DEAD as Outcome]);
+    await record('user-1', [TOKEN_DEAD as Outcome]);
+    await record('user-1', [SCOPE_DEAD as Outcome]);
 
     const updates = profileUpdates();
     expect(updates.map((u) => u.payload.highlevel_invalid_status)).toEqual([401, 401]);
@@ -172,23 +184,23 @@ describe('a credential-class failure marks the credential dead, with the reason'
 
 describe('a failure that says nothing about the credential changes nothing', () => {
   it('a record failure writes nothing at all', async () => {
-    await recordHighLevelOutcomes('user-1', [RECORD_FAILURE as Outcome]);
+    await record('user-1', [RECORD_FAILURE as Outcome]);
     expect(H.updates).toEqual([]);
   });
 
   it('a rate limit writes nothing at all', async () => {
-    await recordHighLevelOutcomes('user-1', [RATE_LIMITED as Outcome]);
+    await record('user-1', [RATE_LIMITED as Outcome]);
     expect(H.updates).toEqual([]);
   });
 
   it('a network throw writes nothing at all', async () => {
-    await recordHighLevelOutcomes('user-1', [NETWORK_DOWN as Outcome]);
+    await record('user-1', [NETWORK_DOWN as Outcome]);
     expect(H.updates).toEqual([]);
   });
 
   it('a record failure does not even read the profile, so it cannot clear one either', async () => {
     H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
-    await recordHighLevelOutcomes('user-1', [RECORD_FAILURE as Outcome]);
+    await record('user-1', [RECORD_FAILURE as Outcome]);
     expect(H.selects).toEqual([]);
     expect(H.updates).toEqual([]);
   });
@@ -201,7 +213,7 @@ describe('a success CLEARS the flag, which is the half nobody sees until it is m
     // cleared the flag, that user stays red forever while pushes work.
     H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
 
-    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+    await record('user-1', [SUCCESS as Outcome]);
 
     const updates = profileUpdates();
     expect(updates).toHaveLength(1);
@@ -219,14 +231,14 @@ describe('a success CLEARS the flag, which is the half nobody sees until it is m
 
   it('writes nothing when the flag is already clear, so a healthy push costs one read', async () => {
     H.profileRow = { highlevel_invalid_at: null };
-    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+    await record('user-1', [SUCCESS as Outcome]);
     expect(H.updates).toEqual([]);
     expect(H.selects).toEqual(['user_profiles:highlevel_invalid_at']);
   });
 
   it('writes nothing when the profile row cannot be read', async () => {
     H.profileRow = null;
-    await recordHighLevelOutcomes('user-1', [SUCCESS as Outcome]);
+    await record('user-1', [SUCCESS as Outcome]);
     expect(H.updates).toEqual([]);
   });
 });
@@ -236,7 +248,7 @@ describe('a batch is one decision, not one write per record', () => {
     H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
     const outcomes = Array.from({ length: 50 }, () => SUCCESS as Outcome);
 
-    await recordHighLevelOutcomes('user-1', outcomes);
+    await record('user-1', outcomes);
 
     expect(profileUpdates()).toHaveLength(1);
     expect(H.selects).toHaveLength(1);
@@ -245,7 +257,7 @@ describe('a batch is one decision, not one write per record', () => {
   it('one credential failure among successes marks the credential dead', async () => {
     // Credential wins over success deliberately: a key that refused any write
     // is the outcome that keeps failing until somebody acts on it.
-    await recordHighLevelOutcomes('user-1', [
+    await record('user-1', [
       SUCCESS as Outcome,
       SCOPE_DEAD as Outcome,
       SUCCESS as Outcome,
@@ -260,7 +272,7 @@ describe('a batch is one decision, not one write per record', () => {
   it('successes mixed with record failures still clear, because no credential complaint was made', async () => {
     H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
 
-    await recordHighLevelOutcomes('user-1', [
+    await record('user-1', [
       RECORD_FAILURE as Outcome,
       SUCCESS as Outcome,
       RECORD_FAILURE as Outcome,
@@ -273,7 +285,7 @@ describe('a batch is one decision, not one write per record', () => {
 
   it('an all-transient batch writes nothing', async () => {
     H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
-    await recordHighLevelOutcomes('user-1', [RATE_LIMITED as Outcome, NETWORK_DOWN as Outcome]);
+    await record('user-1', [RATE_LIMITED as Outcome, NETWORK_DOWN as Outcome]);
     expect(H.updates).toEqual([]);
   });
 });
@@ -281,31 +293,154 @@ describe('a batch is one decision, not one write per record', () => {
 describe('it never throws into the caller, because five call sites are on a request path', () => {
   it('survives a failed update', async () => {
     H.updateError = { message: 'permission denied' };
-    await expect(recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
+    await expect(record('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
   });
 
   it('survives createAdminClient throwing', async () => {
     H.adminThrows = true;
-    await expect(recordHighLevelOutcomes('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
+    await expect(record('user-1', [TOKEN_DEAD as Outcome])).resolves.toBeUndefined();
   });
 
   it('survives a push promise that rejects, and records nothing from it', async () => {
     await expect(
-      recordHighLevelPushes('user-1', [Promise.reject(new Error('boom'))])
+      recordHighLevelPushes('user-1', [{ push: Promise.reject(new Error('boom')) }])
     ).resolves.toBeUndefined();
     expect(H.updates).toEqual([]);
   });
 
   it('records the resolved outcomes of the promises it is handed', async () => {
     await recordHighLevelPushes('user-1', [
-      Promise.resolve(SUCCESS as Outcome),
-      Promise.resolve(LOCATION_DEAD as Outcome),
+      { push: Promise.resolve(SUCCESS as Outcome) },
+      { push: Promise.resolve(LOCATION_DEAD as Outcome) },
     ]);
 
     const updates = profileUpdates();
     expect(updates).toHaveLength(1);
     expect(updates[0].payload.highlevel_invalid_reason).toBe('location');
     expect(updates[0].payload.highlevel_invalid_status).toBe(403);
+  });
+});
+
+/**
+ * RECORDING THAT THE TRACE REACHED THE CRM.
+ *
+ * The same funnel, because a second mechanism beside it is a second thing to
+ * forget at the eighth push site. Every caller already hands its outcomes here;
+ * handing the trace id alongside is what makes "did this row reach the CRM"
+ * answerable at all.
+ *
+ * THE PAIRING IS THE RULE. `highlevel_contact_id` and `highlevel_pushed_at` are
+ * written together or not at all: a row with one and not the other is a bug,
+ * not a state, and every reader that asks "has this been pushed" looks at the
+ * timestamp while every reader that asks "where did it go" looks at the id.
+ */
+describe('the push is recorded on the trace row it was for', () => {
+  const traceUpdates = (): Update[] => H.updates.filter((u) => u.table === 'trace_history');
+
+  it('writes the contact id and the timestamp together, with the action', async () => {
+    await recordHighLevelOutcomes('user-1', [{ traceId: 'trace-1', outcome: SUCCESS as Outcome }]);
+
+    const updates = traceUpdates();
+    expect(updates).toHaveLength(1);
+    const payload = updates[0].payload;
+
+    // `in` rather than a value check alone: an ABSENT key satisfies a null
+    // assertion just as well as a null value, and an absent key here is exactly
+    // the half-written row the pairing rule exists to forbid.
+    expect('highlevel_contact_id' in payload).toBe(true);
+    expect('highlevel_pushed_at' in payload).toBe(true);
+    expect('highlevel_push_action' in payload).toBe(true);
+
+    expect(payload.highlevel_contact_id).toBe('c-1');
+    expect(payload.highlevel_push_action).toBe('created');
+    expect(typeof payload.highlevel_pushed_at).toBe('string');
+    expect(Number.isNaN(Date.parse(String(payload.highlevel_pushed_at)))).toBe(false);
+  });
+
+  it('stores the action HighLevel reported, so an update is not read as a new contact', async () => {
+    await recordHighLevelOutcomes('user-1', [
+      { traceId: 'trace-1', outcome: { success: true, contactId: 'c-9', action: 'updated' } as Outcome },
+    ]);
+
+    const updates = traceUpdates();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].payload.highlevel_push_action).toBe('updated');
+    expect(updates[0].payload.highlevel_contact_id).toBe('c-9');
+  });
+
+  it('records each row against its own id, never one row against another', async () => {
+    await recordHighLevelOutcomes('user-1', [
+      { traceId: 'trace-a', outcome: { success: true, contactId: 'c-a', action: 'created' } as Outcome },
+      { traceId: 'trace-b', outcome: { success: true, contactId: 'c-b', action: 'updated' } as Outcome },
+    ]);
+
+    const updates = traceUpdates();
+    expect(updates).toHaveLength(2);
+    expect(updates.map((u) => u.payload.highlevel_contact_id).sort()).toEqual(['c-a', 'c-b']);
+  });
+
+  it('records nothing for a failed push, because nothing reached the CRM', async () => {
+    await recordHighLevelOutcomes('user-1', [
+      { traceId: 'trace-1', outcome: TOKEN_DEAD as Outcome },
+    ]);
+
+    expect(traceUpdates()).toEqual([]);
+  });
+
+  it('records nothing when HighLevel gave us no contact id, rather than a timestamp alone', async () => {
+    // A success with no id cannot answer "where did it go", and half the pair
+    // is worse than neither: a later reader would treat the row as pushed and
+    // have nothing to point at.
+    await recordHighLevelOutcomes('user-1', [
+      { traceId: 'trace-1', outcome: { success: true, action: 'created' } as Outcome },
+    ]);
+
+    expect(traceUpdates()).toEqual([]);
+  });
+
+  it('records nothing for a credential check, which is not about any row', async () => {
+    // validateHighLevelCredential answers { success: true } with no action and
+    // no contact. It must not stamp a push onto anything.
+    await recordHighLevelOutcomes('user-1', [{ outcome: { success: true } as Outcome }]);
+
+    expect(traceUpdates()).toEqual([]);
+  });
+
+  it('still records the push when the credential verdict writes nothing', async () => {
+    // A healthy push against an already-clear flag writes no profile row at
+    // all. The trace record must not ride on that decision.
+    H.profileRow = { highlevel_invalid_at: null };
+
+    await recordHighLevelOutcomes('user-1', [{ traceId: 'trace-1', outcome: SUCCESS as Outcome }]);
+
+    expect(profileUpdates()).toEqual([]);
+    expect(traceUpdates()).toHaveLength(1);
+  });
+
+  it('records through the fire-and-forget form the automatic paths use', async () => {
+    await recordHighLevelPushes('user-1', [
+      { traceId: 'trace-1', push: Promise.resolve(SUCCESS as Outcome) },
+    ]);
+
+    const updates = traceUpdates();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].payload.highlevel_contact_id).toBe('c-1');
+  });
+
+  it('a failed trace update does not stop the credential write', async () => {
+    // The two are independent facts. A row update that fails must not cost the
+    // user the flag that tells them their key is dead, and vice versa.
+    H.updateError = { message: 'permission denied' };
+    H.profileRow = { highlevel_invalid_at: '2026-09-17T00:00:00.000Z' };
+
+    await expect(
+      recordHighLevelOutcomes('user-1', [{ traceId: 'trace-1', outcome: SUCCESS as Outcome }])
+    ).resolves.toBeUndefined();
+
+    // Both were attempted, in spite of the first one erroring.
+    expect(traceUpdates()).toHaveLength(1);
+    expect(profileUpdates()).toHaveLength(1);
+    expect(profileUpdates()[0].payload.highlevel_invalid_at).toBeNull();
   });
 });
 
@@ -362,7 +497,7 @@ describe('the health write is scheduled to outlive the response', () => {
     vi.resetModules();
     const mod = await import('@/lib/highlevel/credentialHealth');
 
-    await mod.recordHighLevelPushes('user-1', [Promise.resolve(TOKEN_DEAD as Outcome)]);
+    await mod.recordHighLevelPushes('user-1', [{ push: Promise.resolve(TOKEN_DEAD as Outcome) }]);
 
     // Asserted as "after() received the work", not as "an update happened".
     // The whole point is that the write is DEFERRED, and a test that only
@@ -388,7 +523,7 @@ describe('the health write is scheduled to outlive the response', () => {
     vi.resetModules();
     const mod = await import('@/lib/highlevel/credentialHealth');
 
-    await mod.recordHighLevelPushes('user-1', [Promise.resolve(TOKEN_DEAD as Outcome)]);
+    await mod.recordHighLevelPushes('user-1', [{ push: Promise.resolve(TOKEN_DEAD as Outcome) }]);
 
     // Degrades to running inline rather than dropping the write. Losing the
     // flag outside a request scope would be worse than the scheduling we lose.

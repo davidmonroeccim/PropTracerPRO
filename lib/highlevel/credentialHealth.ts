@@ -1,6 +1,12 @@
 import { after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { HighLevelPushResult, HighLevelValidation } from '@/lib/highlevel/client';
+import type { HighLevelPushResult } from '@/lib/highlevel/client';
+import {
+  recordTracePushes,
+  type HighLevelOutcome,
+  type HighLevelOutcomeEntry,
+  type HighLevelPushEntry,
+} from '@/lib/highlevel/pushRecord';
 
 /**
  * THE CHANNEL THE AUTOMATIC PATHS DID NOT HAVE.
@@ -21,8 +27,12 @@ import type { HighLevelPushResult, HighLevelValidation } from '@/lib/highlevel/c
  * supabase/migrations/20260918_highlevel_credential_health.sql.
  */
 
-/** Anything a HighLevel call can answer with: a push result or a credential check. */
-export type HighLevelOutcome = HighLevelPushResult | HighLevelValidation;
+/**
+ * Re-exported so a caller needs one import, not three. The entry types carry a
+ * trace id alongside each outcome: see lib/highlevel/pushRecord.ts for why the
+ * record of the push rides this funnel rather than one of its own.
+ */
+export type { HighLevelOutcome, HighLevelOutcomeEntry, HighLevelPushEntry };
 
 type CredentialFailure = Extract<HighLevelPushResult, { kind: 'credential' }>;
 
@@ -71,10 +81,16 @@ export function highLevelVerdict(
 }
 
 /**
- * Record what a run of HighLevel calls said about the credential.
+ * Record what a run of HighLevel calls said about the credential, and record on
+ * each trace row that it reached the CRM.
  *
- * A BATCH IS ONE DECISION, not one write per record: a fifty record bulk push
- * that all succeeded must not produce fifty writes.
+ * TWO INDEPENDENT FACTS THROUGH ONE FUNNEL. The credential verdict is about the
+ * KEY and a batch of it is ONE decision: a fifty record bulk push that all
+ * succeeded must not produce fifty profile writes. The push record is about the
+ * ROW and there is one per row, because each carries its own contact id. They
+ * are recorded separately and neither may take the other down: a failed row
+ * update must not stop a dead key being flagged, and a failed flag must not
+ * lose the record of a contact that really was created.
  *
  * NEVER THROWS. Five of the callers are fire-and-forget on a request path that
  * still has to return the customer's trace result, so a broken health write may
@@ -82,10 +98,14 @@ export function highLevelVerdict(
  */
 export async function recordHighLevelOutcomes(
   userId: string,
-  outcomes: ReadonlyArray<HighLevelOutcome | undefined>
+  entries: ReadonlyArray<HighLevelOutcomeEntry | undefined>
 ): Promise<void> {
+  // Has its own try/catch and never throws, so the credential verdict below
+  // runs whatever happened here.
+  await recordTracePushes(entries);
+
   try {
-    const verdict = highLevelVerdict(outcomes);
+    const verdict = highLevelVerdict(entries.map((entry) => entry?.outcome));
     if (verdict.kind === 'no_signal') return;
 
     const adminClient = createAdminClient();
@@ -148,20 +168,27 @@ export async function recordHighLevelOutcomes(
  */
 function settleAndRecord(
   userId: string,
-  pushes: ReadonlyArray<Promise<HighLevelOutcome>>
+  pushes: ReadonlyArray<HighLevelPushEntry>
 ): Promise<void> {
   return Promise.all(
-    pushes.map((push) =>
-      push.catch((error): undefined => {
-        // pushTraceToHighLevel returns its failures rather than throwing, so
-        // reaching here means something unexpected broke. It tells us nothing
-        // about the credential, so it is dropped rather than classified.
-        console.error('HighLevel push threw:', error);
-        return undefined;
-      })
+    pushes.map((entry) =>
+      entry.push.then(
+        (outcome): HighLevelOutcomeEntry | undefined => ({
+          traceId: entry.traceId,
+          outcome,
+        }),
+        (error): undefined => {
+          // pushTraceToHighLevel returns its failures rather than throwing, so
+          // reaching here means something unexpected broke. It tells us nothing
+          // about the credential and nothing reached the CRM, so it is dropped
+          // rather than classified or recorded.
+          console.error('HighLevel push threw:', error);
+          return undefined;
+        }
+      )
     )
   )
-    .then((outcomes) => recordHighLevelOutcomes(userId, outcomes))
+    .then((entries) => recordHighLevelOutcomes(userId, entries))
     .catch((error) => {
       console.error('HighLevel credential health write failed:', error);
     });
@@ -186,7 +213,7 @@ function settleAndRecord(
  */
 export function recordHighLevelPushes(
   userId: string,
-  pushes: ReadonlyArray<Promise<HighLevelOutcome>>
+  pushes: ReadonlyArray<HighLevelPushEntry>
 ): Promise<void> {
   const work = () => settleAndRecord(userId, pushes);
   try {

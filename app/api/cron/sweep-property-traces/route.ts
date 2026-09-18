@@ -11,6 +11,10 @@ import {
   traceResultFor,
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
+import {
+  pushSettledTrace,
+  type HighLevelCredentialColumns,
+} from '@/lib/highlevel/pushSettledTrace';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
 import { isTrackASource, pricePlanFor } from '@/lib/suite/pricing';
@@ -56,9 +60,12 @@ import {
  * a per-SUCCESSFUL-TRACE one. A tier 1 miss is FREE; a tier 2 miss is BILLED.
  * Do not fold the two.
  *
- * NOTHING ENQUEUES INTO THIS COLUMN YET. The submit routes learn to write
- * 'queued' in phase 5c-3; until then this cron claims nothing every minute and
- * returns processed: 0. That is expected, not a wiring bug.
+ * ALL THREE BULK SUBMIT SURFACES ENQUEUE INTO THIS COLUMN, which is what makes
+ * this one cron the single row-settlement point for tier 2 bulk: the session
+ * route (app/api/trace/bulk), the API-key route (app/api/v1/trace/bulk) and the
+ * Suite MCP tool (lib/suite/mcp-tools.ts) all write 'queued' onto a blank-owner
+ * row and leave it here. A run with nothing to claim returns processed: 0, which
+ * is an empty queue rather than a wiring bug.
  */
 export const maxDuration = 300;
 
@@ -203,6 +210,31 @@ export async function GET(request: Request) {
         : rawPricePlanFor(rateProfile);
     pricePlanCache.set(key, plan);
     return plan;
+  };
+
+  /**
+   * The user's HighLevel credential, resolved at most once per user per run.
+   *
+   * SEPARATE FROM THE PRICE PLAN READ ABOVE ON PURPOSE. That one is keyed by
+   * (user, track) because the same profile prices differently on the two
+   * surfaces; this one is a property of the user alone. It is also only ever
+   * reached for a row that is actually going to push, so a customer with no
+   * HighLevel connection costs this cron nothing.
+   */
+  const credentialCache = new Map<string, HighLevelCredentialColumns | null>();
+  const highLevelCredentialFor = async (
+    userId: string
+  ): Promise<HighLevelCredentialColumns | null> => {
+    const cached = credentialCache.get(userId);
+    if (cached !== undefined) return cached;
+    const { data } = await adminClient
+      .from('user_profiles')
+      .select('highlevel_api_key, highlevel_location_id')
+      .eq('id', userId)
+      .single();
+    const credential = (data as HighLevelCredentialColumns | null) ?? null;
+    credentialCache.set(userId, credential);
+    return credential;
   };
 
   /**
@@ -577,6 +609,30 @@ export async function GET(request: Request) {
           ...(execution.learnedZip ? { zip: execution.learnedZip } : {}),
         })
         .eq('id', row.id);
+
+      // THE ROW REACHES THE CRM HERE, WHERE IT SETTLES. This is the only place
+      // all three bulk surfaces meet: session, v1 and MCP all enqueue into
+      // property_trace_status, so one push here covers all three. Pushing at
+      // job finalization instead is what left tier 2 out, because those lists
+      // are built from Tracerfy's batch array and a tier 2 row has no
+      // tracerfy_job_id at all.
+      //
+      // AWAITED. The credential has to be read before anything can be handed to
+      // after(), so a floating call could be cut off before the work was even
+      // scheduled. The push itself still outlives the response.
+      await pushSettledTrace({
+        userId: row.user_id,
+        resolveCredential: () => highLevelCredentialFor(row.user_id),
+        trace: {
+          id: row.id,
+          address: row.normalized_address,
+          city: row.city,
+          state: row.state,
+          zip: execution.learnedZip || row.zip,
+        },
+        result,
+        isSuccessful,
+      });
 
       billed++;
       if (execution.property) propertyRecords++;

@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
+import { recordHighLevelPushes, type HighLevelPushEntry } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
@@ -394,11 +394,22 @@ export async function GET(request: Request) {
     // record. Nobody is watching this push, so the credential flag is the only
     // channel it has. See lib/highlevel/credentialHealth.ts.
     if (profile.highlevel_api_key && profile.highlevel_location_id) {
-      const pushes = [];
+      const pushes: HighLevelPushEntry[] = [];
       for (const row of rows) {
         if (!row.is_successful || !row.trace_result) continue;
-        pushes.push(
-          pushTraceToHighLevel({
+        // ALREADY THERE. sweep-property-traces pushes a tier 2 row the moment it
+        // settles, and this list walks every ROW of the job, so without this the
+        // same contact is pushed a second time on the poll that finalizes it.
+        //
+        // The skip is the RECORDED PUSH, not a filter on `tier` or on the queue
+        // column. Those two guess at which code path owned the row; the
+        // timestamp is what actually happened to it, and that is the whole
+        // reason the column exists. A tier 1 row nothing has pushed still has a
+        // null here and still goes.
+        if (row.highlevel_pushed_at) continue;
+        pushes.push({
+          traceId: row.id,
+          push: pushTraceToHighLevel({
             apiKey: profile.highlevel_api_key,
             locationId: profile.highlevel_location_id,
             traceResult: row.trace_result,
@@ -406,8 +417,8 @@ export async function GET(request: Request) {
             propertyCity: row.city || undefined,
             propertyState: row.state || undefined,
             propertyZip: row.zip || undefined,
-          })
-        );
+          }),
+        });
       }
       recordHighLevelPushes(profile.id, pushes);
     }

@@ -22,13 +22,29 @@ const H = vi.hoisted(() => ({
   pushCalls: 0,
   /** Every update the route (or the credential recorder) wrote. */
   updates: [] as Array<{ table: string; payload: Record<string, unknown> }>,
+  /**
+   * Every SELECT, with the columns asked for and the filters applied.
+   *
+   * Recorded because the job branch's bug was a FILTER: it selected the job's
+   * rows by `tracerfy_job_id`, which a tier 2 row never has. The stub cannot
+   * model PostgREST filtering, so the predicate itself is what the test reads.
+   */
+  selects: [] as Array<{ table: string; columns: string; filters: Array<[string, ...unknown[]]> }>,
 }));
 
 /** Minimal PostgREST-shaped builder: chainable, and awaitable at either terminator. */
-function chain(rows: { single?: unknown; list?: unknown }) {
+function chain(
+  rows: { single?: unknown; list?: unknown },
+  filters?: Array<[string, ...unknown[]]>
+) {
   const node: Record<string, unknown> = {};
-  const self = () => node;
-  for (const m of ['eq', 'not', 'is', 'select', 'order', 'limit', 'ilike']) node[m] = self;
+  const add =
+    (method: string) =>
+    (...args: unknown[]) => {
+      filters?.push([method, ...args]);
+      return node;
+    };
+  for (const m of ['eq', 'not', 'is', 'select', 'order', 'limit', 'ilike']) node[m] = add(m);
   node.single = () => Promise.resolve({ data: rows.single ?? null, error: null });
   node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
     Promise.resolve({ data: rows.list ?? null, error: null }).then(res, rej);
@@ -44,10 +60,12 @@ vi.mock('@/lib/supabase/server', () => ({
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminClient: () => ({
     from: (table: string) => ({
-      select: () => {
-        if (table === 'user_profiles') return chain({ single: H.profile });
-        if (table === 'trace_jobs') return chain({ single: H.job });
-        return chain({ single: H.trace, list: H.traces });
+      select: (columns?: string) => {
+        const filters: Array<[string, ...unknown[]]> = [];
+        H.selects.push({ table, columns: String(columns ?? ''), filters });
+        if (table === 'user_profiles') return chain({ single: H.profile }, filters);
+        if (table === 'trace_jobs') return chain({ single: H.job }, filters);
+        return chain({ single: H.trace, list: H.traces }, filters);
       },
       update: (payload: Record<string, unknown>) => {
         H.updates.push({ table, payload });
@@ -133,6 +151,7 @@ beforeEach(() => {
   H.pushResults = [CREATED];
   H.pushCalls = 0;
   H.updates = [];
+  H.selects = [];
   vi.spyOn(console, 'error').mockImplementation(() => {}).mockClear();
 });
 
@@ -390,5 +409,115 @@ describe('the manual push records what happened to the credential', () => {
     await post({ job_id: 'j-1' });
 
     expect(flagWrite()?.payload.highlevel_invalid_reason).toBe('scope');
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE JOB BUTTON HAS TO FIND THE JOB'S OWN ROWS.
+ *
+ * It selected them with `.eq('tracerfy_job_id', job.tracerfy_job_id)`. A Full
+ * Property Trace row never has a tracerfy_job_id -- it is nulled the moment the
+ * row settles -- so a MIXED job pushed only its tier 1 half and said nothing
+ * about the rest, and an all-tier-2 job answered "No successful results to
+ * push" while holding a full set of paid-for contacts.
+ *
+ * `trace_job_id` is the job's own foreign key and every row of the job carries
+ * it, whichever tier it is.
+ * ------------------------------------------------------------------ */
+describe('the job push finds tier 2 rows', () => {
+  /** A tier 1 row: settled through Tracerfy's batch, so it has a batch id. */
+  const TIER1_ROW = {
+    id: 'row-tier1',
+    trace_result: { owner_name: 'Tier One Owner', phones: [], emails: [] },
+    normalized_address: '1 FIRST ST',
+    city: 'Austin',
+    state: 'TX',
+    zip: '78701',
+    is_successful: true,
+    tracerfy_job_id: 'tj-1',
+  };
+
+  /** A tier 2 row: settled inline or by the cron, so it has NO batch id at all. */
+  const TIER2_ROW = {
+    id: 'row-tier2',
+    trace_result: { owner_name: 'Tier Two Owner', phones: [], emails: [] },
+    normalized_address: '2 SECOND ST',
+    city: 'Austin',
+    state: 'TX',
+    zip: '78701',
+    is_successful: true,
+    tracerfy_job_id: null,
+  };
+
+  const traceSelect = () =>
+    H.selects.find((s) => s.table === 'trace_history' && s.filters.some((f) => f[0] === 'eq'));
+
+  it("selects the job's rows by trace_job_id, which a tier 2 row actually has", async () => {
+    H.job = { tracerfy_job_id: null, status: 'completed' };
+    H.traces = [TIER1_ROW, TIER2_ROW];
+    H.pushResults = [CREATED];
+
+    await post({ job_id: 'j-1' });
+
+    const select = traceSelect();
+    expect(select).toBeDefined();
+    expect(select!.filters).toContainEqual(['eq', 'trace_job_id', 'j-1']);
+    // The predicate that excluded every tier 2 row is gone, not merely joined.
+    expect(select!.filters.some((f) => f[1] === 'tracerfy_job_id')).toBe(false);
+  });
+
+  it('pushes the tier 2 half of a mixed job, not only the tier 1 half', async () => {
+    H.job = { tracerfy_job_id: 'tj-1', status: 'completed' };
+    H.traces = [TIER1_ROW, TIER2_ROW];
+    H.pushResults = [CREATED];
+
+    const res = await post({ job_id: 'j-1' });
+    const body = await res.json();
+
+    expect(body).toMatchObject({ success: true, pushed: 2, failed: 0, total: 2 });
+
+    const { pushTraceToHighLevel } = await import('@/lib/highlevel/client');
+    const owners = vi
+      .mocked(pushTraceToHighLevel)
+      .mock.calls.map((c) => c[0].traceResult.owner_name);
+    expect(owners).toContain('Tier Two Owner');
+  });
+
+  it('records each pushed row against its own id', async () => {
+    H.job = { tracerfy_job_id: null, status: 'completed' };
+    H.traces = [TIER1_ROW, TIER2_ROW];
+    H.pushResults = [
+      { success: true, contactId: 'c-one', action: 'created' },
+      { success: true, contactId: 'c-two', action: 'updated' },
+    ];
+
+    await post({ job_id: 'j-1' });
+
+    const records = H.updates.filter(
+      (u) => u.table === 'trace_history' && 'highlevel_pushed_at' in u.payload
+    );
+    expect(records).toHaveLength(2);
+    expect(records.map((r) => r.payload.highlevel_contact_id).sort()).toEqual([
+      'c-one',
+      'c-two',
+    ]);
+    for (const record of records) {
+      expect('highlevel_contact_id' in record.payload).toBe(true);
+      expect('highlevel_pushed_at' in record.payload).toBe(true);
+    }
+  });
+
+  it('records the single push too, on the trace the caller named', async () => {
+    H.trace = { ...TRACE, id: 't-1' };
+    H.pushResults = [{ success: true, contactId: 'c-single', action: 'updated' }];
+
+    await post({ trace_id: 't-1' });
+
+    const records = H.updates.filter(
+      (u) => u.table === 'trace_history' && 'highlevel_pushed_at' in u.payload
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].payload.highlevel_contact_id).toBe('c-single');
+    expect(records[0].payload.highlevel_push_action).toBe('updated');
   });
 });

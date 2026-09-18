@@ -409,3 +409,84 @@ describe("the two results limits, and why they differ", () => {
     }
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * DOUBLE-PUSH RESTS ON A FACT ABOUT THE ROW, NOT ON A CODE PATH.
+ *
+ * sweep-property-traces now pushes a tier 2 row the moment it settles. This
+ * route's finalize push reads every ROW of the job, so without a skip it pushes
+ * those same rows a second time. The skip is `highlevel_pushed_at IS NOT NULL`,
+ * which is the whole reason that column exists: a filter on `tier` or on
+ * `property_trace_status` would be guessing at which code path owned the row,
+ * while the timestamp is the record of what actually happened.
+ * ------------------------------------------------------------------ */
+describe("a row that already reached the CRM is not pushed again", () => {
+  const CONNECTED = {
+    id: "user-abc",
+    subscription_tier: "wallet",
+    is_acquisition_pro_member: false,
+    highlevel_api_key: "hl-key",
+    highlevel_location_id: "loc-1",
+  };
+
+  const DONE_JOB = {
+    id: "job-1",
+    status: "processing",
+    records_submitted: 2,
+    created_at: new Date().toISOString(),
+  };
+
+  /** A settled tier 2 row the cron already pushed. */
+  const PUSHED_ROW = {
+    id: "row-pushed",
+    status: "success",
+    tracerfy_job_id: null,
+    normalized_address: "100 MAIN ST|AUSTIN|TX",
+    city: "Austin",
+    state: "TX",
+    ai_research_status: null,
+    property_trace_status: "property_trace_done",
+    is_successful: true,
+    trace_result: { owner_name: "Pushed Owner", phones: [], emails: [] },
+    charge: 0.4,
+    highlevel_contact_id: "hl-earlier",
+    highlevel_pushed_at: "2026-09-18T10:00:00.000Z",
+  };
+
+  /** A tier 1 row nothing has pushed. */
+  const UNPUSHED_ROW = {
+    id: "row-fresh",
+    status: "success",
+    tracerfy_job_id: null,
+    normalized_address: "200 OAK AVE|AUSTIN|TX",
+    city: "Austin",
+    state: "TX",
+    ai_research_status: null,
+    is_successful: true,
+    trace_result: { owner_name: "Fresh Owner", phones: [], emails: [] },
+    charge: 0.15,
+    highlevel_pushed_at: null,
+  };
+
+  it("skips the recorded row and still pushes the one nothing has touched", async () => {
+    H.profile = { ...CONNECTED };
+    H.job = { ...DONE_JOB };
+    H.rows = [{ ...PUSHED_ROW }, { ...UNPUSHED_ROW }];
+
+    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+    vi.mocked(pushTraceToHighLevel).mockClear();
+    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
+      success: true,
+      contactId: "hl-new",
+      action: "created",
+    });
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+
+    // Exactly one push, and it is the row with no record of one.
+    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
+    expect(arg.traceResult.owner_name).toBe("Fresh Owner");
+  });
+});

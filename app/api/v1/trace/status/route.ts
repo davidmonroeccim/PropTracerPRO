@@ -258,15 +258,18 @@ export async function GET(request: Request) {
       // block in app/api/trace/status/route.ts for why.
       if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
         recordHighLevelPushes(profile.id, [
-          pushTraceToHighLevel({
-            apiKey: integrationProfile.highlevel_api_key,
-            locationId: integrationProfile.highlevel_location_id,
-            traceResult: result,
-            propertyAddress: trace.normalized_address,
-            propertyCity: trace.city || undefined,
-            propertyState: trace.state || undefined,
-            propertyZip: trace.zip || undefined,
-          }),
+          {
+            traceId: trace.id,
+            push: pushTraceToHighLevel({
+              apiKey: integrationProfile.highlevel_api_key,
+              locationId: integrationProfile.highlevel_location_id,
+              traceResult: result,
+              propertyAddress: trace.normalized_address,
+              propertyCity: trace.city || undefined,
+              propertyState: trace.state || undefined,
+              propertyZip: trace.zip || undefined,
+            }),
+          },
         ]);
       }
     }

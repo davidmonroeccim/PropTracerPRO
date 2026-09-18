@@ -108,7 +108,8 @@ export async function POST(request: Request) {
 
     if (validation.success) {
       // Clears any standing red badge, and only if one is standing.
-      await recordHighLevelOutcomes(user.id, [validation]);
+      // No traceId: a credential CHECK is about the key, not about any row.
+      await recordHighLevelOutcomes(user.id, [{ outcome: validation }]);
       return NextResponse.json({ success: true, connected: true });
     }
 

@@ -18,6 +18,7 @@ import {
   lookupPersonTrace,
 } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
+import { pushSettledTrace } from '@/lib/highlevel/pushSettledTrace';
 import { executeRoute } from '@/lib/routing/executeRoute';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
@@ -503,6 +504,28 @@ export async function POST(request: Request) {
         charge,
         propertyRecord: execution.property,
         ownerType: execution.ownerType,
+      });
+
+      // 7. THE CRM PUSH, HERE BECAUSE THIS IS WHERE THE ROW SETTLES. Tier 2
+      //    completes INLINE and app/api/v1/trace/status returns early on a
+      //    terminal status, so the poll route that carries every other automatic
+      //    push never sees this row. Without this an API caller's Full Property
+      //    Trace never arrives in HighLevel.
+      //
+      //    `profile` came from the ADMIN client in validateApiKey via
+      //    select('*'), so the two credential columns are already in hand.
+      await pushSettledTrace({
+        userId: profile.id,
+        resolveCredential: async () => profile,
+        trace: {
+          id: traceRecord.id,
+          address: normalizedAddress,
+          city: resubmitData.city,
+          state: resubmitData.state,
+          zip: persistedZip,
+        },
+        result,
+        isSuccessful,
       });
 
       // Two different zeros, two different sentences. Saying "your wallet did

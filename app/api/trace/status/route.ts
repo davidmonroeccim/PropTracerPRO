@@ -290,15 +290,18 @@ export async function GET(request: Request) {
       // this route still returns the customer's trace result either way.
       if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
         recordHighLevelPushes(user.id, [
-          pushTraceToHighLevel({
-            apiKey: integrationProfile.highlevel_api_key,
-            locationId: integrationProfile.highlevel_location_id,
-            traceResult: result,
-            propertyAddress: trace.normalized_address,
-            propertyCity: trace.city || undefined,
-            propertyState: trace.state || undefined,
-            propertyZip: trace.zip || undefined,
-          }),
+          {
+            traceId: trace.id,
+            push: pushTraceToHighLevel({
+              apiKey: integrationProfile.highlevel_api_key,
+              locationId: integrationProfile.highlevel_location_id,
+              traceResult: result,
+              propertyAddress: trace.normalized_address,
+              propertyCity: trace.city || undefined,
+              propertyState: trace.state || undefined,
+              propertyZip: trace.zip || undefined,
+            }),
+          },
         ]);
       }
     }

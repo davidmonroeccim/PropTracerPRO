@@ -195,15 +195,18 @@ export async function GET(request: Request) {
           // never throws, so the sweep continues either way.
           if (profile.highlevel_api_key && profile.highlevel_location_id && isSuccessful) {
             recordHighLevelPushes(trace.user_id, [
-              pushTraceToHighLevel({
-                apiKey: profile.highlevel_api_key,
-                locationId: profile.highlevel_location_id,
-                traceResult: result,
-                propertyAddress: trace.normalized_address,
-                propertyCity: trace.city || undefined,
-                propertyState: trace.state || undefined,
-                propertyZip: trace.zip || undefined,
-              }),
+              {
+                traceId: trace.id,
+                push: pushTraceToHighLevel({
+                  apiKey: profile.highlevel_api_key,
+                  locationId: profile.highlevel_location_id,
+                  traceResult: result,
+                  propertyAddress: trace.normalized_address,
+                  propertyCity: trace.city || undefined,
+                  propertyState: trace.state || undefined,
+                  propertyZip: trace.zip || undefined,
+                }),
+              },
             ]);
           }
         }

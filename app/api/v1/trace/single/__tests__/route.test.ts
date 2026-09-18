@@ -55,6 +55,13 @@ const H = vi.hoisted(() => ({
   person: null as unknown,
   /** Every outbound webhook POST: [url, init]. */
   webhookPosts: [] as Array<{ url: string; body: Record<string, unknown> }>,
+  /** What the mocked HighLevel client answers. A push success by default. */
+  pushResult: { success: true, contactId: "hl-1", action: "created" } as Record<
+    string,
+    unknown
+  >,
+  /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
+  scheduled: [] as Array<() => unknown>,
 }));
 
 /** True when this select is the dedup lookup: only it carries the cache filter. */
@@ -198,10 +205,32 @@ vi.mock("@/lib/utils/auto-rebill", () => ({
   triggerAutoRebillIfNeeded: vi.fn(async () => undefined),
 }));
 
+vi.mock("@/lib/highlevel/client", () => ({
+  pushTraceToHighLevel: vi.fn(async () => H.pushResult),
+}));
+
+/**
+ * `after()` is captured, not executed. The CRM push and the record of it are
+ * handed to `after()` so they outlive the response; running the real one here
+ * would schedule work these tests never wait on.
+ */
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (fn: () => unknown) => {
+    H.scheduled.push(fn);
+  },
+}));
+
 // No AI Search mock: the engine was deleted on 2026-09-17 and this route no
 // longer calls anything to discover an owner.
 
 const { POST } = await import("@/app/api/v1/trace/single/route");
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
+/** Drain everything `after()` was handed, in order. */
+async function flushDeferred(): Promise<void> {
+  while (H.scheduled.length > 0) await H.scheduled.shift()!();
+}
 
 /**
  * The TIER 1 body. It carries an owner of record on purpose: since phase 4 an
@@ -281,6 +310,8 @@ beforeEach(() => {
   H.entity = { success: true, hit: false, contacts: null };
   H.person = { success: true, hit: false, contacts: null };
   H.webhookPosts = [];
+  H.pushResult = { success: true, contactId: "hl-1", action: "created" };
+  H.scheduled = [];
   H.profile = {
     id: "user-1",
     subscription_tier: "pro",
@@ -1517,5 +1548,111 @@ describe("v1 tier 2 — the persist FOLDS the receipt it found", () => {
     await post(TIER2_BODY);
 
     expect(persisted()).toMatchObject({ charge: 0.25, tier: 2 });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * TIER 2 REACHES THE CRM FROM THE PLACE IT SETTLES.
+ *
+ * This route settles a Full Property Trace INLINE, so the v1 poll route that
+ * carries every other automatic push never sees the row. Without a push here an
+ * API customer's tier 2 single never arrives in HighLevel.
+ * ------------------------------------------------------------------ */
+describe("tier 2 single (v1) — the result reaches HighLevel", () => {
+  const CONNECTED = {
+    ...PRO_PROFILE,
+    highlevel_api_key: "hl-key",
+    highlevel_location_id: "loc-1",
+  };
+
+  const pushRecords = () =>
+    H.ops
+      .filter(
+        (o) =>
+          o.table === "trace_history" &&
+          o.op === "update" &&
+          o.payload !== null &&
+          typeof o.payload === "object" &&
+          "highlevel_pushed_at" in (o.payload as object)
+      )
+      .map((o) => o.payload as Record<string, unknown>);
+
+  it("pushes the contacts it just resolved, and records the push on the row", async () => {
+    H.profile = { ...CONNECTED };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+    await flushDeferred();
+
+    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
+    expect(arg.apiKey).toBe("hl-key");
+    expect(arg.locationId).toBe("loc-1");
+    expect(arg.traceResult.phones?.[0]?.number).toBe("5550000101");
+
+    const records = pushRecords();
+    expect(records).toHaveLength(1);
+    expect("highlevel_contact_id" in records[0]).toBe(true);
+    expect("highlevel_pushed_at" in records[0]).toBe(true);
+    expect(records[0].highlevel_contact_id).toBe("hl-1");
+    expect(records[0].highlevel_push_action).toBe("created");
+    expect(Number.isNaN(Date.parse(String(records[0].highlevel_pushed_at)))).toBe(false);
+  });
+
+  it("does not push a billed miss, whose trace_result is NOT null", async () => {
+    H.profile = { ...CONNECTED };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = { success: true, hit: false, contacts: null };
+
+    await post(TIER2_BODY);
+    await flushDeferred();
+
+    expect(persisted()!.is_successful).toBe(false);
+    expect(persisted()!.trace_result).not.toBeNull();
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+    expect(pushRecords()).toEqual([]);
+  });
+
+  it("does not push when the caller has no HighLevel credential", async () => {
+    H.profile = { ...PRO_PROFILE };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+
+    await post(TIER2_BODY);
+    await flushDeferred();
+
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+    expect(pushRecords()).toEqual([]);
+  });
+
+  it("flags the credential when HighLevel refuses it on this path", async () => {
+    H.profile = { ...CONNECTED };
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    H.pushResult = {
+      success: false,
+      kind: "credential",
+      reason: "location",
+      status: 403,
+      error: "Your HighLevel token does not have access to that location.",
+    };
+
+    await post(TIER2_BODY);
+    await flushDeferred();
+
+    const flags = H.ops.filter(
+      (o) =>
+        o.table === "user_profiles" &&
+        o.op === "update" &&
+        o.payload !== null &&
+        typeof o.payload === "object" &&
+        "highlevel_invalid_reason" in (o.payload as object)
+    );
+    expect(flags).toHaveLength(1);
+    expect((flags[0].payload as Record<string, unknown>).highlevel_invalid_reason).toBe(
+      "location"
+    );
+    expect(pushRecords()).toEqual([]);
   });
 });
