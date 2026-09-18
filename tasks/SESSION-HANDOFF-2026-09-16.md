@@ -18,8 +18,23 @@
 > | 3b. Tier 2 bills end to end on the session route | **DONE** |
 > | 3c. Pre-submit charge disclosure | **DONE** |
 > | 4a. AI Search removed, UI shipped, v1 wired, webhook | **DONE, PUSHED** |
-> | 4b. Dossier reaches the CRM | **IN PROGRESS**, scope changed, read below |
-> | 5. Bulk | **NOT STARTED** |
+> | 4b. Dossier reaches the CRM | **DONE, PUSHED** |
+> | 5a. Export carries everything purchased | **DONE, PUSHED** (`32c29f3`) |
+> | 5b. Status is not a receipt; refunds link | **DONE, PUSHED** (`a3752e2`) |
+> | 5c. Bulk tier 2 | **NOT STARTED.** Plan in `tasks/todo.md`, "PLAN: Phase 5c (2026-09-18)" |
+>
+> **Amended 2026-09-18.** `main` at `a3752e2`, in sync with origin. Baselines: **1000 passing / 61
+> files / 0 failing**, `tsc` 0, eslint 47, build compiles.
+>
+> **A THIRD migration is applied to production and verified:**
+> `20260917_credit_wallet_balance_trace_link.sql` — `credit_wallet_balance` gained a 5th optional
+> `p_trace_history_id` so a refund can name the row it refunds. **Read its header before writing
+> any migration**: the first version revoked only FROM PUBLIC and the function came back callable by
+> `anon` — a SECURITY DEFINER function that mints wallet balance. Supabase's default privileges
+> grant EXECUTE to `anon` and `authenticated` BY NAME at CREATE time and `REVOKE FROM PUBLIC` does
+> not touch a named grant. Closed in ~2 min, audited clean. CLAUDE.md's template is corrected.
+>
+> **The three live HighLevel bugs below are STILL unfixed** and still affect customers today.
 >
 > **Both migrations are APPLIED to production and verified.** `property_record` and `tier` exist
 > on `trace_history`; `usage_records.unit_price` default is 0.15.

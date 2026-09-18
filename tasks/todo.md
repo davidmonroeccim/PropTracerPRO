@@ -2631,3 +2631,189 @@ moves; MCP-attributed spend under-reports for any address a user later re-runs f
 
 eslint briefly went to 48 (a `RECEIPT_COLUMNS` const used only as a type in the fence); the const was
 replaced with a plain union type and the count is back to 47. Nothing committed, nothing pushed.
+
+---
+
+# PLAN: Phase 5c (2026-09-18) — bulk tier 2. Three sub-phases, STOP AND CHECK IN AFTER EACH.
+
+David's decision, 2026-09-17: **a blank-owner bulk row runs a Full Property Trace AUTOMATICALLY**,
+same as single and v1 single. 273 of 1,270 historical bulk rows (21%) are blank-owner, so this is
+the capability gap closing and it is also a real change to what existing bulk users are billed.
+
+## MEASURED LIVE 2026-09-18, $0.00 spent (every probe a deliberate miss, misses are free)
+
+| | |
+|---|---|
+| Dossier latency | 681 / 724 / 816 ms (min/median/max) |
+| FastAppend contact latency | 528 / 617 / 875 ms |
+| Tracerfy person latency | 448 ms |
+| **A tier 2 record, both calls** | **~1.2 to 1.7 s** |
+| PTP's Tracerfy balance | **10,694 credits = 1,069 dossier hits** |
+| Tracerfy `queues_pending` | 0 |
+
+## 5c-1. PREREQUISITES. Two live defects. Bulk tier 2 built on today's client is broken.
+
+### P1. A FastAppend "company not found" is billed as an outage and 502s the customer
+
+Measured: FastAppend returns **HTTP 404** with body
+`{"error":"Company not found: ...","hit":false,"credits_deducted":0}`. That is a MISS.
+`lib/tracerfy/client.ts:536` checks `if (!response.ok)` and returns `contactFailure(...)` **before
+the body is parsed**. Chain, confirmed end to end:
+
+`success:false` -> `executeRoute` `pass2.failure` -> `app/api/trace/single/route.ts` **502 with
+`charge: 0`**.
+
+So a tier 2 record whose dossier HIT — $0.20 spent, the 86-field record in hand — and whose entity
+FastAppend does not carry, returns an **error, no record, and no bill**. `executeRoute`'s own
+comment says "the dossier spend above stands and the record is good" immediately before discarding
+it. Measured rates make this the dominant case: 22 of 24 commercial parcels are entities and
+FastAppend hits 13 of 22, so **~9 in 22 entity records** take this path.
+
+**L-008 recorded this exact lesson and the fix landed one layer too deep.**
+`parseBusinessTraceResponse` handles `hit:false` correctly; the HTTP status check above it
+short-circuits before reaching it.
+
+**Fix:** the discriminator is the BODY, not the status. A response carrying a valid vendor envelope
+(`hit` boolean present) is an ANSWER at any status and goes to the parser. Only a genuine transport
+failure — 5xx, network throw, non-JSON, no `hit` field — is `contactFailure`. **Verified: Tracerfy's
+person endpoint returns 200 + `hit:false`, so this is FastAppend-only.**
+
+### P2. `getAnalytics()`'s type is fiction, and the pre-flight built on it would never fire
+
+Declares `credits_remaining`, `credits_used`, `total_jobs`, `total_records`. The API returns
+`balance`, `total_queues`, `properties_traced`, `queues_pending`, `queues_completed`. **No declared
+field name exists.** Zero call sites, so it was never exercised.
+
+The failure mode is the silent kind: `if (data.credits_remaining < needed)` evaluates
+`undefined < 300` = `false`, so the guard passes every time and blocks nothing. It would look
+implemented and do nothing. Fix the interface against the real response and add the test that
+would have caught it.
+
+## 5c-2. THE ENGINE. Visible: almost nothing. Saying so bluntly.
+
+### It cannot run in the submit route
+`maxDuration` is 60 s and a 345-record job is minutes of vendor work. Queue plus cron worker.
+
+### The queue gets its OWN column, not `ai_research_status`
+Four reasons, none stylistic: that column is `VARCHAR(20)` and its name refers to a retired engine;
+its partial index `WHERE ai_research_status = 'queued'` covers **only the literal first rung**, so
+the live `.in(ENTITY_QUEUED_STATUSES)` claim and all five stale sweeps are seq scans today; and
+mixing two billing models in one state machine is how tier gets confused.
+
+**Migration:** `property_trace_status VARCHAR(24)`, `property_trace_claimed_at TIMESTAMPTZ`, and
+a partial index on `(property_trace_status, created_at) WHERE property_trace_status IS NOT NULL`
+— which covers **every** rung including retries, fixing the flaw the entity queue has.
+Column adds on a pre-existing table need no GRANT. **Read the ACL back anyway if any function is
+touched; see CLAUDE.md.**
+
+### Mirror the entity claim EXACTLY. It is correct and it is already load-bearing.
+Atomic compare-and-swap (`UPDATE ... WHERE id = ? AND status = <the value we read>` + `.select().maybeSingle()`,
+`continue` on null), `claimed_at` set with the flip, stale recovery with
+`.or(claimed_at.is.null, claimed_at.lt.cutoff)` because SQL `<` never matches NULL, and a killed
+claim counts as a SPENT attempt so a poison row cannot loop forever.
+
+### Throughput, sized from the measurement not a guess
+Both tier 2 calls draw the **shared 500/min instant pool**; tier 1 bulk posts to the batch endpoint,
+a different bucket, so they do not compete. 2 calls/record = a 250 rec/min hard ceiling.
+**Budget 120 records per run at concurrency 5** = 240 calls/min, 48% of the pool, headroom left for
+single traces. At ~1.5 s/record that is ~36 s per run, far inside `maxDuration = 300`. Cron is
+`* * * * *`. A 345-record job finishes in **~3 minutes**; 10,000 in ~83.
+(For scale: the entity cron's `MAX_ROWS_PER_RUN = 5` would take **69 minutes** for 345.)
+
+### BILLING. L-007 is the whole rule and it must be written at the gate.
+**Bill on whether the dossier ANSWERED, never on whether it FOUND anything.** A hit and a miss are
+both billable — tier 2 is per record SUBMITTED. A vendor FAILURE is not billable and goes back on
+the retry ladder. The charge fires in the cron, in the same request as the vendor spend, which is
+David's mechanical rule applied where the money actually moves.
+
+**The sentence in `lib/trace/entityTraceAttempts.ts` that 5c breaks**, quoted so nobody reuses it:
+*"an exhausted row is written terminal with no charge, no tier and no ai_research_charge, which is
+also what keeps it deletable under lib/trace/billedRows.ts."* Under tier 2 a row CAN be exhausted
+AND billed (dossier answered, contacts never reachable). Exhaustion must not zero a receipt. Reuse
+`foldBillingWrite`; never a flat write. **Phase 5b's rule applies unchanged: STATUS IS NOT A RECEIPT.**
+
+## 5c-3. THE SURFACES. Visible: all of it. This is the phase David judges.
+
+### The two balance checks are DIFFERENT and must never be merged
+| Check | Question | On failure |
+|---|---|---|
+| User's PTP wallet (`wallet_balance`, dollars) | can the CUSTOMER pay? | **402, tell them to add funds** |
+| PTP's Tracerfy balance (`balance`, credits) | can PTP EXECUTE? | **Refuse/hold and alert David. NEVER tell the customer to add funds** |
+
+Billing a customer for a job we cannot run is the outcome the second check exists to prevent.
+**The Tracerfy balance is SHARED across all users' jobs**, so size the check against credits needed
+PLUS whatever is already queued, not the raw balance, or the guard passes for two jobs that cannot
+both run.
+
+### Pre-flight estimates, all three submit surfaces
+Blank rows stop being free. `app/api/trace/bulk/route.ts:101` and `app/api/v1/trace/bulk/route.ts:129`
+must add `blankCount x tier2Rate`. `worstCaseCost` in `lib/suite/mcp-tools.ts:167-176`: the
+`continue` at :171 is the single line making blanks free, and its own comment names the
+replacement — *"the blank arm becomes chargePerRecord(profile)"*.
+
+### EVERY user-facing string that goes FALSE. Enumerated so none is missed.
+`app/(dashboard)/trace/bulk/page.tsx` — the amber banner :651-653 (*"We skip those and you are not
+charged for them"*), the count :665, the cost estimate :669 (wrong multiplicand AND wrong model:
+tier 2 is per record submitted, not "per successful match"), the `Estimated Max Cost` tile :708-709,
+and **`Skipped, not charged` at :713 AND :773**.
+`components/trace/BulkSkipSummary.tsx` :51, and its header invariant :31-32 (*"There is no price
+here and there must never be one. These rows are free"*) — that component's premise is gone.
+`lib/suite/mcp-shared.ts:21-25` **`PTP_MCP_CAVEAT`, appended to EVERY MCP response**, whose own
+header calls the no-match sentence a money promise. Tool descriptions at
+`app/api/[transport]/route.ts:61,67`. `BLANK_OWNER_SKIP_REASON` survives **only** for rows that fail
+address validation (the session route does not validate per record, so a row with no city still
+cannot be looked up); it must stop being written for a missing owner.
+
+### The 10-minute poll ceiling breaks
+`page.tsx:393` is 120 attempts x 5 s. A cron-driven job over ~1,200 records exceeds it and
+*"Processing is taking longer than expected"* becomes the normal outcome, not an error. Raise it,
+or change the UX to a resumable "check back" with the job id. **This is a real behaviour change:
+bulk submit goes from seconds to minutes of background work.**
+
+### Payload parity and size
+`buildPerRecordResult` on v1 REST (`app/api/v1/trace/bulk/status/route.ts:345-369`) **lacks
+`property_record` and `tier`** although both surfaces' comments claim they are line-for-line
+identical. A tier 2 bulk row's record is invisible there today. The session status route has **no
+per-record payload at all**. And `bulkStatus` in `lib/suite/mcp-tools.ts` has **NO limit** — it
+returns every row of the job, each carrying a 65-key record, pretty-printed at 2-space indent with
+no cap. `list_traces` is default 25 / max 200. Both need revisiting before rows carry records.
+
+### THE BULK CAP IS 500 RECORDS. David, 2026-09-18.
+
+`MAX_RECORDS` drops from **10,000 to 500** on `app/api/trace/bulk/route.ts:11` and
+`app/api/v1/trace/bulk/route.ts:14`. MCP already caps at 500 (`lib/suite/mcp-tools.ts:106`), so
+this makes **one number true on all three surfaces** instead of two.
+
+**Measured against all 92 historical jobs before choosing:** median 20, average 51, p90 100,
+p95 223, p99/max **654**. Only 6 jobs exceed 200, 4 exceed 300, and **exactly 1 exceeds 500**.
+So 500 covers 91 of 92.
+
+**The one it blocks is the 654 from 2026-03-27, and it is the only large job that ever worked**
+(552 of 654 matched). The other five over 200 returned 2, 1, 1, 5 and 0 matches. Recorded so nobody
+re-derives it: the cap catches the single productive large run, and that was accepted knowingly.
+
+**What the cap is and is not.** It is NOT the money guard — the two pre-flight checks are. Its job
+is bounding blast radius when a run goes wrong, and stopping one user from eating the SHARED
+Tracerfy pool. For scale: a 500-record all-blank tier 2 job is 5,000 credits, **47% of the 10,694
+balance in one submit**. That is exactly why the Tracerfy pre-flight must size against credits
+needed PLUS what is already queued, not the raw balance.
+
+**Worst-case single-submit exposure for a customer:** 500 x $0.40 = **$200** (all blank owners,
+pay-as-you-go tier 2).
+
+The 402/refusal copy must say the cap in records, and the UI should refuse at selection time rather
+than after an upload the user waited on.
+
+## TASKS
+- [ ] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status.
+- [ ] 2. P2: fix `getAnalytics` against the real response; test it.
+- [ ] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time.
+- [ ] 4. Migration: two queue columns + the all-rungs partial index.
+- [ ] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5.
+- [ ] 6. Billing in the worker: answer = billable, failure = retry, fold never flat.
+- [ ] 7. Both pre-flight checks, with the two different failure owners.
+- [ ] 8. All three submit estimates.
+- [ ] 9. Every string above.
+- [ ] 10. Poll ceiling / long-job UX.
+- [ ] 11. v1 payload parity + MCP limits.
+- [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
