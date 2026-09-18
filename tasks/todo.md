@@ -3155,3 +3155,87 @@ only thing that will prove any of them are worth having.
 - **R8. The bulk push loops are unbounded and uncapped.** `push/route.ts:110` is sequential with no
   `maxDuration` on the route, so a large job can be cut off mid-loop with the already-counted
   `pushed` value lost.
+
+---
+
+# PLAN: Full Property Trace reaches the CRM (2026-09-18). David's instruction, NOT started.
+
+Baselines: **1456 passing / 75 files / 0 failing**, `tsc` 0, eslint 47, build compiles.
+`main` = `c24ffa5`, pushed, deploy READY.
+
+## THE GAP, RESTATED CORRECTLY. My earlier statement of it was wrong three ways.
+
+I told David "Full Property Trace results never reach the CRM by this integration", attributing it
+to `sweep-business-traces` and `sweep-property-traces` not reading the credential columns. Corrected
+against source:
+
+- **`sweep-business-traces` is TIER 1**, a FastAppend recovery path. Naming it was a misattribution.
+- **"Never" is false.** v1 BULK pushes tier 2 today (`app/api/v1/trace/bulk/status/route.ts:398-404`
+  reads every ROW of the job, not Tracerfy's batch array). The manual button also works for a tier 2
+  SINGLE.
+- **My follow-up guess was also wrong.** I said the one production tier 2 row settled via
+  `trace/status` and so pushed. It did not: `app/api/trace/single/route.ts:513-536` settles tier 2
+  INLINE and `trace/status` returns early on a terminal status (`:68-69`), so it never sees it.
+
+**The real gap is WIDER than the original claim, which is why it still matters.** Automatic push
+fires for tier 2 on exactly ONE of five surfaces.
+
+| Surface | Tier 2 settles at | Pushes today |
+|---|---|---|
+| Single, session | inline, `trace/single/route.ts:513-536` | **NO** |
+| Single, v1 | inline, `v1/trace/single/route.ts:438-461` | **NO** |
+| Bulk, session | `sweep-property-traces`, finalized by `trace/bulk/status` | **NO** |
+| Bulk, v1 | same cron, finalized by `v1/trace/bulk/status` | **YES** |
+| Bulk, MCP | same cron, finalized by `mcp-tools.ts:737-743` | **NO**, by design |
+
+## THE ROOT CAUSE, and it is one sentence
+
+**Push is attached to JOB-settlement code that reads Tracerfy's batch array, not to ROW settlement.**
+A tier 2 row never has a `tracerfy_job_id` (nulled at `sweep-property-traces:563` and
+`trace/single:530`), so every push list built from that array cannot see it. v1 bulk is the one
+surface that iterates ROWS instead, which is exactly why it is the one that works.
+
+## WHAT IS NOT THE PROBLEM, verified so nobody re-opens it
+
+- **The shape is fine.** `lib/trace/fullPropertyTrace.ts:103-105` deliberately writes `trace_result`
+  in the same shape tier 1 uses, precisely so the export, the results card and the HighLevel push all
+  keep working. A push added here sends real contacts, not empty ones.
+- **The billed-miss shapes are already excluded correctly.** `no_match` has a null `trace_result`;
+  `property_trace_no_reach` has a non-null one with EMPTY phones and emails but `is_successful:false`.
+  The existing `isSuccessful && result` guard excludes both. **A guard written as `trace_result != null`
+  alone would leak a nameless, contactless row into a customer's CRM**, so keep the `is_successful` half.
+- **The 86-field property record half is already built.** `lib/suite/mcp-tools.ts:617-624` emits
+  `property_record` and `tier` for the gateway, which writes to `custom_objects.property`. That is a
+  different job from a CONTACT reaching HighLevel and it is not this plan.
+
+## TASKS
+
+- [ ] 1. **Push where the row SETTLES, not where the job finalizes.** One shared helper, called from
+      the three row-settlement points: `sweep-property-traces` (which covers session bulk, v1 bulk AND
+      MCP bulk, since all three enqueue into the same column), plus the two inline single routes.
+      Reuse `recordHighLevelPushes` so every new push also feeds credential health.
+- [ ] 2. **Stop v1 bulk double-pushing.** Once the cron owns tier 2, `v1/trace/bulk/status:398-404`
+      must skip rows the cron already pushed. Filter on the row having gone through the tier 2 queue,
+      not on `tier`, because that is the property that actually decides ownership. NOTE: a double push
+      is an UPDATE not a duplicate (the client searches first), and post-tags-fix an update is nearly
+      idempotent, so this is correctness and waste, not damage.
+- [ ] 3. **The manual JOB button silently excludes every tier 2 row.**
+      `integrations/highlevel/push/route.ts:160-166` filters `.eq('tracerfy_job_id', job.tracerfy_job_id)`
+      and a tier 2 row has none. A mixed job pushes only its tier 1 half with no mention; an all-tier-2
+      job reports "No successful results to push". Select the job's rows by `trace_job_id`.
+- [ ] 4. **`sweep-stale-traces` can finalize an all-tier-2 job with NO push, permanently.**
+      `:278-291` writes `status:'completed'` once the property queue drains, and
+      `trace/bulk/status:153` then early-returns forever, so no later poll can ever push it.
+
+## OPEN FOR DAVID, both real
+
+- **The Pro gate excludes the customer paying the MOST.** `push/route.ts:84-89` gates the manual push
+  on `effectiveIsPro`, so a pay-as-you-go customer, who pays **$0.40** for tier 2 against Pro's $0.25,
+  cannot use it at all. Policy, not a bug.
+- **Nothing records that a push happened** (R3). Without it "did this trace reach the CRM" stays
+  unanswerable, task 2 cannot be verified, and a retry is impossible. A column would fix all three.
+
+## STALE COMMENT FOUND
+
+`sweep-property-traces/route.ts:59-61` still says "NOTHING ENQUEUES INTO THIS COLUMN YET". All three
+bulk submit surfaces enqueue (`trace/bulk:385`, `v1/trace/bulk:316`, `mcp-tools.ts:421-424`).
