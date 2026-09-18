@@ -533,13 +533,33 @@ export async function lookupBusinessTrace(req: EntityTraceRequest): Promise<Cont
       body: JSON.stringify({ company_name: req.company_name, state: req.state }),
     });
 
-    if (!response.ok) {
+    // The discriminator is the BODY, not the status: FastAppend answers a
+    // genuine miss with HTTP 404 and a valid envelope (`hit:false`), and that
+    // is an ANSWER, billable like any other tier 2 record -- not a transport
+    // failure. A 5xx is the one exception, checked first and WITHOUT reading
+    // the body as an answer: it is the vendor's own server failing, and
+    // L-007 says an outage is never billable, full stop, regardless of what
+    // the body says. Two false-y-looking signals (a non-2xx status and an
+    // `error` string in the body) read as though they should collapse into
+    // one check; they must not -- that collapse is the exact defect this
+    // block replaces (L-008). Read the body exactly once, below, however the
+    // status turns out.
+    if (response.status >= 500) {
       const errorText = await response.text();
       console.error('FastAppend business trace lookup error:', response.status, errorText);
       return contactFailure(transportError('FastAppend', response.status));
     }
 
-    return parseBusinessTraceResponse(await response.json());
+    const raw = await response.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      console.error('FastAppend business trace lookup error:', response.status, raw);
+      return contactFailure('Malformed business trace response');
+    }
+
+    return parseBusinessTraceResponse(body);
   } catch (error) {
     console.error('FastAppend business trace lookup error:', error);
     return contactFailure('FastAppend service unavailable');
@@ -825,14 +845,24 @@ export async function listJobs(): Promise<{
 
 /**
  * Get account analytics and credit balance.
+ *
+ * The field names below are the REAL response, not a guess: `balance`,
+ * `total_queues`, `properties_traced`, `queues_pending`, `queues_completed`.
+ * A prior version of this type declared `credits_remaining`, `credits_used`,
+ * `total_jobs`, `total_records` -- none of which the API returns. With zero
+ * call sites that lie was never exercised, but the failure mode it sets up
+ * is silent: `data.credits_remaining < needed` evaluates `undefined < 300`
+ * as `false`, so a pre-flight balance guard built on it would look
+ * implemented and block nothing.
  */
 export async function getAnalytics(): Promise<{
   success: boolean;
   data?: {
-    credits_remaining: number;
-    credits_used: number;
-    total_jobs: number;
-    total_records: number;
+    balance: number;
+    total_queues: number;
+    properties_traced: number;
+    queues_pending: number;
+    queues_completed: number;
   };
   error?: string;
 }> {

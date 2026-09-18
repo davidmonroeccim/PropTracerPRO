@@ -47,6 +47,29 @@ const errorResponse = (status: number, text = 'upstream said no') =>
     text: async () => text,
   }) as unknown as Response
 
+/**
+ * A Response whose body can be read exactly once, via EITHER `.text()` or
+ * `.json()`. A second call, on either method, throws -- so an implementation
+ * that reads the body more than once (the exact shape of the "body already
+ * consumed" runtime error the P1 fix has to avoid) fails loudly instead of
+ * silently passing because no test happened to double-read.
+ */
+const singleReadResponse = (status: number, body: unknown): Response => {
+  const bodyText = typeof body === 'string' ? body : JSON.stringify(body)
+  let consumed = false
+  const read = () => {
+    if (consumed) throw new Error('body stream already read')
+    consumed = true
+    return bodyText
+  }
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => read(),
+    json: async () => JSON.parse(read()),
+  } as unknown as Response
+}
+
 let fetchMock: ReturnType<typeof vi.fn>
 
 const ENTITY = { company_name: 'Abc Rentals Llc', state: 'UT' }
@@ -182,6 +205,56 @@ describe('lookupBusinessTrace', () => {
       expect(res.hit).toBe(false)
       expect(res.error).toBeTruthy()
     }
+  })
+
+  it('a FastAppend 404 carrying hit:false is a MISS, not a transport failure', async () => {
+    // Measured 2026-09-16 (tasks/research-test/fastappend/raw-3.json and
+    // raw-11.json, sanitized here as fixtures/business-miss.json): FastAppend
+    // answers a genuine miss with HTTP 404 and
+    // { error: "Company not found: ...", hit: false, credits_deducted: 0 }.
+    // The old code checked `!response.ok` before the body was ever read, so
+    // this exact response became a contactFailure and 502'd the customer
+    // after the $0.20 dossier spend had already stood. L-008.
+    // MUTATION: replace `response.status >= 500` with `!response.ok` (the
+    // original defect) and this test goes red -- the miss becomes a failure.
+    fetchMock.mockResolvedValue(singleReadResponse(404, businessMiss.response))
+    const res = await lookupBusinessTrace(ENTITY)
+    expect(res).toEqual({ success: true, hit: false, contacts: null })
+  })
+
+  it('a 5xx stays a transport failure even when the body carries hit:false', async () => {
+    // The controller's ruling: `hit` is the discriminator for 2xx/4xx ONLY.
+    // A 5xx is the vendor's own server failing and is never billable
+    // regardless of what the body contains (L-007).
+    // MUTATION: delete the `response.status >= 500` short-circuit so every
+    // status falls through to the body check, and this test goes red -- a
+    // vendor outage that happens to echo hit:false would be billed as a miss.
+    fetchMock.mockResolvedValue(singleReadResponse(500, businessMiss.response))
+    const res = await lookupBusinessTrace(ENTITY)
+    expect(res.success).toBe(false)
+    expect(res.hit).toBe(false)
+  })
+
+  it('malformed JSON at a 2xx status is a transport failure, never an answer', async () => {
+    // status alone cannot be trusted as "it worked"; the body still has to
+    // parse. MUTATION: skip the JSON.parse try/catch and let a bad body throw
+    // out of the function instead of returning contactFailure, and this goes
+    // red (the call rejects instead of resolving to success:false).
+    fetchMock.mockResolvedValue(singleReadResponse(200, 'not json at all'))
+    const res = await lookupBusinessTrace(ENTITY)
+    expect(res.success).toBe(false)
+    expect(res.hit).toBe(false)
+  })
+
+  it('a 4xx body with no hit field is a transport failure, not an answer', async () => {
+    // Same status as the real miss (404) but missing the one field that
+    // makes a body trustworthy as an ANSWER.
+    // MUTATION: skip the hit-flag check (call parseBusinessTraceResponse's
+    // isObj/typeof guard a no-op) and this could resolve as a hit or a miss
+    // instead of a failure.
+    fetchMock.mockResolvedValue(singleReadResponse(404, { error: 'Company not found: X (OH)', credits_deducted: 0 }))
+    const res = await lookupBusinessTrace(ENTITY)
+    expect(res.success).toBe(false)
   })
 
   it('a thrown fetch is a failure, not an exception', async () => {
