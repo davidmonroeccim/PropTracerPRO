@@ -3100,10 +3100,10 @@ single write that reaches the user later, on a page they will visit, and it cove
 - [x] 2. **DONE `c5a61dd`. The manual button stops reporting success on a failure.** Route: stop returning
       `{success:false}` at 200, and stop hardcoding `success:true` on the bulk branch. Button: read
       the outcome rather than `response.ok`, and show `failed` on bulk. Covers both B and B.2.
-- [ ] 3. **"Connected" means the credential worked.** Save validates before it stores. Save stops
+- [x] 3. **DONE `d53eaa2`. "Connected" means the credential worked.** Save validates before it stores. Save stops
       clearing a failed test result (`page.tsx:142`). The badge reads a validated state. Depends on
       decision 2 and on confirming the GHL scope names live (C.3).
-- [ ] 4. **The five automatic paths mark the credential dead on a credential-class failure.**
+- [x] 4. **DONE `d53eaa2` + `fcae3fc`. The five automatic paths mark the credential dead on a credential-class failure.**
       DEPENDS ON DECISION 1. Needs a migration. The five sites are `trace/status/route.ts:285`,
       `trace/bulk/status/route.ts:599`, `v1/trace/status/route.ts:257`,
       `v1/trace/bulk/status/route.ts:395`, `cron/sweep-stale-traces/route.ts:192`.
@@ -3119,7 +3119,8 @@ only thing that will prove any of them are worth having.
 
 ## RECORDED, NOT FIXED. Named so they are not rediscovered as bugs.
 
-- **R1. The two newest crons never push at all, and the page says they do.**
+- **R1. FIXED (copy only, per David) `d53eaa2`. The two newest crons never push at all, and the page said they do.** The claim was in THREE places, not the one the plan named: `settings/api-keys/docs/page.tsx` carried it twice more, once in a tip explicitly about Full Property Trace. The crons still do not push; that capability decision is untouched and still open.
+- **R1-ORIGINAL, kept for the diagnosis.**
   `sweep-business-traces` and `sweep-property-traces` finalize traces and dispatch the user webhook
   but never read the HighLevel columns. `settings/integrations/page.tsx:389` promises "Successful
   traces will automatically create or update contacts in your HighLevel CRM." **So Full Property

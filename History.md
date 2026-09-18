@@ -6,6 +6,91 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### HighLevel push honesty, Phase B: the credential tells the truth
+
+Commits `d53eaa2`, `f89eb21`, `3b9f3c7`, `fcae3fc`. **1456 passing from 1367, 75 files, 0 failing**,
+`tsc` 0, eslint 47 (baseline held), build compiles. 15 mutations from the implementer plus 8 run
+independently by the coordinator; all killed, every total held, every restore sha256-verified.
+
+**Migration `20260918_highlevel_credential_health.sql` APPLIED to production and read back.** Three
+columns on `user_profiles`: `highlevel_invalid_at`, `_status`, `_reason`.
+
+**THE CHANNEL THAT DID NOT EXIST.** Five of the seven push sites run with nobody watching, so there
+was no synchronous place to report a dead key. The outcome is now recorded against the CREDENTIAL,
+on a row the integrations page reads, so the user finds out on a page they will visit.
+
+**Only the credential class writes, and the asymmetry is the subtle half.** A record failure (a bad
+payload) and a transient failure (a rate limit) say NOTHING about the credential and write nothing;
+flagging on either would send a user to reconnect a key that works. And **"not dead" is not
+"alive"**: a batch of nothing but rate limits is `no_signal`, not `healthy`, because clearing a red
+badge needs evidence the key WORKS, which only a success provides. A batch is ONE decision, so a
+fifty-record push does not produce fifty writes.
+
+**Clearing on success is REQUIRED, not a nicety.** HighLevel scopes are editable on an existing
+token, so a user can fix a scope problem without ever saving anything in PTP. If only save cleared
+the flag, that user stays red forever while their pushes work.
+
+**THE SAVE POLICY IS NARROWER THAN "REFUSE ANY 401", and deliberately so.** The only check available
+is a contacts READ and every product call is a WRITE, with `contacts.readonly` and `contacts.write`
+as separate scopes. So a failed read does not always prove a failed write:
+
+| reason | | why |
+|---|---|---|
+| `token` | **REFUSE** | a rejected token is rejected for every verb |
+| `location` | **REFUSE** | the wrong location is wrong for every verb |
+| `scope` | SAVE, warn | the token may hold `contacts.write` and push perfectly |
+| `transient` | SAVE, warn | HighLevel being down is not the user's fault |
+| `unknown` | SAVE, warn | we could not read the refusal, so we assert nothing |
+
+Everything saved without confirmation carries a warning naming what we could not confirm. **David's
+stated decision was "refuse on 401/403"; this narrows it**, on his own reasoning for choosing that
+option, which was that a good credential must not be blocked. Flagged to him rather than done
+quietly.
+
+**`setTestResult(null)` is gone.** A save outcome now REPLACES the test outcome with its own honest
+result instead of blanking it, so pressing Save can no longer erase a red "Invalid API key" the user
+has already been shown.
+
+**The scope copy names both scopes** and says why: Test Connection only reads, so a token with just
+`contacts.readonly` passes the test and then fails every push. It also notes scopes are editable on
+an existing token, so a misconfigured user does not need to re-paste a credential.
+
+**R1, the false sentence, is fixed and it was in THREE places, not one.** The plan named
+`page.tsx:389`. `settings/api-keys/docs/page.tsx` carried the same claim twice more, once in a tip
+explicitly about Full Property Trace, which is exactly the tier that does not push. That is the same
+page L-016 records as last phase's miss, found the same way: by grepping the property instead of
+working the list.
+
+**A MUTATION SURVIVED FIRST and was reported rather than buried.** Deleting the recorder from the
+manual push route turned nothing red: that route's test mocked an admin client with no `update`, so
+the write went into the void and the try/catch swallowed it. Seven tests added through the real
+recorder; re-run kills it.
+
+**COORDINATOR FINDING, fixed in `fcae3fc`: the write could be killed with the response.** The five
+automatic sites were left as bare floating promises. On serverless, work still running when the
+response flushes can be cut off, and the old code only stood to lose a `console.error` while this
+stands to lose the flag itself, which is the whole channel. **The repo already had the answer**:
+`lib/suite/access.ts` has used `after()` from `next/server` for the entitlement refresh for months,
+fallback included. Copied rather than reinvented.
+
+Worth recording HOW those two tests were proved, because the first run was misleading: both failed
+initially on a `ReferenceError` (a fixture name I assumed rather than checked), which is a failure
+for the WRONG REASON and proves nothing. Both were then mutation-proved separately. The fallback
+test does NOT bite the revert-to-floating-promise mutation, since both implementations run inline
+once `after()` throws; it bites a different one, where the catch drops the write. Recorded rather
+than counted as a second kill for the first mutation.
+
+**Also done, not in the brief:** disconnect now clears the three health columns. Without it a user
+who disconnected and reconnected during a HighLevel outage would see the OLD key's specific
+remediation attached to a brand new key, since a save we cannot verify deliberately does not clear
+the flag.
+
+**Verified rather than assumed:** all seven push sites are paired with a recorder call, confirmed by
+grepping both sets independently. The implementer tested one automatic path and reasoned the other
+four were "the identical two-line shape", which is the L-016 assumption; the grep says it holds.
+
+---
+
 ### HighLevel push honesty, Phase A: the client says WHY, and the button stops lying
 
 Branch `fix/highlevel-push-honesty`, commits `1dc09ca` (plan), `c5a61dd` (Phase A), `a7962b6`
