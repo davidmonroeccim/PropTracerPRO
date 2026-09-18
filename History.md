@@ -6,6 +6,78 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### SECURITY, found while applying the 5c-2 migration: trace_history is browser-writable
+
+**Not caused by 5c-2, but widened by it, and it must be closed before 5c ships.** Reading privileges
+back after the migration, `public.trace_history` grants `INSERT, UPDATE, DELETE` to `anon` AND
+`authenticated`, table-wide. RLS is enabled but RLS gates WHICH ROWS, not WHICH COLUMNS: the
+"Users can update own traces" policy is `USING (auth.uid() = user_id)`, so any signed-in user can
+rewrite **every column on their own rows** from the browser console with the anon key that ships in
+the JS bundle. `charge`, `tier`, `is_successful`, `trace_result`, `property_record`.
+
+**The 2026-09-17 audit that called PTP clean was a FUNCTION-EXECUTE audit.** It answered its own
+question correctly and never asked this one. Recorded as L-014.
+
+**5c-2 widened it.** A new column inherits the table's grants, so `property_trace_status` landed
+browser-writable, and it is not a fact about a row, it is the trigger the cron claims work from.
+Writing `'queued'` into it enqueues paid vendor work. Combined with `deductOrZero` collapsing an empty
+wallet to 0 while still delivering, a user with no balance could self-enqueue unlimited tier 2
+traces against PTP's SHARED Tracerfy pool. **Not exploitable today: the cron is committed but not
+deployed.** It becomes live on the deploy that ships 5c.
+
+**The fix is verified safe but NOT YET APPLIED, pending David.** Every write to `trace_history` in
+the codebase goes through `createAdminClient` (service_role): 17 files, all server-side. The only two
+browser-side files that touch the table, `app/(dashboard)/history/page.tsx` and
+`app/(dashboard)/dashboard/page.tsx`, contain zero writes. So revoking `INSERT, UPDATE, DELETE` from
+`anon` and `authenticated` and leaving `SELECT` breaks nothing. DELETE is already dead anyway, since
+no DELETE policy exists.
+
+### Full Property Trace, phase 5c-2: the queue, the worker, and a row that says what really happened
+
+Commits `54f1b41` and `64cd577`. Visible output: almost none, by design. A migration, a cron worker
+and the billing gate inside it. The surfaces land in 5c-3.
+
+- **`trace_history` gained its own tier 2 queue**, `property_trace_status VARCHAR(24)` plus
+  `property_trace_claimed_at`, deliberately NOT the existing `ai_research_status`. That column is
+  named for an engine removed on 2026-09-17, its VARCHAR(20) is nearly full at 19 characters, and
+  mixing two billing models in one state machine is how `tier` gets confused: the entity queue bills
+  per SUCCESSFUL trace where a miss is free, this one bills per RECORD SUBMITTED where a miss is
+  charged.
+- **The index fixes a flaw rather than inheriting it.** The entity queue's partial index is
+  `WHERE ai_research_status = 'processing'`, which was correct until the retry ladder added
+  `queued_2..5` and `processing_2..5`. Postgres cannot use a partial index for rows its predicate
+  excludes, so the live claim and all five stale sweeps are sequential scans today. The new predicate
+  is `WHERE property_trace_status IS NOT NULL`, which covers every rung including ones added later.
+  Applied to production and read back: columns, types, nullability, index definition and predicate
+  all verified, and all 3,836 existing rows are NULL in both new columns.
+- **The claim protocol mirrors the entity cron exactly** rather than improving on it: atomic
+  compare-and-swap, `claimed_at` set with the flip, stale recovery using `.or(claimed_at.is.null,
+  claimed_at.lt.cutoff)` because SQL `<` never matches NULL, and a killed claim counting as a SPENT
+  attempt so a poison row cannot loop forever. 120 records per run at concurrency 5, which is 48% of
+  the shared 500/min vendor pool.
+- **A ROW NOW SAYS WHICH THING ACTUALLY HAPPENED.** The first build billed a contact-vendor outage
+  and settled it as a plain `no_match`, byte-identical to a genuine contact miss, with the vendor
+  error persisted nowhere. The customer paid full price for a two-call product, got one call, and was
+  told we asked and found nothing. That satisfies L-007 at the gate and defeats it at the row.
+  Billing it is right and not retrying it is right, since a retry re-buys a $0.20 dossier from a pool
+  of about 1,069 shared across all customers. Those are independent of the label. A contact failure
+  now settles under its own terminal `property_trace_no_reach`, with its own sentence, its own
+  `console.error` naming the row and the vendor error, and its own counter kept out of the ordinary
+  no-contacts count. One of its tests asserts the new sentence never says "not charged" or "free",
+  because unlike its two siblings that row WAS charged.
+- **L-009 is closed on this surface, demonstrated rather than asserted.** Both track-pricing tests
+  set `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED` themselves, and a third re-runs Track A with the flag
+  deleted and watches $0.25 become $0.40. The mutation that collapses Track B onto Track A, which
+  produced ZERO red in phase 4 and is the whole reason that lesson exists, now kills a test.
+
+1075 passing from 1008, 64 files, 0 failing. tsc 0. eslint 47. Build compiles. 22 mutations from the
+implementer, 6 chosen and re-run independently by me, zero survivors. Spec review PASS, quality HIGH,
+one Important finding raised and addressed, re-review clean.
+
+`lessons.md` gains L-013 (a spy you never clear is a fence that cannot fail; found because the log
+assertion was being satisfied by an earlier test's output) and L-014 (a GRANT audit is not done until
+you check the tables too).
+
 ### Full Property Trace, phase 5c-1: a vendor saying "not found" is an answer, not an outage
 
 Two prerequisite defects, both in `lib/tracerfy/client.ts`, both money defects. Bulk tier 2 would

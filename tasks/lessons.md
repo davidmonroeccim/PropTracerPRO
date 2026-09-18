@@ -4,6 +4,61 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-013: A spy you never clear is a fence that cannot fail (2026-09-18)
+
+**What happened.** Writing the test that proves a contact-vendor outage gets logged, the 5c-2
+implementer found that `vi.spyOn(console, 'error')` returns the **same spy object** on a second call.
+The suite's `beforeEach` re-spies but does not clear, so call history accumulated across tests. The
+assertion "an outage writes a log line" passed because an EARLIER test had written one. Its own
+mutation would have been reported as killed by another test's output. `.mockClear()` fixed it.
+
+**Checked, not assumed:** the other three cron test files (`sweep-stale-traces`,
+`sweep-entity-traces`, `sweep-business-traces`) use the identical un-cleared pattern. None of them
+asserts on the console spy today, so all three are LATENT rather than broken. Left alone
+deliberately, minimal-impact rule, and recorded here so the next person who adds a log assertion to a
+cron test does not step in it.
+
+**The general form, and it is the third member of a family.** L-009 was a test whose two branches
+were identical by default. L-012 was a mutation that never applied. This is an assertion satisfied by
+state from outside the test. All three produce the same artifact: **a green test that would stay
+green if the thing it guards were deleted.** Before trusting any assertion about a side effect
+(a log, a counter, a spy, a queue), ask what else in the run could have produced the evidence, and
+clear it.
+
+---
+
+## L-014: A GRANT audit is not done until you check the TABLES too (2026-09-18)
+
+**What happened.** Applying the 5c-2 queue migration, I read the ACL back afterwards as CLAUDE.md
+requires. The columns and index were exactly right. Then I read the TABLE's grants, which the
+migration does not touch and which I only checked because the template told me to look at
+privileges at all, and found `public.trace_history` granting
+`INSERT, UPDATE, DELETE` to **`anon` and `authenticated`**, table-wide. The anon key ships in the
+browser bundle.
+
+**Why the previous audit missed it.** The 2026-09-17 audit that declared PTP clean was a
+**function-EXECUTE** audit, prompted by a `SECURITY DEFINER` function coming back callable by
+`anon`. It answered "which functions can the browser call" correctly and completely. It never asked
+"which TABLES can the browser write", which is a different question with a different catalog view
+(`information_schema.role_table_grants`, not `pg_proc.proacl`). Two vuln classes share the word
+"grant" and an audit of one reads, in memory and in a handoff, like an audit of both.
+
+**The rule.** "Audited clean" must name WHICH catalog it audited. When a finding is about EXECUTE on
+functions, write "function EXECUTE audited clean" and not "grants audited clean", because the second
+sentence retires a question nobody asked. And when you touch a table for any reason, read that
+table's grants once, not just the object you changed.
+
+**The compounding half, and it is the dangerous one.** My migration added
+`property_trace_status` to that table. A new column inherits the table's existing grants
+automatically, so it landed browser-writable. It is not an ordinary data column: the cron claims work
+by reading it, so a browser write to it ENQUEUES PAID VENDOR WORK. Combined with `deductOrZero`
+collapsing an empty wallet to 0 while still delivering, a user with no balance could self-enqueue
+unlimited tier 2 traces against PTP's shared Tracerfy pool. **Adding a column to a table whose grants
+you have not read is a privilege decision, not a schema decision** -- and it is worst when the column
+is a trigger for work rather than a fact about a row.
+
+---
+
 ## L-001: Don't invert an over-claim into an absolute (2026-09-16)
 
 **The correction.** On 2026-09-15 David corrected a prompt that claimed "in commercial real estate,

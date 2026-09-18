@@ -2858,9 +2858,9 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [x] 1. P1: FastAppend 404 is a miss. Discriminate on the body, not the status. **DONE `55616b0`**
 - [x] 2. P2: fix `getAnalytics` against the real response; test it. **DONE `55616b0`**
 - [ ] 3. `MAX_RECORDS` 10,000 -> 500 on session + v1; UI refuses at selection time.
-- [ ] 4. Migration: two queue columns + the all-rungs partial index.
-- [ ] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5.
-- [ ] 6. Billing in the worker: answer = billable, failure = retry, fold never flat.
+- [x] 4. Migration: two queue columns + the all-rungs partial index. **DONE `54f1b41`, APPLIED to production and read back 2026-09-18**
+- [x] 5. `sweep-property-traces` cron: CAS claim, stale recovery, ladder, 120/run, concurrency 5. **DONE `54f1b41`**
+- [x] 6. Billing in the worker: answer = billable, failure = retry, fold never flat. **DONE `54f1b41` + `64cd577`**
 - [ ] 7. Both pre-flight checks, with the two different failure owners.
 - [ ] 8. All three submit estimates.
 - [ ] 9. Every string above.
@@ -2868,3 +2868,9 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
 - [ ] 11. v1 payload parity + MCP limits.
 - [ ] 12. Mutation-verify every money decision. Re-run by me, not taken from the report.
 - [ ] 13. The submit wallet check must size against in-flight unbilled work. See decision 4 above.
+- [ ] 14. **SECURITY, found 2026-09-18, must close before 5c ships.** `trace_history` grants
+      INSERT/UPDATE/DELETE to `anon` and `authenticated` table-wide, so any signed-in user can rewrite
+      every column on their own rows from the browser. 5c-2's `property_trace_status` inherited that
+      and is a work trigger, so a browser write enqueues paid vendor work. Fix is verified safe:
+      all 17 writing files use `createAdminClient`; the two browser files never write. REVOKE
+      INSERT/UPDATE/DELETE from anon + authenticated, keep SELECT. See History.md 2026-09-18 and L-014.
