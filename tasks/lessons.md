@@ -4,6 +4,53 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-019: A goal-shaped instruction does not name its mechanism, so check it against the standing decisions (2026-09-18)
+
+**What happened.** David said "Full property trace needs to reach the CRM, so whatever you need to
+do make that happen." I read the gap, planned carefully, verified against source, corrected my own
+wrong analysis twice, ran the mutations, shipped it, and **built the wrong thing.** He then explained
+why: most users reach their CRM through the Suite Gateway, which holds the GoHighLevel snapshot and
+knows that an entity owner is a **Company**, that a person is a **Contact** only when there is a
+phone or an email, and that the property hangs on a property object. PTP's own push only ever creates
+Contacts, so what I built writes the wrong object type into a gateway user's CRM.
+
+**The part that makes this a lesson rather than bad luck: the answer was in the handoff, and I had
+read it that same session.** Verbatim, in a file I opened in my first five minutes:
+
+> **PTP's own direct HighLevel push is being DROPPED, not built.**
+
+I did not miss the sentence. I read it, absorbed it as context about a fourth-phase scope decision,
+and then hours later received an instruction phrased as an outcome and never re-checked the outcome
+against it. Every step after that was rigorous and every step compounded the error. The mutation
+runs, the guard analysis, the three-way correction of my own gap statement: all of it was excellent
+work aimed at a thing that should not have been built.
+
+**The mechanism.** An instruction phrased as a GOAL ("X needs to reach Y") is silent about mechanism.
+The mind fills that silence with the mechanism most recently in view, and what was in view was the
+push I had been fixing all session. A standing decision that FORBIDS that mechanism does not announce
+itself at the moment you choose, because it is filed under a different topic from the instruction.
+
+**The rules.**
+- **Before acting on a goal-shaped instruction, name the mechanism out loud and grep the standing
+  decisions for it.** Not the goal, the MECHANISM. "Reach the CRM" finds nothing; "HighLevel push"
+  finds the sentence that would have stopped me.
+- **When the work spans two systems, ask which one the user is picturing.** David was picturing the
+  gateway the entire time. One question would have surfaced it: "through PTP's own push, or through
+  the gateway?" Cf. L-010, which is the same failure aimed at a consumer instead of a decision.
+- **Rigour downstream cannot rescue a wrong target, and it disguises one.** A careful plan, a clean
+  mutation table and a corrected analysis all read as evidence the work is right. They are evidence
+  the work is CORRECT, which is a different claim from RIGHT. I corrected my gap statement three
+  times and every correction made the wrong thing more accurate.
+
+**The tell I ignored.** I had already flagged the contradiction to myself and moved past it. Asking
+David about the MCP asymmetry, I wrote that PTP pushing MCP-submitted rows "is a change of ownership,
+not just a gap being filled", and cited the handoff's gateway boundary in the same sentence. **I
+identified the exact problem and filed it as a question about a detail instead of a question about
+the premise.** When a consequence of your work requires re-drawing a boundary somebody else already
+drew, that is not a footnote to raise, it is a sign the premise is wrong.
+
+---
+
 ## L-018: Wiring N call sites and testing two of them is L-016 inside the mutation run (2026-09-18)
 
 **What happened.** Making Full Property Trace reach the CRM required every push site to record which
