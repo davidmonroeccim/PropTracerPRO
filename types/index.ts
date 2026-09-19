@@ -207,6 +207,12 @@ export interface AddressInput {
   owner_name?: string;
   owner_name_2?: string;
   mailing_address?: string;
+  /** The dossier's SECOND lookup key, with county below and state above. Optional: every
+   *  caller before the Suite Gateway sent an address only. See recordSchema in
+   *  lib/suite/mcp-tools.ts for the independence claim between this key and the address. */
+  apn?: string;
+  /** Bare county name for the APN key. Tracerfy wants "Stark", never "Stark County". */
+  county?: string;
 }
 
 export interface SingleTraceRequest {

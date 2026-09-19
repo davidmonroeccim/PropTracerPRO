@@ -10,6 +10,7 @@ import {
   MAX_RECORDS,
   skipTraceBulk,
   bulkStatus,
+  recordSchema,
 } from "@/lib/suite/mcp-tools";
 import { PRICING } from "@/lib/constants";
 import { chargePerRecord } from "@/lib/suite/pricing";
@@ -818,6 +819,58 @@ describe("skip_trace_bulk", () => {
     });
     expect(out).toMatchObject({ error: "insufficient_balance" });
     expect(captured.traceHistoryUpserts).toHaveLength(0);
+  });
+});
+
+describe("skip_trace_bulk carries the dossier parcel key", () => {
+  const linked = {
+    id: "p1",
+    subscription_tier: "wallet",
+    is_acquisition_pro_member: false,
+    gateway_products: ["prop-tracer-pro"],
+    wallet_balance: 100,
+  };
+
+  /** Submits `records` through the real skipTraceBulk() with the existing submit stub, then
+   *  returns every trace_history row it upserted. Built on submitAdminStub rather than a second
+   *  harness, matching every other test in this describe group. */
+  async function capturedHistoryRowsFor(records: unknown[]) {
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    await skipTraceBulk(admin, "sub-1", { records, confirm: true });
+    return captured.traceHistoryUpserts.flatMap((u) => u.batch);
+  }
+
+  it("accepts apn and county on a record", () => {
+    const parsed = recordSchema.safeParse({
+      address: "203 Dauphin St", city: "Mobile", state: "AL",
+      apn: "R022901", county: "Mobile",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("still accepts a record with neither, which is every caller today", () => {
+    expect(recordSchema.safeParse({
+      address: "203 Dauphin St", city: "Mobile", state: "AL",
+    }).success).toBe(true);
+  });
+
+  it("persists both onto the trace_history row", async () => {
+    // The whole point of the migration. If these are not written at submit, the cron
+    // cannot use them a minute later and the APN step stays dead with no error anywhere.
+    const rows = await capturedHistoryRowsFor([{
+      address: "203 Dauphin St", city: "Mobile", state: "AL",
+      apn: "R022901", county: "Mobile",
+    }]);
+    expect(rows[0].parcel_id_local).toBe("R022901");
+    expect(rows[0].county).toBe("Mobile");
+  });
+
+  it("writes null, never an empty string, when they are absent", async () => {
+    const rows = await capturedHistoryRowsFor([{
+      address: "203 Dauphin St", city: "Mobile", state: "AL",
+    }]);
+    expect(rows[0].parcel_id_local).toBeNull();
+    expect(rows[0].county).toBeNull();
   });
 });
 

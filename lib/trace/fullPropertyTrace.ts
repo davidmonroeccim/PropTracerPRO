@@ -74,11 +74,16 @@ export function isFullPropertyTrace(input: {
  * plan with no dossier step at all. The supplied name is still stored on the
  * row as `input_owner_name`; it is the ROUTE that must not short-circuit.
  *
- * No `parcelIdLocal` and no `county`: nothing in PTP produces a parcel id, and
- * address mode is the proven key (it returned the owner the county recorder
- * confirms on a parcel where APN mode missed).
+ * A caller CAN now supply `apn` and `county`: the Suite Gateway holds a county
+ * parcel id from the property registry and passes it through here. Address
+ * mode remains the proven key (it returned the owner the county recorder
+ * confirms on a parcel where APN mode missed) and still fires whenever a
+ * situs exists; the parcel id is a second, independent attempt, not a
+ * replacement.
  */
-export function parcelForFullTrace(input: TraceAddressInput): ParcelInput {
+export function parcelForFullTrace(
+  input: TraceAddressInput & { apn?: string | null; county?: string | null },
+): ParcelInput {
   const state = input.state.trim().toUpperCase()
   return {
     state,
@@ -86,6 +91,13 @@ export function parcelForFullTrace(input: TraceAddressInput): ParcelInput {
     situsCity: input.city.trim(),
     situsState: state,
     situsZip: input.zip?.trim() || null,
+    // THE SECOND DOSSIER KEY, and the first caller that has ever supplied it. hasApn()
+    // needs BOTH of these plus `state` above: apn, county and state is a three-part key
+    // and a request missing any part is malformed. Blank trims to null rather than to ''
+    // because an empty apn would make hasApn() true and spend an attempt on a request the
+    // vendor answers with a free, silent miss (CLAUDE.md rule 7).
+    parcelIdLocal: input.apn?.trim() || null,
+    county: input.county?.trim() || null,
     ownerName: null,
   }
 }

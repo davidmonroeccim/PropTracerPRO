@@ -5,6 +5,7 @@ import {
   parcelForFullTrace,
   traceResultFor,
 } from "@/lib/trace/fullPropertyTrace";
+import { planRoute } from "@/lib/routing/ownerRoute";
 import type { ExecutionResult } from "@/lib/routing/executeRoute";
 
 /**
@@ -73,6 +74,8 @@ describe("parcelForFullTrace", () => {
       situsCity: "Austin",
       situsState: "TX",
       situsZip: "78701",
+      parcelIdLocal: null,
+      county: null,
       ownerName: null,
     });
   });
@@ -169,3 +172,60 @@ describe("hasContactData", () => {
     ).toBe(true);
   });
 });
+
+describe('parcelForFullTrace with a parcel id', () => {
+  it('populates parcelIdLocal and county so hasApn can finally be true', () => {
+    const parcel = parcelForFullTrace({
+      address: '203 Dauphin St', city: 'Mobile', state: 'al', zip: '36602',
+      apn: 'R022901', county: 'Mobile',
+    })
+    expect(parcel.parcelIdLocal).toBe('R022901')
+    expect(parcel.county).toBe('Mobile')
+    // The THIRD part of the APN key. Already carried, asserted here so a refactor that
+    // drops it is caught: an apn and a county without a state is a malformed request.
+    expect(parcel.state).toBe('AL')
+  })
+
+  it('leaves both null when no parcel id is supplied, which is every caller today', () => {
+    const parcel = parcelForFullTrace({ address: '203 Dauphin St', city: 'Mobile', state: 'AL' })
+    expect(parcel.parcelIdLocal ?? null).toBeNull()
+    expect(parcel.county ?? null).toBeNull()
+  })
+
+  it('treats a blank parcel id as absent, never as a value', () => {
+    // CLAUDE.md rule 7: no placeholder data. An empty string would make hasApn() true and
+    // send a request with an empty apn, which the vendor charges nothing for and answers
+    // with nothing, so it would be an invisible waste rather than an error.
+    const parcel = parcelForFullTrace({
+      address: '203 Dauphin St', city: 'Mobile', state: 'AL', apn: '   ', county: '',
+    })
+    expect(parcel.parcelIdLocal ?? null).toBeNull()
+    expect(parcel.county ?? null).toBeNull()
+  })
+
+  it('emits BOTH dossier steps, APN first, when both keys exist', () => {
+    const plan = planRoute(parcelForFullTrace({
+      address: '203 Dauphin St', city: 'Mobile', state: 'AL', apn: 'R022901', county: 'Mobile',
+    }), 'pro')
+    expect(plan.steps.map((s) => s.kind)).toEqual(['DOSSIER_APN', 'DOSSIER_ADDRESS'])
+  })
+
+  it('sends apn, county AND state on the APN step', () => {
+    // The three-part key. A request with two of the three is malformed and the vendor
+    // answers it with a miss, which is free and therefore silent.
+    const plan = planRoute(parcelForFullTrace({
+      address: '203 Dauphin St', city: 'Mobile', state: 'AL', apn: 'R022901', county: 'Mobile',
+    }), 'pro')
+    const apnStep = plan.steps.find((s) => s.kind === 'DOSSIER_APN')!
+    expect(apnStep.request).toEqual({ apn: 'R022901', county: 'Mobile', state: 'AL' })
+  })
+
+  it('still emits the address step alone when only a situs exists', () => {
+    // The regression fence for every caller that exists today. Address mode is the proven
+    // key and must not become conditional on a parcel id arriving.
+    const plan = planRoute(
+      parcelForFullTrace({ address: '203 Dauphin St', city: 'Mobile', state: 'AL' }), 'pro',
+    )
+    expect(plan.steps.map((s) => s.kind)).toEqual(['DOSSIER_ADDRESS'])
+  })
+})

@@ -115,6 +115,14 @@ export const recordSchema = z.object({
   // made 241 counties / 16,062,225 parcels untraceable for a field nothing downstream reads.
   // Still validated by validateAddressInput when supplied; absent is fine, wrong is not.
   zip: z.string().optional(),
+  /** The dossier's SECOND lookup key, with county and state. Optional: every caller before
+   *  the Suite Gateway sent an address only, and address mode stays the proven key. The two
+   *  keys fail INDEPENDENTLY (Napa hit on APN and missed on address; Salt Lake did the
+   *  reverse), so supplying this adds a second attempt rather than replacing the first, and
+   *  a dossier miss is free at the vendor so the extra attempt costs nothing unless it works. */
+  apn: z.string().optional(),
+  /** Bare county name for the APN key. Tracerfy wants "Stark", never "Stark County". */
+  county: z.string().optional(),
 });
 export type TraceRecord = z.infer<typeof recordSchema>;
 
@@ -400,6 +408,8 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       state: record.state.toUpperCase(),
       zip: (record.zip || "").substring(0, 5),
       input_owner_name: record.owner_name || null,
+      parcel_id_local: record.apn?.trim() || null,
+      county: record.county?.trim() || null,
       ai_research_status: aiResearchStatus,
       status,
       source: "mcp",

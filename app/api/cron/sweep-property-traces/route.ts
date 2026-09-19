@@ -123,6 +123,12 @@ interface QueueRow {
   city: string | null;
   state: string | null;
   zip: string | null;
+  /** The dossier's SECOND lookup key, with county below and state above. NULL for every row
+   *  submitted before the Suite Gateway started sending one. See mcp-tools.ts's recordSchema
+   *  for where it enters, and fullPropertyTrace.ts's parcelForFullTrace for the three-part key. */
+  parcel_id_local: string | null;
+  /** Bare county name for the APN key. Tracerfy wants "Stark", never "Stark County". */
+  county: string | null;
   /** Track A or Track B. See pricePlanForRow below; this is a PRICE decision. */
   source: string | null;
   property_trace_status: string | null;
@@ -341,6 +347,8 @@ export async function GET(request: Request) {
           city: row.city || '',
           state: row.state || '',
           zip: row.zip,
+          apn: row.parcel_id_local,
+          county: row.county,
         }),
         pricePlan
       );
