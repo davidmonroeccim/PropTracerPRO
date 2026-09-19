@@ -109,10 +109,43 @@
 > blocked by a stricter rule. David's stated decision was "refuse on 401/403"; this narrows it on his
 > own reasoning for picking that option, which was that a good credential must not be blocked.
 >
-> **STILL OPEN AND NOT FIXED, recorded as R1 through R8 in `tasks/todo.md`:** the two newest crons
-> (`sweep-business-traces`, `sweep-property-traces`) STILL do not push at all, so **tier 2 results
-> never reach the CRM by this integration**. The false copy claiming otherwise was fixed in three
-> places; the capability gap is untouched and is a David decision. Also open: an entity still pushes
+> **AMENDED AGAIN 2026-09-18: FULL PROPERTY TRACE NOW REACHES THE CRM. `main` = `5f45288`, pushed.**
+> 1493 passing / 75 files / 0 failing. A SIXTH migration,
+> `20260918_trace_highlevel_push_record.sql`, is applied and read back.
+>
+> **THE GAP I RECORDED ABOVE WAS WRONG THREE WAYS and the corrected version is the useful one.**
+> `sweep-business-traces` is TIER 1, so naming it was a misattribution. "Never reaches" was false:
+> v1 BULK already pushed tier 2, because it iterates ROWS rather than Tracerfy's batch array. And a
+> follow-up guess that a tier 2 single settled via `trace/status` was also wrong: `trace/single`
+> settles tier 2 INLINE and `trace/status` returns early on a terminal status.
+>
+> **ROOT CAUSE, one sentence: push was attached to JOB settlement, which reads Tracerfy's batch
+> array, not to ROW settlement.** A settled tier 2 row has `tracerfy_job_id: null`, so every push
+> list built that way was blind to it. Fixed by pushing where the ROW settles;
+> `sweep-property-traces` alone covers session bulk, v1 bulk AND MCP bulk, since all three enqueue
+> into the same queue column.
+>
+> **THE GUARD THAT PROTECTS A CUSTOMER'S CRM IS `isSuccessful && result` AND BOTH HALVES CARRY
+> WEIGHT.** TWO billed-miss shapes carry a NON-NULL `trace_result` with EMPTY phones and emails:
+> `property_trace_no_reach`, and a contact-vendor MISS. Under a bare `trace_result != null` both
+> push a nameless, contactless contact into the customer's CRM. Never simplify that guard.
+>
+> **A push is now RECORDED** (`highlevel_contact_id`, `highlevel_pushed_at`,
+> `highlevel_push_action` on `trace_history`), so "did this trace reach the CRM" is answerable for
+> the first time since January. **It records from now on only:** 2,742 historical traces belonging
+> to the six credentialed users stay null, and that must never be rendered as a claim that they did
+> not reach the CRM.
+>
+> **DECIDED BY DAVID: PTP pushes what it settles**, so MCP-submitted tier 2 rows now push even
+> though the gateway's `crm_push_owners` also exists. MCP tier 1 still does not push. The asymmetry
+> is accepted, not overlooked.
+>
+> **The Pro gate on the MANUAL push is unchanged, deliberately.** A pay-as-you-go customer pays
+> $0.40 for tier 2 against Pro's $0.25 and still cannot use the manual button. David considered
+> opening it and decided it stays a Pro benefit.
+>
+> **STILL OPEN:** a push that FAILED leaves `highlevel_pushed_at` null and nothing re-reads it, so
+> there is no automatic retry; the manual job button is the only recovery, and only for Pro. Also open: an entity still pushes
 > a garbage contact that SUCCEEDS (`owner_name.split()[0]` as first name); no `highlevel_contact_id`
 > is ever persisted so "did this reach the CRM" is unanswerable after the fact; only the first phone
 > and first email are ever sent.
