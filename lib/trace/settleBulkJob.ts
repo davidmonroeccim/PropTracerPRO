@@ -63,13 +63,12 @@ export type TraceHistoryRow = {
   // again. Optional for the same reason as the two above: rows written before
   // the migration carry no value, and absent reads as not pending.
   property_trace_status?: string | null;
-  // Added by migration 20260918. Set together with highlevel_contact_id when a
-  // push reaches the customer's CRM. Read by the v1 bulk status route to skip a
-  // row sweep-property-traces has already pushed: a tier 2 row is settled by the
-  // cron and finalized here, so without it the same contact is pushed twice.
-  // Optional for the same reason as the columns above: rows written before the
-  // migration carry no value, and absent reads as never pushed.
-  highlevel_pushed_at?: string | null;
+  // `highlevel_pushed_at` was declared here for the v1 bulk status route, which
+  // used it to skip a row the property-trace cron had already pushed. Both the
+  // automatic pushes and that skip are gone: PTP never calls HighLevel unless a
+  // person asked it to, so no settle path can push a row and nothing here needs
+  // to know whether one did. The COLUMN still exists and the manual push still
+  // writes it (lib/highlevel/pushRecord.ts); it just has no reader on this type.
 };
 
 export type SettleBulkJobArgs = {
