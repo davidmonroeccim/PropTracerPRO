@@ -59,10 +59,32 @@ cron is the ONLY place the parcel id ever reaches the vendor. Closed by extracti
 `parcelForRow(row)` as an exported pure function and testing it directly rather than standing up a
 route harness. Both mutations now red in vitest, not merely in `tsc`. See L-020.
 
-**STILL OPEN, and it needs David:** live verification. Proving the APN key actually resolves a
-parcel means spending about $0.20 to $0.40 at Tracerfy. The proposed probe is Napa
-`003330004000`, chosen because it is the parcel the research measured as hitting on APN and
-MISSING on address, so it demonstrates the new key doing something the old one cannot. Not run.
+**LIVE VERIFICATION: RUN AND PASSED, 2026-09-19, authorised by David. Cost $0.20 (10 credits).**
+Script kept at `tasks/research-scripts/verify-apn-key.ts`. It exercises the real wiring, not a
+reconstruction: `parcelForRow` on a row shaped as the cron reads one, then `planRoute`, then two
+live `lookupDossier` calls.
+
+| | |
+|---|---|
+| `parcelForRow` produced | `parcelIdLocal "003330004000"`, `county "Napa"`, `state "CA"` |
+| `planRoute` emitted | `DOSSIER_APN, DOSSIER_ADDRESS` |
+| APN request on the wire | `{"apn":"003330004000","county":"Napa","state":"CA"}` |
+| ADDRESS mode | **MISS**, 0 credits, free |
+| APN mode | **HIT**, 10 credits, $0.20 |
+| owner of record returned | `John Anthony Investments Llc` |
+| property keys returned | 86 |
+
+**The APN key resolved a parcel the address key could not**, which is the exact claim and the
+reason this parcel was chosen. Napa was measured on 2026-09-16 as hitting on APN and missing on
+address; that reproduced exactly, three days later, through the new code path.
+
+**GOTCHA FOUND BY THE RUN, and it has teeth. THE VENDOR RETURNS A DIFFERENTLY FORMATTED APN THAN
+THE ONE YOU SEND.** We sent `003330004000` and `property.apn` came back `003-330-004-000`, dashed.
+The situs came back reformatted too: we sent `1440 FIRST ST` and got `1440 1st St`. Anything that
+compares a returned identifier against the one submitted **must normalise before comparing**, or
+it will report a mismatch on every single row. This matters immediately for the Suite Gateway's
+proposed check of `property_record.apn` against the registry's `parcel_id_local`: a bare string
+comparison there would flag every correct match as wrong.
 
 ---
 

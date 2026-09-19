@@ -31,10 +31,17 @@
 > section 7b, and it fences against shipping before this landed by checking PTP's advertised input
 > schema live before sending the field.
 >
-> **STILL OPEN, NEEDS DAVID:** live verification. Proving the APN key resolves a parcel costs about
-> $0.20 to $0.40 at Tracerfy. Proposed probe is Napa `003330004000`, the parcel measured as hitting
-> on APN and MISSING on address, so it demonstrates the new key doing something the old one cannot.
-> Not run.
+> **LIVE VERIFICATION RUN AND PASSED**, 2026-09-19, authorised by David, cost $0.20. Napa
+> `003330004000`: address mode MISSED and was free, APN mode HIT for 10 credits and returned
+> `John Anthony Investments Llc` with all 86 property keys. The APN key resolved a parcel the
+> address key could not, through the real wiring. Script kept at
+> `tasks/research-scripts/verify-apn-key.ts`; full table in `History.md`.
+>
+> **GOTCHA THE RUN FOUND, and it will bite the next person who compares identifiers.** The vendor
+> returns a DIFFERENTLY FORMATTED apn than the one you send: we sent `003330004000` and got back
+> `003-330-004-000`. The situs comes back reformatted too, `1440 FIRST ST` returning as
+> `1440 1st St`. **Normalise before comparing any returned identifier against a submitted one**,
+> or every correct match reads as a mismatch.
 >
 > **ALSO NOTE, for anyone reading the block below about the gateway consuming the dossier:** that
 > work is live and underway in the suite-gateway repo. PTP's half remains DONE and unchanged, and
