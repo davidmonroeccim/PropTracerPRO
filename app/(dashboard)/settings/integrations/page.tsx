@@ -290,7 +290,7 @@ export default function IntegrationsPage() {
                 Upgrade to Pro ($97/month) to unlock integrations, including:
               </p>
               <ul className="list-disc list-inside text-gray-600 space-y-1">
-                <li>HighLevel CRM, push contacts automatically</li>
+                <li>HighLevel CRM, push contacts with one click</li>
                 <li>Webhook support for any CRM or automation platform</li>
                 <li>Full API access</li>
               </ul>
@@ -457,18 +457,19 @@ export default function IntegrationsPage() {
           </div>
 
           {/*
-            R1. This used to read "Successful traces will automatically create
-            or update contacts in your HighLevel CRM", which is not true of
-            every trace. The two crons that finalize a Full Property Trace
-            (sweep-business-traces, sweep-property-traces) never touch the
-            HighLevel columns, so a tier 2 result does not reach the CRM on its
-            own. The sentence now says what actually happens. Do not widen it
-            back without adding the push.
+            NOTHING PUSHES ON ITS OWN ANY MORE, AND THIS SENTENCE HAS TO KEEP
+            SAYING SO. It has been wrong twice already: first as "Successful
+            traces will automatically create or update contacts", then as a
+            narrower claim that a tier 1 trace pushes itself. Every automatic
+            push is gone, because PTP's own push only ever creates Contacts and
+            that is the wrong object for an entity owner. Do not widen this
+            back without adding a push, and there is no plan to add one.
           */}
           <p className="text-xs text-gray-500">
-            A skip trace where you give us the owner of record pushes to HighLevel on its own as soon
-            as it comes back, whether you ran it here, in bulk, or through the API. A Full Property
-            Trace does not push itself, so send those over with the Push to CRM button on the result.
+            Nothing goes to HighLevel on its own. When you want a result in your CRM, press Add to
+            CRM on the trace, or Add All to CRM on a finished bulk job, and we create or update
+            those contacts. It works the same for a skip trace where you gave us the owner and for
+            a Full Property Trace.
           </p>
         </CardContent>
       </Card>

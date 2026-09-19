@@ -521,3 +521,87 @@ describe('the job push finds tier 2 rows', () => {
     expect(records[0].payload.highlevel_push_action).toBe('updated');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * THE BUTTON IS THE ONLY THING LEFT THAT PUSHES, SO IT HAS TO WORK.
+ *
+ * Every automatic push was removed: PTP never calls HighLevel unless a person
+ * asked it to. This route IS the person asking. The eight fences around the
+ * settle paths all assert an ABSENCE, and an absence is cheap to satisfy by
+ * breaking the push everywhere at once. These assert the presence at both
+ * tiers, on both branches, so a removal that went one file too far is not
+ * reported as a clean run.
+ * ------------------------------------------------------------------ */
+describe('the manual push still reaches HighLevel, at both tiers', () => {
+  /** A tier 1 row: settled through Tracerfy's batch, so it carries a batch id. */
+  const TIER1 = {
+    id: 'row-tier1',
+    trace_result: { owner_name: 'Tier One Owner', phones: [], emails: [] },
+    normalized_address: '1 FIRST ST',
+    city: 'Austin',
+    state: 'TX',
+    zip: '78701',
+    is_successful: true,
+    tracerfy_job_id: 'tj-1',
+  };
+
+  /** A tier 2 row: a Full Property Trace, which has NO batch id at all. */
+  const TIER2 = {
+    id: 'row-tier2',
+    trace_result: { owner_name: 'Tier Two Owner', phones: [], emails: [] },
+    normalized_address: '2 SECOND ST',
+    city: 'Austin',
+    state: 'TX',
+    zip: '78701',
+    is_successful: true,
+    tracerfy_job_id: null,
+  };
+
+  /**
+   * The client mock is module-level and its call history accumulates across
+   * this whole file, so "it pushed Tier Two Owner" would otherwise be
+   * satisfiable by an earlier test's call (L-013). Cleared per test.
+   */
+  beforeEach(async () => {
+    const { pushTraceToHighLevel } = await import('@/lib/highlevel/client');
+    vi.mocked(pushTraceToHighLevel).mockClear();
+  });
+
+  it.each([
+    ['tier 1', TIER1, 'Tier One Owner'],
+    ['tier 2', TIER2, 'Tier Two Owner'],
+  ])('pushes a %s single and answers 200', async (_label, row, owner) => {
+    H.trace = { ...row };
+    H.pushResults = [CREATED];
+
+    const res = await post({ trace_id: row.id });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ success: true, action: 'created' });
+
+    const { pushTraceToHighLevel } = await import('@/lib/highlevel/client');
+    // Exactly one push, and it carried the contacts off THIS row with the
+    // credential off the profile.
+    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
+    expect(arg.traceResult.owner_name).toBe(owner);
+    expect(arg.apiKey).toBe('key-1');
+    expect(arg.locationId).toBe('loc-1');
+  });
+
+  it('pushes a job holding one row of each tier, and counts both', async () => {
+    H.job = { tracerfy_job_id: null, status: 'completed' };
+    H.traces = [TIER1, TIER2];
+    H.pushResults = [CREATED];
+
+    const body = await (await post({ job_id: 'j-1' })).json();
+    expect(body).toMatchObject({ success: true, pushed: 2, failed: 0, total: 2 });
+
+    const { pushTraceToHighLevel } = await import('@/lib/highlevel/client');
+    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(2);
+    const owners = vi
+      .mocked(pushTraceToHighLevel)
+      .mock.calls.map((c) => c[0].traceResult.owner_name);
+    expect(owners).toContain('Tier One Owner');
+    expect(owners).toContain('Tier Two Owner');
+  });
+});

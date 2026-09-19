@@ -153,7 +153,7 @@ const features = [
   {
     icon: LinkIcon,
     title: 'CRM Integration',
-    description: 'Auto-push traced contacts to HighLevel CRM or trigger webhooks to Zapier, Make, and more. Build a fully hands-off pipeline.',
+    description: 'Push traced contacts to HighLevel CRM in one click, or trigger webhooks to Zapier, Make, and more the moment a trace lands.',
     badge: 'Pro',
   },
   {
@@ -280,7 +280,7 @@ const plans = [
       'Everything in Pay-As-You-Go',
       `Our lowest rates (${TIER_1_PRO} per trace, ${TIER_2_PRO} per record)`,
       'Full inbound + outbound API access',
-      'HighLevel CRM auto-push',
+      'One-click HighLevel CRM push',
       'Webhook automations (Zapier, Make, etc.)',
     ],
     cta: 'Start Pro',
@@ -383,7 +383,7 @@ const faqs = [
   },
   {
     q: 'What makes PropTracerPRO\u2122 different from other skip tracers?',
-    a: 'Two things. First, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM, with no manual exports and no spreadsheets. Second, when we look up an owner for you, you get the property record behind it and not just a phone number. That is over 60 fields of county data in the same response.',
+    a: 'Two things. First, we are the only skip tracing platform with full inbound and outbound API access. You can send addresses in via our API, automatically receive results via webhooks, and push contacts straight to your CRM with one click, with no manual exports and no spreadsheets. Second, when we look up an owner for you, you get the property record behind it and not just a phone number. That is over 60 fields of county data in the same response.',
   },
   {
     q: 'How does wallet billing work?',

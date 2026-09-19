@@ -696,7 +696,7 @@ Parse response: Yes
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Put a Router straight after module 1 that checks <code className="bg-blue-100 px-1 rounded">tier</code>. A Full Property Trace is already finished and has no job to poll, so sending it into the repeater just wastes runs. Use a second Router after the poll to handle success, no_match and error separately. A trace where you gave us the owner of record pushes to HighLevel on the server on its own; a Full Property Trace does not, so push those from PropTracerPRO or send them on to your CRM from here.
+                  <strong>Tip:</strong> Put a Router straight after module 1 that checks <code className="bg-blue-100 px-1 rounded">tier</code>. A Full Property Trace is already finished and has no job to poll, so sending it into the repeater just wastes runs. Use a second Router after the poll to handle success, no_match and error separately. Nothing goes to your CRM on its own, whichever tier ran, so either send the result on to your CRM from here or press Add to CRM on it in PropTracerPRO.
                 </p>
               </div>
             </TabsContent>
@@ -766,8 +766,8 @@ Headers: Authorization: Bearer ptp_your_api_key
 {{ $json.propertyRecord.assessed_value }} -> County tax assessment, not a market value
 {{ $json.charge }}                    -> What your wallet actually paid
 
-// CRM push happens server-side (HighLevel) when you gave us the owner
-// of record. A Full Property Trace does not push itself.
+// Nothing is pushed to HighLevel on its own, whichever tier ran.
+// Send the result on from here, or press Add to CRM in PropTracerPRO.
 // Webhook fires automatically when a trace completes`}
                   section="n8n-step3"
                 />
