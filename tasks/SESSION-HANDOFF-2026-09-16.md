@@ -1,4 +1,46 @@
-# SESSION HANDOFF, 2026-09-16, amended through 2026-09-17
+# SESSION HANDOFF, 2026-09-16, amended through 2026-09-19
+
+> # AMENDED 2026-09-19. THE DOSSIER NOW HAS TWO LOOKUP KEYS. READ THIS BEFORE THE BLOCK BELOW.
+>
+> **`main` = `e48d5c7`. 1502 passing / 75 files / 0 failing, `tsc` 0, eslint 47, build compiles.**
+> A SEVENTH migration, `20260919_trace_history_parcel_key.sql`, is APPLIED to production and read
+> back. Full detail in `History.md`; the lesson is L-020.
+>
+> **`DOSSIER_APN` had never executed.** It has been emitted by `planRoute` since 2026-09-16, but
+> `hasApn()` needs `parcelIdLocal` and `county` and `parcelForFullTrace` set neither, so the
+> address key was not the fallback, it was the only key that had ever fired. An MCP caller can now
+> supply `apn` and `county` on a record, they persist on `trace_history`, and the tier 2 cron feeds
+> them to `parcelForFullTrace`.
+>
+> **THE KEY IS THREE PARTS: `apn`, `county`, `state`.** `state` was already required and already
+> carried, so it completes on its own. Two mutations pin the request shape, and they matter more
+> than usual: **the vendor answers a malformed key with a MISS, and a miss is free**, so a two-part
+> request would have shipped, found nothing, cost nothing, forever, with no error anywhere.
+>
+> **DO NOT SAY THE PARCEL ID IS MORE ACCURATE THAN THE ADDRESS.** They fail independently: Napa hit
+> on APN and missed on address, Salt Lake did the reverse. It is a second independent attempt, and
+> since a miss is free it costs nothing unless it works. Neither is the senior partner.
+>
+> **SCOPED TO THE MCP SUBMIT.** `v1/trace/bulk` and the dashboard's `trace/bulk` also enqueue tier
+> 2 rows and are deliberately NOT wired; either would need a public API field or a CSV column.
+> That is a choice, per L-018, not an oversight to helpfully fix.
+>
+> **WHO ASKED.** The Suite Gateway, which holds a county parcel id for every registry parcel. Its
+> side is specced at
+> `/Users/davidmonroe/suite-gateway/docs/superpowers/specs/2026-09-19-crm-push-dossier-tier-design.md`
+> section 7b, and it fences against shipping before this landed by checking PTP's advertised input
+> schema live before sending the field.
+>
+> **STILL OPEN, NEEDS DAVID:** live verification. Proving the APN key resolves a parcel costs about
+> $0.20 to $0.40 at Tracerfy. Proposed probe is Napa `003330004000`, the parcel measured as hitting
+> on APN and MISSING on address, so it demonstrates the new key doing something the old one cannot.
+> Not run.
+>
+> **ALSO NOTE, for anyone reading the block below about the gateway consuming the dossier:** that
+> work is live and underway in the suite-gateway repo. PTP's half remains DONE and unchanged, and
+> `lib/suite/mcp-tools.ts` still has no HighLevel import and must never gain one.
+
+
 
 > # STATE OF PLAY, 2026-09-17. READ THIS BLOCK FIRST.
 >

@@ -4,6 +4,68 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-19: THE DOSSIER'S SECOND LOOKUP KEY. `DOSSIER_APN` fires for the first time since it was written.
+
+`main` = `e48d5c7`, 2 commits. **1502 passing / 75 files / 0 failing**, `tsc` 0, eslint 47, build
+compiles. Baseline before was 1489, so +13. A seventh migration,
+`20260919_trace_history_parcel_key.sql`, is APPLIED to production and read back.
+
+**THE HEADLINE: a step that has existed for three days had never once executed.** `planRoute` has
+emitted `DOSSIER_APN` alongside `DOSSIER_ADDRESS` since `40ea107` on 2026-09-16, stopping at the
+first hit. `hasApn()` requires `parcelIdLocal` AND `county`, and `parcelForFullTrace` is the only
+builder any tier 2 entry point uses. It set neither. Its own docblock said so: "Nothing in PTP
+produces a parcel id today: every entry point is address shaped." **So the address was never the
+fallback. It was the only key that had ever fired.**
+
+**WHO ASKED, AND WHY IT MATTERS.** The Suite Gateway holds a county parcel id for every registry
+parcel (`CuratedProperty.parcel_number_1`, sourced from the property registry's
+`parcel_id_local`) plus the county name, and had no field to send them in. David ruled 2026-09-19:
+send both keys, as `planRoute` was built to use.
+
+**THE KEY IS THREE PARTS: `apn`, `county`, `state`.** Not two. `state` was already required on
+`recordSchema` and already mapped onto `ParcelInput.state`, so it completes on its own once the
+other two arrive. This is written in capitals because the consumer spec described it correctly
+once and then called it "two fields" three times running before David caught it. Two mutations now
+pin the request shape, because **the vendor answers a malformed key with a MISS, and a miss is
+free, so a two-part request would have shipped and found nothing and cost nothing, forever, with
+no error anywhere.**
+
+**NOT AN UPGRADE OVER THE ADDRESS KEY, and nothing may say it is.** The two fail independently:
+Napa hit on APN and missed on address, Salt Lake did the exact reverse. Sending the parcel id adds
+a second independent attempt at the same parcel. Since a dossier miss is free at the vendor, the
+second attempt costs nothing unless it works. Neither key is the senior partner.
+
+**WHY A MIGRATION WAS UNAVOIDABLE.** The tier 2 queue separates submit from execution: an MCP
+submit writes a `trace_history` row, and `sweep-property-traces` buys the dossier up to a minute
+later, rebuilding the parcel from that row alone. It read `normalized_address`, `city`, `state`
+and `zip` and nothing else, so a parcel id supplied at submit had nowhere to live.
+`normalized_address` was not an option (it is the sha256 dedup key; anything added re-buys every
+row forever) and neither was `property_record` (that is the raw 86-key vendor OUTPUT, and the raw
+dump is the product). Two nullable columns, `parcel_id_local` and `county`. No grants needed:
+`ADD COLUMN` inherits the table ACL and `20260918_lock_trace_history_writes.sql` already left
+`anon` and `authenticated` with SELECT only. The ACL was read back and every value accounted for,
+including four pre-existing grants traced to Supabase project-wide defaults by comparing against
+an untouched table.
+
+**SCOPED TO THE MCP SUBMIT, deliberately.** `v1/trace/bulk` and the dashboard's `trace/bulk` also
+enqueue tier 2 rows and are NOT wired. Giving either a parcel id means adding a public API field
+or a CSV column, which is a product decision about those surfaces rather than about this seam.
+Named here rather than left looking like an oversight, per L-018.
+
+**TWO MUTATIONS SURVIVED THE FIRST PASS AND WERE CLOSED.** Deleting the two lines that pass `apn`
+and `county` into `parcelForFullTrace` inside the cron left `tsc` clean and all 1499 tests green.
+That is the whole feature silently reverting to address-only with nothing to notice it, and the
+cron is the ONLY place the parcel id ever reaches the vendor. Closed by extracting
+`parcelForRow(row)` as an exported pure function and testing it directly rather than standing up a
+route harness. Both mutations now red in vitest, not merely in `tsc`. See L-020.
+
+**STILL OPEN, and it needs David:** live verification. Proving the APN key actually resolves a
+parcel means spending about $0.20 to $0.40 at Tracerfy. The proposed probe is Napa
+`003330004000`, chosen because it is the parcel the research measured as hitting on APN and
+MISSING on address, so it demonstrates the new key doing something the old one cannot. Not run.
+
+---
+
 ## 2026-09-18
 
 ### PTP stops pushing to the CRM on its own. All eight automatic sites removed.

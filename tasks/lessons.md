@@ -4,6 +4,55 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-020: A branch that has never executed is not code, it is a plan, and nothing guards it (2026-09-19)
+
+**What happened.** `planRoute` has emitted a `DOSSIER_APN` step since 2026-09-16. It was written
+carefully, it was covered by twelve tests, and it had **never once run in production**, because
+`hasApn()` needs `parcelIdLocal` and `county` and `parcelForFullTrace`, the only builder any tier 2
+entry point uses, set neither. The function's own docblock stated the fact plainly and it still
+took an outside consumer asking for the feature to notice that the fallback was the only path.
+
+**The mechanism.** Tests prove a branch is CORRECT. They say nothing about whether it is REACHED.
+A well-tested unreachable branch reads exactly like a working feature in every artifact a reader
+consults: the code is there, the tests are green, the docblock describes the behaviour. The only
+signal that distinguishes them is a caller, and absence of a caller is invisible unless you go
+looking for it. This is lesson 25 in the suite-gateway's file ("latent code is unverified code")
+arriving from the opposite direction: there, a fix unblocked a path that had never run; here,
+nothing ever unblocked it at all.
+
+**The second half, and it is the sharper one.** Wiring the parcel id through was straightforward.
+The mutation run then found that deleting the two lines that pass `apn` and `county` into
+`parcelForFullTrace` inside the cron left `tsc` clean and all 1499 tests green. **The cron is the
+only place the parcel id ever reaches the vendor**; every other piece built that day existed to
+feed it. So the feature could silently revert to address-only and nothing would say so. The
+implementer reported the survivors honestly and judged them out of scope because the brief's
+git-add list did not name the cron's test file. That read was reasonable and the ruling went the
+other way: a surviving mutation is an unfenced behaviour, not an observation to file.
+
+**Why it survived, mechanically.** The cron reads with `select('*')`, so a mutation to its row
+interface is caught by `tsc` but never by a test, and the wiring itself sat inline inside a long
+loop where nothing could address it. Closed by extracting `parcelForRow(row)` as an exported pure
+function: no behaviour change, but the wiring became a unit with one clear purpose that a test can
+hold. Both mutations then went red in vitest rather than only in `tsc`.
+
+**The rules.**
+- **When you write a conditional branch, name its first caller in the same sitting.** If you
+  cannot, write in the docblock that it has no caller yet, and treat that sentence as a defect
+  report rather than documentation. `parcelForFullTrace` did exactly this and it still went
+  unnoticed for three days, so the sentence is necessary and is not sufficient.
+- **`tsc` catching a mutation is not the same as a test catching it.** A type error is caught by
+  whoever next compiles; a missing value at a seam is caught by nobody. When a mutation reds only
+  under `tsc`, say so explicitly rather than counting it as killed.
+- **Inline wiring inside a long loop cannot be fenced.** If a mutation survives because there is
+  nothing to point a test at, the fix is usually an extraction, not a bigger harness. A route-level
+  test harness would have worked and would have cost ten times as much.
+- **A free vendor miss is the most dangerous error shape there is.** A malformed APN key returns a
+  miss, and a miss is free, so a wrong request would have shipped and found nothing and cost
+  nothing, indefinitely, with no error anywhere. Where an invalid call is silently free, the
+  request SHAPE has to be pinned by a test; nothing downstream will ever complain.
+
+---
+
 ## L-019: A goal-shaped instruction does not name its mechanism, so check it against the standing decisions (2026-09-18)
 
 **What happened.** David said "Full property trace needs to reach the CRM, so whatever you need to
