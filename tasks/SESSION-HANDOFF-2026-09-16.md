@@ -109,6 +109,10 @@
 > blocked by a stricter rule. David's stated decision was "refuse on 401/403"; this narrows it on his
 > own reasoning for picking that option, which was that a good credential must not be blocked.
 >
+> # SUPERSEDED BY THE BLOCK BELOW. The amendment that follows was written before David explained
+> # WHY PTP must not auto-push, and its headline conclusion is WRONG. Kept only so the correction
+> # is legible. Read "PTP DOES NOT PUSH TO THE CRM ON ITS OWN" first.
+>
 > **AMENDED AGAIN 2026-09-18: FULL PROPERTY TRACE NOW REACHES THE CRM. `main` = `5f45288`, pushed.**
 > 1493 passing / 75 files / 0 failing. A SIXTH migration,
 > `20260918_trace_highlevel_push_record.sql`, is applied and read back.
@@ -208,6 +212,58 @@ diagnosis.**
 > - **Save validates nothing.** A garbage credential saves with a green "Connected" badge; the
 >   Test Connection button is separate, optional, never called by save, and only proves a contacts
 >   READ.
+
+> # PTP DOES NOT PUSH TO THE CRM ON ITS OWN. 2026-09-19, and it supersedes the block above.
+>
+> **All EIGHT automatic HighLevel push sites are REMOVED.** `main` = see git, pushed. 1489 passing /
+> 75 files / 0 failing, `tsc` 0, eslint 47, build compiles. The test total DROPPED by 4 deliberately:
+> 12 old push tests and 5 dead-code tests out, 13 fences in.
+>
+> **THE REASON, from David, and it is the thing to understand before touching any CRM code.** Most
+> PTP users reach their CRM through the **SUITE GATEWAY**, not through PTP. The gateway holds the
+> GoHighLevel snapshot and knows the object model: **an entity owner becomes a COMPANY**, a person
+> becomes a **CONTACT and only when there is a phone or an email**, and the property hangs on the
+> property custom object. **PTP's own push only ever creates Contacts.** So an automatic PTP push
+> writes the WRONG OBJECT TYPE into a gateway user's snapshot, and a user with no gateway has no
+> snapshot for it to populate correctly either.
+>
+> **This was ALREADY the decision in this very file** ("PTP's own direct HighLevel push is being
+> DROPPED, not built", in the 4b section). It was read and then contradicted by work done on
+> 2026-09-18. See L-019: a goal-shaped instruction does not name its mechanism.
+>
+> **WHAT STILL EXISTS, and it is the whole of PTP's CRM story now:**
+> - the **manual** button (`app/api/integrations/highlevel/push/route.ts`), single and bulk. Pro-gated,
+>   deliberately: David considered opening it to pay-as-you-go, who pay $0.40 against Pro's $0.25,
+>   and decided it stays a Pro benefit.
+> - the **CSV export**.
+> - **`lib/suite/mcp-tools.ts`, UNTOUCHED and it must stay that way.** When the gateway sends a
+>   single or bulk request over MCP, results flow back with NO human step. It has no HighLevel
+>   import and must never gain one.
+>
+> **A trace with nothing to contact is not successful and cannot reach a CRM.** Verified uniformly:
+> every path computes `is_successful` as "at least one phone OR at least one email". No path requires
+> an owner name, and production has zero successful rows missing one. **Do not change this without
+> realising it is a BILLING predicate**: tier 1 bills per successful trace.
+>
+> **THE REAL WORK, and it is in the suite-gateway repo, not here.** Three links; PTP's is DONE:
+> 1. **PTP emits the dossier over MCP.** DONE in 4b: `mcp-tools.ts` sends `property_record`
+>    (filtered to 65 defensible keys) and `tier` on both tools.
+> 2. **The gateway consumes it.** NOT DONE. `property_record` appears NOWHERE in the suite-gateway
+>    source. `PROPERTY_FIELD_MIRROR` in `lib/crm-writer.ts` maps `CuratedProperty` (the registry
+>    shape) and has only a handful of entries.
+> 3. **The snapshot has somewhere to put it.** DONE and VERIFIED LIVE 2026-09-19 against the snapshot
+>    subaccount `jeq20bcKOgy7XQ3AAgHD`: all **54** fields from `tasks/ghl-property-fields-to-add.txt`
+>    exist with exact key matches, 104 fields total (50 + 54), types exactly as specced (33 TEXT,
+>    19 NUMERICAL, 2 DATE), and **ZERO MONETORY fields**, so nothing created by hand hit the
+>    unwritable type. The four renamed mappings (`zip`, `parcel_number_1`, `units`, `years_held`) are
+>    present. **Bonus: `original_upb` and `current_upb` now read NUMERICAL**, so the long-standing
+>    unwritable-UPB gotcha is resolved ON THIS SNAPSHOT. An account provisioned from an OLDER snapshot
+>    still carries the old Money type; a snapshot change does not retrofit.
+>
+> **CONSEQUENCE NOT TO LOSE:** the credential-health flag (`highlevel_invalid_at/_status/_reason`)
+> now updates ONLY when a person acts, via the manual push or save validation. The five unwatched
+> paths its design argued for no longer exist. Not broken, but much narrower than the entry above it
+> in History claims.
 
 **READ THIS BEFORE TOUCHING OWNER LOOKUP, SKIP TRACE ROUTING, OR PRICING.**
 Supersedes `SESSION-HANDOFF-2026-09-15.md` for everything about owner discovery.

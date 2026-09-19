@@ -3158,7 +3158,18 @@ only thing that will prove any of them are worth having.
 
 ---
 
-# PLAN: Full Property Trace reaches the CRM (2026-09-18). David's instruction, NOT started.
+# PLAN: Full Property Trace reaches the CRM (2026-09-18).
+# ** LARGELY REVERSED 2026-09-19. READ THIS FIRST. **
+#
+# Tasks 1 and 2 below were BUILT AND THEN REMOVED. PTP must not push to the CRM on its own: the
+# Suite Gateway holds the snapshot and the object model (an entity is a COMPANY, a person is a
+# CONTACT only with a phone or email, the property hangs on the property object), and PTP's push
+# only ever creates Contacts. All EIGHT automatic push sites are now gone.
+#
+# WHAT SURVIVED and was worth doing: task 3 (the manual job button now finds tier 2 rows via
+# trace_job_id), the push-record columns, the guard analysis, and the billed-miss shapes below.
+# The REAL work is in the suite-gateway repo. See the handoff's "PTP DOES NOT PUSH TO THE CRM ON
+# ITS OWN" block and lessons L-019.
 
 Baselines: **1456 passing / 75 files / 0 failing**, `tsc` 0, eslint 47, build compiles.
 `main` = `c24ffa5`, pushed, deploy READY.
@@ -3210,11 +3221,11 @@ surface that iterates ROWS instead, which is exactly why it is the one that work
 
 ## TASKS
 
-- [x] 1. **DONE `09371fe` + `1def747`. Push where the row SETTLES, not where the job finalizes.** One shared helper, called from
+- [~] 1. **BUILT, THEN REMOVED 2026-09-19.** Push where the row SETTLES. Reversed: PTP does not push automatically at all. One shared helper, called from
       the three row-settlement points: `sweep-property-traces` (which covers session bulk, v1 bulk AND
       MCP bulk, since all three enqueue into the same column), plus the two inline single routes.
       Reuse `recordHighLevelPushes` so every new push also feeds credential health.
-- [x] 2. **DONE `09371fe`. Stop v1 bulk double-pushing.** Once the cron owns tier 2, `v1/trace/bulk/status:398-404`
+- [~] 2. **MOOT, removed with task 1.** Stop v1 bulk double-pushing. Nothing pushes automatically, so there is no double push. Once the cron owns tier 2, `v1/trace/bulk/status:398-404`
       must skip rows the cron already pushed. Filter on the row having gone through the tier 2 queue,
       not on `tier`, because that is the property that actually decides ownership. NOTE: a double push
       is an UPDATE not a duplicate (the client searches first), and post-tags-fix an update is nearly
