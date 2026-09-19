@@ -3,7 +3,13 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { lookupBusinessTrace, lookupPersonTrace } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
 import { executeRoute } from '@/lib/routing/executeRoute';
-import { FAILSAFE_PRICE_PLAN, planRoute, type PricePlan, type StepKind } from '@/lib/routing/ownerRoute';
+import {
+  FAILSAFE_PRICE_PLAN,
+  planRoute,
+  type ParcelInput,
+  type PricePlan,
+  type StepKind,
+} from '@/lib/routing/ownerRoute';
 import {
   FULL_PROPERTY_TRACE_DESCRIPTION,
   hasContactData,
@@ -136,6 +142,36 @@ interface QueueRow {
   charge: number | string | null;
   tier: number | string | null;
   property_record: unknown;
+}
+
+/**
+ * The parcel planRoute() plans from, rebuilt off a claimed row.
+ *
+ * A PURE EXTRACTION with one job, so the two lines that carry the dossier's second lookup
+ * key (apn and county) can be pinned by a direct test instead of only by standing up the
+ * whole cron. Before this extraction, deleting either line from the inline call site here
+ * still compiled clean and left the full suite green: nothing anywhere would have caught the
+ * feature silently reverting to address-only, which is the exact failure this task exists to
+ * prevent. Exported so lib/trace/__tests__/fullPropertyTrace.test.ts and this file's own test
+ * can both call it directly.
+ *
+ * normalized_address is a pipe-delimited dedup key of exactly THREE fields, street|city|state,
+ * like "160 MINE LAKE CT|RALEIGH|NC". There is no zip in it: normalizeAddress() dropped it
+ * deliberately (migration 20260904). The zip lives in its own column. Pull the street portion
+ * back out before handing it to a vendor, which expects a raw street address and separate
+ * city/state/zip.
+ */
+export function parcelForRow(row: QueueRow): ParcelInput {
+  const streetAddress =
+    row.normalized_address.split('|')[0] || row.normalized_address;
+  return parcelForFullTrace({
+    address: streetAddress,
+    city: row.city || '',
+    state: row.state || '',
+    zip: row.zip,
+    apn: row.parcel_id_local,
+    county: row.county,
+  });
 }
 
 export async function GET(request: Request) {
@@ -326,32 +362,13 @@ export async function GET(request: Request) {
     processed++;
 
     try {
-      // normalized_address is a pipe-delimited dedup key of exactly THREE
-      // fields, street|city|state, like "160 MINE LAKE CT|RALEIGH|NC". There is
-      // no zip in it: normalizeAddress() dropped it deliberately (migration
-      // 20260904). The zip lives in its own column. Pull the street portion back
-      // out before handing it to a vendor, which expects a raw street address
-      // and separate city/state/zip.
-      const streetAddress =
-        row.normalized_address.split('|')[0] || row.normalized_address;
-
       // planRoute takes the price plan as a REQUIRED argument so that no caller
-      // can quietly bill the wrong column. parcelForFullTrace deliberately
-      // passes ownerName: null -- tier 2 is dossier-first by definition, and a
-      // plan built with an owner name present returns a tier 1 route with no
+      // can quietly bill the wrong column. parcelForRow deliberately passes
+      // ownerName: null -- tier 2 is dossier-first by definition, and a plan
+      // built with an owner name present returns a tier 1 route with no
       // dossier step at all.
       const pricePlan = await pricePlanForRow(row.user_id, row.source);
-      const plan = planRoute(
-        parcelForFullTrace({
-          address: streetAddress,
-          city: row.city || '',
-          state: row.state || '',
-          zip: row.zip,
-          apn: row.parcel_id_local,
-          county: row.county,
-        }),
-        pricePlan
-      );
+      const plan = planRoute(parcelForRow(row), pricePlan);
 
       if (plan.steps.length === 0) {
         // NO VENDOR WAS EVER ASKED, AND NONE EVER CAN BE. planRoute emits no

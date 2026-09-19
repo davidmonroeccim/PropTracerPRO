@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
-import { PRICE } from "@/lib/routing/ownerRoute";
+import { PRICE, planRoute } from "@/lib/routing/ownerRoute";
 import {
   MAX_PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_FAILED_STATUS,
@@ -224,7 +224,7 @@ vi.mock("next/server", async (importOriginal) => ({
   },
 }));
 
-const { GET } = await import("@/app/api/cron/sweep-property-traces/route");
+const { GET, parcelForRow } = await import("@/app/api/cron/sweep-property-traces/route");
 const { lookupDossier } = await import("@/lib/tracerfy/dossier");
 const { lookupBusinessTrace, lookupPersonTrace } = await import("@/lib/tracerfy/client");
 const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
@@ -383,6 +383,54 @@ beforeEach(() => {
   // test's output as well as their own.
   vi.spyOn(console, "error").mockImplementation(() => {}).mockClear();
   vi.spyOn(console, "log").mockImplementation(() => {}).mockClear();
+});
+
+/**
+ * parcelForRow, tested directly rather than only through the whole cron.
+ *
+ * WHY THIS DESCRIBE BLOCK EXISTS. Before the extraction, the two lines that carried apn and
+ * county into parcelForFullTrace lived inline in the claim loop. Deleting either one still
+ * left tsc clean and the full suite green, because nothing exercised that wiring end to end:
+ * the mutation survived. Pinning it here closes that gap without standing up the route.
+ */
+describe("parcelForRow", () => {
+  const baseRow = {
+    id: "row-1",
+    user_id: "user-1",
+    trace_job_id: "job-1",
+    normalized_address: "203 DAUPHIN ST|MOBILE|AL",
+    city: "MOBILE",
+    state: "AL",
+    zip: "36602",
+    source: "mcp",
+    property_trace_status: "queued",
+    charge: null,
+    tier: null,
+    property_record: null,
+  };
+
+  it("carries parcel_id_local and county through, alongside state, and emits both dossier steps APN first", () => {
+    const parcel = parcelForRow({ ...baseRow, parcel_id_local: "R022901", county: "Mobile" });
+    expect(parcel.parcelIdLocal).toBe("R022901");
+    expect(parcel.county).toBe("Mobile");
+    expect(parcel.state).toBe("AL");
+    const plan = planRoute(parcel, "pro");
+    expect(plan.steps.map((s) => s.kind)).toEqual(["DOSSIER_APN", "DOSSIER_ADDRESS"]);
+  });
+
+  it("produces address-only, one step, for a row with no parcel key, which is every existing production row", () => {
+    const parcel = parcelForRow({ ...baseRow, parcel_id_local: null, county: null });
+    expect(parcel.parcelIdLocal ?? null).toBeNull();
+    expect(parcel.county ?? null).toBeNull();
+    const plan = planRoute(parcel, "pro");
+    expect(plan.steps.map((s) => s.kind)).toEqual(["DOSSIER_ADDRESS"]);
+  });
+
+  it("treats a blank or whitespace parcel_id_local as absent, never as an empty string", () => {
+    const parcel = parcelForRow({ ...baseRow, parcel_id_local: "   ", county: "" });
+    expect(parcel.parcelIdLocal ?? null).toBeNull();
+    expect(parcel.county ?? null).toBeNull();
+  });
 });
 
 describe("auth", () => {
