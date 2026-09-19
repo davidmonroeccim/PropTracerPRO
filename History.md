@@ -78,11 +78,19 @@ results to push". It now selects by `trace_job_id`. **`effectiveIsPro` was left 
 considered opening the manual push to pay-as-you-go, who pay $0.40 against Pro's $0.25, and decided
 it stays a Pro benefit.
 
-**OPEN, flagged by the implementer, not decided:** MCP bulk is now asymmetric. Its tier 2 rows reach
+**DECIDED BY DAVID 2026-09-18: PTP PUSHES WHAT IT SETTLES, and the MCP asymmetry stands.**
+MCP bulk is now asymmetric. Its tier 2 rows reach
 the CRM through the shared cron, while its tier 1 rows still do not, because the MCP finalize path
 has no push at all. Note the boundary this touches: the 09-16 handoff records that the Suite Gateway
 owns the CRM push for MCP callers via `crm_push_owners`, so PTP pushing MCP-submitted rows directly
 is a change of ownership, not just a gap being filled.
+
+**David's ruling and the reasoning to keep:** a user who configured HighLevel credentials IN PTP
+asked PTP to push their traces, so PTP pushes what it settles regardless of which surface submitted
+it. The gateway's `crm_push_owners` remains available and is user-initiated, so the two do not race;
+the worst case is a second push landing as an UPDATE, which since the tags fix no longer overwrites
+anything. **The asymmetry is accepted, not overlooked:** MCP tier 1 rows still do not push, because
+the MCP finalize path has no push and adding one was the larger expansion David declined.
 
 ---
 
