@@ -122,8 +122,15 @@ vi.mock("@/lib/highlevel/client", () => ({
 }));
 
 /**
- * `after()` is captured, not executed. The credential health write and the push
- * record are handed to it so they outlive the response.
+ * The handle the fence at the bottom of this file asserts on. The mock stays
+ * even though nothing calls it: it is what makes "was HighLevel called" a
+ * question this file can ask at all.
+ */
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
+/**
+ * `after()` is captured, not executed, so anything this cron defers is drained
+ * explicitly by flushDeferred() rather than read as a race.
  */
 vi.mock("next/server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("next/server")>()),
@@ -445,15 +452,27 @@ describe("a stale MIXED bulk job, whose Tracerfy half is ready", () => {
 });
 
 /**
- * STAGE 1 RECORDS ITS PUSH TOO.
+ * THE FENCE. THIS CRON MUST NEVER CALL HIGHLEVEL.
  *
- * This is the path with the LEAST chance of anyone noticing anything: an hour
- * after the fact, with no user on a page. If it pushes a contact and writes
- * nothing on the row, "did this trace reach the CRM" is unanswerable for
- * exactly the traces nobody was watching.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * PTP never calls HighLevel unless a person asked it to, and a cron is the
+ * furthest thing from a person asking: this one runs an hour after the fact
+ * with nobody on a page. A recovered trace reaches the CRM through the Push to
+ * CRM button, app/api/integrations/highlevel/push.
+ *
+ * Set up with EXACTLY the conditions that used to push: a credential on the
+ * profile and a stale single that sweeps into a successful, contact-bearing
+ * result. Re-adding a push turns it red.
  */
-describe("the stale single sweep records the push on the row it settled", () => {
-  it("writes the contact id and the timestamp against that trace", async () => {
+describe("the stale sweep never pushes to HighLevel", () => {
+  beforeEach(() => {
     H.staleSingles = [
       {
         id: "trace-1",
@@ -489,21 +508,54 @@ describe("the stale single sweep records the push on the row it settled", () => 
         },
       ],
     };
-    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
+    vi.mocked(pushTraceToHighLevel).mockClear();
+  });
 
+  it("does not call HighLevel on a stale single it just recovered", async () => {
     await run();
     await flushDeferred();
 
-    const records = H.ops.filter(
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+  });
+
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    await run();
+    await flushDeferred();
+
+    expect(
+      H.ops.filter(
+        (o) =>
+          o.table === "trace_history" &&
+          o.op === "update" &&
+          o.payload !== undefined &&
+          "highlevel_pushed_at" in o.payload
+      )
+    ).toEqual([]);
+    expect(
+      H.ops.filter(
+        (o) =>
+          o.table === "user_profiles" &&
+          o.op === "update" &&
+          o.payload !== undefined &&
+          "highlevel_invalid_at" in o.payload
+      )
+    ).toEqual([]);
+  });
+
+  it("still settles the stale trace it swept", async () => {
+    // The removal took the push out, not the sweep. A green fence on a cron
+    // that stopped working would be worthless.
+    await run();
+    await flushDeferred();
+
+    const settles = H.ops.filter(
       (o) =>
         o.table === "trace_history" &&
         o.op === "update" &&
         o.payload !== undefined &&
-        "highlevel_pushed_at" in o.payload
+        o.payload.is_successful === true
     );
-    expect(records).toHaveLength(1);
-    expect(records[0].payload!.highlevel_contact_id).toBe("c-9");
-    expect(records[0].payload!.highlevel_push_action).toBe("updated");
-    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
+    expect(settles).toHaveLength(1);
+    expect(settles[0].filters).toContainEqual(["eq", "id", "trace-1"]);
   });
 });

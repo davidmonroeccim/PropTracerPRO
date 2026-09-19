@@ -94,6 +94,13 @@ vi.mock("@/lib/highlevel/client", () => ({
   pushTraceToHighLevel: vi.fn(async () => H.pushResult),
 }));
 
+/**
+ * The handle the fence at the bottom of this file asserts on. The mock stays
+ * even though nothing calls it: it is what makes "was HighLevel called" a
+ * question this file can ask at all.
+ */
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
 const fetchSpy = vi.fn(async () => new Response(null, { status: 200 }));
 
 beforeEach(() => {
@@ -523,91 +530,73 @@ describe("trace/status route publishes 65 of the stored 86 keys", () => {
 });
 
 /**
- * THE AUTOMATIC PATH. This route pushes to HighLevel with nobody watching and
- * used to drop the result on the floor entirely: `.catch(console.error)` on a
- * function that never rejects. A customer whose key was revoked got silence,
- * forever. The push outcome now has to reach the credential health columns,
- * which is the only channel a fire-and-forget path has.
+ * THE FENCE. THIS ROUTE MUST NEVER CALL HIGHLEVEL.
  *
- * These assert the STORED VALUES, through the real recorder and the same
- * mocked admin client the rest of this file uses.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * So the rule is a single sentence: PTP never calls HighLevel unless a person
+ * asked it to. The only thing that asks is the Push to CRM button, which is
+ * app/api/integrations/highlevel/push.
+ *
+ * This test sets up EXACTLY the conditions that used to push -- credentials on
+ * the profile, a successful trace with contacts on it -- and asserts the client
+ * was not called. Re-adding a push here turns it red.
  */
-describe("trace/status route records the HighLevel push outcome against the credential", () => {
+describe("trace/status never pushes to HighLevel", () => {
   /** One macrotask tick, which flushes every pending microtask in these mocks. */
   const settle = () => new Promise((r) => setTimeout(r, 0));
 
-  const flagWrite = () =>
-    H.updates.find(
-      (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
-    );
-
   beforeEach(() => {
+    // The conditions under which this route USED to push.
     H.profile = {
       ...H.profile,
       highlevel_api_key: "key-1",
       highlevel_location_id: "loc-1",
     };
+    vi.mocked(pushTraceToHighLevel).mockClear();
   });
 
-  it("marks the credential dead, with the reason, on a credential-class failure", async () => {
-    H.pushResult = {
-      success: false,
-      kind: "credential",
-      reason: "scope",
-      status: 401,
-      error: "missing contacts.write",
-    };
-
+  it("does not call HighLevel on a successful trace, credentials and all", async () => {
     const { GET } = await import("@/app/api/trace/status/route");
     await GET(
       new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
     );
     await settle();
 
-    const flag = flagWrite();
-    expect(flag).toBeDefined();
-    expect(flag?.payload.highlevel_invalid_reason).toBe("scope");
-    expect(flag?.payload.highlevel_invalid_status).toBe(401);
-    expect(flag?.payload.highlevel_invalid_at).not.toBeNull();
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
   });
 
-  it("leaves the credential alone when only the record was refused", async () => {
-    // A malformed payload says nothing about the key. Marking it dead here
-    // would send a user to reconnect a credential that works.
-    H.pushResult = { success: false, kind: "record", status: 422, error: "bad payload" };
-
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    // The two writes a push used to leave behind. Neither may appear when
+    // nothing reached the CRM: a row that reads as pushed is a lie, and a
+    // credential verdict from a call nobody made is a verdict on nothing.
     const { GET } = await import("@/app/api/trace/status/route");
     await GET(
       new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
     );
     await settle();
 
-    expect(flagWrite()).toBeUndefined();
+    expect(
+      H.updates.filter(
+        (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+      )
+    ).toEqual([]);
+    expect(
+      H.updates.filter(
+        (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
+      )
+    ).toEqual([]);
   });
 
-  it("leaves the credential alone when HighLevel was simply busy", async () => {
-    H.pushResult = { success: false, kind: "transient", status: 429, error: "slow down" };
-
-    const { GET } = await import("@/app/api/trace/status/route");
-    await GET(
-      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
-    );
-    await settle();
-
-    expect(flagWrite()).toBeUndefined();
-  });
-
-  it("still returns the trace result when the credential write happens", async () => {
-    // Five of these sites are on a request path the customer is waiting on.
-    // Recording the credential outcome must never change what they get back.
-    H.pushResult = {
-      success: false,
-      kind: "credential",
-      reason: "token",
-      status: 401,
-      error: "Invalid JWT",
-    };
-
+  it("still settles the trace and returns the result the customer paid for", async () => {
+    // The removal took the push out, not the trace. A green fence on a route
+    // that stopped working would be worthless.
     const { GET } = await import("@/app/api/trace/status/route");
     const body = await (
       await GET(
@@ -619,39 +608,5 @@ describe("trace/status route records the HighLevel push outcome against the cred
     expect(body.success).toBe(true);
     expect(body.status).toBe("success");
     expect(body.result.phones).toHaveLength(1);
-  });
-});
-
-/**
- * AND THE PUSH ITSELF IS RECORDED ON THE ROW.
- *
- * The credential flag above says whether the KEY works. It cannot answer "did
- * THIS trace reach the CRM", which is the question a customer asks and which
- * was unanswerable for eight months because every caller dropped the contactId.
- */
-describe("trace/status route records the push on the trace row", () => {
-  const settle = () => new Promise((r) => setTimeout(r, 0));
-
-  it("writes the contact id and the timestamp against that trace", async () => {
-    H.profile = {
-      ...H.profile,
-      highlevel_api_key: "key-1",
-      highlevel_location_id: "loc-1",
-    };
-    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
-
-    const { GET } = await import("@/app/api/trace/status/route");
-    await GET(
-      new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1")
-    );
-    await settle();
-
-    const records = H.updates.filter(
-      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
-    );
-    expect(records).toHaveLength(1);
-    expect(records[0].payload.highlevel_contact_id).toBe("c-9");
-    expect(records[0].payload.highlevel_push_action).toBe("updated");
-    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
   });
 });

@@ -111,6 +111,13 @@ vi.mock("@/lib/utils/auto-rebill", () => ({
 }));
 vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
 
+/**
+ * The handle the fence at the bottom of this file asserts on. The mock stays
+ * even though nothing calls it: it is what makes "was HighLevel called" a
+ * question this file can ask at all.
+ */
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
 beforeEach(() => {
   H.updates = [];
   H.scheduled = [];
@@ -439,16 +446,26 @@ describe("the two results limits, and why they differ", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * DOUBLE-PUSH RESTS ON A FACT ABOUT THE ROW, NOT ON A CODE PATH.
+ * THE FENCE. THIS ROUTE MUST NEVER CALL HIGHLEVEL.
  *
- * sweep-property-traces now pushes a tier 2 row the moment it settles. This
- * route's finalize push reads every ROW of the job, so without a skip it pushes
- * those same rows a second time. The skip is `highlevel_pushed_at IS NOT NULL`,
- * which is the whole reason that column exists: a filter on `tier` or on
- * `property_trace_status` would be guessing at which code path owned the row,
- * while the timestamp is the record of what actually happened.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * PTP never calls HighLevel unless a person asked it to. A finished bulk job
+ * reaches the CRM through the Push to CRM button on the job, which is
+ * app/api/integrations/highlevel/push.
+ *
+ * The already-pushed skip that used to live on this route went with the push:
+ * with nothing pushing automatically, no row can be pushed twice. Both rows
+ * below are therefore pushable by every test the old code had, which is what
+ * makes this fence bite.
  * ------------------------------------------------------------------ */
-describe("a row that already reached the CRM is not pushed again", () => {
+describe("v1 bulk status never pushes to HighLevel", () => {
   const CONNECTED = {
     id: "user-abc",
     subscription_tier: "wallet",
@@ -464,9 +481,9 @@ describe("a row that already reached the CRM is not pushed again", () => {
     created_at: new Date().toISOString(),
   };
 
-  /** A settled tier 2 row the cron already pushed. */
-  const PUSHED_ROW = {
-    id: "row-pushed",
+  /** A settled tier 2 row. */
+  const TIER_2_ROW = {
+    id: "row-two",
     status: "success",
     tracerfy_job_id: null,
     normalized_address: "100 MAIN ST|AUSTIN|TX",
@@ -475,15 +492,14 @@ describe("a row that already reached the CRM is not pushed again", () => {
     ai_research_status: null,
     property_trace_status: "property_trace_done",
     is_successful: true,
-    trace_result: { owner_name: "Pushed Owner", phones: [], emails: [] },
+    trace_result: { owner_name: "Second Owner", phones: [], emails: [] },
     charge: 0.4,
-    highlevel_contact_id: "hl-earlier",
-    highlevel_pushed_at: "2026-09-18T10:00:00.000Z",
+    highlevel_pushed_at: null,
   };
 
-  /** A tier 1 row nothing has pushed. */
-  const UNPUSHED_ROW = {
-    id: "row-fresh",
+  /** A settled tier 1 row. */
+  const TIER_1_ROW = {
+    id: "row-one",
     status: "success",
     tracerfy_job_id: null,
     normalized_address: "200 OAK AVE|AUSTIN|TX",
@@ -491,57 +507,58 @@ describe("a row that already reached the CRM is not pushed again", () => {
     state: "TX",
     ai_research_status: null,
     is_successful: true,
-    trace_result: { owner_name: "Fresh Owner", phones: [], emails: [] },
+    trace_result: { owner_name: "First Owner", phones: [], emails: [] },
     charge: 0.15,
     highlevel_pushed_at: null,
   };
 
-  it("skips the recorded row and still pushes the one nothing has touched", async () => {
+  beforeEach(() => {
+    // The conditions under which this route USED to push: a credential on the
+    // profile and successful rows carrying contacts, none of them recorded as
+    // pushed before.
     H.profile = { ...CONNECTED };
     H.job = { ...DONE_JOB };
-    H.rows = [{ ...PUSHED_ROW }, { ...UNPUSHED_ROW }];
-
-    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+    H.rows = [{ ...TIER_1_ROW }, { ...TIER_2_ROW }];
     vi.mocked(pushTraceToHighLevel).mockClear();
-    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
-      success: true,
-      contactId: "hl-new",
-      action: "created",
-    });
-
-    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
-    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
-
-    // Exactly one push, and it is the row with no record of one.
-    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
-    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
-    expect(arg.traceResult.owner_name).toBe("Fresh Owner");
   });
 
-  it("records the push it does make against that row's own id", async () => {
-    // Without the id the push happens and nothing on the row ever says so, and
-    // the next finalize has no fact to skip on.
-    H.profile = { ...CONNECTED };
-    H.job = { ...DONE_JOB };
-    H.rows = [{ ...UNPUSHED_ROW }];
-
-    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
-    vi.mocked(pushTraceToHighLevel).mockClear();
-    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
-      success: true,
-      contactId: "hl-new",
-      action: "created",
-    });
-
+  it("does not call HighLevel when a job finalizes with successful rows", async () => {
     const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
     await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
     await flushDeferred();
 
-    const records = H.updates.filter(
-      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
-    );
-    expect(records).toHaveLength(1);
-    expect(records[0].payload.highlevel_contact_id).toBe("hl-new");
-    expect(records[0].filters).toContainEqual(["eq", "id", "row-fresh"]);
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+  });
+
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    expect(
+      H.updates.filter(
+        (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+      )
+    ).toEqual([]);
+    expect(
+      H.updates.filter(
+        (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
+      )
+    ).toEqual([]);
+  });
+
+  it("still finalizes the job and returns its rows", async () => {
+    // The removal took the push out, not the finalize.
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1")
+      )
+    ).json();
+    await flushDeferred();
+
+    expect(body.success).toBe(true);
+    expect(body.status).toBe("completed");
+    expect(body.results).toHaveLength(2);
   });
 });

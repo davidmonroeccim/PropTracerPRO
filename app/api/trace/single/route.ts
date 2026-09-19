@@ -18,7 +18,6 @@ import {
   lookupPersonTrace,
 } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
-import { pushSettledTrace } from '@/lib/highlevel/pushSettledTrace';
 import { executeRoute } from '@/lib/routing/executeRoute';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
@@ -575,30 +574,10 @@ export async function POST(request: Request) {
         ownerType: execution.ownerType,
       });
 
-      // THE CRM PUSH, HERE BECAUSE THIS IS WHERE THE ROW SETTLES. Tier 2
-      // completes INLINE and app/api/trace/status returns early on a terminal
-      // status, so the poll route that carries every other automatic push never
-      // sees this row. Without this a signed-in customer's Full Property Trace
-      // simply never arrives in HighLevel.
-      //
-      // `profile` is the select('*') at the top of this route, so the two
-      // credential columns are already in hand and no admin re-read is needed.
-      await pushSettledTrace({
-        // Deferred: the customer is waiting on this response and must not wait
-        // on HighLevel too.
-        timing: 'deferred',
-        userId: user.id,
-        resolveCredential: async () => profile,
-        trace: {
-          id: traceRecord.id,
-          address: normalizedAddress,
-          city: city.toUpperCase(),
-          state: state.toUpperCase(),
-          zip: persistedZip,
-        },
-        result,
-        isSuccessful,
-      });
+      // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
+      // unless a person asked it to. The customer sees this result on screen
+      // with a Push to CRM button beside it, and that button is the only thing
+      // that starts a push: app/api/integrations/highlevel/push.
 
       // Two different zeros, two different sentences. Saying "your wallet did
       // not cover this" to a customer whose wallet is full, because OUR RPC

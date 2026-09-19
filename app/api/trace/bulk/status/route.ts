@@ -2,8 +2,6 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
-import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
@@ -391,7 +389,7 @@ export async function GET(request: Request) {
     // Get user profile for billing
     const { data: profile } = await adminClient
       .from('user_profiles')
-      .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
+      .select('subscription_tier, is_acquisition_pro_member, webhook_url, gateway_products')
       .eq('id', user.id)
       .single();
 
@@ -399,16 +397,10 @@ export async function GET(request: Request) {
       ? chargePerTrace(profile)
       : PRICING.CHARGE_PER_SUCCESS_WALLET;
 
-    // Collect successful results for HighLevel push
-    // `traceId` is filled in below, once the matching trace_history row has been
-    // found: the entry is pushed here so the order of the webhook payload is
-    // unchanged, and the SAME object is completed a few statements later. It is
-    // what lets the HighLevel push at the bottom of this route record which row
-    // reached the CRM.
+    // Collect successful results for the completion webhook.
     const successfulResults: {
       parsed: TraceResult;
       rawResult: TracerfyResult;
-      traceId?: string;
     }[] = [];
 
     for (const rawResult of results) {
@@ -417,13 +409,10 @@ export async function GET(request: Request) {
         (parsed.phones?.length || 0) > 0 || (parsed.emails?.length || 0) > 0;
       const attemptedCharge = isSuccessful ? perTraceCharge : 0;
 
-      const successEntry = isSuccessful
-        ? { parsed, rawResult, traceId: undefined as string | undefined }
-        : null;
-      if (successEntry) {
+      if (isSuccessful) {
         recordsMatched++;
         attemptedTotal += attemptedCharge;
-        successfulResults.push(successEntry);
+        successfulResults.push({ parsed, rawResult });
       }
 
       // Find the matching trace_history row by tracerfy_job_id + address match
@@ -449,10 +438,6 @@ export async function GET(request: Request) {
 
       const historyRow = historyRows?.[0];
       const historyId = historyRow?.id;
-      // The same object that is already in successfulResults. Without this the
-      // push at the bottom of this route has contacts and no idea which row
-      // they came off, so it could not record that the row reached the CRM.
-      if (successEntry) successEntry.traceId = historyId;
 
       if (historyId) {
         // Bill for a successful match FIRST -- all tiers use wallet deduction,
@@ -586,7 +571,11 @@ export async function GET(request: Request) {
       triggerAutoRebillIfNeeded(user.id).catch(() => {});
     }
 
-    // Fire-and-forget: webhook dispatch + HighLevel push
+    // Fire-and-forget: webhook dispatch.
+    //
+    // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
+    // unless a person asked it to. A finished bulk job reaches the CRM through
+    // the Push to CRM button on the job, which is app/api/integrations/highlevel/push.
     if (profile) {
       // Webhook dispatch — send bulk job summary
       if (profile.webhook_url) {
@@ -610,27 +599,6 @@ export async function GET(request: Request) {
         }).catch((err) => console.error('Bulk webhook dispatch error:', err));
       }
 
-      // HighLevel push — push each successful result. The whole batch is ONE
-      // credential decision rather than one write per record: a credential
-      // refusal anywhere flags the key, and an all-successful batch clears it
-      // once. Nobody is watching this push, so the flag is the only channel it
-      // has. See lib/highlevel/credentialHealth.ts.
-      if (profile.highlevel_api_key && profile.highlevel_location_id) {
-        recordHighLevelPushes(
-          user.id,
-          successfulResults.map(({ parsed, rawResult, traceId }) => ({
-            traceId,
-            push: pushTraceToHighLevel({
-              apiKey: profile.highlevel_api_key,
-              locationId: profile.highlevel_location_id,
-              traceResult: parsed,
-              propertyAddress: rawResult.address,
-              propertyCity: rawResult.city,
-              propertyState: rawResult.state,
-            }),
-          }))
-        );
-      }
     }
 
     return NextResponse.json({

@@ -91,6 +91,13 @@ vi.mock("@/lib/highlevel/client", () => ({
   pushTraceToHighLevel: vi.fn(async () => H.pushResult),
 }));
 
+/**
+ * The handle the fence at the bottom of this file asserts on. The mock stays
+ * even though nothing calls it: it is what makes "was HighLevel called" a
+ * question this file can ask at all.
+ */
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
 const fetchSpy = vi.fn(async () => new Response(null, { status: 200 }));
 
 beforeEach(() => {
@@ -448,35 +455,74 @@ describe("v1 trace/status route publishes 65 of the stored 86 keys", () => {
 });
 
 /**
- * THE PUSH IS RECORDED ON THE TRACE ROW.
+ * THE FENCE. THIS ROUTE MUST NEVER CALL HIGHLEVEL.
  *
- * The credential flag says whether the KEY works. It cannot answer "did THIS
- * trace reach the CRM", which is the question a customer asks and which was
- * unanswerable for eight months because every caller dropped the contactId.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * PTP never calls HighLevel unless a person asked it to. The only thing that
+ * asks is the Push to CRM button, app/api/integrations/highlevel/push.
+ *
+ * Set up with EXACTLY the conditions that used to push: credentials on the
+ * profile and a successful trace with contacts. Re-adding a push turns it red.
  */
-describe("v1 trace/status route records the push on the trace row", () => {
+describe("v1 trace/status never pushes to HighLevel", () => {
   const settle = () => new Promise((r) => setTimeout(r, 0));
 
-  it("writes the contact id and the timestamp against that trace", async () => {
+  beforeEach(() => {
     H.integrationProfile = {
       ...H.integrationProfile,
       highlevel_api_key: "key-1",
       highlevel_location_id: "loc-1",
     };
-    H.pushResult = { success: true, contactId: "c-9", action: "updated" };
+    vi.mocked(pushTraceToHighLevel).mockClear();
+  });
 
+  it("does not call HighLevel on a successful trace, credentials and all", async () => {
     const { GET } = await import("@/app/api/v1/trace/status/route");
     await GET(
       new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
     );
     await settle();
 
-    const records = H.updates.filter(
-      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+  });
+
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    await GET(
+      new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
     );
-    expect(records).toHaveLength(1);
-    expect(records[0].payload.highlevel_contact_id).toBe("c-9");
-    expect(records[0].payload.highlevel_push_action).toBe("updated");
-    expect(records[0].filters).toContainEqual(["eq", "id", "trace-1"]);
+    await settle();
+
+    expect(
+      H.updates.filter(
+        (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+      )
+    ).toEqual([]);
+    expect(
+      H.updates.filter(
+        (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
+      )
+    ).toEqual([]);
+  });
+
+  it("still settles the trace and returns the result the caller paid for", async () => {
+    const { GET } = await import("@/app/api/v1/trace/status/route");
+    const body = await (
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+      )
+    ).json();
+    await settle();
+
+    expect(body.success).toBe(true);
+    expect(body.status).toBe("success");
+    expect(body.result.phones).toHaveLength(1);
   });
 });

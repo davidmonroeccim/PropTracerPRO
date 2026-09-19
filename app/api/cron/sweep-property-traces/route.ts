@@ -11,10 +11,6 @@ import {
   traceResultFor,
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
-import {
-  pushSettledTrace,
-  type HighLevelCredentialColumns,
-} from '@/lib/highlevel/pushSettledTrace';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
 import { isTrackASource, pricePlanFor } from '@/lib/suite/pricing';
@@ -210,31 +206,6 @@ export async function GET(request: Request) {
         : rawPricePlanFor(rateProfile);
     pricePlanCache.set(key, plan);
     return plan;
-  };
-
-  /**
-   * The user's HighLevel credential, resolved at most once per user per run.
-   *
-   * SEPARATE FROM THE PRICE PLAN READ ABOVE ON PURPOSE. That one is keyed by
-   * (user, track) because the same profile prices differently on the two
-   * surfaces; this one is a property of the user alone. It is also only ever
-   * reached for a row that is actually going to push, so a customer with no
-   * HighLevel connection costs this cron nothing.
-   */
-  const credentialCache = new Map<string, HighLevelCredentialColumns | null>();
-  const highLevelCredentialFor = async (
-    userId: string
-  ): Promise<HighLevelCredentialColumns | null> => {
-    const cached = credentialCache.get(userId);
-    if (cached !== undefined) return cached;
-    const { data } = await adminClient
-      .from('user_profiles')
-      .select('highlevel_api_key, highlevel_location_id')
-      .eq('id', userId)
-      .single();
-    const credential = (data as HighLevelCredentialColumns | null) ?? null;
-    credentialCache.set(userId, credential);
-    return credential;
   };
 
   /**
@@ -610,34 +581,11 @@ export async function GET(request: Request) {
         })
         .eq('id', row.id);
 
-      // THE ROW REACHES THE CRM HERE, WHERE IT SETTLES. This is the only place
-      // all three bulk surfaces meet: session, v1 and MCP all enqueue into
-      // property_trace_status, so one push here covers all three. Pushing at
-      // job finalization instead is what left tier 2 out, because those lists
-      // are built from Tracerfy's batch array and a tier 2 row has no
-      // tracerfy_job_id at all.
-      //
-      // INLINE, NOT DEFERRED, AND THAT IS THE RACE IT CLOSES. Deferring to
-      // after() would let this cron write the row terminal and return before
-      // the push record lands. The parent bulk job can finalize on the very
-      // next poll, and app/api/v1/trace/bulk/status skips a row by its RECORDED
-      // push, so a finalize landing in that window pushes the same contact
-      // again. Nobody is waiting on a cron, so there is nothing to protect by
-      // deferring.
-      await pushSettledTrace({
-        timing: 'inline',
-        userId: row.user_id,
-        resolveCredential: () => highLevelCredentialFor(row.user_id),
-        trace: {
-          id: row.id,
-          address: row.normalized_address,
-          city: row.city,
-          state: row.state,
-          zip: execution.learnedZip || row.zip,
-        },
-        result,
-        isSuccessful,
-      });
+      // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
+      // unless a person asked it to, and a cron is the furthest thing from a
+      // person asking. A settled Full Property Trace reaches the CRM through
+      // the Push to CRM button on the result or on the job, which is
+      // app/api/integrations/highlevel/push. Do not reattach a push here.
 
       billed++;
       if (execution.property) propertyRecords++;

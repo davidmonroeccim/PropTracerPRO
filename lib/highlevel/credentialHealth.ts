@@ -1,24 +1,23 @@
-import { after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { HighLevelPushResult } from '@/lib/highlevel/client';
 import {
   recordTracePushes,
   type HighLevelOutcome,
   type HighLevelOutcomeEntry,
-  type HighLevelPushEntry,
 } from '@/lib/highlevel/pushRecord';
 
 /**
- * THE CHANNEL THE AUTOMATIC PATHS DID NOT HAVE.
+ * WHAT THE LAST HIGHLEVEL CALL SAID ABOUT THE CREDENTIAL.
  *
- * Seven places call `pushTraceToHighLevel`. Five of them run with nobody
- * watching (two poll routes, two v1 poll routes, one cron) and every one of
- * them threw the result away, so a customer whose HighLevel key was revoked got
- * silence and an empty CRM for as long as they cared to wait.
+ * PTP calls HighLevel in exactly three places and a person started every one of
+ * them: the Push to CRM button (app/api/integrations/highlevel/push), Save on
+ * the integrations page, and Test Connection. Nothing automatic pushes any
+ * more, so there is no longer a path running with nobody watching.
  *
- * There is no synchronous channel on those paths, so the outcome is recorded
- * against the CREDENTIAL instead, on a row the integrations page reads. The
- * user finds out on a page they will visit rather than not at all.
+ * The verdict is still recorded against the CREDENTIAL rather than only shown
+ * in the moment, because a key that worked on Tuesday can be revoked on
+ * Wednesday and the badge on the integrations page is what tells the user. A
+ * push that succeeds clears the flag; a push refused for the credential sets it.
  *
  * The three columns live on `user_profiles` and `anon` and `authenticated` hold
  * no UPDATE grant on that table, which is deliberate: a user must not be able
@@ -28,11 +27,11 @@ import {
  */
 
 /**
- * Re-exported so a caller needs one import, not three. The entry types carry a
+ * Re-exported so a caller needs one import, not two. The entry type carries a
  * trace id alongside each outcome: see lib/highlevel/pushRecord.ts for why the
  * record of the push rides this funnel rather than one of its own.
  */
-export type { HighLevelOutcome, HighLevelOutcomeEntry, HighLevelPushEntry };
+export type { HighLevelOutcome, HighLevelOutcomeEntry };
 
 type CredentialFailure = Extract<HighLevelPushResult, { kind: 'credential' }>;
 
@@ -92,9 +91,8 @@ export function highLevelVerdict(
  * update must not stop a dead key being flagged, and a failed flag must not
  * lose the record of a contact that really was created.
  *
- * NEVER THROWS. Five of the callers are fire-and-forget on a request path that
- * still has to return the customer's trace result, so a broken health write may
- * not take the response down with it.
+ * NEVER THROWS. A health write that fell over must not turn a push the customer
+ * just watched succeed into an error on their screen.
  */
 export async function recordHighLevelOutcomes(
   userId: string,
@@ -157,69 +155,5 @@ export async function recordHighLevelOutcomes(
     }
   } catch (error) {
     console.error('HighLevel credential health write failed:', error);
-  }
-}
-
-/**
- * The fire-and-forget form, for the call sites that do not await the push.
- *
- * Returns a promise so a test can wait on it; callers are not expected to, and
- * it resolves rather than rejects whatever happens.
- */
-function settleAndRecord(
-  userId: string,
-  pushes: ReadonlyArray<HighLevelPushEntry>
-): Promise<void> {
-  return Promise.all(
-    pushes.map((entry) =>
-      entry.push.then(
-        (outcome): HighLevelOutcomeEntry | undefined => ({
-          traceId: entry.traceId,
-          outcome,
-        }),
-        (error): undefined => {
-          // pushTraceToHighLevel returns its failures rather than throwing, so
-          // reaching here means something unexpected broke. It tells us nothing
-          // about the credential and nothing reached the CRM, so it is dropped
-          // rather than classified or recorded.
-          console.error('HighLevel push threw:', error);
-          return undefined;
-        }
-      )
-    )
-  )
-    .then((entries) => recordHighLevelOutcomes(userId, entries))
-    .catch((error) => {
-      console.error('HighLevel credential health write failed:', error);
-    });
-}
-
-/**
- * THE WRITE HAS TO OUTLIVE THE RESPONSE, which is why this is not a bare
- * floating promise.
- *
- * Five callers are fire-and-forget on a request path that must still return the
- * customer's trace result. On serverless, work still running when the response
- * flushes can be killed with it. The code this replaces only stood to lose a
- * `console.error`; this stands to lose the credential flag, and that flag is
- * the ENTIRE channel by which a user with a dead key finds out. A flag that
- * usually lands is the same silent failure in a different hat.
- *
- * `after()` hands the work to the runtime to run once the response is flushed.
- * It throws outside a request scope, so a cron or a script degrades to running
- * inline: losing the scheduling is much better than losing the write. This is
- * the pattern `lib/suite/access.ts` has used for the entitlement refresh, copied
- * rather than reinvented.
- */
-export function recordHighLevelPushes(
-  userId: string,
-  pushes: ReadonlyArray<HighLevelPushEntry>
-): Promise<void> {
-  const work = () => settleAndRecord(userId, pushes);
-  try {
-    after(work);
-    return Promise.resolve();
-  } catch {
-    return work();
   }
 }

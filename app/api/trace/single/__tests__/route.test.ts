@@ -1810,14 +1810,24 @@ describe("POST /api/trace/single — one address, submitted twice", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * TIER 2 REACHES THE CRM FROM THE PLACE IT SETTLES.
+ * THE FENCE. THIS ROUTE MUST NEVER CALL HIGHLEVEL.
  *
- * This route settles a Full Property Trace INLINE and app/api/trace/status
- * returns early on a terminal status, so the poll route that carries every
- * other automatic push never sees this row. Without a push here a signed-in
- * customer's tier 2 single simply never arrives in HighLevel.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * PTP never calls HighLevel unless a person asked it to. The customer sees this
+ * result on screen with a Push to CRM button beside it, and that button is the
+ * only thing that starts a push: app/api/integrations/highlevel/push.
+ *
+ * Set up with EXACTLY the conditions that used to push: a credential on the
+ * profile and a tier 2 single settling inline with real contacts on it.
  * ------------------------------------------------------------------ */
-describe("tier 2 single — the result reaches HighLevel", () => {
+describe("tier 2 single never pushes to HighLevel", () => {
   /** A connected profile. Tier 2 needs the wallet balance too. */
   const CONNECTED = {
     id: "user-1",
@@ -1829,7 +1839,7 @@ describe("tier 2 single — the result reaches HighLevel", () => {
     highlevel_location_id: "loc-1",
   };
 
-  /** Every trace_history update carrying the push record columns. */
+  /** Any trace_history update carrying the push record columns. */
   const pushRecords = () =>
     H.ops
       .filter(
@@ -1842,85 +1852,45 @@ describe("tier 2 single — the result reaches HighLevel", () => {
       )
       .map((o) => o.payload as Record<string, unknown>);
 
-  it("pushes the contacts it just resolved, and records the push on the row", async () => {
+  beforeEach(() => {
     H.profile = { ...CONNECTED };
     H.dossier = DOSSIER_ENTITY_HIT;
     H.entity = CONTACTS_HIT;
-
-    await post(TIER2_BODY);
-    await flushDeferred();
-
-    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
-    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
-    expect(arg.apiKey).toBe("hl-key");
-    expect(arg.locationId).toBe("loc-1");
-    expect(arg.traceResult.phones?.[0]?.number).toBe("5550000101");
-
-    const records = pushRecords();
-    expect(records).toHaveLength(1);
-    // The pair, together or not at all.
-    expect("highlevel_contact_id" in records[0]).toBe(true);
-    expect("highlevel_pushed_at" in records[0]).toBe(true);
-    expect(records[0].highlevel_contact_id).toBe("hl-1");
-    expect(records[0].highlevel_push_action).toBe("created");
-    expect(Number.isNaN(Date.parse(String(records[0].highlevel_pushed_at)))).toBe(false);
+    vi.mocked(pushTraceToHighLevel).mockClear();
   });
 
-  it("does not push a billed miss, whose trace_result is NOT null", async () => {
-    // The dossier named an owner of record and the contact vendor had nothing.
-    // The row carries a trace_result with owner_name_2 set and no contacts at
-    // all, so a `trace_result != null` guard would push a nameless, contactless
-    // contact into the customer's CRM.
-    H.profile = { ...CONNECTED };
-    H.dossier = DOSSIER_ENTITY_HIT;
-    H.entity = { success: true, hit: false, contacts: null };
-
-    await post(TIER2_BODY);
-    await flushDeferred();
-
-    expect(persisted()!.is_successful).toBe(false);
-    expect(persisted()!.trace_result).not.toBeNull();
-    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
-  });
-
-  it("does not push when the user has no HighLevel credential", async () => {
-    H.profile = { ...PAYG_PROFILE };
-    H.dossier = DOSSIER_ENTITY_HIT;
-    H.entity = CONTACTS_HIT;
-
+  it("does not call HighLevel on a tier 2 single that resolved contacts", async () => {
     await post(TIER2_BODY);
     await flushDeferred();
 
     expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
   });
 
-  it("flags the credential when HighLevel refuses it on this path", async () => {
-    H.profile = { ...CONNECTED };
-    H.dossier = DOSSIER_ENTITY_HIT;
-    H.entity = CONTACTS_HIT;
-    H.pushResult = {
-      success: false,
-      kind: "credential",
-      reason: "token",
-      status: 401,
-      error: "HighLevel rejected your API key. Reconnect HighLevel in Settings.",
-    };
-
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
     await post(TIER2_BODY);
     await flushDeferred();
 
-    const flags = H.ops.filter(
-      (o) =>
-        o.table === "user_profiles" &&
-        o.op === "update" &&
-        o.payload !== null &&
-        typeof o.payload === "object" &&
-        "highlevel_invalid_reason" in (o.payload as object)
-    );
-    expect(flags).toHaveLength(1);
-    expect((flags[0].payload as Record<string, unknown>).highlevel_invalid_reason).toBe("token");
     expect(pushRecords()).toEqual([]);
+    expect(
+      H.ops.filter(
+        (o) =>
+          o.table === "user_profiles" &&
+          o.op === "update" &&
+          o.payload !== null &&
+          typeof o.payload === "object" &&
+          "highlevel_invalid_at" in (o.payload as object)
+      )
+    ).toEqual([]);
+  });
+
+  it("still settles the trace and returns the contacts the customer paid for", async () => {
+    // The removal took the push out, not the trace. A green fence on a route
+    // that stopped working would be worthless.
+    const body = await (await post(TIER2_BODY)).json();
+    await flushDeferred();
+
+    expect(body.success).toBe(true);
+    expect(persisted()!.is_successful).toBe(true);
+    expect(body.result.phones?.[0]?.number).toBe("5550000101");
   });
 });

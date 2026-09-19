@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
-import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
@@ -113,7 +111,7 @@ export async function GET(request: Request) {
         // Get user profile for tier-aware pricing
         const { data: profile } = await adminClient
           .from('user_profiles')
-          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
+          .select('subscription_tier, is_acquisition_pro_member, webhook_url, gateway_products')
           .eq('id', trace.user_id)
           .single();
 
@@ -168,7 +166,12 @@ export async function GET(request: Request) {
           triggerAutoRebillIfNeeded(trace.user_id).catch(() => {});
         }
 
-        // Fire-and-forget: webhook + HighLevel
+        // Fire-and-forget: webhook.
+        //
+        // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
+        // unless a person asked it to, and a cron is the furthest thing from a
+        // person asking. A recovered trace reaches the CRM through the Push to
+        // CRM button on the result, which is app/api/integrations/highlevel/push.
         if (profile) {
           if (profile.webhook_url) {
             fetch(profile.webhook_url, {
@@ -189,26 +192,6 @@ export async function GET(request: Request) {
             }).catch((err) => console.error('Cron webhook error:', err));
           }
 
-          // This is the path with the LEAST chance of anyone noticing a dead
-          // credential: no user is on a page at all. The outcome is recorded
-          // against the credential so the integrations page can show it. It
-          // never throws, so the sweep continues either way.
-          if (profile.highlevel_api_key && profile.highlevel_location_id && isSuccessful) {
-            recordHighLevelPushes(trace.user_id, [
-              {
-                traceId: trace.id,
-                push: pushTraceToHighLevel({
-                  apiKey: profile.highlevel_api_key,
-                  locationId: profile.highlevel_location_id,
-                  traceResult: result,
-                  propertyAddress: trace.normalized_address,
-                  propertyCity: trace.city || undefined,
-                  propertyState: trace.state || undefined,
-                  propertyZip: trace.zip || undefined,
-                }),
-              },
-            ]);
-          }
         }
 
         singleResolved++;
@@ -339,7 +322,7 @@ export async function GET(request: Request) {
 
         const { data: profile } = await adminClient
           .from('user_profiles')
-          .select('subscription_tier, is_acquisition_pro_member, webhook_url, highlevel_api_key, highlevel_location_id, gateway_products')
+          .select('subscription_tier, is_acquisition_pro_member, webhook_url, gateway_products')
           .eq('id', job.user_id)
           .single();
 

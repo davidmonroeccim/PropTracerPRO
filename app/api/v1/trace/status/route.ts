@@ -2,8 +2,6 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
-import { pushTraceToHighLevel } from '@/lib/highlevel/client';
-import { recordHighLevelPushes } from '@/lib/highlevel/credentialHealth';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
@@ -224,10 +222,15 @@ export async function GET(request: Request) {
       triggerAutoRebillIfNeeded(profile.id).catch(() => {});
     }
 
-    // Fire-and-forget: webhook dispatch + HighLevel push
+    // Fire-and-forget: webhook dispatch.
+    //
+    // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
+    // unless a person asked it to. See app/api/integrations/highlevel/push,
+    // which is the one place a push starts, and only from the Push to CRM
+    // button. The credential columns are deliberately not read on this path.
     const { data: integrationProfile } = await adminClient
       .from('user_profiles')
-      .select('webhook_url, highlevel_api_key, highlevel_location_id')
+      .select('webhook_url')
       .eq('id', profile.id)
       .single();
 
@@ -253,25 +256,6 @@ export async function GET(request: Request) {
         }).catch((err) => console.error('Webhook dispatch error:', err));
       }
 
-      // HighLevel push — only for successful traces with results. The outcome
-      // is recorded against the credential rather than discarded: see the same
-      // block in app/api/trace/status/route.ts for why.
-      if (integrationProfile.highlevel_api_key && integrationProfile.highlevel_location_id && isSuccessful && result) {
-        recordHighLevelPushes(profile.id, [
-          {
-            traceId: trace.id,
-            push: pushTraceToHighLevel({
-              apiKey: integrationProfile.highlevel_api_key,
-              locationId: integrationProfile.highlevel_location_id,
-              traceResult: result,
-              propertyAddress: trace.normalized_address,
-              propertyCity: trace.city || undefined,
-              propertyState: trace.state || undefined,
-              propertyZip: trace.zip || undefined,
-            }),
-          },
-        ]);
-      }
     }
 
     return NextResponse.json({

@@ -1195,25 +1195,32 @@ describe("an empty queue", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * THE ROW REACHES THE CRM WHERE IT SETTLES.
+ * THE FENCE. THIS CRON MUST NEVER CALL HIGHLEVEL.
  *
- * Push used to be attached to JOB settlement code that reads Tracerfy's batch
- * array. A tier 2 row has no tracerfy_job_id, so every list built that way was
- * blind to it and a Full Property Trace never reached HighLevel from here.
- * These tests fence the ROW settle instead, which is the only place all three
- * bulk surfaces (session, v1 and MCP) meet.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
  *
- * THE GUARD IS `isSuccessful && result`, AND BOTH HALVES CARRY WEIGHT. The two
- * billed-miss shapes below have a NON-NULL trace_result and would both leak a
- * nameless, contactless contact into a customer's CRM under a null check alone.
+ * PTP never calls HighLevel unless a person asked it to, and a cron is the
+ * furthest thing from a person asking. A settled Full Property Trace reaches
+ * the CRM through the Push to CRM button, app/api/integrations/highlevel/push.
+ *
+ * This cron is the one place all three bulk surfaces meet (session, v1 and
+ * MCP), so it is also the single site that could reach the most CRMs by
+ * accident. Set up with EXACTLY the conditions that used to push: a credential
+ * on the profile and a tier 2 row settling successfully with contacts on it.
  * ------------------------------------------------------------------ */
 
-/** The push record write, which is the only trace_history update carrying these columns. */
+/** A push record write would be the only trace_history update carrying these columns. */
 const pushRecords = () => historyWrites().filter((p) => "highlevel_pushed_at" in p);
 /** The settle write, ie every trace_history update that is NOT a push record. */
 const settleWrites = () => historyWrites().filter((p) => !("highlevel_pushed_at" in p));
 
-/** A profile with a HighLevel credential on it. Without one nothing pushes at all. */
+/** A profile with a HighLevel credential on it, which is what used to unlock the push. */
 const CONNECTED = {
   subscription_tier: "wallet",
   is_acquisition_pro_member: false,
@@ -1222,72 +1229,59 @@ const CONNECTED = {
   highlevel_location_id: "loc-1",
 };
 
-describe("a settled tier 2 row reaches the customer's CRM", () => {
+describe("the property-trace sweep never pushes to HighLevel", () => {
   beforeEach(() => {
     H.profile = { ...CONNECTED };
+    vi.mocked(pushTraceToHighLevel).mockClear();
   });
 
-  it("pushes the contacts it just resolved", async () => {
-    await run();
-    await flushDeferred();
-
-    expect(pushTraceToHighLevel).toHaveBeenCalledTimes(1);
-    const arg = vi.mocked(pushTraceToHighLevel).mock.calls[0][0];
-    expect(arg.apiKey).toBe("hl-key");
-    expect(arg.locationId).toBe("loc-1");
-    // The contacts that were just written to the row, not an empty shell.
-    expect(arg.traceResult.phones?.[0]?.number).toBe("5550000101");
-    expect(arg.traceResult.emails?.[0]).toBe("principal@example.invalid");
-    // The property address, so the contact lands with the parcel it came from.
-    expect(arg.propertyAddress).toBe("100 MAIN ST|DALLAS|TX");
-    expect(arg.propertyCity).toBe("DALLAS");
-    expect(arg.propertyState).toBe("TX");
-  });
-
-  it("records the contact id and the timestamp together on the row", async () => {
-    await run();
-    await flushDeferred();
-
-    const records = pushRecords();
-    expect(records).toHaveLength(1);
-    // Both keys PRESENT. Half the pair is a bug, not a state: a timestamp with
-    // no id cannot say where the contact went, and an id with no timestamp is
-    // invisible to every "has this been pushed" query.
-    expect("highlevel_contact_id" in records[0]).toBe(true);
-    expect("highlevel_pushed_at" in records[0]).toBe(true);
-    expect(records[0].highlevel_contact_id).toBe("hl-1");
-    expect(records[0].highlevel_push_action).toBe("created");
-    expect(Number.isNaN(Date.parse(String(records[0].highlevel_pushed_at)))).toBe(false);
-  });
-
-  it("finishes the push before the run returns, rather than deferring it", async () => {
-    // NOT after(). This cron writes the row terminal and returns; the parent
-    // bulk job can finalize on the very next poll, and the v1 finalize skips a
-    // row by its RECORDED push. Deferring would let that poll land in the
-    // window before highlevel_pushed_at exists and push the same contact twice.
-    // Nobody is waiting on a cron, so there is nothing to protect by deferring.
-    await run();
-
-    expect(H.scheduled).toEqual([]);
-    // Recorded WITHOUT flushing anything.
-    expect(pushRecords()).toHaveLength(1);
-  });
-
-  it("does not push when the user has no HighLevel credential", async () => {
-    H.profile = {
-      subscription_tier: "wallet",
-      is_acquisition_pro_member: false,
-      gateway_products: [],
-    };
-
+  it("does not call HighLevel on a tier 2 row it just settled with contacts", async () => {
     await run();
     await flushDeferred();
 
     expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
   });
 
-  it("settles the row the same way it always did, push or no push", async () => {
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    await run();
+    await flushDeferred();
+
+    expect(pushRecords()).toEqual([]);
+    expect(
+      H.ops.filter(
+        (o) =>
+          o.table === "user_profiles" &&
+          o.op === "update" &&
+          o.payload &&
+          "highlevel_invalid_at" in o.payload
+      )
+    ).toEqual([]);
+  });
+
+  it("never reads the credential columns at all on this path", async () => {
+    // The credential read went with the push. Reading a key on a path that
+    // cannot use it is how a push gets reattached by someone who sees the
+    // value already in hand.
+    await run();
+    await flushDeferred();
+
+    // The recorder stores a select's column list as ["select", ...args] in
+    // `filters`, so the columns asked for are read back from there.
+    const profileSelects = H.ops.filter(
+      (o) => o.table === "user_profiles" && o.op === "select"
+    );
+    // The precondition: this cron really does still read the profile, for
+    // pricing. If it stopped, the assertion below would pass on an empty list.
+    expect(profileSelects.length).toBeGreaterThan(0);
+    for (const select of profileSelects) {
+      expect(JSON.stringify(select.filters)).not.toContain("highlevel_api_key");
+      expect(JSON.stringify(select.filters)).not.toContain("highlevel_location_id");
+    }
+  });
+
+  it("settles the row exactly as it always did", async () => {
+    // The removal took the push out, not the settle. A green fence on a cron
+    // that stopped working would be worthless.
     await run();
     await flushDeferred();
 
@@ -1295,92 +1289,5 @@ describe("a settled tier 2 row reaches the customer's CRM", () => {
     expect(settle.status).toBe("success");
     expect(settle.is_successful).toBe(true);
     expect(settle.property_trace_status).toBe(PROPERTY_TRACE_SETTLED_STATUS);
-  });
-});
-
-describe("the two billed-miss shapes must never reach a customer's CRM", () => {
-  beforeEach(() => {
-    H.profile = { ...CONNECTED };
-  });
-
-  it("a property_trace_no_reach row does not push, though its trace_result is NOT null", async () => {
-    // The contact vendor could not be ASKED. The row still carries a
-    // trace_result -- owner_name_2 from the dossier, empty phones and emails --
-    // so a guard written as `trace_result != null` would push a nameless,
-    // contactless contact into the customer's CRM. `is_successful` is the half
-    // that stops it.
-    H.entityContacts = { success: false, hit: false, contacts: null, error: "FastAppend 503" };
-
-    await run();
-    await flushDeferred();
-
-    const settle = settleWrites()[settleWrites().length - 1];
-    expect(settle.property_trace_status).toBe(PROPERTY_TRACE_NO_REACH_STATUS);
-    expect(settle.is_successful).toBe(false);
-    // The precondition this test exists for: the result really is non-null.
-    expect(settle.trace_result).not.toBeNull();
-
-    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
-  });
-
-  it("a contact-vendor MISS does not push, and its trace_result is not null either", async () => {
-    // The vendor answered and has no record of this owner. A complete, billed
-    // answer with no contacts in it. Same non-null trace_result, same rule.
-    H.entityContacts = { ...CONTACTS_MISS };
-
-    await run();
-    await flushDeferred();
-
-    const settle = settleWrites()[settleWrites().length - 1];
-    expect(settle.is_successful).toBe(false);
-    expect(settle.trace_result).not.toBeNull();
-
-    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
-  });
-
-  it("a no_match row with no result at all does not push", async () => {
-    H.dossier = { ...DOSSIER_MISS };
-
-    await run();
-    await flushDeferred();
-
-    const settle = settleWrites()[settleWrites().length - 1];
-    expect(settle.status).toBe("no_match");
-    expect(settle.trace_result).toBeNull();
-
-    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
-    expect(pushRecords()).toEqual([]);
-  });
-});
-
-describe("a dead credential on this path is flagged like everywhere else", () => {
-  it("marks the credential with the reason HighLevel gave, and records no push", async () => {
-    H.profile = { ...CONNECTED };
-    H.pushResult = {
-      success: false,
-      kind: "credential",
-      reason: "scope",
-      status: 401,
-      error: "Your HighLevel token is missing the contacts.write permission.",
-    };
-
-    await run();
-    await flushDeferred();
-
-    const flags = H.ops.filter(
-      (o) =>
-        o.table === "user_profiles" &&
-        o.op === "update" &&
-        o.payload &&
-        "highlevel_invalid_reason" in o.payload
-    );
-    expect(flags).toHaveLength(1);
-    expect(flags[0].payload!.highlevel_invalid_reason).toBe("scope");
-    expect(flags[0].payload!.highlevel_invalid_status).toBe(401);
-
-    // Nothing reached the CRM, so nothing may say it did.
-    expect(pushRecords()).toEqual([]);
   });
 });

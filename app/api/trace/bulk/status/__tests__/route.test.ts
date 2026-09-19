@@ -144,6 +144,13 @@ vi.mock("@/lib/utils/auto-rebill", () => ({
 vi.mock("@/lib/highlevel/client", () => ({ pushTraceToHighLevel: vi.fn() }));
 
 /**
+ * The handle the fence at the bottom of this file asserts on. The mock stays
+ * even though nothing calls it: it is what makes "was HighLevel called" a
+ * question this file can ask at all.
+ */
+const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+
+/**
  * `after()` is captured, not executed. The credential health write and the push
  * record are handed to it so they outlive the response, so a test that does not
  * run them is reading a race.
@@ -923,43 +930,76 @@ describe("the job summary says how many rows were skipped and why", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * THE PUSH IS RECORDED AGAINST THE ROW IT WAS FOR.
+ * THE FENCE. THIS ROUTE MUST NEVER CALL HIGHLEVEL.
  *
- * This route resolves the matching trace_history row inside the settle loop and
- * pushes from a list built earlier, so the id and the contacts are assembled in
- * two different places. Without the id, the push happens and nothing on the row
- * ever says so, which is the state "did this trace reach the CRM" was
- * unanswerable from for eight months.
+ * PTP's own push only ever creates Contacts. Most PTP users reach their CRM
+ * through the Suite Gateway, which holds the GoHighLevel snapshot and knows the
+ * object model: an entity owner is a Company, a person is a Contact and only
+ * when there is a phone or an email, and the property hangs on a property
+ * custom object. An automatic push from here writes the WRONG OBJECT TYPE into
+ * that snapshot, and for a user with no gateway there is no snapshot for it to
+ * populate at all.
+ *
+ * PTP never calls HighLevel unless a person asked it to. A finished bulk job
+ * reaches the CRM through the Push to CRM button on the job, which is
+ * app/api/integrations/highlevel/push.
+ *
+ * Set up with EXACTLY the conditions that used to push: credentials on the
+ * profile and a job whose rows settled successfully. Re-adding a push turns it
+ * red.
  * ------------------------------------------------------------------ */
-describe("the bulk push records which row reached the CRM", () => {
-  it("carries the settled row's id into the push record", async () => {
+describe("bulk status never pushes to HighLevel", () => {
+  beforeEach(() => {
     H.profile = {
       ...H.profile,
       highlevel_api_key: "hl-key",
       highlevel_location_id: "loc-1",
     };
+    vi.mocked(pushTraceToHighLevel).mockClear();
+  });
 
-    const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
-    vi.mocked(pushTraceToHighLevel).mockResolvedValue({
-      success: true,
-      contactId: "hl-1",
-      action: "created",
-    });
-
+  it("does not call HighLevel when a job finishes with successful rows", async () => {
     const { GET } = await import("@/app/api/trace/bulk/status/route");
     await GET(
       new Request("http://localhost/api/trace/bulk/status?job_id=job-1") as never
     );
     await flushDeferred();
 
-    const records = H.updates.filter(
-      (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+    expect(pushTraceToHighLevel).not.toHaveBeenCalled();
+  });
+
+  it("writes no push record and no credential verdict, because nothing was pushed", async () => {
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(
+      new Request("http://localhost/api/trace/bulk/status?job_id=job-1") as never
     );
-    expect(records).toHaveLength(2);
-    for (const record of records) {
-      expect(record.payload.highlevel_contact_id).toBe("hl-1");
-      // The row the settle loop actually found, not undefined.
-      expect(record.filters).toContainEqual(["eq", "id", "hist-1"]);
-    }
+    await flushDeferred();
+
+    expect(
+      H.updates.filter(
+        (u) => u.table === "trace_history" && "highlevel_pushed_at" in u.payload
+      )
+    ).toEqual([]);
+    expect(
+      H.updates.filter(
+        (u) => u.table === "user_profiles" && "highlevel_invalid_at" in u.payload
+      )
+    ).toEqual([]);
+  });
+
+  it("still finalizes the job and reports its matches", async () => {
+    // The removal took the push out, not the settle. A green fence on a route
+    // that stopped working would be worthless.
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(
+        new Request("http://localhost/api/trace/bulk/status?job_id=job-1") as never
+      )
+    ).json();
+    await flushDeferred();
+
+    expect(body.success).toBe(true);
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(2);
   });
 });

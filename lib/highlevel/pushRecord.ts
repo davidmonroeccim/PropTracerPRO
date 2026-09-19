@@ -5,18 +5,15 @@ import type { HighLevelPushResult, HighLevelValidation } from '@/lib/highlevel/c
  * RECORDING THAT A TRACE REACHED THE CUSTOMER'S CRM.
  *
  * PTP has pushed contacts to HighLevel since January and never wrote down that
- * it happened: `contactId` came back from the client and was dropped by all
- * seven callers, so "did this trace reach the CRM" was unanswerable after the
- * fact. It does two more jobs beyond reporting. A tier 2 row is now observed by
- * more than one settle path, so avoiding a double push has to rest on a FACT
- * about the row rather than on a filter that matches a code path. And a push
- * that failed is otherwise indistinguishable from one that never ran, so no
- * retry could ever be written.
+ * it happened: `contactId` came back from the client and was dropped by every
+ * caller, so "did this trace reach the CRM" was unanswerable after the fact.
+ * It still answers that, and a push that failed is otherwise indistinguishable
+ * from one that never ran, so no retry could ever be written.
  *
- * WHY IT LIVES BEHIND THE SAME FUNNEL AS THE CREDENTIAL VERDICT. Every push
- * site already hands its outcomes to lib/highlevel/credentialHealth. A second
- * mechanism bolted beside it is a second thing to forget at the eighth push
- * site. credentialHealth calls this; nothing else should need to.
+ * WHY IT LIVES BEHIND THE SAME FUNNEL AS THE CREDENTIAL VERDICT. The push route
+ * already hands its outcomes to lib/highlevel/credentialHealth. A second
+ * mechanism bolted beside it is a second thing to forget at the next call site.
+ * credentialHealth calls this; nothing else should need to.
  *
  * Only `service_role` may write these columns (anon and authenticated hold
  * SELECT and nothing else on trace_history), so every write here goes through
@@ -35,12 +32,6 @@ export interface HighLevelOutcomeEntry {
    */
   traceId?: string | null;
   outcome: HighLevelOutcome;
-}
-
-/** A HighLevel call still in flight, and the trace row it is about. */
-export interface HighLevelPushEntry {
-  traceId?: string | null;
-  push: Promise<HighLevelOutcome>;
 }
 
 /**
