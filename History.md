@@ -6,6 +6,77 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ## 2026-09-18
 
+### PTP stops pushing to the CRM on its own. All eight automatic sites removed.
+
+Commits through `2f95896`. **1489 passing from 1493, 75 files, 0 failing**, `tsc` 0, eslint 47,
+build compiles. The total DROPPED by 4 and that is deliberate, not a regression: 12 old push tests
+and 5 dead-code tests removed, 13 fences added.
+
+**WHY, and it is David's reason, not a preference.** Most PTP users reach their CRM through the
+**Suite Gateway**, which holds the GoHighLevel snapshot and knows the object model: an entity owner
+becomes a **Company**, a person becomes a **Contact** and only when there is a phone or an email, and
+the property hangs on the property custom object. **PTP's own push only ever creates Contacts.** So
+an automatic PTP push writes the WRONG OBJECT TYPE into a gateway user's snapshot, and a user with no
+gateway has no snapshot for it to populate correctly either.
+
+**THIS WAS ALREADY DECIDED AND I MISSED IT.** The 2026-09-16 handoff says, in the section I read at
+the start of this session: *"PTP's own direct HighLevel push is being DROPPED, not built."* When
+David said Full Property Trace needs to reach the CRM, I extended that push rather than reconciling
+the instruction against the decision already on the page, and added three more automatic sites to a
+feature marked for removal. **The lesson is not "read the handoff"; I did read it. It is that a new
+instruction has to be checked AGAINST the standing decisions, because an instruction phrased as a
+goal ("X needs to reach Y") does not announce which mechanism it means.**
+
+**Removed: eight automatic sites**, each with its import, its call, and the credential read that fed
+it. `trace/status`, `v1/trace/status`, `trace/bulk/status`, `v1/trace/bulk/status`,
+`sweep-stale-traces`, `sweep-property-traces`, `trace/single`, `v1/trace/single`.
+
+**Deleted as genuinely unreachable, each checked rather than assumed:** `lib/highlevel/pushSettledTrace.ts`
+entirely, `recordHighLevelPushes` and `settleAndRecord` and the `after()` scheduling in
+`credentialHealth.ts`, `HighLevelPushEntry`, the v1 bulk "skip an already-pushed row" guard, and
+`TraceHistoryRow.highlevel_pushed_at`. **The COLUMN and the manual push's write of it stay.**
+
+**A NINTH caller exists and correctly stays.** `app/api/verify-member/route.ts` calls
+`verifyAcquisitionProMember`, fired by an onClick in onboarding. A person asked, so it is not an
+automatic site. Twelve production files reach HighLevel: 8 automatic (gone) plus push, save, test and
+verify-member, all person-initiated.
+
+**SURVIVES, verified byte-identical by diff:** the manual route
+(`app/api/integrations/highlevel/push/route.ts`, including the `effectiveIsPro` gate David kept and
+the `trace_job_id` fix that lets it see tier 2 rows), the CSV export, and
+**`lib/suite/mcp-tools.ts`**. That last one matters most: when the gateway sends a single or bulk
+request over MCP, results still flow back with no human step. Confirmed before the work that the MCP
+surface has no HighLevel import and that the only MCP references inside the eight route files are
+prose comments.
+
+**FIVE COPY CLAIMS HAD GONE FALSE ACROSS FOUR PAGES, and the brief's list named two of them.** The
+implementer grepped the property instead. The one that mattered most was on the **landing page
+pricing feature list**, "HighLevel CRM auto-push", which is the only false claim that was attached to
+money. Also the Pro upsell, an integrations note that had ALREADY been narrowed once earlier the same
+day and was still wrong, the Make tip and n8n comment on the API docs page, and an FAQ sentence
+promising a hands-off chain. Copy now names the button a user actually sees.
+
+**Two self-caught test defects worth recording.** The implementer's first fence for
+`sweep-property-traces` asserted on a field the recorder does not have, so it was vacuously green;
+found by reading the recorder's shape rather than by the suite. And three old `trace/status`
+credential tests PASSED after the removal because they asserted "no flag was written" and now nothing
+writes one. Green by default, guarding nothing, removed rather than kept as decoration.
+
+**Coordinator verification, independent of the report.** All eight sites carry a fence. Re-injecting
+an automatic push into `trace/status`, at the exact block it used to occupy, turns **20 red** with the
+total held, which is what proves the fences are not vacuous: a `not.toHaveBeenCalled()` is satisfied
+for free if the test never drives the route that far. Disabling the manual bulk push turns 11 red. An
+earlier attempt at that second mutation dropped the total to 1460 and was discarded as an INVALID RUN
+rather than read as a result (L-012).
+
+**A CONSEQUENCE TO KEEP IN VIEW: the credential-health flag now only updates when a person acts.**
+Phase B's whole argument was that five push paths had nobody watching. Those paths are gone, so the
+flag is written by the manual push and by save validation only. That is not broken, and it is
+arguably better since a user is present to see it, but the justification is now much narrower than
+what History records one entry above.
+
+---
+
 ### Full Property Trace reaches the CRM
 
 Commits `eba223c` (migration), `09371fe`, `1def747`, `eadc678`, `16abb6c`, `5841673`.
