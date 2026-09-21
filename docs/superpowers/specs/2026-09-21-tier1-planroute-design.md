@@ -100,8 +100,9 @@ businesses. It is deleted in Phase 4.
 1. `TRACERFY_INSTANT_NAMED` (trace/lookup/, `find_owner:false` + first and last name) when the record
    has a street and a city.
 2. `TRACERFY_PARCEL_APN` (trace/parcel/lookup/) when the record has an APN and county AND either there
-   was no city or step 1 missed. The request carries the owner's first and last name as well, so the
-   parser can match on them.
+   was no city or step 1 missed. The owner's first and last name travel with the step so
+   PropTracerPRO's parser can match on them; they are not sent to Tracerfy, whose parcel endpoint
+   takes only parcel_id, county and state (docs/vendor/tracerfy-api.md:1352-1356).
 
 Today the individual branch is an exclusive `if / else if` (ownerRoute.ts:396-434): address when the situs
 is complete, APN only when it is not. It becomes two pushes in the order above. The warning at :426

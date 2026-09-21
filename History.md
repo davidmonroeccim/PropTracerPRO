@@ -4,6 +4,15 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (d): Tier 1 Phase 0, Task 1. The APN step's names are not sent to Tracerfy.
+
+Spec section 4.2 (person step 2) corrected: the owner's first and last name travel with the step for PropTracerPRO's parser to match on them, and are not sent to Tracerfy, whose parcel endpoint takes only parcel_id, county, and state.
+- Tier 1 tracking section added at top of tasks/todo.md with Phase 0 through 4 plan checklist.
+- Phase 0 plan file committed: docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md
+- Three unmerged commits on feat/contact-vendor-provenance will merge before Phase 1.
+
+---
+
 ## 2026-09-21 (c): THE VENDOR LABEL IS READ, NOT GUESSED, AND IT IS OURS. Phase 2.
 
 Branch `feat/contact-vendor-provenance`. **1517 passing / 75 files / 0 failing**, `tsc` 0.

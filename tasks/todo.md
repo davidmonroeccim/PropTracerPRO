@@ -1,3 +1,17 @@
+# Tier 1 through planRoute (2026-09-21)
+
+Spec: `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md` (approved by David section by section).
+Plans are written one phase at a time, each after the previous phase's results.
+
+- [ ] Phase 0: paid measurement. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`
+- [ ] Merge `feat/contact-vendor-provenance` (727bae2, d462ab6, 98424af) before Phase 1
+- [ ] Phase 1: single traces (plan written after Phase 0)
+- [ ] Phase 2: bulk queue (plan written after Phase 1)
+- [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
+- [ ] Phase 4: cleanup (plan written after Phase 3)
+
+---
+
 # ZIP becomes optional; dedup key drops to STREET|CITY|STATE (2026-09-04)
 
 Workstream A of the registry-to-PTP enrichment plan
