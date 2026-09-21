@@ -4,6 +4,44 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21: THE ENTITY LANE STOPS AT FASTAPPEND. The Tracerfy salvage submit is removed.
+
+Branch `feat/contact-vendor-provenance`. **1510 passing / 75 files / 0 failing**, `tsc` 0. One
+test replaced by two, so +1 on the 1509 this branch had.
+
+**DAVID'S RULING, 2026-09-21, verbatim because it is the whole reason:** "DO NOT send a
+fastappend contact to Tracerfy. This will produce no new results and waste time. Fastappend is a
+tracerfy company and if the contact info is not found in Fastappend, it will not be found in
+Tracerfy either. Even if the contact is found in FastAppend, and that contact has no email or
+phone, it gets treated as null result and the search is free for tier 1."
+
+**WHAT WAS THERE.** When FastAppend returned a named principal but no phone and no email,
+`sweep-entity-traces` submitted a per-row Tracerfy person skip-trace on that name. 42 lines,
+including its own failure arm and a `tracerfy_job_id` write that handed the row to the status
+poller. A second vendor call, on a row the first vendor had already failed to deliver, against a
+database owned by the same company.
+
+**WHAT IT IS NOW.** FastAppend answers or it does not. No reachable contact is a null result: the
+row settles `no_match`, free, terminal. Whether a principal was named no longer changes anything,
+so the `!resolvedPerson` branch became unconditional.
+
+**HOW THIS WAS FOUND, and it was not by reading the code.** I told David the fall-through existed
+and described it as "FastAppend is asked only to name the owner and a Tracerfy person submit
+supplies the contacts afterwards". He read that and said it was not the workflow. He was right
+about the primary path and my sentence was wrong: `if (fastAppendCredit) { ... continue; }`
+terminates the row and its own comment says FastAppend's contacts "are what the user paid for".
+What I had actually been looking at was the narrower residual branch. Surfacing it got it deleted.
+
+**DEAD CODE REMOVED WITH IT:** the `submitSingleTrace` import, the `resolveOwnerContact` import
+and its call (its only consumer was picking a name for the submit), the `resolvedToPerson`
+counter and its field on the cron's JSON response, and `streetAddress`, which had no consumer
+left once the submit went. This lane now keys FastAppend on the company name and state alone.
+
+**Mutations run, both red.** Re-adding a `submitSingleTrace` call on the no-contact path reds the
+test that pins the ruling; dropping the terminal `no_match` write reds three.
+
+---
+
 ## 2026-09-21: RECORD WHICH CONTACT VENDOR RAN. Phase 1 of retiring the `ai_research` name.
 
 Branch `feat/contact-vendor-provenance`. **1509 passing / 75 files / 0 failing**, baseline was

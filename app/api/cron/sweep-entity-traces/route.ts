@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { lookupBusinessTrace, submitSingleTrace } from '@/lib/tracerfy/client';
-import { traceCreditFromFastAppend, resolveOwnerContact } from '@/lib/ai-research/contacts';
+import { lookupBusinessTrace } from '@/lib/tracerfy/client';
+import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
@@ -144,7 +144,6 @@ export async function GET(request: Request) {
 
   const adminClient = createAdminClient();
   let processed = 0;
-  let resolvedToPerson = 0;
   let noMatch = 0;
   let fastAppendCredited = 0;
   let skippedNoOwner = 0;
@@ -320,18 +319,13 @@ export async function GET(request: Request) {
       processed++;
 
       try {
-        // normalized_address is a pipe-delimited dedup key of exactly THREE
-        // fields, street|city|state, like
-        //   "160 MINE LAKE CT|RALEIGH|NC"
-        // There is no zip in it. normalizeAddress() dropped it deliberately
-        // (lib/utils/address-normalizer.ts, migration 20260904) because zip
-        // never reached either vendor and requiring it was rejecting traceable
-        // records at the door. The zip lives in its own column; do not try to
-        // parse one out of this string. Pull the street portion back out before
-        // handing it to a vendor, which expects a raw street address and
-        // separate city/state/zip.
-        const streetAddress = row.normalized_address.split('|')[0] || row.normalized_address;
-
+        // NO ADDRESS IS PULLED OUT OF normalized_address HERE ANY MORE. This lane
+        // keys FastAppend on the company name and state and nothing else, so the
+        // street portion had no consumer once the Tracerfy person submit was
+        // removed. If a future vendor call on this path needs one, note that
+        // normalized_address is street|city|state with NO zip in it
+        // (lib/utils/address-normalizer.ts, migration 20260904) and the zip lives
+        // in its own column; do not try to parse one out of that string.
         const companyName = (row.input_owner_name || '').trim();
 
         if (!companyName) {
@@ -384,16 +378,6 @@ export async function GET(request: Request) {
           companyName,
           lookup.hit ? lookup.contacts : null
         );
-
-        // Determine the best person name to use for the follow-up person-
-        // skip-trace, via the shared resolveOwnerContact precedence. This row
-        // has not been traced yet, so there is no trace_result to consider --
-        // passing null leaves ONE definition of "who is the human behind this
-        // owner" for the whole codebase.
-        const { owner_contact_name: resolvedPerson } = resolveOwnerContact({
-          trace_result: null,
-          ai_research: researchForStorage,
-        });
 
         const ownerFound = !!researchForStorage.owner_name;
 
@@ -478,9 +462,23 @@ export async function GET(request: Request) {
           })
           .eq('id', row.id);
 
-        if (!resolvedPerson) {
-          // FastAppend answered and had no person for us. That is a real miss,
-          // and under tier 1 a miss is free.
+        {
+          // FASTAPPEND ANSWERED AND DELIVERED NO REACHABLE CONTACT. That is the
+          // end of the row: a real miss, and under tier 1 a miss is free.
+          //
+          // NO SECOND VENDOR. David's ruling, 2026-09-21: "DO NOT send a
+          // fastappend contact to Tracerfy. This will produce no new results and
+          // waste time. Fastappend is a tracerfy company and if the contact info
+          // is not found in Fastappend, it will not be found in Tracerfy either.
+          // Even if the contact is found in FastAppend, and that contact has no
+          // email or phone, it gets treated as null result and the search is
+          // free for tier 1."
+          //
+          // So it does not matter whether FastAppend named a principal. A name
+          // with no phone and no email is a null result, not a lead to chase
+          // against the same company's other database. This used to fall through
+          // to a per-row Tracerfy person submit, which spent a second vendor call
+          // on a row the first vendor had already failed to deliver.
           //
           // FREE MEANS "COLLECT NOTHING FURTHER", NOT "THIS ROW WAS ALWAYS
           // FREE". The row is REUSED, never re-inserted
@@ -508,48 +506,6 @@ export async function GET(request: Request) {
           continue;
         }
 
-        // Submit a per-row Tracerfy person-skip-trace for the resolved name.
-        const submitResult = await submitSingleTrace({
-          address: streetAddress,
-          city: row.city || '',
-          state: row.state || '',
-          zip: row.zip || '',
-          owner_name: resolvedPerson,
-        });
-
-        if (!submitResult.success || !submitResult.jobId) {
-          console.error(
-            `[sweep-entity-traces] Tracerfy submit failed for row ${row.id}: ${submitResult.error}`
-          );
-          // No FastAppend contacts (already established above) and the
-          // Tracerfy submit also failed -- mark no_match. Free either way, and
-          // folded for the same reason as the miss arm above: free means
-          // "collect nothing further", never "this row was always free".
-          const billing = foldBillingWrite(row, {
-            charge: 0,
-            tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
-          });
-          await adminClient
-            .from('trace_history')
-            .update({
-              status: 'no_match',
-              is_successful: false,
-              charge: billing.charge,
-              tier: billing.tier,
-            })
-            .eq('id', row.id);
-          noMatch++;
-          continue;
-        }
-
-        // Row now has its own Tracerfy job; status endpoint will poll it.
-        await adminClient
-          .from('trace_history')
-          .update({
-            tracerfy_job_id: submitResult.jobId,
-          })
-          .eq('id', row.id);
-        resolvedToPerson++;
       } catch (err) {
         errored++;
         // Same ladder as the vendor failure above. Retry a transient throw,
@@ -564,7 +520,6 @@ export async function GET(request: Request) {
     return NextResponse.json({
       success: true,
       processed,
-      resolvedToPerson,
       noMatch,
       fastAppendCredited,
       skippedNoOwner,
