@@ -3,8 +3,9 @@
 > # READ FIRST. STATE AS OF 2026-09-21 EVENING. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
 > **MERGED 2026-09-21 night on David's go ("go ahead and merge"): `feat/contact-vendor-provenance` -> `main` at
-> 95db059 (--no-ff), branch deleted. NOT PUSHED: local main is ahead of origin/main by b02f82d (older Tracerfy API
-> docs commit) plus this merge; a push deploys 727bae2, d462ab6, 98424af to production and needs David's go.
+> 95db059 (--no-ff), branch deleted. It carried b02f82d (older Tracerfy API
+> docs commit) plus this merge. PUSHED on David's go ("push it, then write the Phase 1 plan"): origin/main =
+> 5c2b0ee, Vercel production deploy Ready in 43 s, aliased to proptracerpro.com (200).
 > Verified before and after: vitest 1517 passing / 75 files, tsc 0, eslint 47 (baseline), next build OK.** Spec:
 > `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, decisions **D1-D18** (D13-D18 added
 > 2026-09-21 afternoon in David's words; they win over anything older). Phase 0 plan:
