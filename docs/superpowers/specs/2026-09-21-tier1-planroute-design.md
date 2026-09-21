@@ -351,18 +351,23 @@ Each phase ends with something David can see, and work stops for his go-ahead be
 
 **Phase 0, paid measurement.** No code changes. Every lookup is logged with its raw response under
 `tasks/research-test/` (gitignored). David approves the spend before it starts; estimated at most $15
-(misses free; person and company hits $0.10; county records $0.20).
-- Individually owned parcels, owners from the registry: at least 4 states, 2 or more secondary or tertiary
-  counties each (no primary metros). Each gets the named address lookup and the APN lookup. Record hit,
-  name match, what an unrecognized APN returns, and latency.
-- About 10 trust-owned parcels: person lookup on the stripped name, and FastAppend on the full name.
-- About 10 multifamily properties the registry cannot find: the Full Property Trace path.
+(misses free; person and company hits $0.10; county records $0.20). (Revised 2026-09-21 evening for
+D13-D18; the plan file carries the detail and the three gates: county picks, spend, findings.)
+- Counties come from the registry inventory, chosen to find defects, across property types, never re-using
+  a tested parcel or county, secondary or tertiary only (see `tasks/phase0-county-shortlist.md`).
+- Individually owned parcels, owners from the registry, INCLUDING parcels with no city: each gets the
+  Instant lookup (when it has a city) and the APN lookup. Record hit, name match, name order per county
+  (D18), what an unrecognized APN returns, and latency.
+- About 10 trust-owned parcels: person lookups on the stripped name then FastAppend on the full name; a name
+  left with no first name or initial goes to FastAppend only (D16).
+- Registry parcels with no owner on record, across property types including multifamily (D17): the dossier,
+  then the second lookup on the owner it found (D15), judged by the name test.
 - Output: a per-county report in tasks/. Anything it disproves comes out of this design before Phase 1
   (for example the FastAppend half of the trust ladder if it never hits, or the APN step if it never
   returns the named owner).
 
-**Phase 1, single traces (web and API).** Routing (4), name matching, the trust and unknown ladder, one
-classifier, the step log, outcome codes and sentences, `busy_try_again`, billing on `hasContactData`.
+**Phase 1, single traces (web and API).** Routing (4), name matching, name order per county (D18), the
+trust and unknown ladder including D16, one classifier, the step log, outcome codes and sentences, `busy_try_again`, billing on `hasContactData`.
 What David sees: a web single trace shows "Found by" and the real reason when nothing was found.
 
 **Phase 2, bulk (gateway MCP, API bulk, web upload).** The Tier 1 queue and cron, the shared rate budget,
@@ -371,7 +376,8 @@ fields, CSV columns, webhooks, and the bulk page summary. New submits stop going
 What David sees: a web upload shows each record's outcome, and a batch with a city-less record still
 runs.
 
-**Phase 3, gateway.** The owner rule, the multifamily registry lookup and opt-in fallback, the relaxed city
+**Phase 3, gateway.** The owner rule, the multifamily registry lookup and opt-in fallback (D17: records
+come from the registry; no registry owner means a dossier search the user is told about), the relaxed city
 guard, outcome mapping, corrected sentences and descriptions. What David sees: a `crm_push_owners` dry
 run shows each owner's outcome and which key found them.
 

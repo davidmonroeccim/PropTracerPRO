@@ -3,7 +3,19 @@
 Spec: `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md` (approved by David section by section).
 Plans are written one phase at a time, each after the previous phase's results.
 
+Decisions D1-D18 in the spec win over anything older; D13-D18 were added 2026-09-21 evening. Read the top
+block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
+
 - [ ] Phase 0: paid measurement. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`
+  (rewritten 2026-09-21 evening for D13-D18)
+  - [x] Task 1: spec wording and this section (1cfb222, dd88bf4)
+  - [x] Task 2: name-match prototype and spend guard (931929b), **review still owed**
+  - [x] Tier 1 search type reconciled with David; spec D13-D18; county shortlist `tasks/phase0-county-shortlist.md`
+  - [ ] GATE A: David picks counties, records per county, name-order add-on
+  - [ ] Selector, builder, runner (`--plan` only)
+  - [ ] GATE B: David names the dollar amount
+  - [ ] Live run, analysis, report `tasks/phase0-tier1-measurement.md`
+  - [ ] GATE C: findings to David; he decides before the Phase 1 plan is written
 - [ ] Merge `feat/contact-vendor-provenance` (727bae2, d462ab6, 98424af) before Phase 1
 - [ ] Phase 1: single traces (plan written after Phase 0)
 - [ ] Phase 2: bulk queue (plan written after Phase 1)

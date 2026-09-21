@@ -1,106 +1,63 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # AMENDED 2026-09-21 (afternoon). READ THIS FIRST.
+> # READ FIRST. STATE AS OF 2026-09-21 EVENING. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
-> **RESOLVED LATER THE SAME AFTERNOON. David decided: Tier 1 person lookup with a city = INSTANT;
-> dossier-found individual = SECOND Tracerfy lookup, name-matched; no first name or initial = FastAppend
-> as an entity; Tracerfy never supplies an entity's contacts.** All four are spec decisions D13-D16, in
-> his words. The block below is kept as the record of how it went wrong.
+> **Branch `feat/contact-vendor-provenance`** (unmerged, unpushed; merging is David's call). Spec:
+> `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, decisions **D1-D18** (D13-D18 added
+> 2026-09-21 afternoon in David's words; they win over anything older). Phase 0 plan:
+> `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md` (REWRITTEN 2026-09-21 evening to match
+> D13-D18). County shortlist: `tasks/phase0-county-shortlist.md`. SDD ledger (gitignored):
+> `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md`. Nothing has been spent.
 >
-> **NEXT: Phase 0 plan amendments A1-A4, awaiting David's approval (not yet applied):** A1 trusts that
-> strip to no first name or initial get FastAppend only (D16); A2 the multifamily second lookup is judged
-> by the name test, so the runner saves the raw vendor response and the analyzer applies D6 (today's
-> parser takes persons[0], client.ts:602); A3 read-only registry count of owner-name shapes in the 10
-> counties before sampling (Instant sends the split name, splitPersonName reads two words as FIRST LAST);
-> A4 spread the 10 multifamily samples across states (plan Task 4 `mf.slice(0, MF_TOTAL)` takes IN and FL
-> only). Do not dispatch Task 3+ until David answers. Task 2 (931929b) still needs its review.
+> **Where Phase 0 stands.** Task 1 DONE (1cfb222, dd88bf4). Task 2 DONE but NOT REVIEWED (931929b):
+> review it first. Then GATE A: David names the counties, records per county and the name-order add-on
+> (proposal below). Nothing that touches the registry for sampling, and nothing that spends, runs before
+> his named answer.
 >
-> **David's answers so far:** A1 YES. A2: "The multifamily records are coming from the registry NOT
-> MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user
-> needs to be notified of that." (spec D17; the Phase 0 multifamily sample must be REGISTRY parcels
-> with no owner, not MPS rows the registry cannot find). A3: he asked whether name order is getting
-> FIXED or only measured; David then said "yes to A3": spec D18, Phase 1 fixes it per county. A4: "Do not use those 2 states [IN, FL]. Id 2 states where
-> the test matters most, that can find defects, not assume it should all pass."
-> **Sampling rule, David, 2026-09-21, for EVERY Phase 0 sample (individuals too):** registry coverage
-> required, chosen to FIND DEFECTS: "I don't want like you did in the previous context where kept testing
-> the same property after it was already determined to be valid, so it could not find defects from other
-> markets or property types." No parcel already tested (anything in tasks/research-test/, e.g. Pinole,
-> Napa, Salt Lake) is reused; spread across markets and property types. Candidate MF states proposed:
-> New York (municipal city, attacks the address key) and Louisiana (parishes, attacks the APN key);
-> Utah (no ZIP) as the alternative. David has not picked yet. A3: asked whether to add a Phase 1
-> name-order fix to the spec; no answer yet.
-> **Registry coverage, measured 2026-09-21 (read-only, counts only):** NY Onondaga 181,909 parcels
-> (89,754 no city), Monroe 267,414 (358 no city), Broome 85,058 (56,804 no city), Oneida 105,058 (17,412
-> no city); NY multifamily parcels with NO owner: 0 in all four. LA: Lafayette, Caddo, Calcasieu, Ouachita
-> have 0 parcels; parcels_la is ~345k rows, the first 200k East Baton Rouge (22033). UT Weber, Utah,
-> Washington, Cache: EVERY parcel has no city and no ZIP; Washington has 4,308 multifamily parcels, all
-> with no owner, 2,503 with an APN. PLAN DEFECT found by this: the plan's individual sample REQUIRES a
-> city, so it never tests the no-city APN path this whole design exists for.
-> **Louisiana, all 64 parish FIPS counted:** the registry holds only East Baton Rouge (22033, 200,163) and
-> Jefferson (22051, 144,894). **David, 2026-09-21: every sample group spans PROPERTY TYPES, not just
-> multifamily** ("Why are you so focused on Multifamily? I said earlier that I wanted other property
-> types tested").
-> **Pick every Phase 0 county from the registry inventory,
-> `/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`** (1,854 rows,
-> 2026-09-01; it has no situs-city column, so measure city fill live, one county at a time).
-> **Shortlist built: `tasks/phase0-county-shortlist.md`** (57 counties, counts only, storage-order sample,
-> city figures NOT reliable until full-counted). Findings: 52 of the 55 with owner names store them LAST FIRST (only MN Ramsey,
-> WI Milwaukee, WI Dane read FIRST LAST); UT Washington and Cache carry NO owner names at all. David picks next.
+> **The search types, settled (David's vocabulary: Normal, Advanced, Dossier).**
+> - Tier 1 individual WITH a city: Tracerfy **Instant** `trace/lookup/`, find_owner:false + name, 5 credits
+>   (D13). Not Advanced (batch `trace_type:'advanced'`, 2 credits, still needs a city, batch only; built
+>   2026-09-15 on unmerged `feat/tracerfy-advanced-owner-lookup`, not used). Not Normal (what Tier 1 runs
+>   TODAY: `submitSingleTrace`/`submitBulkTrace` post to `trace/` with no trace_type).
+> - Individual with NO city: **APN lookup** `trace/parcel/lookup/` (parcel_id, county, state), 5 credits.
+> - Entity: **FastAppend only**, company_name + state. Tracerfy NEVER supplies an entity's contacts (D14).
+> - No owner on record: **Dossier** `property-search/lookup/` (APN first, then address), 10 credits, finds the
+>   owner and type; then a SECOND lookup on that owner: individual -> Tracerfy, entity -> FastAppend (D15).
+>   The dossier's own contacts block is not used (no name on it; PTP discards it, dossier.ts:173).
+> - Trust or unreadable name with no first name or initial -> FastAppend as an entity (D16).
+> - Multifamily and every no-owner record come from the REGISTRY, never MPS; the user is told it went to the
+>   dossier (D17). Owner name order is fixed in Phase 1 per county (D18).
 >
-> **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
-> and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
-> Tracerfy's INSTANT named lookup. David understood Tier 1 had moved to ADVANCED. Nobody told him the
-> design used instant, or why. Reconcile with David first; record his answer in the spec's decisions
-> table IN HIS WORDS, with the endpoint and trace_type (lesson L-022).
+> **Facts measured 2026-09-21 that the plan rests on.**
+> - 52 of 55 shortlisted counties with owner names store them LAST FIRST ("SMITH JOHN T" or "SMITH, JOHN");
+>   only MN Ramsey, WI Milwaukee, WI Dane read FIRST LAST. `splitPersonName` reads two-word names as FIRST
+>   LAST and does not strip a comma (the D18 defect).
+> - UT Washington and Cache: no owner names, no city, no ZIP anywhere. Washington has 4,308 multifamily
+>   parcels, all with no owner.
+> - Louisiana: the registry holds 2 of 64 parishes, East Baton Rouge (22033) and Jefferson (22051).
+> - NY full counts: Onondaga 89,754 of 181,909 no city, Broome 56,804 of 85,058, Monroe 358 of 267,414.
+> - The dossier returns contacts on 24 of 28 saved hits; 18 of 24 distinct hits were entity-owned.
 >
-> **Tracerfy's three search types, in David's words: Normal, Advanced, Dossier.** Facts, verified
-> 2026-09-21 against the code, the transcripts and `docs/vendor/tracerfy-api.md` (live copy identical):
-> - **Normal** is what Tier 1 runs TODAY: `submitSingleTrace` and `submitBulkTrace`
->   (lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`. 1 credit per lead. Needs
->   names and a mailing address as well as address, city, state.
-> - **Advanced** = same batch endpoint, `trace_type: 'advanced'`, 2 credits per lead. Finds the owner
->   from address, city, state; names "not used" (:567). **It still REQUIRES a city (:564).** Batch
->   only: there is NO synchronous Advanced. Built and live-verified 2026-09-15 (3 of 3 hits, 2 credits
->   each) on `feat/tracerfy-advanced-owner-lookup` (worktree `/Users/davidmonroe/PTP-advanced-owner-lookup`,
->   e9940fe + dc7c511). NEVER MERGED.
-> - **Dossier** = Property Lookup `property-search/lookup/`, 10 credits per property found. Returns the
->   property, the owner AND the owner's contacts. PTP DISCARDS the contacts (lib/tracerfy/dossier.ts:173)
->   and buys a second lookup; 24 of the 28 saved dossier hits carried phones or emails.
-> - The only Tracerfy person path with NO city is the APN lookup `trace/parcel/lookup/` (parcel_id,
->   county, state; 5 credits per hit). The instant lookup `trace/lookup/` (5 credits) needs a city;
->   its `find_owner:true` mode is the synchronous equivalent of Advanced.
-> - The whole-batch rejection on one city-less record is PTP's own validator
->   (lib/suite/mcp-tools.ts:359-370), not Tracerfy. Per-record validation fixes it whatever the type.
+> **Sampling rules (David).** Pick every county from the registry inventory
+> (`/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`), never from
+> memory. Chosen to FIND DEFECTS, across property types, never re-using a tested parcel or county
+> (tasks/research-test/). Not IN, not FL. Secondary/tertiary only. Include no-city parcels (APN path).
 >
-> **How it went wrong.** 2026-09-20 David said "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore,
-> We are using Advanced or Dossier"; the reply said PTP never used Normal (false). 2026-09-21 the design
-> session offered "batch at 1 credit" (Normal) against instant; Advanced was never offered.
+> **GATE A proposal (David has NOT picked).** Individuals and trusts: NY Monroe, NY Broome, LA East Baton
+> Rouge, LA Jefferson, OH Summit, OH Muskingum, WI Milwaukee, MN Ramsey. No owner: UT Washington, TX
+> Hidalgo, AL Jefferson. 4 per county. Worst case $13.50 (32 x $0.20 + 10 trusts x $0.30 + 12 x $0.30 +
+> 5 probes x $0.10); about $23.50 at 8 per county; name-order add-on +$0.80. Expected about $9 (estimate
+> from past hit rates, not measured).
 >
-> **David's intent, his words, 2026-09-21:** "The point of going to Advanced was to remove the need for
-> a city, so we could use the APN/property_id lookup." Also: "If no first name or initial send to
-> fastappend as an entity" (a trust or name that strips to a surname only). Tier 1 is $0.15 per
-> successful trace.
+> **How this went wrong, so it does not again (lessons L-021, L-022, L-023).** 2026-09-20 David said Tier 1
+> was on Advanced or Dossier and was told PTP never used Normal (false). 2026-09-21 the design session
+> offered only Normal-vs-Instant and the spec recorded Instant without telling him. The next session planned
+> around it and made nine silent "rulings". Rules now: a decision exists only if the spec's decisions table
+> names it in David's words; plan defects are questions for David, not rulings; grep the code before
+> describing it; pick counties from the inventory.
 >
-> **DAVID'S RULE FOR THE DOSSIER, his words, 2026-09-21:** "The original goal of the Dossier is to test
-> for owner is invidual or entity. If individual, tracefy gets the results. If entity, the owner name is
-> sent to fastappend for results, it does NOT stay in tracerfy. Tracerfy is NOT to give results for
-> entities, ONLY id if is an entity." Verified on this branch: planRoute sends an entity only to
-> FASTAPPEND_ENTITY (lib/routing/ownerRoute.ts:379-394) and the dossier parser surfaces no contacts
-> (lib/tracerfy/dossier.ts:173, :220). The one Tracerfy-for-entity path, the Tier 1 entity cron's
-> salvage submit (main: app/api/cron/sweep-entity-traces/route.ts:503), is removed by d462ab6, which
-> is on `feat/contact-vendor-provenance` and NOT on `main`.
->
-> **OPEN, for David:** (1) Tier 1 person lookup when there IS a city: Advanced (batch, 2 credits, name
-> not sent, results matched back to rows) or instant (5 credits, immediate). With no city, the APN
-> lookup either way. (2) Dossier found an INDIVIDUAL owner: use the contacts the dossier already
-> returned (paid within its 10 credits, but they carry no name so the owner test cannot run), or a
-> second Tracerfy lookup on the owner's name (5 credits, name-matched; what the code does today).
-> Entities are settled: FastAppend only.
->
-> **State.** Branch `feat/contact-vendor-provenance`. Phase 0 Task 1 committed (1cfb222, dd88bf4),
-> Task 2 committed (931929b, NOT reviewed). SDD ledger:
-> `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md` (gitignored). Nothing spent.
-> Lessons L-021 and L-022 were earned in this session; read them.
+> Superseded detail from the afternoon (the step-by-step record of the reconciliation) is in `History.md`,
+> entry 2026-09-21 (f).
 
 > # AMENDED 2026-09-19. THE DOSSIER NOW HAS TWO LOOKUP KEYS. READ THIS BEFORE THE BLOCK BELOW.
 >

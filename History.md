@@ -4,6 +4,33 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (f): TIER 1 SEARCH TYPE RECONCILED. Spec D13-D18; Phase 0 re-planned before any spend.
+
+- **What went wrong.** 2026-09-20 David said "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore, We
+  are using Advanced or Dossier" and was told PTP never used Normal. False: `submitSingleTrace` and
+  `submitBulkTrace` (lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`, which is Normal.
+  The 2026-09-21 design session offered Tier 1 as Normal batch (1 credit) versus Instant (5 credits), never
+  Advanced, and the spec recorded Instant without saying so. The Phase 0 session then planned around it and
+  wrote nine rulings into a gitignored ledger instead of asking. Lessons L-021, L-022, L-023.
+- **Read in full** the Tracerfy docs (live copy identical to docs/vendor/tracerfy-api.md bar one example
+  date) and FastAppend's own API docs. Advanced is batch only, 2 credits per lead, and still REQUIRES a city
+  (:564); the APN lookup is the only Tracerfy person path with no city. The dossier returns the owner AND
+  contacts; PTP discards the contacts (dossier.ts:173).
+- **David's decisions, recorded in his words as spec D13-D18:** Instant for a Tier 1 individual with a city;
+  Tracerfy never supplies an entity's contacts; a dossier-found individual gets a second, name-matched
+  Tracerfy lookup; no first name or initial goes to FastAppend as an entity; multifamily and every no-owner
+  record come from the registry, with the user told it went to the dossier; name order fixed per county in
+  Phase 1.
+- **Measured (read-only registry, counts only):** 52 of 55 shortlisted counties store owner names LAST FIRST;
+  UT Washington and Cache carry no owner names; Louisiana holds 2 of 64 parishes (East Baton Rouge,
+  Jefferson); NY Onondaga and Broome are about half without a city. County shortlist committed at
+  tasks/phase0-county-shortlist.md, built from the registry inventory.
+- **Phase 0 plan rewritten** to match (G1 individuals incl. no-city parcels, G2 trusts under D16, G3 no-owner
+  records across property types through the dossier, G4 unrecognized-APN probes; raw responses captured;
+  GATE A county picks, GATE B spend, GATE C findings). Tasks 1-2 stay done; Task 2 awaits review. $0 spent.
+
+---
+
 ## 2026-09-21 (e): Tier 1 Phase 0, Task 2. Name-match prototype and spend guard.
 
 - Implemented three pure functions for Phase 0 measurement: stripTrustWords (removes trust words, dates, and normalization from owner names), personMatchesOwner (judges vendor person against owner, measuring two shapes: LAST FIRST order and surname-only trust stripping), and affordable (spend guard ensuring worst-case cost fits under cap).
