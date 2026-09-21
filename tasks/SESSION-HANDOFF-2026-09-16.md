@@ -24,7 +24,9 @@
 > multifamily, CA Shasta rural land). `--plan` worst case $1.40. David approved $2 (spec D20: "$2, go ahead and run it"). RUN DONE: $0.90 spent, report tasks/phase0-small-sample.md,
 > History (h). 4 of 8 worked (Instant by address, APN no city, dossier then FastAppend, absent-APN free miss); 2 Tier 1
 > FastAppend LLCs "Company not found"; 2 dossier individuals whose D15 second lookup missed while the dossier's own
-> contacts block had phones and emails. AWAITING DAVID'S DECISIONS on the findings; no Phase 1 plan before. (Was: write
+> contacts block had phones and emails. DAVID DECIDED (spec D21, "c then b"): the dossier second lookup tries every owner named and, with no
+> street or city, the owner's mailing address by name; only if all miss, the dossier's own contacts labelled not
+> name-verified. He then said "go ahead and merge" (this branch into main; NOT a push). Next: Phase 1 plan for his approval. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
