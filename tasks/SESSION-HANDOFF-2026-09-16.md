@@ -21,6 +21,14 @@
 > with no owner, not MPS rows the registry cannot find). A3: he asked whether name order is getting
 > FIXED or only measured; answer pending. A4: "Do not use those 2 states [IN, FL]. Id 2 states where
 > the test matters most, that can find defects, not assume it should all pass."
+> **Sampling rule, David, 2026-09-21, for EVERY Phase 0 sample (individuals too):** registry coverage
+> required, chosen to FIND DEFECTS: "I don't want like you did in the previous context where kept testing
+> the same property after it was already determined to be valid, so it could not find defects from other
+> markets or property types." No parcel already tested (anything in tasks/research-test/, e.g. Pinole,
+> Napa, Salt Lake) is reused; spread across markets and property types. Candidate MF states proposed:
+> New York (municipal city, attacks the address key) and Louisiana (parishes, attacks the APN key);
+> Utah (no ZIP) as the alternative. David has not picked yet. A3: asked whether to add a Phase 1
+> name-order fix to the spec; no answer yet.
 >
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on

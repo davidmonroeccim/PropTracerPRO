@@ -4,6 +4,19 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-023: A property that already passed is spent evidence (2026-09-21)
+
+**What happened.** Verifying the gateway on 2026-09-20, the same Pinole parcel was picked again because it
+had already hit on both keys. David: "I don't want like you did in the previous context where kept testing
+the same property after it was already determined to be valid, so it could not find defects from other
+markets or property types."
+
+**The rule.** A test sample exists to find defects. Exclude every parcel already tested (tasks/research-test/),
+require registry coverage, and pick markets and property types where the path is most likely to break, with
+the recorded reason for each. A sample chosen because it is known to pass proves nothing new.
+
+---
+
 ## L-022: A decision that lives only in a conversation is lost at the next context change (2026-09-21)
 
 **What happened.** On 2026-09-20 David said: "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore,
