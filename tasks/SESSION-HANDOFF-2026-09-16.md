@@ -40,6 +40,9 @@
 > Jefferson (22051, 144,894). **David, 2026-09-21: every sample group spans PROPERTY TYPES, not just
 > multifamily** ("Why are you so focused on Multifamily? I said earlier that I wanted other property
 > types tested").
+> **Pick every Phase 0 county from the registry inventory,
+> `/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`** (1,854 rows,
+> 2026-09-01; it has no situs-city column, so measure city fill live, one county at a time).
 >
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on

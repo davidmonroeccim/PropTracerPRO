@@ -22,6 +22,13 @@ under discussion. And I reported Louisiana as having "0 properties" from four pa
 holds two of 64 (East Baton Rouge 22033, Jefferson 22051). Report what was measured, not a conclusion
 wider than the query.
 
+**And the root of it:** I picked counties from memory and let queries find out afterward. David: "Did you
+look at the registry inventory in property-registry to see if these parrishes are ingested, or did you just
+assume?" The registry has 1,854 of the country's counties and parishes. **Pick candidate counties FROM
+`/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`** (one row per
+ingested county: parcels, owner_pct, property_type_pct and the other curated fills; measured 2026-09-01, no
+situs-city column, so city fill still comes from the live DB). Never propose a county that is not in it.
+
 ---
 
 ## L-022: A decision that lives only in a conversation is lost at the next context change (2026-09-21)
