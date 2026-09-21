@@ -4,6 +4,59 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21: RECORD WHICH CONTACT VENDOR RAN. Phase 1 of retiring the `ai_research` name.
+
+Branch `feat/contact-vendor-provenance`. **1509 passing / 75 files / 0 failing**, baseline was
+1502, so +7. `tsc` 0. An eighth migration, `20260921_trace_history_contact_vendor.sql`, is
+APPLIED to production and read back.
+
+**THE DECISION THIS TIER TURNS ON WAS UNAUDITABLE.** An entity owner goes to FastAppend, an
+individual to Tracerfy, a trust to neither. Nothing durable recorded which way a row went.
+`executeRoute` builds a `StepReport` per step carrying the vendor and the crons dropped it at the
+database boundary. There is no vendor column, and `VENDOR_COST.FASTAPPEND_ENTITY` and
+`VENDOR_COST.TRACERFY_INSTANT` are both 0.10, so `cost` cannot separate them either.
+
+**WHAT IT COSTS TODAY, measured on a real row.** `owner_contact_source` is computed on read by
+`resolveOwnerContact`, whose FastAppend rung looks in `ai_research.business_trace_contacts`.
+Tier 2 never writes `ai_research`, so that rung cannot fire and EVERY tier 2 FastAppend hit
+reaches customers labelled `person_trace`. Trace `5ec0cf47-6844-4514-9029-53a0b6f34cd0`,
+2026-09-20: county owner `Estates Ave Properties Llc`, classified `entity`, routed
+`FASTAPPEND_ENTITY`, reported `person_trace`. The label fix is Phase 2; this is the fact it needs.
+
+**THE FACT WAS ALREADY IN MEMORY, only discarded.** So `contactVendorFrom(steps)` reads the
+reports `executeRoute` already writes rather than threading a parallel field that could disagree
+with them. `CONTACT_VENDOR_BY_STEP` is a full `Record<StepKind, ...>`, so a new step kind is a
+compile error until somebody classifies it.
+
+**ASKED, NOT PRODUCED.** A lane that ran and missed still answers the routing question, and a miss
+leaves no contact name to mislabel anyway. `skipped` is excluded: that is the record of a question
+we chose not to ask. NULL means no contact vendor was asked, the trust and unknown case.
+
+**DEVIATION FROM THE PLAN, deliberate.** The plan said to write the column at both
+`sweep-entity-traces` sites, `:436` and `:465`. Only `:436` was written. At `:465` FastAppend is
+asked only to NAME the owner and a Tracerfy person submit supplies the contacts afterwards, so
+writing `fastappend` there would name the wrong vendor. Tier 1 person rows keep NULL and their
+existing `person_trace` label, which is correct for them.
+
+**NO BACKFILL, deliberately.** The 3,838 existing rows have no recoverable vendor: the step
+reports were never persisted and cost cannot discriminate. A NULL that honestly means "not
+recorded" is the point.
+
+**Mutations run, four red and one escaped as predicted.** Classifying a dossier step as a contact
+vendor, mapping the entity lane to the wrong vendor, counting `skipped` as asked, and dropping the
+contact-step filter all went red. Last-match-instead-of-first survived and is an equivalent
+mutant: `planRoute` emits the entity step or the individual steps and never both, so first and
+last are the same answer. One test of my own was deleted rather than shipped, an assertion
+`not.toBe('dossier')` that could not fail; the dossier mutation still reds four tests without it.
+
+**FOUND WHILE READING THE ACL BACK, not fixed, not in scope.** `trace_history` is
+`anon=rDxtm/postgres`. The `D` is TRUNCATE, alongside REFERENCES and TRIGGER. The 2026-09-18
+lockdown removed insert, update and delete and left those. RLS does not gate TRUNCATE. Not
+reachable through PostgREST, which has no TRUNCATE verb, so this is a wrong grant rather than a
+live hole. Recorded for David.
+
+---
+
 ## 2026-09-19: THE DOSSIER'S SECOND LOOKUP KEY. `DOSSIER_APN` fires for the first time since it was written.
 
 `main` = `e48d5c7`, 2 commits. **1502 passing / 75 files / 0 failing**, `tsc` 0, eslint 47, build

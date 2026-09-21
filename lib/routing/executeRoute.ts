@@ -156,6 +156,50 @@ export interface ExecutionResult {
   error?: string
 }
 
+/** The contact vendors. The dossier is not one of them: it finds the OWNER, and which
+ *  vendor is then asked for that owner's contacts is the entity-versus-individual decision. */
+export type ContactVendor = 'fastappend' | 'tracerfy'
+
+/** Which vendor each step puts the question to, or null when the step asks no contact vendor.
+ *
+ *  EXHAUSTIVE BY TYPE, deliberately. A new StepKind is a compile error here until somebody
+ *  says which lane it belongs to, rather than silently defaulting to "not a contact step" and
+ *  leaving its rows unattributed. */
+const CONTACT_VENDOR_BY_STEP: Record<StepKind, ContactVendor | null> = {
+  DOSSIER_APN: null,
+  DOSSIER_ADDRESS: null,
+  FASTAPPEND_ENTITY: 'fastappend',
+  TRACERFY_INSTANT_NAMED: 'tracerfy',
+  TRACERFY_PARCEL_APN: 'tracerfy',
+}
+
+/**
+ * Which contact vendor this run actually put the question to, or null when none was asked.
+ *
+ * WHY IT EXISTS. Nothing durable records the lane. These reports carry it, and the crons throw
+ * them away at the database boundary, so the entity-versus-individual decision cannot be
+ * audited after the fact: there is no vendor column and both vendors cost 0.10, so even the
+ * cost column cannot separate them. It is also why a tier 2 FastAppend hit reaches customers
+ * labelled `person_trace`: resolveOwnerContact has to infer the vendor from which storage
+ * envelope the contacts landed in, and on tier 2 that inference is wrong every time.
+ *
+ * ASKED, NOT PRODUCED. A lane that ran and missed still answers the routing question, and a
+ * miss leaves no contact name to mislabel anyway. A 'skipped' step is excluded because it was
+ * never put to a vendor: it is the record of a question we decided not to ask.
+ *
+ * At most one vendor family can appear in a run. planRoute emits the entity step or the
+ * individual steps, never both (lib/routing/ownerRoute.ts:379-442), and a stage stops at its
+ * first hit, so this reads the first attempted contact step rather than resolving a conflict.
+ */
+export function contactVendorFrom(steps: StepReport[]): ContactVendor | null {
+  for (const step of steps) {
+    if (step.outcome === 'skipped') continue
+    const vendor = CONTACT_VENDOR_BY_STEP[step.kind]
+    if (vendor) return vendor
+  }
+  return null
+}
+
 /**
  * The dossier bills in credits. Ten of them are the $0.20 in VENDOR_COST.DOSSIER, so the
  * step's own costOnHit and the vendor's own credits_deducted between them give the real

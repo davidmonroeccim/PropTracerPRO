@@ -437,6 +437,15 @@ export async function GET(request: Request) {
               ai_research_status: 'found',
               ai_research_charge: 0, // The research fee is retired; nothing to book.
               ai_research_claimed_at: null,
+              // FastAppend by construction, not by inference: this branch runs only
+              // because lookupBusinessTrace returned the contacts being written on the
+              // next line. The tier 2 cron derives the same fact from its step reports;
+              // here there is no route to read, so the constant IS the record.
+              //
+              // NOT written on the fall-through branch below. There FastAppend was asked
+              // only to name the owner, and a Tracerfy person submit supplies the contacts
+              // afterwards, so calling that row 'fastappend' would name the wrong vendor.
+              contact_vendor: 'fastappend',
               status: 'success',
               trace_result: fastAppendCredit.trace_result,
               phone_count: fastAppendCredit.phone_count,
