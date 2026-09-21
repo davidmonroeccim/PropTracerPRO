@@ -1,4 +1,49 @@
-# SESSION HANDOFF, 2026-09-16, amended through 2026-09-19
+# SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
+
+> # AMENDED 2026-09-21 (afternoon). READ THIS FIRST. THE TIER 1 SEARCH TYPE IS UNRESOLVED.
+>
+> **Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
+> and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
+> Tracerfy's INSTANT named lookup. David understood Tier 1 had moved to ADVANCED. Nobody told him the
+> design used instant, or why. Reconcile with David first; record his answer in the spec's decisions
+> table IN HIS WORDS, with the endpoint and trace_type (lesson L-022).
+>
+> **Tracerfy's three search types, in David's words: Normal, Advanced, Dossier.** Facts, verified
+> 2026-09-21 against the code, the transcripts and `docs/vendor/tracerfy-api.md` (live copy identical):
+> - **Normal** is what Tier 1 runs TODAY: `submitSingleTrace` and `submitBulkTrace`
+>   (lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`. 1 credit per lead. Needs
+>   names and a mailing address as well as address, city, state.
+> - **Advanced** = same batch endpoint, `trace_type: 'advanced'`, 2 credits per lead. Finds the owner
+>   from address, city, state; names "not used" (:567). **It still REQUIRES a city (:564).** Batch
+>   only: there is NO synchronous Advanced. Built and live-verified 2026-09-15 (3 of 3 hits, 2 credits
+>   each) on `feat/tracerfy-advanced-owner-lookup` (worktree `/Users/davidmonroe/PTP-advanced-owner-lookup`,
+>   e9940fe + dc7c511). NEVER MERGED.
+> - **Dossier** = Property Lookup `property-search/lookup/`, 10 credits per property found. Returns the
+>   property, the owner AND the owner's contacts. PTP DISCARDS the contacts (lib/tracerfy/dossier.ts:173)
+>   and buys a second lookup; 24 of the 28 saved dossier hits carried phones or emails.
+> - The only Tracerfy person path with NO city is the APN lookup `trace/parcel/lookup/` (parcel_id,
+>   county, state; 5 credits per hit). The instant lookup `trace/lookup/` (5 credits) needs a city;
+>   its `find_owner:true` mode is the synchronous equivalent of Advanced.
+> - The whole-batch rejection on one city-less record is PTP's own validator
+>   (lib/suite/mcp-tools.ts:359-370), not Tracerfy. Per-record validation fixes it whatever the type.
+>
+> **How it went wrong.** 2026-09-20 David said "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore,
+> We are using Advanced or Dossier"; the reply said PTP never used Normal (false). 2026-09-21 the design
+> session offered "batch at 1 credit" (Normal) against instant; Advanced was never offered.
+>
+> **David's intent, his words, 2026-09-21:** "The point of going to Advanced was to remove the need for
+> a city, so we could use the APN/property_id lookup." Also: "If no first name or initial send to
+> fastappend as an entity" (a trust or name that strips to a surname only). Tier 1 is $0.15 per
+> successful trace.
+>
+> **OPEN, for David:** (1) Tier 1 person lookup when there IS a city: Advanced (batch, 2 credits, name
+> not sent, results matched back to rows) or instant (5 credits, immediate). With no city, the APN
+> lookup either way. (2) Whether the dossier's own contacts replace the second contact lookup.
+>
+> **State.** Branch `feat/contact-vendor-provenance`. Phase 0 Task 1 committed (1cfb222, dd88bf4),
+> Task 2 committed (931929b, NOT reviewed). SDD ledger:
+> `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md` (gitignored). Nothing spent.
+> Lessons L-021 and L-022 were earned in this session; read them.
 
 > # AMENDED 2026-09-19. THE DOSSIER NOW HAS TWO LOOKUP KEYS. READ THIS BEFORE THE BLOCK BELOW.
 >

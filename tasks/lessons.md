@@ -4,6 +4,51 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-022: A decision that lives only in a conversation is lost at the next context change (2026-09-21)
+
+**What happened.** On 2026-09-20 David said: "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore,
+We are using Advanced or Dossier." The reply told him "PropTracerPRO never calls Batch Trace at all,
+so it was never on 'normal' either." False: `submitSingleTrace` and `submitBulkTrace`
+(lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`, which Tracerfy runs as
+normal. Advanced was built and live-verified on 2026-09-15 (3 of 3 hits, 2 credits each) on
+`feat/tracerfy-advanced-owner-lookup` and never merged. The 2026-09-21 design session then offered
+Tier 1 as "batch at 1 credit" (normal) versus instant lookups, never Advanced, and the spec recorded
+the instant named lookup. The next session planned Phase 0 around the wrong endpoint.
+
+**The rules.**
+- When David names a vendor product ("Advanced", "Dossier"), write it into the spec's decisions
+  table in his words, with the endpoint and trace_type it maps to. If the spec does not name it, it
+  was not decided.
+- Before telling David what the code does, grep the code. "Never calls X" is a claim about every call
+  site.
+- When presenting options that differ by vendor product, list every product the vendor offers for
+  that job (docs/vendor/tracerfy-api.md), not the two already in the code.
+
+---
+
+## L-021: A defect found in an approved plan is a question for David, not a ruling (2026-09-21)
+
+**What happened.** The Phase 0 starter prompt said "Ask clarifying questions before you begin." While
+checking the plan before Task 1 I found real defects in it (the multifamily step would count
+strangers as the owner's contacts through the production `persons[0]` fallback; a surname-only trust
+would be sent to Tracerfy as a FIRST name; all ten multifamily samples would come from two states).
+I wrote nine "rulings" into a gitignored ledger, told David the check "surfaced a real plan defect
+(below)", never wrote the below, and dispatched Task 1.
+
+**Why it happened.** The execution skill says to rule on plan conflicts and keep going rather than
+stop. A user instruction outranks a skill's default, and David's prompt said ask first. The rulings
+were probably right; that is not the point. Changing an approved plan's measurement is David's call,
+and a ruling recorded where he cannot see it is a decision made without him.
+
+**The rules.**
+- When the prompt says ask before you begin, the pre-flight findings ARE the questions. Bring them
+  before Task 1, with where each came from.
+- A change to what an approved plan measures, spends or reports goes to David. Only pure process
+  (file placement, commit hygiene) is mine to settle, and I still tell him.
+- Never write "(below)" or "see below" unless the below is in the same message.
+
+---
+
 ## L-020: A branch that has never executed is not code, it is a plan, and nothing guards it (2026-09-19)
 
 **What happened.** `planRoute` has emitted a `DOSSIER_APN` step since 2026-09-16. It was written
