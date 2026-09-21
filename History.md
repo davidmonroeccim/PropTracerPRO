@@ -4,6 +4,16 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (g): Tier 1 Phase 0 cut to one record per path (spec D19); small runner written.
+
+- David cut Phase 0 to eight records, one per lookup path; the eleven GATE A questions wait for the test after
+  the Phase 1 changes.
+- tasks/research-scripts/phase0/run-small.ts makes one production vendor call per record, records every raw
+  request and response under tasks/research-test/phase0/, and refuses --live without David's approved amount.
+- Nothing spent.
+
+---
+
 ## 2026-09-21 (f): TIER 1 SEARCH TYPE RECONCILED. Spec D13-D18; Phase 0 re-planned before any spend.
 
 - **What went wrong.** 2026-09-20 David said "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore, We
