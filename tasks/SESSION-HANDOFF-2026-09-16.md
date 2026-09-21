@@ -36,9 +36,21 @@
 > fastappend as an entity" (a trust or name that strips to a surname only). Tier 1 is $0.15 per
 > successful trace.
 >
+> **DAVID'S RULE FOR THE DOSSIER, his words, 2026-09-21:** "The original goal of the Dossier is to test
+> for owner is invidual or entity. If individual, tracefy gets the results. If entity, the owner name is
+> sent to fastappend for results, it does NOT stay in tracerfy. Tracerfy is NOT to give results for
+> entities, ONLY id if is an entity." Verified on this branch: planRoute sends an entity only to
+> FASTAPPEND_ENTITY (lib/routing/ownerRoute.ts:379-394) and the dossier parser surfaces no contacts
+> (lib/tracerfy/dossier.ts:173, :220). The one Tracerfy-for-entity path, the Tier 1 entity cron's
+> salvage submit (main: app/api/cron/sweep-entity-traces/route.ts:503), is removed by d462ab6, which
+> is on `feat/contact-vendor-provenance` and NOT on `main`.
+>
 > **OPEN, for David:** (1) Tier 1 person lookup when there IS a city: Advanced (batch, 2 credits, name
 > not sent, results matched back to rows) or instant (5 credits, immediate). With no city, the APN
-> lookup either way. (2) Whether the dossier's own contacts replace the second contact lookup.
+> lookup either way. (2) Dossier found an INDIVIDUAL owner: use the contacts the dossier already
+> returned (paid within its 10 credits, but they carry no name so the owner test cannot run), or a
+> second Tracerfy lookup on the owner's name (5 credits, name-matched; what the code does today).
+> Entities are settled: FastAppend only.
 >
 > **State.** Branch `feat/contact-vendor-provenance`. Phase 0 Task 1 committed (1cfb222, dd88bf4),
 > Task 2 committed (931929b, NOT reviewed). SDD ledger:
