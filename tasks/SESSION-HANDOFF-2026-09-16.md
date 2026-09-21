@@ -43,6 +43,9 @@
 > **Pick every Phase 0 county from the registry inventory,
 > `/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`** (1,854 rows,
 > 2026-09-01; it has no situs-city column, so measure city fill live, one county at a time).
+> **Shortlist built: `tasks/phase0-county-shortlist.md`** (57 counties, counts only, storage-order sample,
+> city figures NOT reliable until full-counted). Findings: 50 of 57 store owner names LAST FIRST (only MN Ramsey,
+> WI Milwaukee, WI Dane read FIRST LAST); UT Washington and Cache carry NO owner names at all. David picks next.
 >
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
