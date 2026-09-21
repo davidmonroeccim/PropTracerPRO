@@ -629,11 +629,17 @@ interface CallLine {
   raw: RawExchange[]
 }
 
-function classifyEndpoint(path: string): 'instant' | 'apn' | 'dossier' | 'fastappend' | 'unknown' {
+/**
+ * Decide the host FIRST. The substring 'trace/lookup' is literally contained inside
+ * 'business-trace/lookup/' ('...business-' + 'trace/lookup/'), so a path-only substring check
+ * mislabels every FastAppend exchange as 'instant'. FASTAPPEND_HOST is unambiguous and is the
+ * same signal computeSpend() already keys its own vendor split on.
+ */
+function classifyEndpoint(host: string, path: string): 'instant' | 'apn' | 'dossier' | 'fastappend' | 'unknown' {
+  if (host === FASTAPPEND_HOST) return 'fastappend'
   if (path.includes('property-search')) return 'dossier'
   if (path.includes('trace/parcel/lookup')) return 'apn'
   if (path.includes('trace/lookup')) return 'instant'
-  if (path.includes('business-trace')) return 'fastappend'
   return 'unknown'
 }
 
@@ -657,7 +663,7 @@ function exchangeSummary(ex: RawExchange): string {
           : 'n/a'
     : 'n/a'
   return (
-    `endpoint ${classifyEndpoint(ex.path)}, HTTP ${ex.status ?? 'none'}, hit ${String(hit)}, ` +
+    `endpoint ${classifyEndpoint(ex.host, ex.path)}, HTTP ${ex.status ?? 'none'}, hit ${String(hit)}, ` +
     `people ${people}, credits_deducted ${credits}, ${ex.ms}ms`
   )
 }
@@ -774,7 +780,7 @@ function reportDossierSection(call: CallLine, personMatchesOwner: MatchFn): stri
 
   if (vendor === 'tracerfy') {
     const contactExchange = call.raw.find((e) => {
-      const label = classifyEndpoint(e.path)
+      const label = classifyEndpoint(e.host, e.path)
       return label === 'instant' || label === 'apn'
     })
     const ownerName = typeof exec?.ownerName === 'string' ? exec.ownerName : ''
@@ -853,7 +859,7 @@ function verdictFor(call: CallLine, personMatchesOwner: MatchFn): string {
     return phones > 0 || emails > 0 ? 'works' : 'did not find the owner'
   }
   const contactExchange = call.raw.find((e) => {
-    const label = classifyEndpoint(e.path)
+    const label = classifyEndpoint(e.host, e.path)
     return label === 'instant' || label === 'apn'
   })
   const ownerName = typeof res.ownerName === 'string' ? res.ownerName : ''
@@ -1082,6 +1088,14 @@ function runSelftest(): void {
   assert.equal(refuseLiveReason(0, '/tmp/phase0-selftest-does-not-exist.json') !== null, true)
   assert.equal(refuseLiveReason(-5, '/tmp/phase0-selftest-does-not-exist.json') !== null, true)
   assert.equal(refuseLiveReason(10, '/tmp/phase0-selftest-does-not-exist.json') !== null, true)
+
+  // classifyEndpoint: host decides first. 'business-trace/lookup/' contains the substring
+  // 'trace/lookup', so a path-only check mislabels every FastAppend exchange as 'instant' --
+  // this is the exact regression fix round 1 found and pins down.
+  assert.equal(classifyEndpoint(FASTAPPEND_HOST, '/v1/api/business-trace/lookup/'), 'fastappend')
+  assert.equal(classifyEndpoint(TRACERFY_HOST, '/v1/api/trace/lookup/'), 'instant')
+  assert.equal(classifyEndpoint(TRACERFY_HOST, '/v1/api/trace/parcel/lookup/'), 'apn')
+  assert.equal(classifyEndpoint(TRACERFY_HOST, '/v1/api/property-search/lookup/'), 'dossier')
 
   console.log('run-small selftest OK')
 }
