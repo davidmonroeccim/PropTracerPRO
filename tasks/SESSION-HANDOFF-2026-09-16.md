@@ -17,8 +17,15 @@
 > path; the eleven GATE A questions (and PF-1, PF-2) wait for the post-Phase-1 test. Tasks 1-2 stay (931929b
 > reviewed; its Haiku trailer left as is, a process call told to David). Task 3's selector
 > (tasks/research-scripts/phase0/select_samples.py) is UNCOMMITTED and not used by the small run; keep it for the
-> later test. Next: pick the 8 registry records (read-only), a small runner, show David the calls and worst case,
-> he names the amount, run, report. Interpretations put to him: FastAppend has no APN key, so its "APN" record is an
+> later test. DONE since: small runner committed (9769245, tasks/research-scripts/phase0/run-small.ts, under
+> review); 8 records picked read-only into tasks/research-test/phase0/small-sample.json (NY Broome individual
+> commercial by address; NY Monroe LLC commercial; LA East Baton Rouge individual multifamily, no city, APN; OH
+> Summit LLC multifamily, no city; MN Ramsey absent-parcel probe; dossier MD Wicomico commercial, UT Washington
+> multifamily, CA Shasta rural land). `--plan` worst case $1.40. NEXT: David names the amount, write
+> small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
+> Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
+> digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
+> The registry busy check must ignore supabase_admin/postgres_exporter (system metrics, always there). Interpretations put to him: FastAppend has no APN key, so its "APN" record is an
 > entity parcel with no city; "nothing found" = a real-format parcel id absent from the county, sent to the APN lookup.
 >
 > **The search types, settled (David's vocabulary: Normal, Advanced, Dossier).**
