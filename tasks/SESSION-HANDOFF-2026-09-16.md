@@ -33,7 +33,10 @@
 > name-verified. Merged and pushed (see top). Phase 1 scope answers recorded as spec D22-D26 (single traces keep name
 > handling; API single and bulk send the parcel id when there is no city; dossier needs only the APN; cache reuse only
 > on a matching owner; the API poll contract is deprecated and removed). D21 is built whole in Phase 1. Phase 1 code
-> map: .superpowers/sdd/phase1-research.md (gitignored). NEXT: write the Phase 1 plan, bring it to David. (Was: write
+> map: .superpowers/sdd/phase1-research.md (gitignored). PLAN WRITTEN AND COMMITTED:
+> docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md (12 tasks, two open questions: Q1 owner matched
+> but no phone or email; Q2 add THE and ESTATE OF to the trust words). NEXT: one independent review, fixes, then David
+> approves; execution subagent-driven. David 2026-09-21: decided items are NOT reopened; the pace was too slow. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
