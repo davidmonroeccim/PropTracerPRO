@@ -121,3 +121,95 @@ describe('resolveOwnerContact', () => {
     expect(out.owner_contact_source).toBe('ai_research');
   });
 });
+
+describe('resolveOwnerContact reads the RECORDED vendor before it infers one', () => {
+  /**
+   * THE BUG THIS CLOSES, measured on a real paid row.
+   *
+   * Trace 5ec0cf47-6844-4514-9029-53a0b6f34cd0, 2026-09-20. County owner of record
+   * "Estates Ave Properties Llc", classified `entity`, routed FASTAPPEND_ENTITY, contacts
+   * delivered by FastAppend. It was reported to the customer as `person_trace`.
+   *
+   * The cause is structural, not a typo. The FastAppend rung reads
+   * ai_research.business_trace_contacts, and the tier 2 path never writes ai_research at
+   * all: its contacts go to trace_result, where tier 1 already puts them. So the first rung
+   * cannot fire on tier 2, the second always does, and EVERY tier 2 FastAppend hit is
+   * mislabelled. Inference cannot fix that, because both vendors land in the same field.
+   *
+   * trace_history.contact_vendor (migration 20260921) records which lane was actually asked,
+   * so this reads a fact instead of guessing from the storage envelope.
+   */
+  it('labels a tier 2 FastAppend hit fastappend, not person_trace', () => {
+    const out = resolveOwnerContact({
+      // Exactly the live row's shape: contacts in trace_result, ai_research null.
+      trace_result: traceResult({
+        owner_name: 'William Liu',
+        owner_name_2: 'Estates Ave Properties Llc',
+      }),
+      ai_research: null,
+      contact_vendor: 'fastappend',
+    });
+    expect(out.owner_contact_name).toBe('William Liu');
+    expect(out.owner_contact_source).toBe('fastappend');
+  });
+
+  it('labels a recorded tracerfy lane person_trace', () => {
+    // The Tracerfy lanes ARE person skip traces, so the existing value is the honest one
+    // and the union does not need to grow for this.
+    const out = resolveOwnerContact({
+      trace_result: traceResult({ owner_name: 'Testowner Placeholder' }),
+      ai_research: null,
+      contact_vendor: 'tracerfy',
+    });
+    expect(out.owner_contact_source).toBe('person_trace');
+  });
+
+  it('still returns no contact when the vendor was recorded but named nobody', () => {
+    // A recorded lane is not a contact. A dossier that bought the owner of record and
+    // reached nobody must not start reporting a name it does not have.
+    const out = resolveOwnerContact({
+      trace_result: traceResult({ owner_name: null, owner_name_2: 'Acme Holdings Llc' }),
+      ai_research: null,
+      contact_vendor: 'fastappend',
+    });
+    expect(out.owner_contact_name).toBeNull();
+    expect(out.owner_contact_source).toBeNull();
+  });
+
+  it('falls back to the old chain on a row written before the column existed', () => {
+    // 3,836 of 3,838 rows predate migration 20260917 and came from Tracerfy normal search
+    // or AI Search with FastAppend. They carry no contact_vendor and must keep the label
+    // they have always had, not acquire a new one derived from nothing.
+    const out = resolveOwnerContact({
+      trace_result: traceResult({ owner_name: 'Legacy Person' }),
+      ai_research: null,
+      contact_vendor: null,
+    });
+    expect(out.owner_contact_source).toBe('person_trace');
+  });
+
+  it('keeps the legacy ai_research label on a legacy row, rather than relabelling it', () => {
+    const out = resolveOwnerContact({
+      trace_result: null,
+      ai_research: research({ individual_behind_business: 'Legacy Principal' }),
+      contact_vendor: null,
+    });
+    expect(out.owner_contact_name).toBe('Legacy Principal');
+    expect(out.owner_contact_source).toBe('ai_research');
+  });
+
+  it('the recorded vendor OUTRANKS the inferred chain when they disagree', () => {
+    // The disagreement is the whole point: business_trace_contacts would say fastappend by
+    // inference, and on this row the lane that actually ran was Tracerfy.
+    const out = resolveOwnerContact({
+      trace_result: traceResult({ owner_name: 'Traced Person' }),
+      ai_research: research({
+        business_trace_contacts: {
+          owner_name: 'Traced Person', phones: [], emails: [], address: null,
+        },
+      }),
+      contact_vendor: 'tracerfy',
+    });
+    expect(out.owner_contact_source).toBe('person_trace');
+  });
+})

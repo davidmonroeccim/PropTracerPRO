@@ -426,7 +426,9 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // property_record and tier were on the MCP twin only, and both comments went on
   // claiming parity, which is why lib/trace/__tests__/payloadParity.test.ts now
   // compares the two key sets instead of trusting either comment.
-  const { owner_contact_name, owner_contact_source } = resolveOwnerContact(row);
+  // THE NAME ONLY. owner_contact_source is ours, not the customer's, and it was wrong on
+  // every tier 2 FastAppend row until contact_vendor existed. See the MCP twin.
+  const { owner_contact_name } = resolveOwnerContact(row);
   return {
     address: row.normalized_address,
     city: row.city,
@@ -435,7 +437,6 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     status: row.status,
     input_owner_name: row.input_owner_name,
     owner_contact_name,
-    owner_contact_source,
     result: row.trace_result,
     research: row.ai_research,
     contacts,

@@ -188,10 +188,15 @@ describe("listTraces", () => {
       ],
     });
     const out = (await listTraces(admin, "sub-1", { limit: 10 })) as {
-      traces: Array<{ owner_contact_name: string | null; owner_contact_source: string | null }>;
+      traces: Array<Record<string, unknown>>;
     };
     expect(out.traces[0].owner_contact_name).toBe("Daniel Hamann");
-    expect(out.traces[0].owner_contact_source).toBe("fastappend");
+    // OURS, NOT THEIRS. The vendor lane is an operational fact about how we work, and until
+    // trace_history.contact_vendor existed the value shipped here was wrong on every tier 2
+    // FastAppend row. It is recorded on the row, where we can read it and they cannot.
+    expect(out.traces[0]).not.toHaveProperty("owner_contact_source");
+    // The column feeding it must not ride out on the spread either.
+    expect(out.traces[0]).not.toHaveProperty("contact_vendor");
   });
 
   describe("limit clamp", () => {
@@ -1163,22 +1168,22 @@ describe("bulk_status", () => {
     });
 
     const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
-      results: Array<{
-        input_owner_name: string;
-        owner_contact_name: string | null;
-        owner_contact_source: string | null;
-      }>;
+      results: Array<Record<string, unknown> & { input_owner_name: string }>;
     };
 
     const magnolia = out.results.find((r) => r.input_owner_name === "Magnolia Property Company")!;
     expect(magnolia.owner_contact_name).toBe("Daniel Hamann");
-    expect(magnolia.owner_contact_source).toBe("fastappend");
+    // OURS, NOT THEIRS. See the listTraces twin: removed from BOTH payloads together, which
+    // lib/trace/__tests__/payloadParity.test.ts requires.
+    expect(magnolia).not.toHaveProperty("owner_contact_source");
 
     const fountain = out.results.find(
       (r) => r.input_owner_name === "Fountain Parc Apartments LLC",
     )!;
     expect(fountain.owner_contact_name).toBeNull();
-    expect(fountain.owner_contact_source).toBeNull();
+    // Absent, not null: the key is gone from the payload entirely, for every row and not
+    // only the ones that resolved somebody.
+    expect(fountain).not.toHaveProperty("owner_contact_source");
   });
 });
 
@@ -1227,6 +1232,11 @@ function tier2Row(overrides: Record<string, unknown> = {}) {
     ai_research_status: null,
     property_record: RAW_PROPERTY_RECORD,
     tier: 2,
+    // A REAL tier 2 row carries this, and the fixture must too. Without it the leak guard
+    // below is vacuous: there is nothing on the row to spread, so leaving contact_vendor in
+    // the destructure passes just as happily as removing it. Found by the mutation that was
+    // supposed to fail and did not.
+    contact_vendor: "fastappend",
     ...overrides,
   };
 }
@@ -1338,6 +1348,38 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
       for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
         expect(serialized, `${key} present somewhere in the trace`).not.toContain(`"${key}"`);
       }
+    });
+
+    it("never leaks which vendor lane ran, on any row", async () => {
+      // OURS, NOT THEIRS. owner_contact_source says which vendor was asked, which is an
+      // operational fact about how we work rather than something the customer bought. It
+      // was also WRONG on every tier 2 FastAppend row until trace_history.contact_vendor
+      // existed, so it shipped a false claim about provenance.
+      //
+      // SCANS THE WHOLE SERIALIZED ROW rather than checking two keys, because both names
+      // can reappear by accident: contact_vendor rides the `...rest` spread the moment it
+      // is dropped from the destructure, and owner_contact_source comes back the moment
+      // anyone spreads resolveOwnerContact() instead of picking the name off it. Those are
+      // the two ways this regresses and neither is visible at the call site.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as { traces: Array<unknown> };
+      const serialized = JSON.stringify(out.traces[0]);
+      expect(serialized, "owner_contact_source reached the customer payload")
+        .not.toContain('"owner_contact_source"');
+      // POSITIVE CONTROL. Without it this passes just as happily on an empty row, which is
+      // the shape that proves nothing: the payload really was built and really does carry
+      // the name, so the missing key is a removal rather than an absence of output.
+      expect(serialized).toContain('"owner_contact_name"');
+
+      // contact_vendor is NOT asserted here, deliberately. listTraces does not select it, so
+      // the stub never puts it on the row and an assertion that it is absent would pass for
+      // the wrong reason. The fixture below carries the column so a future change that adds
+      // it to the select has something real to leak; if that happens, assert it here and
+      // mutation-check it, because the first version of this test did exactly that and the
+      // mutation SURVIVED.
     });
 
     it("does not mutate the row it was handed", async () => {

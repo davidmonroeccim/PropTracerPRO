@@ -86,9 +86,18 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
       property_record: unknown;
       tier: number | null;
     };
+    // THE NAME ONLY, never the source. resolveOwnerContact returns both, and a spread would
+    // put the source back in the payload no matter how many other call sites removed it.
+    //
+    // contact_vendor is deliberately NOT selected here. This tool emits the name and not the
+    // source, and the NAME does not depend on the vendor: the vendor only decides what we
+    // call the source. Selecting it would add a column that has to be destructured out of
+    // `rest` on pain of leaking, to influence a value this tool never returns. The label is
+    // read from the column where it is needed, which is trace_history itself.
+    const { owner_contact_name } = resolveOwnerContact({ trace_result, ai_research });
     return {
       ...rest,
-      ...resolveOwnerContact({ trace_result, ai_research }),
+      owner_contact_name,
       // 65 of the 86 stored keys. The other 21 are provably wrong, not merely missing, and this
       // payload is one the Suite Gateway maps into a customer's own CRM.
       property_record: toPublicPropertyRecord(property_record),
@@ -611,7 +620,15 @@ export const bulkStatusSchema = z.object({
  *  2026-08-13 Dallas run lost all 45 resolved people that way. Null when no human was
  *  resolved -- never the company name. */
 function buildPerRecordResult(row: TraceHistoryRow) {
-  const { owner_contact_name, owner_contact_source } = resolveOwnerContact(row);
+  // THE NAME ONLY. owner_contact_source is OURS, not the customer's: it says which vendor
+  // lane ran, which is an operational fact about how we work rather than something they
+  // bought. It was also WRONG on every tier 2 FastAppend row until contact_vendor existed,
+  // so it was shipping a false claim about provenance. The lane is still recorded, on
+  // trace_history.contact_vendor, where we can read it and they cannot.
+  //
+  // REMOVED FROM BOTH TWINS IN ONE CHANGE. lib/trace/__tests__/payloadParity.test.ts
+  // compares the two key sets, so dropping it here alone would go red.
+  const { owner_contact_name } = resolveOwnerContact(row);
   return {
     address: row.normalized_address,
     city: row.city,
@@ -620,7 +637,6 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     status: row.status,
     input_owner_name: row.input_owner_name,
     owner_contact_name,
-    owner_contact_source,
     result: row.trace_result,
     research: row.ai_research,
     contacts: row.ai_research?.business_trace_contacts || null,

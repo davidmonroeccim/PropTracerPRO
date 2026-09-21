@@ -4,6 +4,55 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (c): THE VENDOR LABEL IS READ, NOT GUESSED, AND IT IS OURS. Phase 2.
+
+Branch `feat/contact-vendor-provenance`. **1517 passing / 75 files / 0 failing**, `tsc` 0.
+Suite Gateway verified alongside: 1461 passing / 24 skipped, unchanged, on branch
+`chore/ptp-drops-owner-contact-source`.
+
+**THE LABEL NOW READS A FACT.** `resolveOwnerContact` prefers `trace_history.contact_vendor`
+and only infers when it is absent. Name resolution is UNCHANGED: the chain still decides who
+the contact is, and the recorded vendor only decides what we call the source. A recorded
+vendor is not a contact, so a row that reached nobody still returns nulls.
+
+The inference could not be fixed by reordering. A tier 2 FastAppend hit puts its contacts in
+`trace_result`, where tier 1 already puts them, and never writes `ai_research`, so the
+FastAppend rung could not fire and the Tracerfy rung always did. Both vendors land in the same
+field; only a recorded lane separates them.
+
+**AND IT IS NO LONGER THE CUSTOMER'S.** `owner_contact_source` is removed from all five
+surfaces it reached: the v1 REST bulk status, the `bulk_job.completed` webhook that shares that
+builder, `ptp_bulk_status`, `ptp_list_traces`, and the documented ones, which were the in-app
+API docs page, `docs/AGENT_BULK_INTEGRATION.md` including its field-meaning table, and the MCP
+tool description that told a calling agent the field existed.
+
+**THE FALLBACK IS NOT DEBT.** 3,836 of 3,838 rows predate the column and came from Tracerfy
+normal search or AI Search with FastAppend. They keep the label they have always carried rather
+than acquiring one derived from nothing.
+
+**TWO MUTATIONS THAT ESCAPED, AND WHAT THEY TAUGHT.**
+
+The first: leaving `contact_vendor` in the `listTraces` spread SURVIVED, because the fixture
+did not carry the column, so there was nothing to leak. A negative assertion with no positive
+control, in a test written the same day as the lesson about exactly that.
+
+The second: dropping `contact_vendor` from the `listTraces` select also survived. Chasing it
+found the real answer, which was that selecting it there was a mistake. That tool emits the
+name and not the source, and the NAME does not depend on the vendor. Selecting it added a
+column that had to be destructured out of `rest` on pain of leaking, in order to influence a
+value the tool never returns. Reverted. The label is read from the column where it is needed,
+which is `trace_history` itself.
+
+**FENCED, ALL MUTATION-VERIFIED RED:** spreading `resolveOwnerContact` back into the
+`listTraces` payload; re-adding `owner_contact_source` to the v1 twin alone, which
+`payloadParity.test.ts` catches.
+
+**HONEST LIMIT.** With the source emitted nowhere, the corrected label has no customer-visible
+effect. `buildPerRecordResult` still calls `resolveOwnerContact` and discards the source. What
+is live is the recorded column and a function that is now right when anything internal asks it.
+
+---
+
 ## 2026-09-21: THE ENTITY LANE STOPS AT FASTAPPEND. The Tracerfy salvage submit is removed.
 
 Branch `feat/contact-vendor-provenance`. **1510 passing / 75 files / 0 failing**, `tsc` 0. One
