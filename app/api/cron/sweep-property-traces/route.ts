@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { lookupBusinessTrace, lookupPersonTrace } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
-import { executeRoute } from '@/lib/routing/executeRoute';
+import { executeRoute, contactVendorFrom } from '@/lib/routing/executeRoute';
 import {
   FAILSAFE_PRICE_PLAN,
   planRoute,
@@ -576,6 +576,13 @@ export async function GET(request: Request) {
           // What the vendors actually took, read from their own credit counters
           // rather than assumed from a price list.
           cost: execution.vendorSpend,
+          // WHICH LANE THE OWNER WENT DOWN, recorded rather than inferred later.
+          // The entity-versus-individual split is the decision this whole tier turns
+          // on, and until now nothing durable said which way it went: there was no
+          // vendor column, `steps` was built and then dropped here, and both vendors
+          // cost 0.10 so `cost` cannot separate them either. Null when no contact
+          // vendor was asked at all, which is a trust or an unclassifiable name.
+          contact_vendor: contactVendorFrom(execution.steps),
           // MONEY FACTS. `charge` is the LEDGER's net for this row, written
           // as-is: folding it onto the row's own column would add money already
           // recorded to money already there and count one debit twice. `tier` is

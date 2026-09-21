@@ -613,16 +613,30 @@ describe("the vendor named a principal but gave no contacts", () => {
     };
   });
 
-  it("falls through to a Tracerfy person trace for that human, unpaid so far", async () => {
+  it("settles it free and never asks Tracerfy, because FastAppend IS Tracerfy", async () => {
+    // David's ruling, 2026-09-21: "DO NOT send a fastappend contact to Tracerfy. This will
+    // produce no new results and waste time. Fastappend is a tracerfy company and if the
+    // contact info is not found in Fastappend, it will not be found in Tracerfy either. Even
+    // if the contact is found in FastAppend, and that contact has no email or phone, it gets
+    // treated as null result and the search is free for tier 1."
+    //
+    // So a named principal with no phone and no email is a MISS, not a lead to chase. The
+    // previous behaviour submitted a second vendor call on a row the first vendor had already
+    // failed to deliver, against a database owned by the same company.
     const res = await run();
     const body = await res.json();
 
-    expect(submitSingleTrace).toHaveBeenCalledWith(
-      expect.objectContaining({ owner_name: "Testowner Placeholder", address: "100 MAIN ST" })
-    );
+    expect(submitSingleTrace).not.toHaveBeenCalled();
     expect(deducts()).toHaveLength(0);
-    expect(body.resolvedToPerson).toBe(1);
-    expect(finalWrite()).toMatchObject({ tracerfy_job_id: "tf-person-1" });
+    expect(body.noMatch).toBe(1);
+    expect(finalWrite()).toMatchObject({ status: "no_match", is_successful: false, charge: 0 });
+  });
+
+  it("never leaves a Tracerfy job id behind for the status poller to chase", async () => {
+    // The old path wrote tracerfy_job_id and handed the row to the status endpoint. A row
+    // that still carried one would be polled forever against a job nobody submitted.
+    await run();
+    expect(finalWrite()).not.toHaveProperty("tracerfy_job_id");
   });
 
   it("keys FastAppend on the company name and the state we hold", async () => {

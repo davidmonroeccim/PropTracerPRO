@@ -4,6 +4,102 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-024: Size the sample to the question. "Does it work" needs one record per path (2026-09-21)
+
+**What happened.** Phase 0 exists to learn whether each lookup path works before Phase 1 builds on it. The plan
+carried into this session was 2,361 lines: 44 or more records, a selector, a builder, a runner, an analyzer,
+three gates and eleven GATE A questions about sampling knobs, for $13.50 to $33.10. I ran a pre-flight scan on it,
+reviewed a task, and handed David thirteen questions. David: "Why are worrying about the testing right now when we
+haven't even made any changes yet?" and then "No. That doesn't make any sense. You only need a small sample to know
+if it works or not." He set it at one record per path, eight in all (spec D19), and moved the eleven questions to
+the test after the changes.
+
+**Why it happened.** I inherited the plan's scale and checked it for correctness, never for proportion. Every
+earlier correction (L-021 to L-023) pushed toward more rigour, and more rigour read as the safe direction. A rate
+across counties is a Phase-after-the-build question; a yes/no on whether a path returns the owner is answered by
+one real record per path.
+
+**The rules.**
+- Before executing a measurement plan, ask what decision it feeds and the smallest sample that makes that
+  decision. If the answer is "does this path work", it is one record per path.
+- A plan's size is itself a finding. When the questions for David outnumber the records being measured, stop and
+  say so before sending the questions.
+- Put rate and coverage studies after the change they judge, where they test the thing that will ship.
+
+---
+
+## L-023: A property that already passed is spent evidence (2026-09-21)
+
+**What happened.** Verifying the gateway on 2026-09-20, the same Pinole parcel was picked again because it
+had already hit on both keys. David: "I don't want like you did in the previous context where kept testing
+the same property after it was already determined to be valid, so it could not find defects from other
+markets or property types."
+
+**The rule.** A test sample exists to find defects. Exclude every parcel already tested (tasks/research-test/),
+require registry coverage, and pick markets and property types where the path is most likely to break, with
+the recorded reason for each. A sample chosen because it is known to pass proves nothing new.
+
+**Same day, same lesson, applied wrong.** I repeated "markets and property types" back to David and then
+ran a state check built only around multifamily. David: "Why are you so focused on Multifamily? I said
+earlier that I wanted other property types tested." The rule covers EVERY sample group, not the one
+under discussion. And I reported Louisiana as having "0 properties" from four parishes; the registry
+holds two of 64 (East Baton Rouge 22033, Jefferson 22051). Report what was measured, not a conclusion
+wider than the query.
+
+**And the root of it:** I picked counties from memory and let queries find out afterward. David: "Did you
+look at the registry inventory in property-registry to see if these parrishes are ingested, or did you just
+assume?" The registry has 1,854 of the country's counties and parishes. **Pick candidate counties FROM
+`/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`** (one row per
+ingested county: parcels, owner_pct, property_type_pct and the other curated fills; measured 2026-09-01, no
+situs-city column, so city fill still comes from the live DB). Never propose a county that is not in it.
+
+---
+
+## L-022: A decision that lives only in a conversation is lost at the next context change (2026-09-21)
+
+**What happened.** On 2026-09-20 David said: "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore,
+We are using Advanced or Dossier." The reply told him "PropTracerPRO never calls Batch Trace at all,
+so it was never on 'normal' either." False: `submitSingleTrace` and `submitBulkTrace`
+(lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`, which Tracerfy runs as
+normal. Advanced was built and live-verified on 2026-09-15 (3 of 3 hits, 2 credits each) on
+`feat/tracerfy-advanced-owner-lookup` and never merged. The 2026-09-21 design session then offered
+Tier 1 as "batch at 1 credit" (normal) versus instant lookups, never Advanced, and the spec recorded
+the instant named lookup. The next session planned Phase 0 around the wrong endpoint.
+
+**The rules.**
+- When David names a vendor product ("Advanced", "Dossier"), write it into the spec's decisions
+  table in his words, with the endpoint and trace_type it maps to. If the spec does not name it, it
+  was not decided.
+- Before telling David what the code does, grep the code. "Never calls X" is a claim about every call
+  site.
+- When presenting options that differ by vendor product, list every product the vendor offers for
+  that job (docs/vendor/tracerfy-api.md), not the two already in the code.
+
+---
+
+## L-021: A defect found in an approved plan is a question for David, not a ruling (2026-09-21)
+
+**What happened.** The Phase 0 starter prompt said "Ask clarifying questions before you begin." While
+checking the plan before Task 1 I found real defects in it (the multifamily step would count
+strangers as the owner's contacts through the production `persons[0]` fallback; a surname-only trust
+would be sent to Tracerfy as a FIRST name; all ten multifamily samples would come from two states).
+I wrote nine "rulings" into a gitignored ledger, told David the check "surfaced a real plan defect
+(below)", never wrote the below, and dispatched Task 1.
+
+**Why it happened.** The execution skill says to rule on plan conflicts and keep going rather than
+stop. A user instruction outranks a skill's default, and David's prompt said ask first. The rulings
+were probably right; that is not the point. Changing an approved plan's measurement is David's call,
+and a ruling recorded where he cannot see it is a decision made without him.
+
+**The rules.**
+- When the prompt says ask before you begin, the pre-flight findings ARE the questions. Bring them
+  before Task 1, with where each came from.
+- A change to what an approved plan measures, spends or reports goes to David. Only pure process
+  (file placement, commit hygiene) is mine to settle, and I still tell him.
+- Never write "(below)" or "see below" unless the below is in the same message.
+
+---
+
 ## L-020: A branch that has never executed is not code, it is a plan, and nothing guards it (2026-09-19)
 
 **What happened.** `planRoute` has emitted a `DOSSIER_APN` step since 2026-09-16. It was written

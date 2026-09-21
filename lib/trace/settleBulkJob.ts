@@ -54,6 +54,17 @@ export type TraceHistoryRow = {
   property_record?: unknown;
   // 1 = billed per successful trace, 2 = billed per record submitted.
   tier?: number | null;
+  // Added by migration 20260921. Which contact vendor the row's lane actually asked:
+  // 'fastappend' for an entity owner, 'tracerfy' for an individual, absent when none was
+  // asked or when the row predates the column. resolveOwnerContact reads it so the source
+  // label is a recorded fact rather than an inference from which field the contacts landed
+  // in, which was wrong on every tier 2 FastAppend row. OPTIONAL for the same reason as the
+  // two above: readers load with select('*'), and absent reads as "not recorded".
+  //
+  // OURS, NOT THE CUSTOMER'S. It must never reach a response payload. Both
+  // buildPerRecordResult twins build explicit object literals, so it cannot ride a spread
+  // out of here; keep it that way.
+  contact_vendor?: string | null;
   // Added by migration 20260918. The TIER 2 queue, driven by
   // app/api/cron/sweep-property-traces. Nothing in this file settles it -- it is
   // declared here because every bulk STATUS surface loads this type with

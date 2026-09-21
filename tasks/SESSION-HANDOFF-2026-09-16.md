@@ -1,4 +1,82 @@
-# SESSION HANDOFF, 2026-09-16, amended through 2026-09-19
+# SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
+
+> # READ FIRST. STATE AS OF 2026-09-21 EVENING. Tier 1 through planRoute, Phase 0 (paid measurement).
+>
+> **Branch `feat/contact-vendor-provenance`** (unmerged, unpushed; merging is David's call). Spec:
+> `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, decisions **D1-D18** (D13-D18 added
+> 2026-09-21 afternoon in David's words; they win over anything older). Phase 0 plan:
+> `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md` (REWRITTEN 2026-09-21 evening to match
+> D13-D18). County shortlist: `tasks/phase0-county-shortlist.md`. SDD ledger (gitignored):
+> `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md`. Nothing has been spent.
+>
+> **Where Phase 0 stands (updated 2026-09-21 night). D19 REPLACED THE BIG SAMPLE.** David: "No. That doesn't
+> make any sense. You only need a small sample to know if it works or not. Pick one for address on Tier 1 to both
+> tracerfy and fastappend each, and one for APN on tier 1 for both and one for nothing found on tier 1. Pick three
+> for dossier, one for a commercial, one for multifamily, and one for land or rural. Reserve the 11 questions for
+> the test to see if the changes worked. So this is halfway between b and c." So Phase 0 is EIGHT records, one per
+> path; the eleven GATE A questions (and PF-1, PF-2) wait for the post-Phase-1 test. Tasks 1-2 stay (931929b
+> reviewed; its Haiku trailer left as is, a process call told to David). Task 3's selector
+> (tasks/research-scripts/phase0/select_samples.py) is UNCOMMITTED and not used by the small run; keep it for the
+> later test. DONE since: small runner committed (9769245 + fix a958e34, tasks/research-scripts/phase0/run-small.ts, REVIEWED CLEAN;
+> was under review); 8 records picked read-only into tasks/research-test/phase0/small-sample.json (NY Broome individual
+> commercial by address; NY Monroe LLC commercial; LA East Baton Rouge individual multifamily, no city, APN; OH
+> Summit LLC multifamily, no city; MN Ramsey absent-parcel probe; dossier MD Wicomico commercial, UT Washington
+> multifamily, CA Shasta rural land). `--plan` worst case $1.40. David approved $2 (spec D20: "$2, go ahead and run it"). RUN DONE: $0.90 spent, report tasks/phase0-small-sample.md,
+> History (h). 4 of 8 worked (Instant by address, APN no city, dossier then FastAppend, absent-APN free miss); 2 Tier 1
+> FastAppend LLCs "Company not found"; 2 dossier individuals whose D15 second lookup missed while the dossier's own
+> contacts block had phones and emails. DAVID DECIDED (spec D21, "c then b"): the dossier second lookup tries every owner named and, with no
+> street or city, the owner's mailing address by name; only if all miss, the dossier's own contacts labelled not
+> name-verified. He then said "go ahead and merge" (this branch into main; NOT a push). Next: Phase 1 plan for his approval. (Was: write
+> small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
+> Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
+> digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
+> The registry busy check must ignore supabase_admin/postgres_exporter (system metrics, always there). Interpretations put to him: FastAppend has no APN key, so its "APN" record is an
+> entity parcel with no city; "nothing found" = a real-format parcel id absent from the county, sent to the APN lookup.
+>
+> **The search types, settled (David's vocabulary: Normal, Advanced, Dossier).**
+> - Tier 1 individual WITH a city: Tracerfy **Instant** `trace/lookup/`, find_owner:false + name, 5 credits
+>   (D13). Not Advanced (batch `trace_type:'advanced'`, 2 credits, still needs a city, batch only; built
+>   2026-09-15 on unmerged `feat/tracerfy-advanced-owner-lookup`, not used). Not Normal (what Tier 1 runs
+>   TODAY: `submitSingleTrace`/`submitBulkTrace` post to `trace/` with no trace_type).
+> - Individual with NO city: **APN lookup** `trace/parcel/lookup/` (parcel_id, county, state), 5 credits.
+> - Entity: **FastAppend only**, company_name + state. Tracerfy NEVER supplies an entity's contacts (D14).
+> - No owner on record: **Dossier** `property-search/lookup/` (APN first, then address), 10 credits, finds the
+>   owner and type; then a SECOND lookup on that owner: individual -> Tracerfy, entity -> FastAppend (D15).
+>   The dossier's own contacts block is not used (no name on it; PTP discards it, dossier.ts:173).
+> - Trust or unreadable name with no first name or initial -> FastAppend as an entity (D16).
+> - Multifamily and every no-owner record come from the REGISTRY, never MPS; the user is told it went to the
+>   dossier (D17). Owner name order is fixed in Phase 1 per county (D18).
+>
+> **Facts measured 2026-09-21 that the plan rests on.**
+> - 52 of 55 shortlisted counties with owner names store them LAST FIRST ("SMITH JOHN T" or "SMITH, JOHN");
+>   only MN Ramsey, WI Milwaukee, WI Dane read FIRST LAST. `splitPersonName` reads two-word names as FIRST
+>   LAST and does not strip a comma (the D18 defect).
+> - UT Washington and Cache: no owner names, no city, no ZIP anywhere. Washington has 4,308 multifamily
+>   parcels, all with no owner.
+> - Louisiana: the registry holds 2 of 64 parishes, East Baton Rouge (22033) and Jefferson (22051).
+> - NY full counts: Onondaga 89,754 of 181,909 no city, Broome 56,804 of 85,058, Monroe 358 of 267,414.
+> - The dossier returns contacts on 24 of 28 saved hits; 18 of 24 distinct hits were entity-owned.
+>
+> **Sampling rules (David).** Pick every county from the registry inventory
+> (`/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv`), never from
+> memory. Chosen to FIND DEFECTS, across property types, never re-using a tested parcel or county
+> (tasks/research-test/). Not IN, not FL. Secondary/tertiary only. Include no-city parcels (APN path).
+>
+> **SUPERSEDED BY D19, kept for the post-Phase-1 test. GATE A proposal (David has NOT picked).** Individuals and trusts: NY Monroe, NY Broome, LA East Baton
+> Rouge, LA Jefferson, OH Summit, OH Muskingum, WI Milwaukee, MN Ramsey. No owner: UT Washington, TX
+> Hidalgo, AL Jefferson. 4 per county. Worst case $13.50 (32 x $0.20 + 10 trusts x $0.30 + 12 x $0.30 +
+> 5 probes x $0.10); about $23.50 at 8 per county; name-order add-on +$0.80. Expected about $9 (estimate
+> from past hit rates, not measured).
+>
+> **How this went wrong, so it does not again (lessons L-021, L-022, L-023).** 2026-09-20 David said Tier 1
+> was on Advanced or Dossier and was told PTP never used Normal (false). 2026-09-21 the design session
+> offered only Normal-vs-Instant and the spec recorded Instant without telling him. The next session planned
+> around it and made nine silent "rulings". Rules now: a decision exists only if the spec's decisions table
+> names it in David's words; plan defects are questions for David, not rulings; grep the code before
+> describing it; pick counties from the inventory.
+>
+> Superseded detail from the afternoon (the step-by-step record of the reconciliation) is in `History.md`,
+> entry 2026-09-21 (f).
 
 > # AMENDED 2026-09-19. THE DOSSIER NOW HAS TWO LOOKUP KEYS. READ THIS BEFORE THE BLOCK BELOW.
 >

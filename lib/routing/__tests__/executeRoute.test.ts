@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { executeRoute, situsZipFrom, type RouteDeps, type ContactResult } from '../executeRoute'
+import { executeRoute, situsZipFrom, contactVendorFrom, type RouteDeps, type ContactResult } from '../executeRoute'
 import { planRoute, VENDOR_COST, type ParcelInput } from '../ownerRoute'
 import { parseDossierResponse, type DossierResult } from '@/lib/tracerfy/dossier'
 
@@ -547,5 +547,89 @@ describe('situsZipFrom', () => {
     expect(situsZipFrom({})).toBeNull()
     expect(situsZipFrom(null)).toBeNull()
     expect(situsZipFrom(undefined)).toBeNull()
+  })
+})
+
+describe('contactVendorFrom — which contact lane was actually asked', () => {
+  /**
+   * WHY THIS EXISTS. Nothing durable records which vendor a row went through. The step
+   * reports carry it, executeRoute builds them, and the cron then throws them away at the
+   * database boundary. So the one decision David calls first and foremost, entity versus
+   * individual, is unauditable after the fact: there is no vendor column, and both vendors
+   * cost 0.10 so the cost column cannot tell them apart either.
+   *
+   * It is also why a tier 2 FastAppend hit is reported to customers as `person_trace`:
+   * resolveOwnerContact has to guess from which storage envelope the data landed in, and on
+   * tier 2 it guesses wrong every time.
+   *
+   * ASKED, NOT PRODUCED. A lane that ran and missed still answers the routing question, and
+   * a miss leaves no contact name to mislabel anyway. 'skipped' does not count: that step was
+   * never put to a vendor.
+   */
+  it('records fastappend when the entity lane was asked and hit', async () => {
+    const d = deps({
+      lookupDossier: dossierSequence(HIT_ENTITY_APN),
+      traceEntity: vi.fn(async () => CONTACT_HIT),
+    })
+    const r = await executeRoute(tier2Plan(), d)
+
+    // The positive control: prove the entity lane really ran before asserting on its label.
+    expect(r.ownerType).toBe('entity')
+    expect(d.traceEntity).toHaveBeenCalledTimes(1)
+    expect(contactVendorFrom(r.steps)).toBe('fastappend')
+  })
+
+  it('records fastappend even when the entity lane MISSED', async () => {
+    // The routing question is answered either way, and this is the case the cost column
+    // cannot distinguish.
+    const d = deps({ lookupDossier: dossierSequence(HIT_ENTITY_APN) })
+    const r = await executeRoute(tier2Plan(), d)
+
+    expect(d.traceEntity).toHaveBeenCalledTimes(1)
+    expect(r.contactsFound).toBe(false)
+    expect(contactVendorFrom(r.steps)).toBe('fastappend')
+  })
+
+  it('records tracerfy when the individual lane was asked', async () => {
+    const d = deps({
+      lookupDossier: dossierSequence(HIT_INDIVIDUAL),
+      tracePerson: vi.fn(async () => CONTACT_HIT),
+    })
+    const r = await executeRoute(tier2Plan(), d)
+
+    expect(r.ownerType).toBe('individual')
+    expect(d.tracePerson).toHaveBeenCalledTimes(1)
+    expect(contactVendorFrom(r.steps)).toBe('tracerfy')
+  })
+
+  it('records nothing for a trust, because no vendor was asked', async () => {
+    const d = deps({ lookupDossier: dossierSequence(HIT_TRUST_ONLY) })
+    const r = await executeRoute(tier2Plan(), d)
+
+    expect(r.needsManualReview).toBe(true)
+    expect(d.traceEntity).not.toHaveBeenCalled()
+    expect(d.tracePerson).not.toHaveBeenCalled()
+    expect(contactVendorFrom(r.steps)).toBeNull()
+  })
+
+  it('records nothing when the dossier itself missed, so no lane was reached', async () => {
+    const d = deps()
+    const r = await executeRoute(tier2Plan(), d)
+
+    expect(r.ownerFound).toBe(false)
+    expect(contactVendorFrom(r.steps)).toBeNull()
+  })
+
+  it('ignores a skipped step, which was never put to a vendor', () => {
+    expect(contactVendorFrom([
+      { kind: 'DOSSIER_APN', outcome: 'hit', cost: 0.2 },
+      { kind: 'FASTAPPEND_ENTITY', outcome: 'skipped', cost: 0 },
+    ])).toBeNull()
+  })
+
+  it('records a lane that was asked and FAILED, because it still ran', () => {
+    expect(contactVendorFrom([
+      { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'failed', cost: 0, error: 'boom' },
+    ])).toBe('tracerfy')
   })
 })

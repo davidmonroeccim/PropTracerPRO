@@ -4,6 +4,217 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (h): Tier 1 Phase 0 live run, eight records, one per path (spec D19, D20).
+
+- David approved $2 (D20). Spent $0.90: Tracerfy 40 credits ($0.80), matching the account balance move
+  exactly (10,649 to 10,609), plus one FastAppend hit ($0.10). Report: tasks/phase0-small-sample.md (counts
+  only); raw requests and responses in tasks/research-test/phase0/ (gitignored).
+- Worked: Tier 1 Instant by address (NY Broome, name matched, 4 phones); Tier 1 APN lookup with no city (LA
+  East Baton Rouge, parish name accepted, name matched, 9 phones 2 emails); dossier on a UT Washington
+  multifamily (APN key) then FastAppend on the entity owner (3 people, 6 phones 3 emails); an absent parcel
+  id came back as an ordinary free miss.
+- Did not find: FastAppend on two Tier 1 LLCs (NY Monroe, OH Summit) answered 404 "Company not found",
+  free, treated by production as a miss. Dossier found individual owners on MD Wicomico (address key; the APN
+  key missed) and CA Shasta (APN key), but the second lookup (D15) missed on both, while the dossier's own
+  contacts block held 10 phones 4 emails and 7 phones 5 emails.
+- Found while picking: registry parcel ids for MN Ramsey carry a "27123-" prefix and NY ids are 26 digits;
+  production sends them as stored. The registry busy check must ignore supabase_admin/postgres_exporter.
+- Latency: most lookups 0.2 to 2 s; one Instant second lookup took 20.4 s; FastAppend up to 5.2 s.
+
+## 2026-09-21 (g): Tier 1 Phase 0 cut to one record per path (spec D19); small runner written.
+
+- David cut Phase 0 to eight records, one per lookup path; the eleven GATE A questions wait for the test after
+  the Phase 1 changes.
+- tasks/research-scripts/phase0/run-small.ts makes one production vendor call per record, records every raw
+  request and response under tasks/research-test/phase0/, and refuses --live without David's approved amount.
+- Nothing spent.
+
+---
+
+## 2026-09-21 (f): TIER 1 SEARCH TYPE RECONCILED. Spec D13-D18; Phase 0 re-planned before any spend.
+
+- **What went wrong.** 2026-09-20 David said "WE ARE NOT USING THE NORMAL TRACE in Tracerfy anymore, We
+  are using Advanced or Dossier" and was told PTP never used Normal. False: `submitSingleTrace` and
+  `submitBulkTrace` (lib/tracerfy/client.ts:85, :716) post to `trace/` with no `trace_type`, which is Normal.
+  The 2026-09-21 design session offered Tier 1 as Normal batch (1 credit) versus Instant (5 credits), never
+  Advanced, and the spec recorded Instant without saying so. The Phase 0 session then planned around it and
+  wrote nine rulings into a gitignored ledger instead of asking. Lessons L-021, L-022, L-023.
+- **Read in full** the Tracerfy docs (live copy identical to docs/vendor/tracerfy-api.md bar one example
+  date) and FastAppend's own API docs. Advanced is batch only, 2 credits per lead, and still REQUIRES a city
+  (:564); the APN lookup is the only Tracerfy person path with no city. The dossier returns the owner AND
+  contacts; PTP discards the contacts (dossier.ts:173).
+- **David's decisions, recorded in his words as spec D13-D18:** Instant for a Tier 1 individual with a city;
+  Tracerfy never supplies an entity's contacts; a dossier-found individual gets a second, name-matched
+  Tracerfy lookup; no first name or initial goes to FastAppend as an entity; multifamily and every no-owner
+  record come from the registry, with the user told it went to the dossier; name order fixed per county in
+  Phase 1.
+- **Measured (read-only registry, counts only):** 52 of 55 shortlisted counties store owner names LAST FIRST;
+  UT Washington and Cache carry no owner names; Louisiana holds 2 of 64 parishes (East Baton Rouge,
+  Jefferson); NY Onondaga and Broome are about half without a city. County shortlist committed at
+  tasks/phase0-county-shortlist.md, built from the registry inventory.
+- **Phase 0 plan rewritten** to match (G1 individuals incl. no-city parcels, G2 trusts under D16, G3 no-owner
+  records across property types through the dossier, G4 unrecognized-APN probes; raw responses captured;
+  GATE A county picks, GATE B spend, GATE C findings). Tasks 1-2 stay done; Task 2 awaits review. $0 spent.
+
+---
+
+## 2026-09-21 (e): Tier 1 Phase 0, Task 2. Name-match prototype and spend guard.
+
+- Implemented three pure functions for Phase 0 measurement: stripTrustWords (removes trust words, dates, and normalization from owner names), personMatchesOwner (judges vendor person against owner, measuring two shapes: LAST FIRST order and surname-only trust stripping), and affordable (spend guard ensuring worst-case cost fits under cap).
+- Self-test verifies name matching never falls back to persons[0], covers NATURAL / SWAPPED / SURNAME_ONLY match kinds, and guard logic is inclusive of cap.
+- Mutation testing proved the refusal assertion is load-bearing: changing final return from null to 'natural' failed the Mary Jones test case, confirming the guard against false positives.
+
+---
+
+## 2026-09-21 (d): Tier 1 Phase 0, Task 1. The APN step's names are not sent to Tracerfy.
+
+- Spec section 4.2 (person step 2) corrected: the owner's first and last name travel with the step for PropTracerPRO's parser to match on them, and are not sent to Tracerfy, whose parcel endpoint takes only parcel_id, county, and state.
+- Tier 1 tracking section added at top of tasks/todo.md with Phase 0 through 4 plan checklist.
+- Phase 0 plan file committed: docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md
+- Merging `feat/contact-vendor-provenance` is tracked in the todo section as an open item for David.
+
+---
+
+## 2026-09-21 (c): THE VENDOR LABEL IS READ, NOT GUESSED, AND IT IS OURS. Phase 2.
+
+Branch `feat/contact-vendor-provenance`. **1517 passing / 75 files / 0 failing**, `tsc` 0.
+Suite Gateway verified alongside: 1461 passing / 24 skipped, unchanged, on branch
+`chore/ptp-drops-owner-contact-source`.
+
+**THE LABEL NOW READS A FACT.** `resolveOwnerContact` prefers `trace_history.contact_vendor`
+and only infers when it is absent. Name resolution is UNCHANGED: the chain still decides who
+the contact is, and the recorded vendor only decides what we call the source. A recorded
+vendor is not a contact, so a row that reached nobody still returns nulls.
+
+The inference could not be fixed by reordering. A tier 2 FastAppend hit puts its contacts in
+`trace_result`, where tier 1 already puts them, and never writes `ai_research`, so the
+FastAppend rung could not fire and the Tracerfy rung always did. Both vendors land in the same
+field; only a recorded lane separates them.
+
+**AND IT IS NO LONGER THE CUSTOMER'S.** `owner_contact_source` is removed from all five
+surfaces it reached: the v1 REST bulk status, the `bulk_job.completed` webhook that shares that
+builder, `ptp_bulk_status`, `ptp_list_traces`, and the documented ones, which were the in-app
+API docs page, `docs/AGENT_BULK_INTEGRATION.md` including its field-meaning table, and the MCP
+tool description that told a calling agent the field existed.
+
+**THE FALLBACK IS NOT DEBT.** 3,836 of 3,838 rows predate the column and came from Tracerfy
+normal search or AI Search with FastAppend. They keep the label they have always carried rather
+than acquiring one derived from nothing.
+
+**TWO MUTATIONS THAT ESCAPED, AND WHAT THEY TAUGHT.**
+
+The first: leaving `contact_vendor` in the `listTraces` spread SURVIVED, because the fixture
+did not carry the column, so there was nothing to leak. A negative assertion with no positive
+control, in a test written the same day as the lesson about exactly that.
+
+The second: dropping `contact_vendor` from the `listTraces` select also survived. Chasing it
+found the real answer, which was that selecting it there was a mistake. That tool emits the
+name and not the source, and the NAME does not depend on the vendor. Selecting it added a
+column that had to be destructured out of `rest` on pain of leaking, in order to influence a
+value the tool never returns. Reverted. The label is read from the column where it is needed,
+which is `trace_history` itself.
+
+**FENCED, ALL MUTATION-VERIFIED RED:** spreading `resolveOwnerContact` back into the
+`listTraces` payload; re-adding `owner_contact_source` to the v1 twin alone, which
+`payloadParity.test.ts` catches.
+
+**HONEST LIMIT.** With the source emitted nowhere, the corrected label has no customer-visible
+effect. `buildPerRecordResult` still calls `resolveOwnerContact` and discards the source. What
+is live is the recorded column and a function that is now right when anything internal asks it.
+
+---
+
+## 2026-09-21: THE ENTITY LANE STOPS AT FASTAPPEND. The Tracerfy salvage submit is removed.
+
+Branch `feat/contact-vendor-provenance`. **1510 passing / 75 files / 0 failing**, `tsc` 0. One
+test replaced by two, so +1 on the 1509 this branch had.
+
+**DAVID'S RULING, 2026-09-21, verbatim because it is the whole reason:** "DO NOT send a
+fastappend contact to Tracerfy. This will produce no new results and waste time. Fastappend is a
+tracerfy company and if the contact info is not found in Fastappend, it will not be found in
+Tracerfy either. Even if the contact is found in FastAppend, and that contact has no email or
+phone, it gets treated as null result and the search is free for tier 1."
+
+**WHAT WAS THERE.** When FastAppend returned a named principal but no phone and no email,
+`sweep-entity-traces` submitted a per-row Tracerfy person skip-trace on that name. 42 lines,
+including its own failure arm and a `tracerfy_job_id` write that handed the row to the status
+poller. A second vendor call, on a row the first vendor had already failed to deliver, against a
+database owned by the same company.
+
+**WHAT IT IS NOW.** FastAppend answers or it does not. No reachable contact is a null result: the
+row settles `no_match`, free, terminal. Whether a principal was named no longer changes anything,
+so the `!resolvedPerson` branch became unconditional.
+
+**HOW THIS WAS FOUND, and it was not by reading the code.** I told David the fall-through existed
+and described it as "FastAppend is asked only to name the owner and a Tracerfy person submit
+supplies the contacts afterwards". He read that and said it was not the workflow. He was right
+about the primary path and my sentence was wrong: `if (fastAppendCredit) { ... continue; }`
+terminates the row and its own comment says FastAppend's contacts "are what the user paid for".
+What I had actually been looking at was the narrower residual branch. Surfacing it got it deleted.
+
+**DEAD CODE REMOVED WITH IT:** the `submitSingleTrace` import, the `resolveOwnerContact` import
+and its call (its only consumer was picking a name for the submit), the `resolvedToPerson`
+counter and its field on the cron's JSON response, and `streetAddress`, which had no consumer
+left once the submit went. This lane now keys FastAppend on the company name and state alone.
+
+**Mutations run, both red.** Re-adding a `submitSingleTrace` call on the no-contact path reds the
+test that pins the ruling; dropping the terminal `no_match` write reds three.
+
+---
+
+## 2026-09-21: RECORD WHICH CONTACT VENDOR RAN. Phase 1 of retiring the `ai_research` name.
+
+Branch `feat/contact-vendor-provenance`. **1509 passing / 75 files / 0 failing**, baseline was
+1502, so +7. `tsc` 0. An eighth migration, `20260921_trace_history_contact_vendor.sql`, is
+APPLIED to production and read back.
+
+**THE DECISION THIS TIER TURNS ON WAS UNAUDITABLE.** An entity owner goes to FastAppend, an
+individual to Tracerfy, a trust to neither. Nothing durable recorded which way a row went.
+`executeRoute` builds a `StepReport` per step carrying the vendor and the crons dropped it at the
+database boundary. There is no vendor column, and `VENDOR_COST.FASTAPPEND_ENTITY` and
+`VENDOR_COST.TRACERFY_INSTANT` are both 0.10, so `cost` cannot separate them either.
+
+**WHAT IT COSTS TODAY, measured on a real row.** `owner_contact_source` is computed on read by
+`resolveOwnerContact`, whose FastAppend rung looks in `ai_research.business_trace_contacts`.
+Tier 2 never writes `ai_research`, so that rung cannot fire and EVERY tier 2 FastAppend hit
+reaches customers labelled `person_trace`. Trace `5ec0cf47-6844-4514-9029-53a0b6f34cd0`,
+2026-09-20: county owner `Estates Ave Properties Llc`, classified `entity`, routed
+`FASTAPPEND_ENTITY`, reported `person_trace`. The label fix is Phase 2; this is the fact it needs.
+
+**THE FACT WAS ALREADY IN MEMORY, only discarded.** So `contactVendorFrom(steps)` reads the
+reports `executeRoute` already writes rather than threading a parallel field that could disagree
+with them. `CONTACT_VENDOR_BY_STEP` is a full `Record<StepKind, ...>`, so a new step kind is a
+compile error until somebody classifies it.
+
+**ASKED, NOT PRODUCED.** A lane that ran and missed still answers the routing question, and a miss
+leaves no contact name to mislabel anyway. `skipped` is excluded: that is the record of a question
+we chose not to ask. NULL means no contact vendor was asked, the trust and unknown case.
+
+**DEVIATION FROM THE PLAN, deliberate.** The plan said to write the column at both
+`sweep-entity-traces` sites, `:436` and `:465`. Only `:436` was written. At `:465` FastAppend is
+asked only to NAME the owner and a Tracerfy person submit supplies the contacts afterwards, so
+writing `fastappend` there would name the wrong vendor. Tier 1 person rows keep NULL and their
+existing `person_trace` label, which is correct for them.
+
+**NO BACKFILL, deliberately.** The 3,838 existing rows have no recoverable vendor: the step
+reports were never persisted and cost cannot discriminate. A NULL that honestly means "not
+recorded" is the point.
+
+**Mutations run, four red and one escaped as predicted.** Classifying a dossier step as a contact
+vendor, mapping the entity lane to the wrong vendor, counting `skipped` as asked, and dropping the
+contact-step filter all went red. Last-match-instead-of-first survived and is an equivalent
+mutant: `planRoute` emits the entity step or the individual steps and never both, so first and
+last are the same answer. One test of my own was deleted rather than shipped, an assertion
+`not.toBe('dossier')` that could not fail; the dossier mutation still reds four tests without it.
+
+**FOUND WHILE READING THE ACL BACK, not fixed, not in scope.** `trace_history` is
+`anon=rDxtm/postgres`. The `D` is TRUNCATE, alongside REFERENCES and TRIGGER. The 2026-09-18
+lockdown removed insert, update and delete and left those. RLS does not gate TRUNCATE. Not
+reachable through PostgREST, which has no TRUNCATE verb, so this is a wrong grant rather than a
+live hole. Recorded for David.
+
+---
+
 ## 2026-09-19: THE DOSSIER'S SECOND LOOKUP KEY. `DOSSIER_APN` fires for the first time since it was written.
 
 `main` = `e48d5c7`, 2 commits. **1502 passing / 75 files / 0 failing**, `tsc` 0, eslint 47, build

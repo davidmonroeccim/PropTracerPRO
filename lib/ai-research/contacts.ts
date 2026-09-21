@@ -52,26 +52,62 @@ function cleanName(v: string | null | undefined): string | null {
   return t.length > 0 ? t : null;
 }
 
+/** The vendor a row RECORDED, mapped onto the label. The Tracerfy lanes are person skip
+ *  traces, so `person_trace` is the honest existing word for them and the union does not need
+ *  to grow. An unrecognised value maps to null and the inferred chain stands: a vendor name
+ *  this build does not know is not grounds for inventing a label. */
+function labelForVendor(vendor: string | null | undefined): OwnerContactSource | null {
+  if (vendor === 'fastappend') return 'fastappend';
+  if (vendor === 'tracerfy') return 'person_trace';
+  return null;
+}
+
+/**
+ * THE SOURCE IS READ WHEN IT WAS RECORDED, AND ONLY INFERRED WHEN IT WAS NOT.
+ *
+ * The chain below infers the vendor from WHICH FIELD the contacts landed in, and that
+ * inference is structurally wrong on tier 2. A tier 2 FastAppend hit puts its contacts in
+ * `trace_result` (where tier 1 already puts them) and never writes `ai_research`, so rung 1
+ * cannot fire, rung 2 always does, and every such row was reported as `person_trace`.
+ * Measured on trace 5ec0cf47-6844-4514-9029-53a0b6f34cd0: owner of record
+ * "Estates Ave Properties Llc", classified entity, routed FASTAPPEND_ENTITY, labelled
+ * person_trace. No reordering fixes it, because both vendors land in the same field.
+ *
+ * `trace_history.contact_vendor` (migration 20260921) records the lane that was actually
+ * asked, so the label now reads a fact. NAME RESOLUTION IS UNCHANGED: the chain still decides
+ * WHO the contact is, and the recorded vendor only decides what we call the source. A recorded
+ * vendor is not a contact, so a row that reached nobody still returns nulls.
+ *
+ * The fallback is not legacy debt to clear. 3,836 of 3,838 rows predate the column and came
+ * from Tracerfy normal search or AI Search with FastAppend. They keep the label they have
+ * always carried rather than acquiring one derived from nothing.
+ */
 export function resolveOwnerContact(row: {
   trace_result: TraceResult | null | undefined;
   ai_research: AIResearchResult | null | undefined;
+  contact_vendor?: string | null;
 }): ResolvedOwnerContact {
   const research = row.ai_research;
+  const recorded = labelForVendor(row.contact_vendor);
+  const resolved = (name: string, inferred: OwnerContactSource): ResolvedOwnerContact => ({
+    owner_contact_name: name,
+    owner_contact_source: recorded ?? inferred,
+  });
 
   const fastAppend = cleanName(research?.business_trace_contacts?.owner_name);
-  if (fastAppend) return { owner_contact_name: fastAppend, owner_contact_source: 'fastappend' };
+  if (fastAppend) return resolved(fastAppend, 'fastappend');
 
   const traced = cleanName(row.trace_result?.owner_name);
-  if (traced) return { owner_contact_name: traced, owner_contact_source: 'person_trace' };
+  if (traced) return resolved(traced, 'person_trace');
 
   const individual = cleanName(research?.individual_behind_business);
-  if (individual) return { owner_contact_name: individual, owner_contact_source: 'ai_research' };
+  if (individual) return resolved(individual, 'ai_research');
 
   // Last resort, and only when the owner is itself a person -- this guard is what
   // keeps an LLC out of the contact-person field.
   if (research?.owner_type === 'individual') {
     const self = cleanName(research.owner_name);
-    if (self) return { owner_contact_name: self, owner_contact_source: 'ai_research' };
+    if (self) return resolved(self, 'ai_research');
   }
 
   return { owner_contact_name: null, owner_contact_source: null };

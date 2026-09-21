@@ -214,7 +214,6 @@ Finished:
       "status": "success",
       "input_owner_name": "John Smith",
       "owner_contact_name": "John Smith",
-      "owner_contact_source": "person_trace",
       "result": {
         "owner_name": "John Smith",
         "phones": [
@@ -240,7 +239,6 @@ Finished:
       "status": "success",
       "input_owner_name": "Acme Holdings LLC",
       "owner_contact_name": "Jane Rodriguez",
-      "owner_contact_source": "fastappend",
       "result": {
         "owner_name": "Jane Rodriguez",
         "phones": [{ "number": "7045551122", "type": "mobile" }],
@@ -279,7 +277,6 @@ Finished:
       "status": "no_match",
       "input_owner_name": null,
       "owner_contact_name": null,
-      "owner_contact_source": null,
       "result": null,
       "research": null,
       "contacts": null,
@@ -302,7 +299,6 @@ Per-record fields:
 | `status` | `success`, `no_match` or `error` |
 | `input_owner_name` | What you sent in, if anything. The company or the person you asked about |
 | `owner_contact_name` | The human resolved behind it. This is the point of the trace. `null` when no human was resolved, never the company name |
-| `owner_contact_source` | Where that name came from: `fastappend` from the business database, `person_trace` from the delivered skip trace, `ai_research` when it came from the principal stored on the record. `null` when there is no name |
 | `result` | The skip-trace output with phones and emails, or `null` |
 | `research` | The stored record for the row, when it has one. `null` otherwise. Do not depend on it |
 | `contacts` | Top-level alias for `research.business_trace_contacts` |

@@ -483,7 +483,6 @@ export default function ApiDocsPage() {
       "status": "success",
       "input_owner_name": "Extra Space Storage LLC",   // the COMPANY you asked about
       "owner_contact_name": "Joseph Margolis",         // the PERSON resolved behind it
-      "owner_contact_source": "fastappend",            // fastappend | person_trace | ai_research
       "result": {
         "owner_name": "Joseph Margolis",
         "phones": [{ "number": "9196249818", "type": "mobile" }],
@@ -509,7 +508,6 @@ export default function ApiDocsPage() {
       "status": "no_match",
       "input_owner_name": null,
       "owner_contact_name": null,
-      "owner_contact_source": null,
       "result": null,
       "research": null,
       "contacts": null,
