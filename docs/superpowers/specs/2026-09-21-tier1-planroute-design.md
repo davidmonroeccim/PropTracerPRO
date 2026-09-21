@@ -55,6 +55,7 @@ lookups this design uses.
 | D15 | When the dossier finds an INDIVIDUAL owner, the contacts come from a second Tracerfy lookup on that owner's name, name-matched (D6), not from the dossier's own contacts block (which carries no name, so the owner test cannot run on it). David: "2. Second lookup." |
 | D16 | A trust or unreadable name that leaves no first name or initial once the trust words are removed goes to FastAppend as an entity; no person step runs on it. David: "If no first name or initial send to fastappend as an entity." |
 | D17 | Multifamily records come from the registry, not MPS. When the registry names no owner, the property gets a dossier search (the Full Property Trace), even if MPS has an owner name, and the user is told it went that way. David: "The multifamily records are coming from the registry NOT MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user needs to be notified of that." |
+| D18 | Name order is fixed in Phase 1, in both the Tracerfy request and the name match, using the order each county's own data shows (a county that stores "SMITH JOHN T" stores its two-word names LAST FIRST too). Phase 0 measures the order per county. Today `splitPersonName` reads any two-word name as FIRST LAST (lib/routing/ownerRoute.ts:487-490). David: "yes to A3". |
 
 ## 3. Architecture
 

@@ -19,7 +19,7 @@
 > MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user
 > needs to be notified of that." (spec D17; the Phase 0 multifamily sample must be REGISTRY parcels
 > with no owner, not MPS rows the registry cannot find). A3: he asked whether name order is getting
-> FIXED or only measured; answer pending. A4: "Do not use those 2 states [IN, FL]. Id 2 states where
+> FIXED or only measured; David then said "yes to A3": spec D18, Phase 1 fixes it per county. A4: "Do not use those 2 states [IN, FL]. Id 2 states where
 > the test matters most, that can find defects, not assume it should all pass."
 > **Sampling rule, David, 2026-09-21, for EVERY Phase 0 sample (individuals too):** registry coverage
 > required, chosen to FIND DEFECTS: "I don't want like you did in the previous context where kept testing
