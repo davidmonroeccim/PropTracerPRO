@@ -15,6 +15,13 @@ markets or property types."
 require registry coverage, and pick markets and property types where the path is most likely to break, with
 the recorded reason for each. A sample chosen because it is known to pass proves nothing new.
 
+**Same day, same lesson, applied wrong.** I repeated "markets and property types" back to David and then
+ran a state check built only around multifamily. David: "Why are you so focused on Multifamily? I said
+earlier that I wanted other property types tested." The rule covers EVERY sample group, not the one
+under discussion. And I reported Louisiana as having "0 properties" from four parishes; the registry
+holds two of 64 (East Baton Rouge 22033, Jefferson 22051). Report what was measured, not a conclusion
+wider than the query.
+
 ---
 
 ## L-022: A decision that lives only in a conversation is lost at the next context change (2026-09-21)

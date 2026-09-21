@@ -36,6 +36,10 @@
 > Washington, Cache: EVERY parcel has no city and no ZIP; Washington has 4,308 multifamily parcels, all
 > with no owner, 2,503 with an APN. PLAN DEFECT found by this: the plan's individual sample REQUIRES a
 > city, so it never tests the no-city APN path this whole design exists for.
+> **Louisiana, all 64 parish FIPS counted:** the registry holds only East Baton Rouge (22033, 200,163) and
+> Jefferson (22051, 144,894). **David, 2026-09-21: every sample group spans PROPERTY TYPES, not just
+> multifamily** ("Why are you so focused on Multifamily? I said earlier that I wanted other property
+> types tested").
 >
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
