@@ -17,8 +17,8 @@
 > path; the eleven GATE A questions (and PF-1, PF-2) wait for the post-Phase-1 test. Tasks 1-2 stay (931929b
 > reviewed; its Haiku trailer left as is, a process call told to David). Task 3's selector
 > (tasks/research-scripts/phase0/select_samples.py) is UNCOMMITTED and not used by the small run; keep it for the
-> later test. DONE since: small runner committed (9769245, tasks/research-scripts/phase0/run-small.ts, under
-> review); 8 records picked read-only into tasks/research-test/phase0/small-sample.json (NY Broome individual
+> later test. DONE since: small runner committed (9769245 + fix a958e34, tasks/research-scripts/phase0/run-small.ts, REVIEWED CLEAN;
+> was under review); 8 records picked read-only into tasks/research-test/phase0/small-sample.json (NY Broome individual
 > commercial by address; NY Monroe LLC commercial; LA East Baton Rouge individual multifamily, no city, APN; OH
 > Summit LLC multifamily, no city; MN Ramsey absent-parcel probe; dossier MD Wicomico commercial, UT Washington
 > multifamily, CA Shasta rural land). `--plan` worst case $1.40. NEXT: David names the amount, write
