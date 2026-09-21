@@ -4,6 +4,18 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-026: Frustration is not an instruction to stop (2026-09-21)
+
+**What happened.** David said the planning was taking too long and plans were getting lost across context changes.
+I stopped the Phase 1 plan writer. David: "I didn't ask you to stop. Go back to completing the update on the plan we
+just decided on. I'm just bringing this to your attention."
+
+**The rule.** When David voices frustration, keep executing what he last decided and fix the behaviour he named (here:
+do not reopen settled decisions, keep the plan proportionate, write state to the handoff so nothing is lost at a
+context change). Stop work only when he says stop.
+
+---
+
 ## L-025: Describe OUR gates as ours, and never offer to keep what David deprecated (2026-09-21)
 
 **What happened.** Planning Phase 1 I told David "Every Full Property Trace today must have a street and a city",
