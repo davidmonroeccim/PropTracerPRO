@@ -10,8 +10,9 @@
 > `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md`. Nothing has been spent.
 >
 > **Where Phase 0 stands.** Task 1 DONE (1cfb222, dd88bf4). Task 2 DONE but NOT REVIEWED (931929b):
-> review it first. Then GATE A: David names the counties, records per county and the name-order add-on
-> (proposal below). Nothing that touches the registry for sampling, and nothing that spends, runs before
+> review it first. Then GATE A: David answers EVERY GATE A question in the plan by name (counties, records
+> per county, no-city records per county, the name-order add-on cap, street format, G3 trust owners, property
+> types, trusts without an APN, "ESTATE OF" names, the three-failure stop). Proposal below. Nothing that touches the registry for sampling, and nothing that spends, runs before
 > his named answer.
 >
 > **The search types, settled (David's vocabulary: Normal, Advanced, Dossier).**
