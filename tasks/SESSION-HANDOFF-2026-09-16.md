@@ -2,7 +2,10 @@
 
 > # READ FIRST. STATE AS OF 2026-09-21 EVENING. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
-> **Branch `feat/contact-vendor-provenance`** (unmerged, unpushed; merging is David's call). Spec:
+> **MERGED 2026-09-21 night on David's go ("go ahead and merge"): `feat/contact-vendor-provenance` -> `main` at
+> 95db059 (--no-ff), branch deleted. NOT PUSHED: local main is ahead of origin/main by b02f82d (older Tracerfy API
+> docs commit) plus this merge; a push deploys 727bae2, d462ab6, 98424af to production and needs David's go.
+> Verified before and after: vitest 1517 passing / 75 files, tsc 0, eslint 47 (baseline), next build OK.** Spec:
 > `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, decisions **D1-D18** (D13-D18 added
 > 2026-09-21 afternoon in David's words; they win over anything older). Phase 0 plan:
 > `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md` (REWRITTEN 2026-09-21 evening to match
@@ -26,7 +29,8 @@
 > FastAppend LLCs "Company not found"; 2 dossier individuals whose D15 second lookup missed while the dossier's own
 > contacts block had phones and emails. DAVID DECIDED (spec D21, "c then b"): the dossier second lookup tries every owner named and, with no
 > street or city, the owner's mailing address by name; only if all miss, the dossier's own contacts labelled not
-> name-verified. He then said "go ahead and merge" (this branch into main; NOT a push). Next: Phase 1 plan for his approval. (Was: write
+> name-verified. Merged (see top). Next: Phase 1 plan for his approval; D21 needs a phase home (it changes
+> executeRoute pass 2, which is live Tier 2 code), to be put to him in the plan. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
