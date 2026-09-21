@@ -29,6 +29,13 @@
 > New York (municipal city, attacks the address key) and Louisiana (parishes, attacks the APN key);
 > Utah (no ZIP) as the alternative. David has not picked yet. A3: asked whether to add a Phase 1
 > name-order fix to the spec; no answer yet.
+> **Registry coverage, measured 2026-09-21 (read-only, counts only):** NY Onondaga 181,909 parcels
+> (89,754 no city), Monroe 267,414 (358 no city), Broome 85,058 (56,804 no city), Oneida 105,058 (17,412
+> no city); NY multifamily parcels with NO owner: 0 in all four. LA: Lafayette, Caddo, Calcasieu, Ouachita
+> have 0 parcels; parcels_la is ~345k rows, the first 200k East Baton Rouge (22033). UT Weber, Utah,
+> Washington, Cache: EVERY parcel has no city and no ZIP; Washington has 4,308 multifamily parcels, all
+> with no owner, 2,503 with an APN. PLAN DEFECT found by this: the plan's individual sample REQUIRES a
+> city, so it never tests the no-city APN path this whole design exists for.
 >
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
