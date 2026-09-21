@@ -15,6 +15,13 @@
 > A4 spread the 10 multifamily samples across states (plan Task 4 `mf.slice(0, MF_TOTAL)` takes IN and FL
 > only). Do not dispatch Task 3+ until David answers. Task 2 (931929b) still needs its review.
 >
+> **David's answers so far:** A1 YES. A2: "The multifamily records are coming from the registry NOT
+> MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user
+> needs to be notified of that." (spec D17; the Phase 0 multifamily sample must be REGISTRY parcels
+> with no owner, not MPS rows the registry cannot find). A3: he asked whether name order is getting
+> FIXED or only measured; answer pending. A4: "Do not use those 2 states [IN, FL]. Id 2 states where
+> the test matters most, that can find defects, not assume it should all pass."
+>
 > **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
 > Tracerfy's INSTANT named lookup. David understood Tier 1 had moved to ADVANCED. Nobody told him the

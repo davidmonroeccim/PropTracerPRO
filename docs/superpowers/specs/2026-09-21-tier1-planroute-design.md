@@ -54,6 +54,7 @@ lookups this design uses.
 | D14 | Tracerfy never supplies an entity's contacts. David: "The original goal of the Dossier is to test for owner is invidual or entity. If individual, tracefy gets the results. If entity, the owner name is sent to fastappend for results, it does NOT stay in tracerfy. Tracerfy is NOT to give results for entities, ONLY id if is an entity." |
 | D15 | When the dossier finds an INDIVIDUAL owner, the contacts come from a second Tracerfy lookup on that owner's name, name-matched (D6), not from the dossier's own contacts block (which carries no name, so the owner test cannot run on it). David: "2. Second lookup." |
 | D16 | A trust or unreadable name that leaves no first name or initial once the trust words are removed goes to FastAppend as an entity; no person step runs on it. David: "If no first name or initial send to fastappend as an entity." |
+| D17 | Multifamily records come from the registry, not MPS. When the registry names no owner, the property gets a dossier search (the Full Property Trace), even if MPS has an owner name, and the user is told it went that way. David: "The multifamily records are coming from the registry NOT MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user needs to be notified of that." |
 
 ## 3. Architecture
 
