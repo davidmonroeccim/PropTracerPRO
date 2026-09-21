@@ -6,7 +6,8 @@ Plans are written one phase at a time, each after the previous phase's results.
 Decisions D1-D18 in the spec win over anything older; D13-D18 were added 2026-09-21 evening. Read the top
 block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
 
-- [ ] Phase 0: paid measurement, REDUCED by spec D19 (2026-09-21 night) to eight records, one per path; the
+- [x] Phase 0: paid measurement, RUN 2026-09-21 night ($0.90 of $2; report tasks/phase0-small-sample.md;
+  findings await David's decisions before any Phase 1 plan), REDUCED by spec D19 (2026-09-21 night) to eight records, one per path; the
   eleven GATE A questions wait for the post-Phase-1 test. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`
   (rewritten 2026-09-21 evening for D13-D18)
   - [x] Task 1: spec wording and this section (1cfb222, dd88bf4)

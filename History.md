@@ -4,6 +4,23 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (h): Tier 1 Phase 0 live run, eight records, one per path (spec D19, D20).
+
+- David approved $2 (D20). Spent $0.90: Tracerfy 40 credits ($0.80), matching the account balance move
+  exactly (10,649 to 10,609), plus one FastAppend hit ($0.10). Report: tasks/phase0-small-sample.md (counts
+  only); raw requests and responses in tasks/research-test/phase0/ (gitignored).
+- Worked: Tier 1 Instant by address (NY Broome, name matched, 4 phones); Tier 1 APN lookup with no city (LA
+  East Baton Rouge, parish name accepted, name matched, 9 phones 2 emails); dossier on a UT Washington
+  multifamily (APN key) then FastAppend on the entity owner (3 people, 6 phones 3 emails); an absent parcel
+  id came back as an ordinary free miss.
+- Did not find: FastAppend on two Tier 1 LLCs (NY Monroe, OH Summit) answered 404 "Company not found",
+  free, treated by production as a miss. Dossier found individual owners on MD Wicomico (address key; the APN
+  key missed) and CA Shasta (APN key), but the second lookup (D15) missed on both, while the dossier's own
+  contacts block held 10 phones 4 emails and 7 phones 5 emails.
+- Found while picking: registry parcel ids for MN Ramsey carry a "27123-" prefix and NY ids are 26 digits;
+  production sends them as stored. The registry busy check must ignore supabase_admin/postgres_exporter.
+- Latency: most lookups 0.2 to 2 s; one Instant second lookup took 20.4 s; FastAppend up to 5.2 s.
+
 ## 2026-09-21 (g): Tier 1 Phase 0 cut to one record per path (spec D19); small runner written.
 
 - David cut Phase 0 to eight records, one per lookup path; the eleven GATE A questions wait for the test after

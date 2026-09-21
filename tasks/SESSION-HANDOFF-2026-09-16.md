@@ -21,7 +21,10 @@
 > was under review); 8 records picked read-only into tasks/research-test/phase0/small-sample.json (NY Broome individual
 > commercial by address; NY Monroe LLC commercial; LA East Baton Rouge individual multifamily, no city, APN; OH
 > Summit LLC multifamily, no city; MN Ramsey absent-parcel probe; dossier MD Wicomico commercial, UT Washington
-> multifamily, CA Shasta rural land). `--plan` worst case $1.40. David approved $2 (spec D20: "$2, go ahead and run it"). NEXT: write
+> multifamily, CA Shasta rural land). `--plan` worst case $1.40. David approved $2 (spec D20: "$2, go ahead and run it"). RUN DONE: $0.90 spent, report tasks/phase0-small-sample.md,
+> History (h). 4 of 8 worked (Instant by address, APN no city, dossier then FastAppend, absent-APN free miss); 2 Tier 1
+> FastAppend LLCs "Company not found"; 2 dossier individuals whose D15 second lookup missed while the dossier's own
+> contacts block had phones and emails. AWAITING DAVID'S DECISIONS on the findings; no Phase 1 plan before. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
