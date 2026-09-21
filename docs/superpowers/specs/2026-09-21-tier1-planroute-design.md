@@ -56,6 +56,7 @@ lookups this design uses.
 | D16 | A trust or unreadable name that leaves no first name or initial once the trust words are removed goes to FastAppend as an entity; no person step runs on it. David: "If no first name or initial send to fastappend as an entity." |
 | D17 | Multifamily records come from the registry, not MPS. When the registry names no owner, the property gets a dossier search (the Full Property Trace), even if MPS has an owner name, and the user is told it went that way. David: "The multifamily records are coming from the registry NOT MPS. So if MPS has an owner name and the registry does not, it needs a dossier search and the user needs to be notified of that." |
 | D18 | Name order is fixed in Phase 1, in both the Tracerfy request and the name match, using the order each county's own data shows (a county that stores "SMITH JOHN T" stores its two-word names LAST FIRST too). Phase 0 measures the order per county. Today `splitPersonName` reads any two-word name as FIRST LAST (lib/routing/ownerRoute.ts:487-490). David: "yes to A3". |
+| D19 | (Added 2026-09-21 night.) Phase 0 is a small sample, one record per path, to learn whether each path works. David: "No. That doesn't make any sense. You only need a small sample to know if it works or not. Pick one for address on Tier 1 to both tracerfy and fastappend each, and one for APN on tier 1 for both and one for nothing found on tier 1. Pick three for dossier, one for a commercial, one for multifamily, and one for land or rural. Reserve the 11 questions for the test to see if the changes worked. So this is halfway between b and c." The eleven GATE A questions in the Phase 0 plan move to the test after the Phase 1 changes. (Interpretation, not his words, put to him for confirmation: FastAppend takes no APN, so its "APN" record is an entity-owned parcel with no city; "nothing found" is a parcel id in the county's real format that no parcel in that county carries, sent to the APN lookup; the dossier records are registry parcels with no owner on record, run through production planRoute and executeRoute.) |
 
 ## 3. Architecture
 
@@ -349,7 +350,7 @@ merge first; this design builds on them.
 
 Each phase ends with something David can see, and work stops for his go-ahead before the next.
 
-**Phase 0, paid measurement.** No code changes. Every lookup is logged with its raw response under
+**Phase 0, paid measurement.** REVISED by D19 (2026-09-21 night): eight records, one per path (Tier 1 by address to Tracerfy and to FastAppend, Tier 1 with no city to the APN lookup and to FastAppend, one Tier 1 lookup that finds nothing, and three dossier records: commercial, multifamily, land or rural). The eleven GATE A questions move to the test after the Phase 1 changes. The bullets below are the superseded larger design. No code changes. Every lookup is logged with its raw response under
 `tasks/research-test/` (gitignored). David approves the spend before it starts; estimated at most $15
 (misses free; person and company hits $0.10; county records $0.20). (Revised 2026-09-21 evening for
 D13-D18; the plan file carries the detail and the three gates: county picks, spend, findings.)

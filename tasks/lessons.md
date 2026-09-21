@@ -4,6 +4,30 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-024: Size the sample to the question. "Does it work" needs one record per path (2026-09-21)
+
+**What happened.** Phase 0 exists to learn whether each lookup path works before Phase 1 builds on it. The plan
+carried into this session was 2,361 lines: 44 or more records, a selector, a builder, a runner, an analyzer,
+three gates and eleven GATE A questions about sampling knobs, for $13.50 to $33.10. I ran a pre-flight scan on it,
+reviewed a task, and handed David thirteen questions. David: "Why are worrying about the testing right now when we
+haven't even made any changes yet?" and then "No. That doesn't make any sense. You only need a small sample to know
+if it works or not." He set it at one record per path, eight in all (spec D19), and moved the eleven questions to
+the test after the changes.
+
+**Why it happened.** I inherited the plan's scale and checked it for correctness, never for proportion. Every
+earlier correction (L-021 to L-023) pushed toward more rigour, and more rigour read as the safe direction. A rate
+across counties is a Phase-after-the-build question; a yes/no on whether a path returns the owner is answered by
+one real record per path.
+
+**The rules.**
+- Before executing a measurement plan, ask what decision it feeds and the smallest sample that makes that
+  decision. If the answer is "does this path work", it is one record per path.
+- A plan's size is itself a finding. When the questions for David outnumber the records being measured, stop and
+  say so before sending the questions.
+- Put rate and coverage studies after the change they judge, where they test the thing that will ship.
+
+---
+
 ## L-023: A property that already passed is spent evidence (2026-09-21)
 
 **What happened.** Verifying the gateway on 2026-09-20, the same Pinole parcel was picked again because it

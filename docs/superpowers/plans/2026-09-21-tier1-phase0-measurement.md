@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status, 2026-09-21 night: Tasks 3 to 7 are SUPERSEDED by spec D19.** David cut Phase 0 to eight records, one
+per path (Tier 1 by address to Tracerfy and to FastAppend, Tier 1 with no city to the APN lookup and to FastAppend,
+one Tier 1 lookup that finds nothing, three dossier records: commercial, multifamily, land or rural), and moved the
+eleven GATE A questions to the test after the Phase 1 changes. Tasks 3 to 7 below are kept for that later test.
+
 **Status, 2026-09-21 afternoon rewrite.** Tasks 1 and 2 are DONE and kept below as the record (Task 1 =
 1cfb222 + dd88bf4; Task 2 = 931929b, review still pending). Tasks 3 to 7 were rewritten after David's
 decisions D13 to D18 (spec Section 2) and his sampling rules. Nothing has been spent.

@@ -9,18 +9,17 @@
 > D13-D18). County shortlist: `tasks/phase0-county-shortlist.md`. SDD ledger (gitignored):
 > `.superpowers/sdd/2026-09-21-tier1-phase0-measurement/progress.md`. Nothing has been spent.
 >
-> **Where Phase 0 stands (updated 2026-09-21 late).** Task 1 DONE (1cfb222, dd88bf4). Task 2 DONE and
-> REVIEWED (931929b): code identical to the plan, mutation test re-verified; its commit trailer names Haiku
-> (the model that wrote it) and was left as is, a process call told to David. The pre-flight scan of the
-> rewritten plan is in the SDD ledger (below). Task 3's selector script is written (Steps 1-2, checked: only the two process changes) but NOT run, NOT
-> committed (it commits after GATE A). GATE A was put to David with two pre-flight questions (PF-1 runner
-> spend safety: over-count unclear vendor answers, stop on a call above its worst case, tie GATE B to the
-> sample, a --resume after a stop; PF-2 the G4 probe id format). AWAITING HIS ANSWERS. David answers EVERY
-> GATE A question in the plan by name (counties, records per county, no-city records per county, the
-> name-order add-on cap, street format, G3 trust owners, property types, trusts without an APN, "ESTATE OF"
-> names, the three-failure stop). Nothing that touches the registry for sampling, and nothing that spends,
-> runs before his named answer. His answers go into the spec's decisions table (D19 on) in his words, into
-> this block and into gate-a.json, before anything runs.
+> **Where Phase 0 stands (updated 2026-09-21 night). D19 REPLACED THE BIG SAMPLE.** David: "No. That doesn't
+> make any sense. You only need a small sample to know if it works or not. Pick one for address on Tier 1 to both
+> tracerfy and fastappend each, and one for APN on tier 1 for both and one for nothing found on tier 1. Pick three
+> for dossier, one for a commercial, one for multifamily, and one for land or rural. Reserve the 11 questions for
+> the test to see if the changes worked. So this is halfway between b and c." So Phase 0 is EIGHT records, one per
+> path; the eleven GATE A questions (and PF-1, PF-2) wait for the post-Phase-1 test. Tasks 1-2 stay (931929b
+> reviewed; its Haiku trailer left as is, a process call told to David). Task 3's selector
+> (tasks/research-scripts/phase0/select_samples.py) is UNCOMMITTED and not used by the small run; keep it for the
+> later test. Next: pick the 8 registry records (read-only), a small runner, show David the calls and worst case,
+> he names the amount, run, report. Interpretations put to him: FastAppend has no APN key, so its "APN" record is an
+> entity parcel with no city; "nothing found" = a real-format parcel id absent from the county, sent to the APN lookup.
 >
 > **The search types, settled (David's vocabulary: Normal, Advanced, Dossier).**
 > - Tier 1 individual WITH a city: Tracerfy **Instant** `trace/lookup/`, find_owner:false + name, 5 credits
@@ -51,7 +50,7 @@
 > memory. Chosen to FIND DEFECTS, across property types, never re-using a tested parcel or county
 > (tasks/research-test/). Not IN, not FL. Secondary/tertiary only. Include no-city parcels (APN path).
 >
-> **GATE A proposal (David has NOT picked).** Individuals and trusts: NY Monroe, NY Broome, LA East Baton
+> **SUPERSEDED BY D19, kept for the post-Phase-1 test. GATE A proposal (David has NOT picked).** Individuals and trusts: NY Monroe, NY Broome, LA East Baton
 > Rouge, LA Jefferson, OH Summit, OH Muskingum, WI Milwaukee, MN Ramsey. No owner: UT Washington, TX
 > Hidalgo, AL Jefferson. 4 per county. Worst case $13.50 (32 x $0.20 + 10 trusts x $0.30 + 12 x $0.30 +
 > 5 probes x $0.10); about $23.50 at 8 per county; name-order add-on +$0.80. Expected about $9 (estimate
