@@ -4,6 +4,14 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-21 (e): Tier 1 Phase 0, Task 2. Name-match prototype and spend guard.
+
+- Implemented three pure functions for Phase 0 measurement: stripTrustWords (removes trust words, dates, and normalization from owner names), personMatchesOwner (judges vendor person against owner, measuring two shapes: LAST FIRST order and surname-only trust stripping), and affordable (spend guard ensuring worst-case cost fits under cap).
+- Self-test verifies name matching never falls back to persons[0], covers NATURAL / SWAPPED / SURNAME_ONLY match kinds, and guard logic is inclusive of cap.
+- Mutation testing proved the refusal assertion is load-bearing: changing final return from null to 'natural' failed the Mary Jones test case, confirming the guard against false positives.
+
+---
+
 ## 2026-09-21 (d): Tier 1 Phase 0, Task 1. The APN step's names are not sent to Tracerfy.
 
 - Spec section 4.2 (person step 2) corrected: the owner's first and last name travel with the step for PropTracerPRO's parser to match on them, and are not sent to Tracerfy, whose parcel endpoint takes only parcel_id, county, and state.
