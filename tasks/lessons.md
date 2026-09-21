@@ -4,6 +4,25 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-025: Describe OUR gates as ours, and never offer to keep what David deprecated (2026-09-21)
+
+**What happened.** Planning Phase 1 I told David "Every Full Property Trace today must have a street and a city",
+meaning our validation rejects a city-less record before the dossier runs. He read it, correctly, as a claim that
+the dossier needs an address: "This not correct. You do not need a property address to do a dossier search, only
+an APN/property_id." In the same message I asked whether to keep the API single "processing, then poll" shape for
+integrators. David: "This is the old code and was depricated long ago. What the hell are you doing?" And I proposed
+testing parcel-id formats in two states; David: "Testing a single state is irrelevant because every county/state is
+going to be different."
+
+**The rules.**
+- Say whose constraint it is. "Our code rejects a record with no city at the door" is true; "a trace must have a
+  city" states a vendor limit that does not exist.
+- When code David has deprecated is still live, say so in one line with the file:line and plan its removal. Never
+  offer a choice to preserve it.
+- A per-county property (id format, name order) is not settled by sampling one or two states; do not propose it.
+
+---
+
 ## L-024: Size the sample to the question. "Does it work" needs one record per path (2026-09-21)
 
 **What happened.** Phase 0 exists to learn whether each lookup path works before Phase 1 builds on it. The plan

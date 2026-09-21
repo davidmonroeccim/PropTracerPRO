@@ -30,8 +30,10 @@
 > FastAppend LLCs "Company not found"; 2 dossier individuals whose D15 second lookup missed while the dossier's own
 > contacts block had phones and emails. DAVID DECIDED (spec D21, "c then b"): the dossier second lookup tries every owner named and, with no
 > street or city, the owner's mailing address by name; only if all miss, the dossier's own contacts labelled not
-> name-verified. Merged (see top). Next: Phase 1 plan for his approval; D21 needs a phase home (it changes
-> executeRoute pass 2, which is live Tier 2 code), to be put to him in the plan. (Was: write
+> name-verified. Merged and pushed (see top). Phase 1 scope answers recorded as spec D22-D26 (single traces keep name
+> handling; API single and bulk send the parcel id when there is no city; dossier needs only the APN; cache reuse only
+> on a matching owner; the API poll contract is deprecated and removed). D21 is built whole in Phase 1. Phase 1 code
+> map: .superpowers/sdd/phase1-research.md (gitignored). NEXT: write the Phase 1 plan, bring it to David. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
