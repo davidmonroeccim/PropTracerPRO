@@ -12,7 +12,7 @@
 > **Where Phase 0 stands (updated 2026-09-21 late).** Task 1 DONE (1cfb222, dd88bf4). Task 2 DONE and
 > REVIEWED (931929b): code identical to the plan, mutation test re-verified; its commit trailer names Haiku
 > (the model that wrote it) and was left as is, a process call told to David. The pre-flight scan of the
-> rewritten plan is in the SDD ledger (below). Task 3's selector script is being written (Steps 1-2) but NOT run, NOT
+> rewritten plan is in the SDD ledger (below). Task 3's selector script is written (Steps 1-2, checked: only the two process changes) but NOT run, NOT
 > committed (it commits after GATE A). GATE A was put to David with two pre-flight questions (PF-1 runner
 > spend safety: over-count unclear vendor answers, stop on a call above its worst case, tie GATE B to the
 > sample, a --resume after a stop; PF-2 the G4 probe id format). AWAITING HIS ANSWERS. David answers EVERY
