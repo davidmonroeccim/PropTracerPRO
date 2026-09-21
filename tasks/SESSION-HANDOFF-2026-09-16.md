@@ -1,8 +1,21 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # AMENDED 2026-09-21 (afternoon). READ THIS FIRST. THE TIER 1 SEARCH TYPE IS UNRESOLVED.
+> # AMENDED 2026-09-21 (afternoon). READ THIS FIRST.
 >
-> **Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
+> **RESOLVED LATER THE SAME AFTERNOON. David decided: Tier 1 person lookup with a city = INSTANT;
+> dossier-found individual = SECOND Tracerfy lookup, name-matched; no first name or initial = FastAppend
+> as an entity; Tracerfy never supplies an entity's contacts.** All four are spec decisions D13-D16, in
+> his words. The block below is kept as the record of how it went wrong.
+>
+> **NEXT: Phase 0 plan amendments A1-A4, awaiting David's approval (not yet applied):** A1 trusts that
+> strip to no first name or initial get FastAppend only (D16); A2 the multifamily second lookup is judged
+> by the name test, so the runner saves the raw vendor response and the analyzer applies D6 (today's
+> parser takes persons[0], client.ts:602); A3 read-only registry count of owner-name shapes in the 10
+> counties before sampling (Instant sends the split name, splitPersonName reads two words as FIRST LAST);
+> A4 spread the 10 multifamily samples across states (plan Task 4 `mf.slice(0, MF_TOTAL)` takes IN and FL
+> only). Do not dispatch Task 3+ until David answers. Task 2 (931929b) still needs its review.
+>
+> **(Original block.) Do not run Phase 0.** Its plan (`docs/superpowers/plans/2026-09-21-tier1-phase0-measurement.md`)
 > and the spec (`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, fbd1891) are built on
 > Tracerfy's INSTANT named lookup. David understood Tier 1 had moved to ADVANCED. Nobody told him the
 > design used instant, or why. Reconcile with David first; record his answer in the spec's decisions

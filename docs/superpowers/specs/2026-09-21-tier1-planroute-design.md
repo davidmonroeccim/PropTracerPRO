@@ -50,6 +50,10 @@ lookups this design uses.
 | D10 | Every record reports an outcome code, a sentence, and (when found) which key found the owner. |
 | D11 | The gateway NEVER sends PropTracerPRO an owner name from MPS. The owner comes from the registry only (Section 9). |
 | D12 | The multifamily fallback (address and city, no owner, run as a Full Property Trace) stays behind the gateway's `trace_unknown_owners` opt-in. A registry parcel that names no owner gets the same fallback as one that is not found. |
+| D13 | (Added 2026-09-21 afternoon.) The Tier 1 person lookup when the record has a city is Tracerfy's INSTANT lookup, `POST /v1/api/trace/lookup/` with `find_owner:false` and the owner's name, 5 credits per hit. Not Advanced (the batch `POST /v1/api/trace/` with `trace_type: 'advanced'`, 2 credits per lead, batch only, still requires a city) and not Normal (today's batch default). David: "1. Instant". The design session never offered Advanced; see lessons L-022. |
+| D14 | Tracerfy never supplies an entity's contacts. David: "The original goal of the Dossier is to test for owner is invidual or entity. If individual, tracefy gets the results. If entity, the owner name is sent to fastappend for results, it does NOT stay in tracerfy. Tracerfy is NOT to give results for entities, ONLY id if is an entity." |
+| D15 | When the dossier finds an INDIVIDUAL owner, the contacts come from a second Tracerfy lookup on that owner's name, name-matched (D6), not from the dossier's own contacts block (which carries no name, so the owner test cannot run on it). David: "2. Second lookup." |
+| D16 | A trust or unreadable name that leaves no first name or initial once the trust words are removed goes to FastAppend as an entity; no person step runs on it. David: "If no first name or initial send to fastappend as an entity." |
 
 ## 3. Architecture
 
@@ -116,8 +120,9 @@ evidence and cost, not accuracy.
 **Trust.** The person steps above, run on the name with the trust words removed ("John Smith Revocable
 Trust" becomes John Smith), then `FASTAPPEND_ENTITY` on the full trust name if both person steps missed.
 The trust words are a fixed, tested list (TRUST, REVOCABLE, IRREVOCABLE, LIVING, FAMILY, TRUSTEE, TTEE,
-TR, U/A, DTD and a trailing date). A name that leaves only a surname ("Smith Family Trust") is matched
-on the surname alone; Phase 0 measures how often that is right.
+TR, U/A, DTD and a trailing date). A name that leaves no first name or initial ("Smith Family Trust"
+leaves only SMITH) skips the person steps and goes straight to `FASTAPPEND_ENTITY` on the full trust
+name (D16).
 
 **Unknown** (one word, or five or more words). The same ladder as a trust, with the name as given.
 
@@ -407,7 +412,6 @@ settleBulkJob).
 - **Vendor cost rises for people.** A person hit costs 5 credits ($0.10) instead of the batch's 1 credit
   ($0.02). A record where the APN lookup returns strangers and the address lookup then hits costs $0.20
   against a $0.15 Pro charge.
-- **Surname-only trust names** can match the wrong member of a family.
 - **The shared rate budget** is new infrastructure; a bug in it either starves Tier 2 or trips the limit.
 - **Latency is unmeasured**, so the 2 to 5 minute figure for 500 records is a ceiling estimate until
   Phase 0.
