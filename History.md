@@ -14,7 +14,8 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 - rowSkipReason reads the Tier 1 outcome after the Tier 2 status and before the old queue value,
   so the single CSV download's skip_reason column carries the sentence. No new CSV columns.
 - trace.completed takes its tier from the caller and always carries found_by, outcome_code and
-  skip_reason. Mutations: all red.
+  skip_reason. Mutations: all red (8, after fix round 1 closed two coverage gaps: the
+  noContacts-excluding delivering-step search, and the is_successful guard on a stored row).
 
 ## 2026-09-22 (g): Tier 1 Phase 1, Task 6b: the dossier never supplies contacts (spec D32).
 

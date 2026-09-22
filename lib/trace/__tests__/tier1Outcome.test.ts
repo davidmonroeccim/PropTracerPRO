@@ -38,6 +38,16 @@ describe('tier1OutcomeFor (spec 7.1)', () => {
       .toBe('parcel_id')
   })
 
+  it('a contactless hit does not count as delivering: the next hit does (D27)', () => {
+    // The ladder produces exactly this shape when the address lookup matched the owner but
+    // carried no phone or email, and the parcel lookup then delivered.
+    // MUTATION: drop `&& !s.noContacts` from the delivering-step search and this reads found_by_address.
+    expect(tier1OutcomeFor(exec([
+      step('TRACERFY_INSTANT_NAMED', 'hit', { noContacts: true }),
+      step('TRACERFY_PARCEL_APN', 'hit'),
+    ], true))).toEqual({ outcome: 'found_by_parcel_id', foundBy: 'parcel_id' })
+  })
+
   it('any failed step is busy_try_again, whatever answered before it', () => {
     // MUTATION: delete the failed-step test and this reads no_match.
     expect(tier1OutcomeFor(exec([step('TRACERFY_INSTANT_NAMED', 'miss'), step('FASTAPPEND_ENTITY', 'failed')])).outcome)
@@ -169,7 +179,12 @@ describe('tier1OutcomeReason: the sentence read back off a stored row', () => {
   })
 
   it('says nothing about a row that delivered contacts, or a row with no outcome', () => {
-    expect(tier1OutcomeReason({ outcome_code: 'no_match', trace_steps: [], is_successful: true })).toBeNull()
+    // busy_try_again is sentence-producing unconditionally (it needs no trace_steps), so this
+    // is_successful:true case is the one that actually exercises the guard: the old
+    // `outcome_code: 'no_match', trace_steps: []` case stayed null even without the guard,
+    // because noMatchReason([]) is null on its own.
+    // MUTATION: delete the `row.is_successful === true` guard and this reads a sentence instead of null.
+    expect(tier1OutcomeReason({ outcome_code: 'busy_try_again', is_successful: true })).toBeNull()
     expect(tier1OutcomeReason({ outcome_code: null })).toBeNull()
   })
 })
