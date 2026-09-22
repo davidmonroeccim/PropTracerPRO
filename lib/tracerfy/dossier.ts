@@ -34,8 +34,6 @@ import {
   VendorTimeoutError,
   type VendorCallOptions,
 } from './fetchWithTimeout'
-import type { OwnerContacts } from '@/lib/routing/executeRoute'
-import { readEmails, readPhones } from './client'
 
 /** A dossier lookup key. The two modes are mutually exclusive by construction. */
 export type DossierKey =
@@ -94,12 +92,6 @@ export interface DossierResult {
   mailingAddress: DossierMailingAddress | null
   /** 10 on a hit, 0 on a miss. Read it rather than inferring the charge from `hit`. */
   creditsDeducted: number
-  /**
-   * The dossier's OWN contacts block, which carries no name (spec D21 b). Used only as the last
-   * resort after every owner's name-matched lookup missed, and always labelled not name-verified.
-   * Null when the block holds no phone and no email. Absent on a miss or a failure.
-   */
-  contacts?: OwnerContacts | null
   error?: string
 }
 
@@ -179,27 +171,15 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 /**
- * The nameless contacts block. Parsed through the SAME readPhones/readEmails the contact clients
- * in ./client.ts use on their own phones/emails arrays (identical vendor shape: an array of
- * { number, type } objects and an array of { email } objects or bare strings), so the dedupe, the
- * `type` fallback and the TRACERFY.MAX_* caps can never drift between the two call sites.
- */
-function dossierContacts(v: unknown): OwnerContacts | null {
-  if (!isRecord(v)) return null
-  const phones = readPhones(v.phones)
-  const emails = readEmails(v.emails)
-  if (!phones.length && !emails.length) return null
-  return { ownerName: null, phones, emails, mailingAddress: null }
-}
-
-/**
  * Parse a dossier response body. Pure, so it is testable without a network.
  *
  * A MISS is a success. The vendor returns { hit: false, credits_deducted: 0 } and echoes the
  * request keys back; there is no property, owners, contacts or skip_trace_hit key at all.
  *
- * `response.contacts` is surfaced as `contacts` only for the D21 (b) fallback in executeRoute: it
- * has no name, so it is never used while a name-matched lookup can still answer.
+ * `response.contacts` is deliberately not surfaced (spec D32). The dossier identifies the owner
+ * and whether it is an individual or an entity; phones and emails come ONLY from the separate
+ * Tracerfy (individual) or FastAppend (entity) call on a separate ledger line. If that call
+ * misses, the result is a true null: there is no fallback to the dossier's own contacts block.
  */
 export function parseDossierResponse(body: unknown): DossierResult {
   if (!isRecord(body)) {
@@ -245,10 +225,7 @@ export function parseDossierResponse(body: unknown): DossierResult {
       }
     : null
 
-  return {
-    success: true, hit: true, owners, property, mailingAddress, creditsDeducted,
-    contacts: dossierContacts(body.contacts),
-  }
+  return { success: true, hit: true, owners, property, mailingAddress, creditsDeducted }
 }
 
 /**

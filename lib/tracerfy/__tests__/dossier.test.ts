@@ -168,30 +168,6 @@ describe('the fidelity fence', () => {
   })
 })
 
-describe('parseDossierResponse: the contacts block (D21 b)', () => {
-  it('surfaces the nameless contacts on a hit', () => {
-    const result = parseDossierResponse(individualHit.response)
-    expect(result.contacts).toEqual({
-      ownerName: null,
-      phones: [
-        { number: '5555550100', type: 'mobile' },
-        { number: '5555550101', type: 'landline' },
-      ],
-      emails: ['redacted@example.invalid'],
-      mailingAddress: null,
-    })
-  })
-
-  it('carries none on a miss', () => {
-    expect(parseDossierResponse(missApn.response).contacts ?? null).toBeNull()
-  })
-
-  it('returns null for a block with no phone and no email', () => {
-    const body = { ...individualHit.response, contacts: { has_contact: false, phones: [], emails: [] } }
-    expect(parseDossierResponse(body).contacts).toBeNull()
-  })
-})
-
 describe('buildDossierRequest', () => {
   it('builds an APN body with a bare county name', () => {
     expect(buildDossierRequest(APN_KEY)).toEqual({

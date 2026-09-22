@@ -161,8 +161,6 @@ export function traceResultFor(execution: ExecutionResult): TraceResult | null {
     mailing_zip: useContactMailing ? null : mailing?.zip || null,
     // Same convention as parseTracerfyResult: contacts present or nothing.
     match_confidence: phones.length > 0 || emails.length > 0 ? 80 : 0,
-    // D21 (b): contacts from the dossier's nameless block after every owner's lookup missed.
-    ...(execution.contactsNameVerified === false ? { name_verified: false } : {}),
   }
 }
 

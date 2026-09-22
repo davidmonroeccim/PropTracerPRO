@@ -77,12 +77,6 @@ export interface TraceResult {
   mailing_state: string | null;
   mailing_zip: string | null;
   match_confidence: number; // 0-100
-  /**
-   * FALSE only when the contacts came from the county dossier's own contacts block after every
-   * named owner's lookup missed (spec D21 b). That block carries no name, so the owner test cannot
-   * run on it, and every surface shows it as "not name-verified". Absent on every other result.
-   */
-  name_verified?: boolean;
 }
 
 export interface TraceHistory {

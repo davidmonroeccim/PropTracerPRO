@@ -1340,19 +1340,13 @@ describe("the property-trace sweep never pushes to HighLevel", () => {
   });
 });
 
-describe("D21 in the tier 2 cron: every owner, and no dossier contacts in Phase 1", () => {
+describe("D21 (c) in the tier 2 cron: every owner, and D32, never the dossier's own contacts", () => {
   const TWO_INDIVIDUALS = {
     ...ENTITY_HIT,
     owners: [
       { first_name: "Testowner", last_name: "Placeholder", age: "00" },
       { first_name: "Secondowner", last_name: "Placeholder", age: "00" },
     ],
-    contacts: {
-      ownerName: null,
-      phones: [{ number: "5550000901", type: "mobile" }],
-      emails: [],
-      mailingAddress: null,
-    },
   };
 
   beforeEach(() => {
@@ -1367,12 +1361,11 @@ describe("D21 in the tier 2 cron: every owner, and no dossier contacts in Phase 
     expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
     expect(vi.mocked(lookupPersonTrace).mock.calls[1][0]).toMatchObject({ first_name: "Secondowner" });
     expect(finalWrite()).toMatchObject({ status: "success", is_successful: true, contact_vendor: "tracerfy" });
-    expect((finalWrite().trace_result as Record<string, unknown>).name_verified).toBeUndefined();
   });
 
-  it("does NOT return the dossier's own contacts in Phase 1, because bulk surfaces cannot show the label yet", async () => {
-    // D21 (b) is switched on by the two single routes only (ExecuteOptions.dossierContactsFallback).
-    // MUTATION: make the fallback ignore the flag and this goes red with phone_count 1.
+  it("never returns the dossier's own contacts, in any phase (spec D32)", async () => {
+    // D32 (2026-09-22) withdraws the dossier-contacts fallback entirely: phones and emails come
+    // only from the separate Tracerfy or FastAppend call, and a miss there is a true null.
     H.personContacts = { ...CONTACTS_MISS };
     await run();
     expect(lookupPersonTrace).toHaveBeenCalledTimes(2);

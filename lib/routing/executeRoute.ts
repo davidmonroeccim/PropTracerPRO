@@ -166,13 +166,6 @@ export interface ExecuteOptions {
   priorSteps?: StepReport[] | null
   /** The clock, injectable for tests. */
   now?: () => number
-  /**
-   * D21 (b): return the dossier's own nameless contacts, labelled not name-verified, when every
-   * owner's lookup missed. Only a caller whose surfaces show that label may ask: the two single
-   * routes in Phase 1. The Tier 2 cron leaves it off until Phase 2 carries the label to the CSV
-   * export, the HighLevel push and the gateway. Default false.
-   */
-  dossierContactsFallback?: boolean
 }
 
 /** A logged answer older than this is never reused; the record runs fresh instead (spec 5.2). */
@@ -205,11 +198,6 @@ export interface ExecutionResult {
   mailingAddress: DossierMailingAddress | null
   contactsFound: boolean
   contacts: OwnerContacts | null
-  /**
-   * False only when `contacts` came from the dossier's own nameless contacts block after every
-   * named owner's lookup missed (D21 b). Every surface shows it as "not name-verified".
-   */
-  contactsNameVerified: boolean
   tier: BillingTier
   /** Total dollars spent at vendors, to the cent. The caller bills its own price, not this. */
   vendorSpend: number
@@ -655,7 +643,6 @@ export async function executeRoute(
     mailingAddress: null,
     contactsFound: false,
     contacts: null,
-    contactsNameVerified: true,
     tier: plan.tier,
     vendorSpend: 0,
     steps: [],
@@ -712,7 +699,9 @@ export async function executeRoute(
   // From the NAME. Never from property.corporate_owned, which lies.
   result.ownerType = classifyOwnerName(discovered)
 
-  // ---- Pass 2 (D21). Every owner the dossier names, each classified on its own. ----
+  // ---- Pass 2 (D21 c, D32). Every owner the dossier names, each classified on its own. If every
+  // owner's lookup misses, the result is a TRUE NULL: the dossier's own contacts block (D21 b) is
+  // withdrawn (spec D32, 2026-09-22) and is never used, in any phase, by any caller. ----
   //
   // ZIP BACKFILL. The $0.20 we just spent bought the property's own zip, and the contact step is
   // the one that decides whether the customer gets a phone number at all: Tracerfy calls the zip
@@ -737,8 +726,7 @@ export async function executeRoute(
     result.vendorSpend = round2(result.vendorSpend + stage.spend)
 
     if (stage.failure) {
-      // The dossier spend above stands and the record is good. An owner we could not ask is not a
-      // miss, so the dossier's own contacts are not used either.
+      // The dossier spend above stands and the record is good. Only the contact call is unknown.
       result.success = false
       result.error = stage.failure
       return result
@@ -748,22 +736,6 @@ export async function executeRoute(
       result.contactsFound = true
       return result
     }
-  }
-
-  // D21 (b). Every owner the dossier names was tried (an owner with no lookup key is skipped) and
-  // none came back with contacts. The dossier's own block has no name, so it is returned LABELLED
-  // not name-verified, and only when the dossier found individual owners: D14 says Tracerfy never
-  // supplies an entity's contacts. Only a caller that can show the label asks for it: the two
-  // single routes in Phase 1, not the bulk cron.
-  if (
-    options.dossierContactsFallback === true &&
-    result.ownerType === 'individual' &&
-    hasPhoneOrEmail(dossier.contacts)
-  ) {
-    result.contacts = dossier.contacts!
-    result.contactsFound = true
-    result.contactsNameVerified = false
-    return result
   }
 
   // No owner had a usable name or key: a person has to take it.

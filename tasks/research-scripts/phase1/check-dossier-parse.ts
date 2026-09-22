@@ -1,12 +1,19 @@
 /**
- * Tier 1 Phase 1, Task 6 check (spec 11, lessons L-008): run the dossier parser, which now surfaces
- * the contacts block for D21 (b), over every saved dossier response in tasks/research-test/ and
- * print COUNTS ONLY.
+ * Tier 1 Phase 1 check (spec 11, lessons L-008): run the dossier parser over every saved dossier
+ * response in tasks/research-test/ and print COUNTS ONLY.
+ *
+ * HISTORY. This file was originally check-dossier-contacts.ts (Task 6), built to check the
+ * contacts block the dossier parser briefly surfaced for spec D21 (b). Spec D32 (2026-09-22)
+ * withdrew that arm entirely: the dossier's own contacts are never used, in any phase; phones and
+ * emails come only from the separate Tracerfy (individual) or FastAppend (entity) call. This file
+ * kept the other half of what it checked -- that parseDossierResponse's hit/miss and owners
+ * parsing hold up against every real saved payload -- and dropped everything about the contacts
+ * block along with the file's old name.
  *
  * Purchased PII: this script never prints a name, phone, email, address or parcel id, writes
  * nothing, and is not a test. Its output is not saved or committed.
  *
- *   npx tsx tasks/research-scripts/phase1/check-dossier-contacts.ts
+ *   npx tsx tasks/research-scripts/phase1/check-dossier-parse.ts
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -15,9 +22,6 @@ import { join } from 'node:path'
 delete process.env.SUPABASE_SERVICE_ROLE_KEY
 
 const RT = join(process.cwd(), 'tasks/research-test')
-
-/** The keys the contacts block carries in the sanitized fixtures (fixtures README). */
-const CONTACT_KEYS = new Set(['has_contact', 'contact_clean', 'litigator', 'phones', 'emails'])
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'))
 const rec = (v: unknown): Record<string, unknown> =>
@@ -58,18 +62,9 @@ async function main(): Promise<void> {
   const add = (k: string, n = 1): void => {
     count[k] = (count[k] ?? 0) + n
   }
-  const unexpected = new Set<string>()
-  const phoneTypes = new Set<string>()
 
   for (const b of bodies) {
     add(`responses_${b.source.split(':')[0]}`)
-    const raw = rec(b.body)
-    const block = rec(raw.contacts)
-    for (const k of Object.keys(block)) if (!CONTACT_KEYS.has(k)) unexpected.add(k)
-    for (const p of Array.isArray(block.phones) ? block.phones : []) {
-      const t = rec(p).type
-      if (typeof t === 'string') phoneTypes.add(t.trim().toLowerCase())
-    }
     const res = parseDossierResponse(b.body)
     if (!res.success) {
       add('parse_failures')
@@ -80,28 +75,18 @@ async function main(): Promise<void> {
       continue
     }
     add('hits')
-    if (raw.contacts !== undefined) add('hits_with_contacts_block')
-    if (res.contacts) {
-      add('contacts_parsed')
-      add('phones_total', res.contacts.phones.length)
-      add('emails_total', res.contacts.emails.length)
-    }
     const joined = res.owners
       .map((o) => [o.first_name, o.last_name].map((v) => v.trim()).filter(Boolean).join(' '))
       .filter(Boolean)
       .join(' | ')
     const type = classifyOwnerName(joined)
     add(`owner_type_${type}`)
-    if (type === 'individual' && res.contacts) add('fallback_eligible')
     if (b.source.startsWith('phase0:')) {
-      const c = res.contacts ? `${res.contacts.phones.length} phones ${res.contacts.emails.length} emails` : 'none'
-      console.log(`${b.source}: hit, owner_type ${type}, dossier contacts ${c}`)
+      console.log(`${b.source}: hit, owner_type ${type}`)
     }
   }
 
   console.log(JSON.stringify(count, null, 2))
-  console.log(`unexpected contacts keys: ${[...unexpected].sort().join(', ') || 'none'}`)
-  console.log(`phone types seen: ${[...phoneTypes].sort().join(', ') || 'none'}`)
 }
 
 main().catch((e) => {
