@@ -77,6 +77,12 @@ export interface TraceResult {
   mailing_state: string | null;
   mailing_zip: string | null;
   match_confidence: number; // 0-100
+  /**
+   * FALSE only when the contacts came from the county dossier's own contacts block after every
+   * named owner's lookup missed (spec D21 b). That block carries no name, so the owner test cannot
+   * run on it, and every surface shows it as "not name-verified". Absent on every other result.
+   */
+  name_verified?: boolean;
 }
 
 export interface TraceHistory {
@@ -125,6 +131,17 @@ export interface TraceHistory {
    * hand. Absent reads as nothing to explain.
    */
   property_trace_status?: string | null;
+  /** Tier 1 outcome (spec 7.1). NULL before 2026-09-22 and on tier 2 rows. See lib/trace/tier1Outcome.ts. */
+  outcome_code?: string | null;
+  /** The KEY that found the owner: address, parcel_id or company_name. Never the vendor. */
+  found_by?: string | null;
+  /** The step log (spec 5.2). Internal; never in a customer payload. Read it with stepLogFrom(). */
+  trace_steps?: unknown;
+  /** Caller-supplied parcel id and bare county name (migration 20260919). */
+  parcel_id_local?: string | null;
+  county?: string | null;
+  /** Which contact vendor was asked: fastappend, tracerfy, or NULL (migration 20260921). */
+  contact_vendor?: string | null;
   created_at: string;
 }
 

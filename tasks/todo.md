@@ -15,7 +15,19 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Tier 1 search type reconciled with David; spec D13-D18; county shortlist `tasks/phase0-county-shortlist.md`
   - [x] Cut to one record per path (spec D19); live run $0.90 of $2 (D20); findings decided (D21-D26)
 - [x] Merge `feat/contact-vendor-provenance` into main (95db059) and push (5c2b0ee, deployed 2026-09-21)
-- [ ] Phase 1: single traces. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md` (12 tasks, reviewed, APPROVED 2026-09-22; open questions answered as spec D27-D29)
+- [ ] Phase 1: single traces. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md`
+  - [x] Task 1: schema columns and types
+  - [ ] Task 2: one classifier and the Tier 1 ladders
+  - [ ] Task 3: D6 name match and client signals
+  - [ ] Task 4: per-call vendor timeouts
+  - [ ] Task 5: step log, resend reuse and the request budget
+  - [ ] Task 6: D21, every owner then the dossier contacts
+  - [ ] Task 7: outcome codes, sentences, rowSkipReason, webhook tier
+  - [ ] Task 8: shared Tier 1 settle helper
+  - [ ] Task 9: web single route inline
+  - [ ] Task 10: API single route inline, D23 and D24, docs
+  - [ ] Task 11: result card, single page, History
+  - [ ] Task 12: suite gates and the live check
 - [ ] Phase 2: bulk queue (plan written after Phase 1)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)

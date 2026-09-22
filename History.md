@@ -4,6 +4,14 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (a): Tier 1 Phase 1, Task 1: outcome, found-by and step-log columns.
+
+- Migration 20260922_trace_history_tier1_outcome.sql adds trace_history.outcome_code, found_by and
+  trace_steps (all nullable) and an index on (user_id, parcel_id_local, county). Applied with
+  supabase db query and read back: three columns, the index, and anon and authenticated still
+  SELECT only.
+- types/index.ts gains TraceResult.name_verified (D21 b) and the new TraceHistory columns.
+
 ## 2026-09-21 (h): Tier 1 Phase 0 live run, eight records, one per path (spec D19, D20).
 
 - David approved $2 (D20). Spent $0.90: Tracerfy 40 credits ($0.80), matching the account balance move
