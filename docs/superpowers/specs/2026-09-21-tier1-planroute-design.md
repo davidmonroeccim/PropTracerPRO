@@ -64,6 +64,9 @@ lookups this design uses.
 | D24 | (Added 2026-09-21 night.) The dossier needs only the parcel ID; the address is the fallback when there is no parcel ID. David: "You do not need a property address to do a dossier search, only an APN/property_id and an address is used in case the APN is not available." With D23, a record with a parcel ID and no city reaches the dossier and its second lookup, so D21 is built whole in Phase 1 (both arms). |
 | D25 | (Added 2026-09-21 night.) The 90-day cache reuses an earlier result only when the owner name matches; a different owner runs a new trace, charged only on a name-matched result with contacts. David: "4. a". |
 | D26 | (Added 2026-09-21 night.) The API single "processing + tracerfyJobId, then poll" contract (the Normal batch via submitSingleTrace, still live in code at app/api/v1/trace/single/route.ts:548-580) is deprecated and removed for new traces in Phase 1; no compatibility shape is kept. David: "This is the old code and was depricated long ago." |
+| D27 | (Added 2026-09-22.) A lookup that matches the owner but returns no phone and no email is a no-contact result: the ladder, and D21's owner loop and dossier-contacts fallback, keep going; nothing stops early (Phase 1 plan Q1 (a)). David: "How many times to I have to tell you the same answer, and was the original primary reason for using dossier, Identify whether it's an individual or an entity, then send the name to the respective vendor for tracing." |
+| D28 | (Added 2026-09-22.) The trust-word list stays exactly as spec 4.2 fixes it; THE and ESTATE OF are not added (Phase 1 plan Q2 (b)). David: "2. b" |
+| D29 | (Added 2026-09-22.) The step log stores only how many people a billed non-match returned (`peopleCount`), never their names (Phase 1 plan Q3 (b)); amends spec 5.2's "the parsed people". David: "3. b" |
 
 ## 3. Architecture
 

@@ -19,7 +19,14 @@
 
 Nothing else stops the executor except a genuine plan defect (a step that cannot work as written, or a finding that changes what is charged, reported or measured). That goes to the owner as a QUESTION with where it came from (lessons L-021), never as a silent ruling in a ledger.
 
-## Open questions for the owner
+## Open questions for the owner: ALL ANSWERED 2026-09-22 (spec D27-D29). Apply these; do not re-ask.
+
+- **Q1 = (a)** (spec D27): a matched owner with no phone or email is a no-contact result and the ladder continues. The plan is already written for (a).
+- **Q2 = (b)** (spec D28): keep spec 4.2's trust-word list exactly; do NOT add THE or ESTATE OF. In Task 2 use the (b) version of `TRUST_WORDS` and its test rows.
+- **Q3 = (b)** (spec D29): the step log stores `peopleCount: number`, never names. Wherever the plan writes or tests `people` on a step-log entry (Task 3 client signals feeding it, Task 5 step log, and any test that asserts it), write and assert `peopleCount` instead; no name of a returned person is persisted anywhere.
+- **Plan approved for execution:** David, 2026-09-22: "Now create a new starter prompt to begin the tasks you just committed". Hard stop 1 is passed; hard stop 2 (his dollar amount before the live check) stands.
+
+The original questions, kept for the record:
 
 **Q1. A lookup that finds the owner (name matched) but returns no phone and no email.** D8 makes it free; the spec gives it no outcome code. Rare: every matched person in Phase 0 carried phones.
 - **(a) Treat it as a no-contact result.** The next step in the ladder runs; if nothing else finds contacts the record ends `no_match` ("We looked this owner up by address and found no match. You were not charged."). Cost: at most one more $0.10 vendor lookup on those records, and the sentence says "no match" when the owner was found without contacts.

@@ -3,7 +3,7 @@
 Spec: `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md` (approved by David section by section).
 Plans are written one phase at a time, each after the previous phase's results.
 
-Decisions D1-D26 in the spec win over anything older; D13-D26 were added 2026-09-21 in David's words. Read the top
+Decisions D1-D29 in the spec win over anything older; D13-D26 were added 2026-09-21 in David's words. Read the top
 block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
 
 - [x] Phase 0: paid measurement, RUN 2026-09-21 night ($0.90 of $2; report tasks/phase0-small-sample.md;
@@ -15,7 +15,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Tier 1 search type reconciled with David; spec D13-D18; county shortlist `tasks/phase0-county-shortlist.md`
   - [x] Cut to one record per path (spec D19); live run $0.90 of $2 (D20); findings decided (D21-D26)
 - [x] Merge `feat/contact-vendor-provenance` into main (95db059) and push (5c2b0ee, deployed 2026-09-21)
-- [ ] Phase 1: single traces. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md` (written 2026-09-21, 12 tasks; under review, then David approves)
+- [ ] Phase 1: single traces. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md` (12 tasks, reviewed, APPROVED 2026-09-22; open questions answered as spec D27-D29)
 - [ ] Phase 2: bulk queue (plan written after Phase 1)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)

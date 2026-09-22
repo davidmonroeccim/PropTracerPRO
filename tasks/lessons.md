@@ -4,6 +4,18 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-027: Derive the answer from the decisions before asking (2026-09-22)
+
+**What happened.** The Phase 1 plan asked whether a matched owner with no contacts should stop the ladder. Option (b)
+would have ended D21's owner loop early. David: "How many times to I have to tell you the same answer, and was the
+original primary reason for using dossier, Identify whether it's an individual or an entity, then send the name to the
+respective vendor for tracing." The answer followed from D14, D15 and D21.
+
+**The rule.** Before putting a question to David, test each option against the existing decisions. An option that
+undoes a decided flow is not an option; drop it and state the consequence instead of asking.
+
+---
+
 ## L-026: Frustration is not an instruction to stop (2026-09-21)
 
 **What happened.** David said the planning was taking too long and plans were getting lost across context changes.

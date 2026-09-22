@@ -1,6 +1,6 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-21 EVENING. Tier 1 through planRoute, Phase 0 (paid measurement).
+> # READ FIRST. STATE AS OF 2026-09-22. PHASE 1 PLAN APPROVED, EXECUTE IT. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
 > **MERGED 2026-09-21 night on David's go ("go ahead and merge"): `feat/contact-vendor-provenance` -> `main` at
 > 95db059 (--no-ff), branch deleted. It carried b02f82d (older Tracerfy API
@@ -36,9 +36,10 @@
 > map: .superpowers/sdd/phase1-research.md (gitignored). PLAN WRITTEN AND COMMITTED:
 > docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md (12 tasks). REVIEWED: all 12 tasks applied to a
 > scratch copy, 1,692 tests pass, tsc 0; every finding fixed and re-checked (review file .superpowers/sdd/phase1-plan-review.md).
-> AWAITING DAVID: Q1 (matched owner, no phone/email: a continue / b new code), Q2 (add THE and ESTATE OF to trust words),
-> Q3 (strangers' names in trace_steps: a accept / b counts only / c column grant), then his approval. Execution
-> subagent-driven. David 2026-09-21: decided items are NOT reopened; the pace was too slow. (Was: write
+> ANSWERED 2026-09-22 (spec D27-D29): Q1 (a) the ladder continues; Q2 (b) trust words exactly as spec 4.2; Q3 (b) step
+> log stores peopleCount, never names. PLAN APPROVED for execution (David: "Now create a new starter prompt to begin
+> the tasks you just committed"). NEXT SESSION: execute Tasks 1-12 subagent-driven; hard stop before the live check
+> (Task 12) for David's dollar amount. Do NOT reopen D1-D29; do not re-plan what the plan already settles. David 2026-09-21: decided items are NOT reopened; the pace was too slow. (Was: write
 > small-gate-b.json, `--balance`, `--live --max-dollars=<n>`, `--balance`, `--report`, then History + commit.
 > Found while picking: the registry stores Ramsey parcel ids as "27123-" + the 12-digit PIN and NY ids as 26
 > digits; production sends parcel_id_local as is, so APN lookups there may miss for format alone (Phase 1).
