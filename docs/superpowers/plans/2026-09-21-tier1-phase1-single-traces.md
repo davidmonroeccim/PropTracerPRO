@@ -3728,6 +3728,20 @@ describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
     expect(persisted()).toMatchObject({ charge: 0.15, tier: 1 })
   })
 
+  it('still charges when the row already RECORDED a debit inside the 24 hours', async () => {
+    // A Full Property Trace then a supplied-owner trace on the same address the same day, or two
+    // owners on one address in a day: the earlier debit is inside the window but already on the row,
+    // so it is not this request's money.
+    // MUTATION: replace `Math.min(inWindow, (total ?? 0) - recorded)` with bare `inWindow` and this
+    // goes red: no deduct, and the earlier 0.40 reported as this request's charge.
+    H.ledger = [{ amount: 0.4, type: 'debit', created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() }]
+    const r = await run({ row: { id: 'row-1', charge: 0.4, tier: 2 }, deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(r).toMatchObject({ charge: 0.15, deduction: 'charged' })
+    // Folded onto the receipt the row already carried; the tier 2 receipt never downgrades.
+    expect(persisted()).toMatchObject({ charge: 0.55, tier: 2 })
+  })
+
   it('asks the ledger nothing when nothing is billable', async () => {
     await run()
     expect(H.ops.some(o => o.table === 'wallet_transactions')).toBe(false)
@@ -3985,6 +3999,7 @@ Expected: PASS (chargeReceipt and tierLedger included), 0 errors.
 2. Delete the `if (unrecorded > 0) { ... } else` branch so the deduct always runs: `'records, and does not take again, a debit'` goes red.
 3. `const unrecorded = total !== null && total > 0 ? total : 0`: `'still charges a new purchase on a reused row'` goes red.
 3a. `const unrecorded = round2((total ?? 0) - recorded)` (the decision no longer bounded to the window): `"does not treat an OLD debit the row never recorded as this request's money"` goes red.
+3b. `const unrecorded = inWindow !== null && inWindow > 0 ? round2(inWindow) : 0` (bare `inWindow`, no `total - recorded` term): run `'still charges when the row already RECORDED a debit inside the 24 hours'`, it FAILS (no deduct), restore, it passes.
 4. `const priorSteps = stepLogFrom(input.row.trace_steps)` (no busy test): `'runs a row that is NOT busy fresh'` goes red.
 5. Replace the fold with `const billing = { charge: collectedNow, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE }`: the reused-row test (`charge: 0.4, tier: 2`) and chargeReceipt's `'folds the settles that reach reused rows'` go red.
 
@@ -4000,7 +4015,7 @@ Run: `npx vitest run`. Expected: 0 failed.
   first within the 24 hour window like the Tier 2 cron (a debit there that the row does not show
   is recorded, never taken again; an older surplus never makes a trace free), folds the receipt,
   and writes outcome_code, found_by, trace_steps and contact_vendor. It never writes property_record.
-- Pinned as must-fold in chargeReceipt.test.ts. Mutations: six, all red.
+- Pinned as must-fold in chargeReceipt.test.ts. Mutations: seven, all red.
 ```
 
 ```bash
