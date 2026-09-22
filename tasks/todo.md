@@ -2964,6 +2964,19 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       the ledger probe (it sits inside `if (billable)` in `lib/trace/singleTier1.ts`), so the earlier debit stays
       unrecorded and the row says "You were not charged". Rare (the window is two database calls). Fix later,
       together with task 16's transactional hold. David declined a Phase 1 refund path.
+      Two more ways into the same state, found in the Task 8 review: (a) the deduct succeeds and the persist UPDATE
+      FAILS (persistError), no crash needed, then a free resend never probes; (b) `already_collected` is not capped
+      by the Tier 1 price or tier: a Full Property Trace that deducts $0.40 and dies before its persist, then a Tier 1
+      trace on the same row the same day that finds contacts, is treated as already paid and reports charge 0.40.
+      The test "asks the ledger nothing when nothing is billable" (lib/trace/__tests__/singleTier1.test.ts) pins
+      today's behaviour; a fix that probes on every path must invert it.
+- [ ] 20. **FOR DAVID, pre-existing, recorded 2026-09-22 (Task 8 review), not a Phase 1 change.** A trace row is one
+      per address per user, and every settle on a REUSED row overwrites `trace_result`, `phone_count`, `email_count`,
+      `is_successful` and `cost` (the Tier 2 single route does it today, app/api/trace/single/route.ts ~:508-523, and
+      the new Tier 1 settle does the same). So a customer who paid for contacts on an address, then traces the same
+      address again for a different owner (D25) and finds nothing, loses the earlier paid contacts from History and
+      the CSV, while `charge` keeps the running total (D34). Needs David's call on whether a free re-trace may
+      replace a paid result.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and

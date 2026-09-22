@@ -11,15 +11,13 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   first within the 24 hour window like the Tier 2 cron (a debit there that the row does not show
   is recorded, never taken again; an older surplus never makes a trace free), folds the receipt,
   and writes outcome_code, found_by, trace_steps and contact_vendor. It never writes property_record.
-- Pinned as must-fold in chargeReceipt.test.ts. Mutations: eight, all red, including a cross-layer
-  one on lib/routing/executeRoute.ts (contactCall and its runStage report) proving a returned
-  person's name cannot reach the persisted step log even if a future change tried to carry it
-  through (D29); that file was reverted to HEAD afterward and is untouched by this task.
-- Checked, per the controller's brief, whether any path can persist a free outcome with a nonzero
-  charge or leave an unrecorded debit unreported: it cannot. `billable` gates both the deduct and
-  the write (`billing.charge` folds `collectedNow`, which is 0 on every free outcome), and the
-  ledger probe runs before the persist on every billable path, so a crashed earlier debit is
-  recorded as this request's `charge` rather than left as a silent surplus.
+- Pinned as must-fold in chargeReceipt.test.ts. Mutations: fifteen, all red, including a
+  cross-layer one on lib/routing/executeRoute.ts (contactCall and its runStage report) proving a
+  test goes red if a returned name ever reaches the persisted step log (D29); that file was
+  reverted to HEAD afterward and is untouched by this task.
+- Two billing edges are owner decisions, not guarded here: a reused row keeps its running charge
+  beside a new free outcome (spec D34), and a deduct followed by a crash or failed persist, then a
+  free resend within 24 hours, leaves that debit unrecorded (spec D35, todo task 19).
 
 ## 2026-09-22 (h): Tier 1 Phase 1, Task 7: outcome codes, sentences and the webhook tier.
 

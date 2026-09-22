@@ -13,6 +13,7 @@ const H = {
   ledger: [] as Array<Record<string, unknown>>,
   deductData: true as unknown,
   deductError: null as { message: string } | null,
+  updateError: null as { message: string } | null,
 }
 
 /** Records every select and update; answers wallet_transactions from H.ledger. */
@@ -27,7 +28,7 @@ function adminClient(): SupabaseClient {
       node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
         Promise.resolve(
           rec.op === 'update'
-            ? { data: null, error: null }
+            ? { data: null, error: H.updateError }
             : { data: table === 'wallet_transactions' ? H.ledger : null, error: null }
         ).then(res, rej)
       return node
@@ -90,6 +91,7 @@ beforeEach(() => {
   H.ledger = []
   H.deductData = true
   H.deductError = null
+  H.updateError = null
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
@@ -161,6 +163,16 @@ describe('runSingleTier1: the billing gate (spec 6.1, D8)', () => {
     expect(r.outcome).not.toBe('busy_try_again')
     expect(deducts()).toHaveLength(0)
   })
+
+  it('charges the rate it was given, never a hard-coded one (Pay-As-You-Go $0.25)', async () => {
+    // MUTATION: hard-code `p_amount: 0.15` in the deductWallet call and this goes red.
+    const r = await run({
+      pricePlan: 'wallet', chargeAmount: 0.25,
+      deps: deps({ tracePerson: vi.fn(async () => HIT) }),
+    })
+    expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 })
+    expect(r.charge).toBe(0.25)
+  })
 })
 
 describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
@@ -218,6 +230,40 @@ describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
   })
 })
 
+describe('runSingleTier1: a short or failed deduct never loses what the vendor already found', () => {
+  it('a short wallet still delivers the contacts it already found, charging nothing new', async () => {
+    // MUTATION: `collectedNow = input.chargeAmount` on this branch: red (r.charge becomes 0.15).
+    // MUTATION: `deduction = 'charged'` on this branch: red (deduction is no longer 'insufficient_balance').
+    H.deductData = false
+    const r = await run({
+      row: { id: 'row-1', charge: 0.10, tier: 1 },
+      deps: deps({ tracePerson: vi.fn(async () => HIT) }),
+    })
+    expect(r.deduction).toBe('insufficient_balance')
+    expect(r.charge).toBe(0)
+    // The receipt folds in nothing new; the row's prior charge is untouched.
+    expect(persisted()).toMatchObject({ charge: 0.10, status: 'success', is_successful: true })
+    expect(persisted()?.trace_result).toMatchObject({ phones: [{ number: '5550000101', type: 'mobile' }] })
+  })
+
+  it('a deduct error still delivers the contacts it already found, and is logged rather than thrown', async () => {
+    // MUTATION: `collectedNow = input.chargeAmount` on this branch: red, same as the short-wallet case.
+    // MUTATION: `deduction = 'charged'` on this branch: red, same as the short-wallet case.
+    // MUTATION: delete the `if (d.outcome === 'error') console.error(...)` line: red on the spy assertion.
+    // console.error is spied fresh in beforeEach and restored in afterEach (L-013): no extra clearing needed here.
+    H.deductError = { message: 'wallet RPC timed out' }
+    const r = await run({
+      row: { id: 'row-1', charge: 0.10, tier: 1 },
+      deps: deps({ tracePerson: vi.fn(async () => HIT) }),
+    })
+    expect(r.deduction).toBe('error')
+    expect(r.charge).toBe(0)
+    expect(persisted()).toMatchObject({ charge: 0.10, status: 'success', is_successful: true })
+    expect(persisted()?.trace_result).toMatchObject({ phones: [{ number: '5550000101', type: 'mobile' }] })
+    expect(console.error).toHaveBeenCalled()
+  })
+})
+
 describe('runSingleTier1: the busy_try_again resend (spec 5.2)', () => {
   const TRUST: ParcelInput = { ...PARCEL, ownerName: 'Marcus Halloway Revocable Trust' }
   const loggedInstantMiss = (): StepReport[] => [{
@@ -257,5 +303,24 @@ describe('runSingleTier1: what it writes', () => {
   it('names every key that answered in the no_match sentence', async () => {
     const r = await run({ parcel: { ...PARCEL, ownerName: 'Marcus Halloway Revocable Trust' } })
     expect(r.skipReason).toBe('We looked this owner up by address and company name and found no match. You were not charged.')
+  })
+
+  it('reports a persist failure rather than a false success', async () => {
+    // MUTATION: `persistError: null` hard-coded and this goes red.
+    H.updateError = { message: 'connection reset' }
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(r.persistError).toBe('connection reset')
+  })
+
+  it('asks the ledger and settles the row by the row id, never the user id', async () => {
+    // MUTATION: probe collectedChargesFor with input.userId instead of input.row.id: red (the
+    // wallet_transactions filter names 'user-1').
+    // MUTATION: update `.eq('id', ...)` with a key other than input.row.id: red (the trace_history
+    // filter names something other than 'row-1').
+    await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    const probe = H.ops.find(o => o.table === 'wallet_transactions')
+    expect(probe?.filters).toEqual([['eq', 'trace_history_id', 'row-1']])
+    const update = H.ops.find(o => o.table === 'trace_history' && o.op === 'update')
+    expect(update?.filters).toEqual([['eq', 'id', 'row-1']])
   })
 })
