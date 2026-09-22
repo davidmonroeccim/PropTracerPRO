@@ -338,9 +338,28 @@ describe('parsePersonTraceResponse', () => {
     expect(res.nameNotMatched).toBe(true)
   })
 
+  it.each([
+    ['a matching last name but a different first name', { first_name: 'Mary', last_name: 'Placeholder' }],
+    ['a matching first initial but a different last name', { first_name: 'Testowner', last_name: 'Nothere' }],
+  ])('does not match on just one half of the name: %s (D6, mutations 7a/7b)', (_why, want) => {
+    // MUTATION 7a: replace the last-name comparison with `true &&` and the second row (matching
+    // first initial, differing last name) goes red. MUTATION 7b: replace the first-initial
+    // comparison with `true` and the first row (matching last name, differing first name) goes
+    // red. Every fixture person differs from a bad `want` in BOTH halves at once elsewhere in this
+    // file, so those tests alone do not catch either half being deleted -- a same-address relative
+    // (same last name) or a same-initial stranger would otherwise be billed and returned as a hit.
+    const res = parsePersonTraceResponse(personHit.response, want)
+    expect(res.contacts).toBeNull()
+    expect(res.nameNotMatched).toBe(true)
+  })
+
   it('personMatchesName needs both halves of both names', () => {
     expect(personMatchesName({ first_name: 'Testowner', last_name: 'Placeholder' }, { last_name: 'Placeholder' })).toBe(false)
     expect(personMatchesName({ first_name: '', last_name: 'Placeholder' }, { first_name: 'T', last_name: 'Placeholder' })).toBe(false)
+    // MUTATION 7c (L-015): delete the `!wantLast.length || !gotLast.length` half of the empty-name
+    // guard and this goes red -- two empty last names both tokenize to [], and
+    // `[][-1] === [][-1]` is `undefined === undefined`, true.
+    expect(personMatchesName({ first_name: 'Testowner', last_name: '' }, { first_name: 'T', last_name: '' })).toBe(false)
   })
 
   it('unwraps an array-wrapped body', () => {
@@ -464,5 +483,12 @@ describe('our own input problems are refusals, never vendor failures (spec 5.1)'
   it('a missing API key is NOT an input error: the customer did nothing wrong', async () => {
     delete process.env.TRACERFY_API_KEY
     expect((await lookupPersonTrace(PERSON)).inputError).toBeUndefined()
+  })
+
+  it('a missing FastAppend API key is NOT an input error either (mutation 7d, L-018 every site)', async () => {
+    // MUTATION 7d: switch this refusal to inputRefused and this goes red -- a missing key is our
+    // own configuration problem, never something the customer's input caused.
+    delete process.env.FASTAPPEND_API_KEY
+    expect((await lookupBusinessTrace(ENTITY)).inputError).toBeUndefined()
   })
 })

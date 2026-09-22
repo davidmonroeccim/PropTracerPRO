@@ -5,6 +5,13 @@
  * Those files hold purchased PII. This script never prints a name, phone, email, address or parcel
  * id, writes nothing, and is not a test. Its output is not saved or committed.
  *
+ * Fix round 1, finding 2: the first version of this script only bumped ONE flat set of verdict
+ * counters, so there was no way to tell which study a "no owner name to match" sample came from,
+ * or whether that meant "no results.json row for this parcel at all" versus "a row was found but
+ * it carries no owner name". Now every count is also bumped per SOURCE STUDY (apn / instant /
+ * phase0), and "no want" is split into those two reasons. This is still counts and reason-labels
+ * only -- never a name, phone, email, address or parcel id.
+ *
  *   npx tsx tasks/research-scripts/phase1/check-person-parser.ts
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
@@ -16,10 +23,17 @@ delete process.env.SUPABASE_SERVICE_ROLE_KEY
 
 type Want = { first_name?: string; last_name?: string } | undefined
 
+/** Why `want` came back undefined. Never which file, never the name. */
+type NoNameReason = 'no_row_found' | 'row_found_no_owner_name' | 'no_owner_name_recorded'
+
 interface Sample {
+  /** Top-level study: apn, instant or phase0. */
+  family: string
+  /** Full label, phase0 also carries its slot. Only used for the per-line phase0 log. */
   source: string
   body: unknown
   want: Want
+  noNameReason?: NoNameReason
 }
 
 const RT = join(process.cwd(), 'tasks/research-test')
@@ -43,6 +57,9 @@ async function main(): Promise<void> {
   const samples: Sample[] = []
 
   // 1. The 2026-09-15 parcel study. The owner of record comes from its results.json, by parcel id.
+  // Distinguish "no row in results.json matched this raw file's parcel id" from "a row matched but
+  // its own owner_name field is empty" -- these are different findings about the study, not about
+  // the parser.
   const apnDir = join(RT, 'apn')
   if (existsSync(apnDir)) {
     const results = (rec(readJson(join(apnDir, 'results.json'))).results as unknown[] | undefined) ?? []
@@ -50,7 +67,13 @@ async function main(): Promise<void> {
       const d = rec(readJson(join(apnDir, f)))
       const parcel = rec(d.request).parcel_id
       const row = results.map(rec).find((r) => r.parcel_id === parcel)
-      samples.push({ source: 'apn', body: d.response, want: wantFor(row?.owner_name) })
+      const want = wantFor(row?.owner_name)
+      const noNameReason: NoNameReason | undefined = want
+        ? undefined
+        : row
+          ? 'row_found_no_owner_name'
+          : 'no_row_found'
+      samples.push({ family: 'apn', source: 'apn', body: d.response, want, noNameReason })
     }
   }
 
@@ -58,8 +81,18 @@ async function main(): Promise<void> {
   const tiDir = join(RT, 'tracerfy-individual')
   if (existsSync(tiDir)) {
     const owner = rec(readJson(join(tiDir, 'results.json'))).owner_of_record
+    const want = wantFor(owner)
+    // The single results.json row for this study always exists (read above without throwing), so
+    // the only possible reason for no `want` here is that row carrying no owner name.
+    const noNameReason: NoNameReason | undefined = want ? undefined : 'row_found_no_owner_name'
     for (const f of readdirSync(tiDir).filter((n) => n.startsWith('raw-'))) {
-      samples.push({ source: 'instant', body: rec(readJson(join(tiDir, f))).response, want: wantFor(owner) })
+      samples.push({
+        family: 'instant',
+        source: 'instant',
+        body: rec(readJson(join(tiDir, f))).response,
+        want,
+        noNameReason,
+      })
     }
   }
 
@@ -77,7 +110,8 @@ async function main(): Promise<void> {
           typeof req.last_name === 'string'
             ? { first_name: String(req.first_name ?? ''), last_name: req.last_name }
             : wantFor(o.owner_name)
-        samples.push({ source: `phase0:${String(o.slot)}`, body: r.response_body, want })
+        const noNameReason: NoNameReason | undefined = want ? undefined : 'no_owner_name_recorded'
+        samples.push({ family: 'phase0', source: `phase0:${String(o.slot)}`, body: r.response_body, want, noNameReason })
       }
     }
   }
@@ -89,7 +123,7 @@ async function main(): Promise<void> {
   const unexpected = new Set<string>()
 
   for (const s of samples) {
-    bump(`responses_${s.source.split(':')[0]}`)
+    bump(`responses_${s.family}`)
     for (const k of Object.keys(rec(Array.isArray(s.body) ? s.body[0] : s.body))) {
       if (!KNOWN_KEYS.has(k)) unexpected.add(k)
     }
@@ -104,8 +138,17 @@ async function main(): Promise<void> {
             ? 'name_not_matched'
             : 'hit_without_people'
     bump(verdict)
+    bump(`${s.family}_${verdict}`)
     if (res.hit && res.creditsDeducted === undefined) bump('hits_without_credits')
-    if (res.hit && !s.want) bump('hits_with_no_owner_name_to_match')
+    if (res.hit && !s.want) {
+      bump('hits_with_no_owner_name_to_match')
+      if (s.noNameReason) bump(`no_want_reason_${s.family}_${s.noNameReason}`)
+    }
+    // The finding this round of fixes chases: a REAL hit tested against a REAL owner name that
+    // still came out unmatched is the one case Step 5a's stop rule exists for. Flag it by family,
+    // never by name.
+    if (res.hit && s.want && res.nameNotMatched) bump(`named_hit_not_matched_${s.family}`)
+    if (res.hit && s.want && res.contacts) bump(`named_hit_matched_${s.family}`)
     if (s.source.startsWith('phase0:')) console.log(`${s.source}: ${verdict}`)
   }
 
