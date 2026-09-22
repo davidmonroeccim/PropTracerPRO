@@ -271,10 +271,11 @@ export function stepLogFrom(raw: unknown): StepReport[] {
     const r = e as Record<string, unknown>
     if (typeof r.kind !== 'string' || !Object.prototype.hasOwnProperty.call(CONTACT_VENDOR_BY_STEP, r.kind)) continue
     if (typeof r.outcome !== 'string' || !STEP_OUTCOMES.has(r.outcome)) continue
+    if (typeof r.cost !== 'number') continue
     out.push({
       kind: r.kind as StepKind,
       outcome: r.outcome as StepOutcome,
-      cost: typeof r.cost === 'number' ? r.cost : 0,
+      cost: r.cost,
       ...(typeof r.creditsDeducted === 'number' ? { creditsDeducted: r.creditsDeducted } : {}),
       ...(typeof r.error === 'string' ? { error: r.error } : {}),
       ...(typeof r.note === 'string' ? { note: r.note } : {}),
@@ -447,6 +448,8 @@ const isReusableAnswer = (e: StepReport): boolean =>
 /** The logged answer to exactly this question, if it is younger than 24 hours by its OWN time. */
 function reusableAnswer(ctx: StageContext, requestKey: string): StepReport | null {
   for (const e of ctx.prior) {
+    // `!e.at` is belt-and-braces: Date.parse(undefined) is already NaN, which Number.isFinite(age)
+    // below rejects on its own. Kept for clarity at the call site, not because it changes behavior.
     if (e.requestKey !== requestKey || !e.at || !isReusableAnswer(e)) continue
     const age = ctx.now() - Date.parse(e.at)
     if (Number.isFinite(age) && age >= 0 && age < STEP_REUSE_WINDOW_MS) return e
@@ -590,7 +593,10 @@ export async function executeRoute(
 ): Promise<ExecutionResult> {
   const ctx: StageContext = {
     deadlineMs: options.deadlineMs,
-    prior: options.priorSteps ?? [],
+    // Never trust what a caller hands in here: a caller that casts row.trace_steps instead of
+    // going through stepLogFrom could otherwise re-persist a raw `people` key it was carrying,
+    // and D29 requires that no name ever reaches the log, no matter how a caller got here.
+    prior: stepLogFrom(options.priorSteps),
     now: options.now ?? Date.now,
   }
   const warnings = [...plan.warnings]

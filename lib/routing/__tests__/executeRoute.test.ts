@@ -797,6 +797,57 @@ describe('executeRoute: the Tier 1 ladder and its step log (spec 4.3, 5.2)', () 
       expect(r.steps[0]).toMatchObject({ outcome: 'name_not_matched', reused: true, cost: 0.1 })
       expect(r.vendorSpend).toBe(0)
     })
+
+    it('never reuses a prior dated in the future', async () => {
+      // MUTATION: delete "age >= 0" in reusableAnswer and this goes red (the future entry
+      // is wrongly reused, so tracePerson is called once instead of twice).
+      const plan = personPlan()
+      const d = deps()
+      // ageMs negative -> at = NOW - (-1000) = NOW + 1000, one second in the future.
+      await executeRoute(plan, d, { now: clock, priorSteps: logged(plan, -1000) })
+      expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    })
+
+    it('never reuses a prior with a malformed at', async () => {
+      const plan = personPlan()
+      const d = deps()
+      const prior: StepReport[] = [{
+        kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0,
+        at: 'not a date', requestKey: requestKeyFor(plan.steps[0]),
+      }]
+      await executeRoute(plan, d, { now: clock, priorSteps: prior })
+      expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    })
+
+    it('never reuses a prior that actually delivered', async () => {
+      // MUTATION: narrow "(e.outcome === 'hit' && e.noContacts === true)" to "e.outcome === 'hit'"
+      // in isReusableAnswer and this goes red (the delivering hit is wrongly reused, dropping the
+      // contacts it bought, so tracePerson is called once instead of twice).
+      const plan = personPlan()
+      const d = deps()
+      const prior: StepReport[] = [{
+        kind: 'TRACERFY_INSTANT_NAMED', outcome: 'hit', cost: 0.1,
+        at: new Date(NOW - 1000).toISOString(), requestKey: requestKeyFor(plan.steps[0]),
+      }]
+      await executeRoute(plan, d, { now: clock, priorSteps: prior })
+      expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    })
+
+    it('drops a name that arrives via priorSteps, not just via the vendor (D29)', async () => {
+      // MUTATION: remove the stepLogFrom cleaning of options.priorSteps in executeRoute and this
+      // goes red (a caller that casts row.trace_steps instead of calling stepLogFrom itself would
+      // otherwise re-persist the raw name it was carrying).
+      const plan = personPlan()
+      const tainted = [{
+        kind: 'TRACERFY_INSTANT_NAMED', outcome: 'name_not_matched', cost: 0.1,
+        at: new Date(NOW - 1000).toISOString(), requestKey: requestKeyFor(plan.steps[0]),
+        peopleCount: 1, people: [{ first_name: 'Someoneelse', last_name: 'Different' }],
+      }] as unknown as StepReport[]
+      const d = deps()
+      const r = await executeRoute(plan, d, { now: clock, priorSteps: tainted })
+      expect(r.steps[0]).toMatchObject({ outcome: 'name_not_matched', reused: true })
+      expect(JSON.stringify(r.steps)).not.toMatch(/Someoneelse|Different/)
+    })
   })
 
   describe('stepLogFrom', () => {
@@ -808,6 +859,24 @@ describe('executeRoute: the Tier 1 ladder and its step log (spec 4.3, 5.2)', () 
     it('drops anything that is not a step', () => {
       expect(stepLogFrom(null)).toEqual([])
       expect(stepLogFrom([{ kind: 'NOPE', outcome: 'miss' }, 'x', { kind: 'FASTAPPEND_ENTITY', outcome: 'maybe' }])).toEqual([])
+    })
+
+    it('drops a raw people key even off an otherwise well-formed entry (D29)', () => {
+      // MUTATION: restore a `people` copy line in stepLogFrom and this goes red.
+      const raw = {
+        kind: 'TRACERFY_INSTANT_NAMED', outcome: 'name_not_matched', cost: 0.1,
+        peopleCount: 1, people: [{ first_name: 'Someoneelse', last_name: 'Different' }],
+      }
+      const [step] = stepLogFrom([raw])
+      expect(step).toMatchObject({ peopleCount: 1 })
+      expect(step).not.toHaveProperty('people')
+      expect(JSON.stringify(step)).not.toMatch(/Someoneelse|Different/)
+    })
+
+    it('drops an entry with no numeric cost, rather than inventing zero (CLAUDE.md rule 7)', () => {
+      // MUTATION: restore the ": 0" cost default and this goes red.
+      const raw = { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss' }
+      expect(stepLogFrom([raw])).toEqual([])
     })
   })
 })

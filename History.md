@@ -11,11 +11,15 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   billed non-match returned (never their names, D29). A contact step now ends the ladder only with
   a name-matched phone or email.
 - A resend given a busy row's log reuses answered steps younger than 24 hours by their own
-  timestamp, for the identical question only. Our own refused input is recorded as not asked,
-  never as a failure.
+  timestamp, for the identical question only, never one dated in the future, never one with a
+  malformed timestamp, and never one that actually delivered. Our own refused input is recorded as
+  not asked, never as a failure. Whatever a caller hands in as priorSteps is cleaned through
+  stepLogFrom before it is trusted, so a caller that skips stepLogFrom itself cannot re-persist a
+  name into the log (D29).
 - A request deadline: no call starts with under 5 s left, and each call gets only what is left.
   The crons pass none and are unchanged. contactVendorFrom names the vendor that produced the
-  contacts. Mutations: eight, all red.
+  contacts. stepLogFrom drops a malformed entry (including one with no numeric cost) rather than
+  inventing a zero. Mutations: thirteen, all red.
 
 ## 2026-09-22 (d): Tier 1 Phase 1, Task 4: a 25 second ceiling on every vendor call.
 
