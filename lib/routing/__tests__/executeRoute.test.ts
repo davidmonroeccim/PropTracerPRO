@@ -980,6 +980,54 @@ describe('executeRoute: D21, every owner, the mailing address, then the dossier 
     expect(r.contacts).toBeNull()
     expect(r.contactsNameVerified).toBe(true)
   })
+
+  it("does not fall back when the dossier's own contacts block has nothing usable", async () => {
+    // Real: 5 of 31 saved dossier hits parse to a null contacts block (check-dossier-contacts.ts).
+    // MUTATION: drop `hasPhoneOrEmail(dossier.contacts) &&` from the fallback and this goes red.
+    const d = deps({ lookupDossier: dossierSequence({ ...HIT_INDIVIDUAL, contacts: null }) })
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
+    expect(r.contactsFound).toBe(false)
+    expect(r.contacts).toBeNull()
+    expect(r.contactsNameVerified).toBe(true)
+  })
+
+  it('never sends a non-individual owner to the mailing address, even with no situs (D21 c)', async () => {
+    // D21 (c) reserves the mailing-address search for an INDIVIDUAL owner. A trust (or an
+    // unclassifiable name) still gets the ordinary no-situs ladder: the parcel lookup, never the
+    // Instant lookup at the mailing address.
+    // MUTATION: drop `classifyOwnerName(owner) === 'individual'` from contactParcelFor and this
+    // goes red (the parcel id and county are discarded for the mailing address instead).
+    const TRUST_OWNER: DossierResult = {
+      ...HIT_INDIVIDUAL, // carries a complete mailing address, so only the owner-type check stops it
+      owners: [{ first_name: '', last_name: 'Marcus T Halloway Living Trust', age: '' }],
+    }
+    const plan = tier2Plan({ situsAddress: null, situsCity: null, situsState: null })
+    const d = deps({ lookupDossier: dossierSequence(TRUST_OWNER) })
+    const r = await executeRoute(plan, d)
+    expect(r.steps.map(s => s.kind)).toContain('TRACERFY_PARCEL_APN')
+    expect(d.tracePerson).toHaveBeenCalledWith(expect.objectContaining({
+      parcel_id: '16183060290000', county: 'Salt Lake', state: 'UT',
+    }))
+    expect(d.tracePerson).not.toHaveBeenCalledWith(expect.objectContaining({
+      address: '100 Placeholder Way',
+    }))
+  })
+
+  it('runs the parcel lookup rather than throwing when the dossier has no mailing address (D21 c)', async () => {
+    // executeRoute never throws (house pattern). A null mailing address must not reach
+    // `mailing!.address` inside contactParcelFor.
+    // MUTATION: drop the `mailingComplete` check from contactParcelFor's guard and this throws
+    // (TypeError reading .address off null) instead of resolving with the parcel lookup.
+    const plan = tier2Plan({ situsAddress: null, situsCity: null, situsState: null })
+    const d = deps({
+      lookupDossier: dossierSequence({ ...HIT_INDIVIDUAL, mailingAddress: null }),
+      tracePerson: vi.fn(async () => CONTACT_HIT),
+    })
+    await expect(executeRoute(plan, d)).resolves.toMatchObject({ success: true, contactsFound: true })
+    expect(d.tracePerson).toHaveBeenCalledWith(expect.objectContaining({
+      parcel_id: '16183060290000', county: 'Salt Lake', state: 'UT',
+    }))
+  })
 })
 
 describe('contactVendorFrom: the vendor that produced the contacts wins', () => {

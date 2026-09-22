@@ -35,6 +35,7 @@ import {
   type VendorCallOptions,
 } from './fetchWithTimeout'
 import type { OwnerContacts } from '@/lib/routing/executeRoute'
+import { readEmails, readPhones } from './client'
 
 /** A dossier lookup key. The two modes are mutually exclusive by construction. */
 export type DossierKey =
@@ -177,29 +178,18 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
-/** The nameless contacts block, deduplicated and capped the way the contact clients cap theirs. */
+/**
+ * The nameless contacts block. Parsed through the SAME readPhones/readEmails the contact clients
+ * in ./client.ts use on their own phones/emails arrays (identical vendor shape: an array of
+ * { number, type } objects and an array of { email } objects or bare strings), so the dedupe, the
+ * `type` fallback and the TRACERFY.MAX_* caps can never drift between the two call sites.
+ */
 function dossierContacts(v: unknown): OwnerContacts | null {
   if (!isRecord(v)) return null
-  const phones: Array<{ number: string; type: string }> = []
-  for (const p of Array.isArray(v.phones) ? v.phones : []) {
-    if (!isRecord(p)) continue
-    const number = str(p.number).trim()
-    if (number && !phones.some((x) => x.number === number)) {
-      phones.push({ number, type: str(p.type).trim().toLowerCase() || 'unknown' })
-    }
-  }
-  const emails: string[] = []
-  for (const e of Array.isArray(v.emails) ? v.emails : []) {
-    const email = (isRecord(e) ? str(e.email) : str(e)).trim()
-    if (email && !emails.includes(email)) emails.push(email)
-  }
+  const phones = readPhones(v.phones)
+  const emails = readEmails(v.emails)
   if (!phones.length && !emails.length) return null
-  return {
-    ownerName: null,
-    phones: phones.slice(0, TRACERFY.MAX_PHONES),
-    emails: emails.slice(0, TRACERFY.MAX_EMAILS),
-    mailingAddress: null,
-  }
+  return { ownerName: null, phones, emails, mailingAddress: null }
 }
 
 /**

@@ -454,7 +454,12 @@ function flattenMailing(v: unknown): string | null {
   return parts.length ? parts.join(', ') : null;
 }
 
-function readPhones(v: unknown): Array<{ number: string; type: string }> {
+/**
+ * Exported so lib/tracerfy/dossier.ts's own nameless contacts block (D21 b) parses phones and
+ * emails through the SAME dedupe, the same `type` fallback and the same TRACERFY.MAX_* caps as
+ * every other contact vendor here, rather than a second copy that can drift from this one.
+ */
+export function readPhones(v: unknown): Array<{ number: string; type: string }> {
   if (!Array.isArray(v)) return [];
   const out: Array<{ number: string; type: string }> = [];
   for (const raw of v) {
@@ -466,7 +471,7 @@ function readPhones(v: unknown): Array<{ number: string; type: string }> {
   return out.slice(0, TRACERFY.MAX_PHONES);
 }
 
-function readEmails(v: unknown): string[] {
+export function readEmails(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
   for (const raw of v) {

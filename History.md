@@ -24,8 +24,19 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   dossier_commercial individual with 8 phones 4 emails, dossier_land individual with 7 phones 5
   emails, dossier_multifamily entity with no dossier contacts fallback eligibility.
 - traceResultFor no longer labels a supplied Tier 1 owner as the owner of record, so a Tier 1 miss
-  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: eight, all red (the
-  brief's seven plus a controller-added eighth on the owner loop's failure branch).
+  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: eleven, all red (the
+  brief's seven, a controller-added eighth on the owner loop's failure branch, and a review round 1
+  fix added three more: the D21 (b) fallback firing on a dossier contacts block with no phone and no
+  email, the mailing-address search reaching a non-individual owner, and mailingComplete's guard
+  against a null mailing address, the last of which throws rather than merely failing an assertion
+  when deleted).
+- Review round 1 fix: lib/tracerfy/dossier.ts's dossierContacts() now parses phones and emails
+  through the same readPhones/readEmails lib/tracerfy/client.ts's contact vendors already use on
+  the identical vendor shape (an array of { number, type } objects, an array of { email } objects
+  or bare strings), instead of a second hand-rolled copy of the same dedupe and TRACERFY.MAX_* caps.
+  Both functions are now exported from client.ts; no import cycle (client.ts does not import
+  dossier.ts). Existing dossier and contactLookups suites unchanged and green; mutation 6
+  (`contacts: dossierContacts(body.contacts)` deleted) re-run and still red.
 
 ## 2026-09-22 (e): Tier 1 Phase 1, Task 5: step log, resend reuse, request budget.
 
