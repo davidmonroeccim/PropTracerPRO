@@ -55,6 +55,13 @@ export interface SingleTier1Input {
   /** Request start + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS. */
   deadlineMs: number
   deps: RouteDeps
+  /**
+   * The supplied owner name, exactly as the caller sent it, or null. Written into the SAME
+   * persist UPDATE as trace_result below (fix round 1, D25 money): a name and the result it
+   * describes must change together, in one write, never a separate one that could name a new
+   * owner ahead of that owner's own result.
+   */
+  inputOwnerName: string | null
 }
 
 export type Tier1Deduction = 'not_attempted' | 'already_collected' | 'charged' | 'insufficient_balance' | 'error'
@@ -152,6 +159,7 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
     .update({
       status,
       trace_result: result,
+      input_owner_name: input.inputOwnerName,
       phone_count: result?.phones?.length || 0,
       email_count: result?.emails?.length || 0,
       is_successful: status === 'success',

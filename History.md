@@ -16,7 +16,22 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   every vendor call gets the 50 s request budget. D32 (owner) withdrew the dossier-contacts
   fallback before this task started, so this route's Tier 2 executeRoute call carries only the
   request budget, no fallback flag. D29's step log carries peopleCount, never a name, verified at
-  this call site too. Mutations: seven, all red.
+  this call site too.
+- Fix round 1. A row with LIVE work (a Tier 2 cron row still on a queued rung, or a busy row a
+  bulk upload re-enqueued) now answers the same untouched busy_try_again shape as a vendor
+  failure -- no delete, no write, no vendor call, no deduct, no webhook -- instead of being
+  reused live; the gate reads property_trace_status, ai_research_status and a fresh 'processing'
+  row (STALE_PROCESSING.CRON_TIMEOUT_MINUTES, the same threshold sweep-stale-traces itself uses).
+  A reused row's input_owner_name now changes ONLY in the same write as its trace_result (route.ts
+  and, for the shared Tier 1 settle, lib/trace/singleTier1.ts), so a resubmit under a new owner
+  can no longer read, even briefly, as that owner's result while the row still holds the old
+  owner's contacts. lib/utils/ownerName.ts's suffix and single-letter drops now apply only to a
+  name classifyOwnerName reads as an individual, so distinct entities ("Acme Fund II LLC" vs
+  "Acme Fund III LLC", "Series A/B Holdings LLC") no longer collide. Plus six smaller wiring
+  fixes: the Tier 2 vendor calls also carry the request budget, body.warnings never leaks a
+  routing note, auto-rebill fires only on a charged/insufficient/error deduction, Track A pricing
+  is asserted for a pro profile, the fold test checks body.charge (not the receipt), and the busy
+  body's full shape is asserted. Mutations: 22 total (7 original + 15 this round), all red.
 
 ## 2026-09-22 (i): Tier 1 Phase 1, Task 8: one shared Tier 1 settle for both single routes.
 

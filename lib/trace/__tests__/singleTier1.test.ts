@@ -79,6 +79,7 @@ const run = (over: Partial<SingleTier1Input> = {}) =>
     chargeAmount: 0.15,
     deadlineMs: Date.now() + 50_000,
     deps: deps(),
+    inputOwnerName: 'Marcus T Halloway',
     ...over,
   })
 
@@ -310,6 +311,15 @@ describe('runSingleTier1: what it writes', () => {
     H.updateError = { message: 'connection reset' }
     const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
     expect(r.persistError).toBe('connection reset')
+  })
+
+  it('writes the supplied owner name into the SAME update as trace_result (fix round 1, D25 money)', async () => {
+    // MUTATION: drop input_owner_name from the persist and this goes red.
+    const r = await run({
+      inputOwnerName: 'Acme Holdings LLC',
+      deps: deps({ tracePerson: vi.fn(async () => HIT) }),
+    })
+    expect(persisted()).toMatchObject({ input_owner_name: 'Acme Holdings LLC', trace_result: r.result })
   })
 
   it('asks the ledger and settles the row by the row id, never the user id', async () => {

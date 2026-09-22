@@ -16,7 +16,9 @@ import { lookupBusinessTrace, lookupPersonTrace } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
 import { contactVendorFrom, executeRoute } from '@/lib/routing/executeRoute';
 import { runSingleTier1 } from '@/lib/trace/singleTier1';
-import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
+import { BUSY_TRY_AGAIN_REASON, TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import { ownerNamesMatch } from '@/lib/utils/ownerName';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
@@ -146,10 +148,62 @@ export async function POST(request: Request) {
     // nothing.
     const { data: existingRow, error: existingRowError } = await adminClient
       .from('trace_history')
-      .select('id, charge, ai_research_charge, property_record, tier, outcome_code')
+      .select('id, charge, ai_research_charge, property_record, tier, outcome_code, property_trace_status, ai_research_status, trace_job_id, status, created_at')
       .eq('user_id', user.id)
       .eq('address_hash', addressHash)
       .maybeSingle();
+
+    // LIVE WORK IS NEVER TOUCHED BY THIS ROUTE (fix round 1, Task 9).
+    //
+    // Two paths could otherwise put an in-flight row in front of this probe while it still reads
+    // reusable:
+    //   A. The Tier 2 cron's crash window (sweep-property-traces: deduct, throw, requeue) leaves a
+    //      row `ledgerProtected` by the debit the cron already booked, with `property_trace_status`
+    //      back on a queued rung. ledgerProtected alone only stops the SWEEPS below; nothing stopped
+    //      the reuse branch taking the row, and runSingleTier1 would then count the cron's own debit
+    //      as THIS request's charge and null property_trace_status, so the cron's paid Tier 2 record
+    //      never finishes.
+    //   B. `busyResend` used to key on `outcome_code` alone. A bulk upload that re-enqueues a busy
+    //      single row (ai_research_status or property_trace_status back to a queued rung) does not
+    //      clear outcome_code, so the busy exemption spared that live queued work too.
+    //
+    // The fix: a row with live work answers the SAME busy_try_again shape a vendor failure does,
+    // completely untouched -- no delete, no write, no vendor call, no deduct, no webhook -- whether
+    // or not it is ALSO busy_try_again from an earlier attempt. STALE_PROCESSING.CRON_TIMEOUT_MINUTES
+    // is the threshold, the same age at which app/api/cron/sweep-stale-traces itself gives up on a
+    // 'processing' row and marks it error, so a 'processing' row younger than that is presumptively
+    // still running somewhere and this route must not race it.
+    const staleProcessingCutoff = new Date(
+      Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
+    );
+    const processingIsLive =
+      existingRow?.status === 'processing' &&
+      Boolean(existingRow.created_at) &&
+      new Date(existingRow.created_at) >= staleProcessingCutoff;
+    const liveWork = Boolean(
+      existingRow &&
+        (isPropertyTracePending(existingRow.property_trace_status) ||
+          isEntityTracePending(existingRow.ai_research_status) ||
+          processingIsLive)
+    );
+
+    if (liveWork) {
+      return NextResponse.json(
+        {
+          success: false,
+          status: 'error',
+          trace_id: existingRow!.id,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: 0,
+          result: null,
+          found_by: null,
+          outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+          skip_reason: BUSY_TRY_AGAIN_REASON,
+          error: BUSY_TRY_AGAIN_REASON,
+        },
+        { status: 503, headers: { 'Retry-After': '300' } }
+      );
+    }
 
     // Fails CLOSED. Not knowing whether a row exists is not permission to
     // delete one: a refused delete is a 500 the customer cannot get past, while
@@ -163,8 +217,10 @@ export async function POST(request: Request) {
 
     // A busy_try_again row is the one a resend RESUMES (spec 5.2): its step log is what spares the
     // retry from buying the answered steps again, so no sweep below may delete it. It is reused in
-    // place by the update branch further down, like a billed row.
-    const busyResend = existingRow?.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN;
+    // place by the update branch further down, like a billed row. `liveWork` is already false by
+    // this line (live work returned above), named here explicitly so the rule -- busy AND no live
+    // work -- reads the same in code as in the fix.
+    const busyResend = !liveWork && existingRow?.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN;
 
     // Every delete below is narrowed by excludeBilledRows() and its error is
     // checked. A refused delete used to be invisible: the row survived, this
@@ -257,9 +313,10 @@ export async function POST(request: Request) {
           });
         }
 
-        // Cached row holds no contacts, so re-trace. Delete it only if the
-        // customer has not paid for it: a tier 2 row's property record IS the
-        // thing they bought, and its wallet_transactions row references this id.
+        // Re-trace: either the cached row holds no contacts, or it holds a DIFFERENT owner's
+        // contacts (D25: sameOwner false above). Delete it only if the customer has not paid for
+        // it: a tier 2 row's property record IS the thing they bought, and its
+        // wallet_transactions row references this id.
         if (!isBilledRow(cachedResult)) {
           await runDelete('cached-empty', () =>
             adminClient.from('trace_history').delete().eq('id', cachedResult.id)
@@ -368,9 +425,17 @@ export async function POST(request: Request) {
       // (user_id, address_hash) already match, and charge, ai_research_charge,
       // property_record and tier are left untouched: they are what the customer
       // already paid for.
-      const { user_id: _u, address_hash: _h, ...resubmitData } = insertData;
+      //
+      // input_owner_name is excluded too (fix round 1, D25 money): it must change in the SAME
+      // write as trace_result, never ahead of it. Writing it here would let this UPDATE name a NEW
+      // owner while the row still carries the OLD owner's contacts -- readable that way for up to
+      // 50 s, or for 90 days if the settle write below never lands -- so a second request for the
+      // new owner would be served the old owner's contacts free. runSingleTier1 and the Tier 2
+      // persist below write input_owner_name together with trace_result.
+      const { user_id: _u, address_hash: _h, input_owner_name: _o, ...resubmitData } = insertData;
       void _u;
       void _h;
+      void _o;
       const { data, error } = await adminClient
         .from('trace_history')
         .update({ ...resubmitData, tracerfy_job_id: null })
@@ -533,6 +598,9 @@ export async function POST(request: Request) {
         .update({
           status,
           trace_result: result,
+          // D25 money (fix round 1): the owner this result describes changes in the SAME write as
+          // the result, never a separate one. The supplied owner if there was one, else null.
+          input_owner_name: owner_name || null,
           phone_count: result?.phones?.length || 0,
           email_count: result?.emails?.length || 0,
           is_successful: isSuccessful,
@@ -652,6 +720,9 @@ export async function POST(request: Request) {
       chargeAmount: chargePerTrace(profile),
       deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS,
       deps: { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
+      // D25 money (fix round 1): written into the same UPDATE as trace_result inside
+      // runSingleTier1, never ahead of it.
+      inputOwnerName: owner_name || null,
     });
 
     if (tier1.persistError) {

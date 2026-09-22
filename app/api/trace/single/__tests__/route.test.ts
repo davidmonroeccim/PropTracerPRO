@@ -1960,10 +1960,13 @@ describe("tier 1 inline: what the caller gets", () => {
   });
 
   it("a person owner whose returned people do not match is free and says so", async () => {
-    // D29: the step log stores a COUNT, never names.
+    // D29: the step log stores a COUNT, never names. `people` rides alongside peopleCount at
+    // runtime (H.person is typed unknown, so tsc will not catch a missed edit) so the assertions
+    // below can actually fail if a name ever leaked into the log or the response.
     H.person = {
       success: true, hit: true, contacts: null, nameNotMatched: true,
       peopleCount: 1, creditsDeducted: 5,
+      people: [{ first_name: "Someoneelse", last_name: "Different" }],
     };
     const body = await (await post({ ...BODY, owner_name: "Testowner Placeholder" })).json();
     expect(deducts()).toHaveLength(0);
@@ -1987,7 +1990,9 @@ describe("tier 1 inline: what the caller gets", () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("300");
     expect(body).toMatchObject({
-      success: false, status: "error", outcome_code: "busy_try_again", charge: 0,
+      success: false, status: "error", trace_id: "trace-new", tier: 1, charge: 0, result: null,
+      found_by: null, outcome_code: "busy_try_again",
+      skip_reason: "The system is busy. Try again in 5 minutes. You were not charged.",
       error: "The system is busy. Try again in 5 minutes. You were not charged.",
     });
     expect(deducts()).toHaveLength(0);
@@ -2049,9 +2054,49 @@ describe("tier 1 inline: money on this call site (L-018)", () => {
     H.survivingRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
     H.insertedRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
     H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: "2026-08-01T00:00:00.000Z" }];
-    await post();
+    const body = await (await post()).json();
     expect(deducts()).toHaveLength(1);
     expect(tier1Persisted()).toMatchObject({ charge: 0.5, tier: 2 });
+    // The receipt reads 0.50 (both purchases), but this REQUEST only collected its own 0.25.
+    expect(body.charge).toBe(0.25);
+  });
+});
+
+describe("tier 1 inline: warnings are wallet-only, the routing notes stay internal (fix round 1)", () => {
+  it("does not leak a routing warning into body.warnings", async () => {
+    // MUTATION: return tier1.execution.warnings instead of the wallet-only array and this goes
+    // red: planRoute always warns on an entity step with no registrationState ("Sending the
+    // property state..."), and BODY's owner (ACME HOLDINGS LLC) takes that step.
+    H.entity = CONTACTS_HIT;
+    const body = await (await post()).json();
+    expect(body.warnings).toEqual([]);
+  });
+});
+
+describe("tier 1 inline: auto-rebill fires only when money moved or should have (fix round 1)", () => {
+  it("does not trigger on a free outcome", async () => {
+    // MUTATION: call triggerAutoRebillIfNeeded unconditionally and this goes red.
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    await post(); // default entity/business miss: no_match, deduction 'not_attempted'
+    expect(triggerAutoRebillIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it("triggers on a charged outcome", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+});
+
+describe("tier 1 inline: Track A price, grant-aware (fix round 1)", () => {
+  it("charges a pro profile the pro rate, not the wallet rate", async () => {
+    // MUTATION: swap chargePerTrace(profile) for a Track B derivation, or hard-code 0.25, and
+    // this goes red.
+    H.profile = { ...H.profile, subscription_tier: "pro" };
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(deducts()[0].args).toMatchObject({ p_amount: PRICING.CHARGE_PER_SUCCESS });
   });
 });
 
@@ -2083,6 +2128,108 @@ describe("tier 1 inline: the busy_try_again resend (spec 5.2)", () => {
     await post(TRUST_BODY);
     expect(lookupPersonTrace).not.toHaveBeenCalled();
     expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("tier 1 inline: a row with live work is never touched (fix round 1)", () => {
+  it("answers busy without touching a row whose Tier 2 rung is still queued (cron crash window)", async () => {
+    // Path A: the Tier 2 cron's crash window (sweep-property-traces: deduct, throw, requeue)
+    // leaves the row on a queued rung. Under the old code it was merely ledgerProtected, which
+    // only spared the SWEEPS -- the reuse branch still took it.
+    // MUTATION: drop the isPropertyTracePending() clause and this goes red.
+    H.survivingRow = { id: "trace-live-a", property_trace_status: "queued_2", charge: 0, tier: 2 };
+    const { lookupDossier, lookupBusinessTrace, lookupPersonTrace } = await vendorsCalled();
+
+    const res = await post();
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toMatchObject({
+      success: false, outcome_code: "busy_try_again", charge: 0, trace_id: "trace-live-a",
+    });
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+    expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
+    expect(deletes()).toHaveLength(0);
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("answers busy for a busy row bulk re-enqueued, even though outcome_code alone would exempt it", async () => {
+    // Path B: a bulk upload re-enqueues a busy single row (ai_research_status back to a queued
+    // rung) without clearing outcome_code, so the busy exemption alone would spare this live row.
+    // MUTATION: drop the isEntityTracePending() clause and this goes red.
+    H.survivingRow = {
+      id: "trace-live-b", outcome_code: "busy_try_again", ai_research_status: "queued",
+      charge: 0, tier: 1,
+    };
+    const { lookupBusinessTrace } = await vendorsCalled();
+
+    const res = await post();
+
+    expect(res.status).toBe(503);
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
+    expect(deletes()).toHaveLength(0);
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("answers busy for a fresh processing row from a concurrent request", async () => {
+    // MUTATION: drop the processingIsLive clause and this goes red.
+    H.survivingRow = {
+      id: "trace-live-c", status: "processing", created_at: new Date().toISOString(),
+      charge: 0, tier: null,
+    };
+    const { lookupBusinessTrace } = await vendorsCalled();
+
+    const res = await post();
+
+    expect(res.status).toBe(503);
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
+    expect(deletes()).toHaveLength(0);
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("still reuses an ordinary processing row abandoned longer ago than the cron's own threshold", async () => {
+    // Not live work: this proves the gate is not a blanket refusal of every 'processing' row.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = {
+      id: "trace-old", status: "processing",
+      created_at: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
+      charge: 0, tier: null,
+    };
+    H.insertedRow = { id: "trace-old", charge: 0, tier: null };
+    const res = await post();
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("tier 1 inline: a reused row's owner and its result change together (fix round 1, D25 money)", () => {
+  it("the reuse UPDATE never carries the new owner ahead of the new result", async () => {
+    // MUTATION: put input_owner_name back in the reuse UPDATE and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", input_owner_name: "JANE DOE", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    await post(); // BODY's owner is ACME HOLDINGS LLC
+    const reuse = H.ops.find(
+      (o) =>
+        o.op === "update" &&
+        o.filters.some((f) => f[0] === "eq" && f[1] === "id") &&
+        !("outcome_code" in (o.payload as object))
+    );
+    expect(reuse).toBeDefined();
+    expect(reuse!.payload).not.toHaveProperty("input_owner_name");
+  });
+
+  it("the write carrying trace_result carries the new owner", async () => {
+    // MUTATION: drop input_owner_name from the settle persist (runSingleTier1) and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", input_owner_name: "JANE DOE", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    await post();
+    expect(tier1Persisted()).toMatchObject({ input_owner_name: "ACME HOLDINGS LLC" });
   });
 });
 
@@ -2130,5 +2277,41 @@ describe("tier 2 single: the shared-code changes reach this route (L-018)", () =
     expect(bodyStr).not.toContain("5550000901");
     expect(bodyStr).not.toContain("fallback@example.invalid");
     expect(bodyStr).not.toMatch(/name_verified/);
+  });
+});
+
+describe("tier 2 single: input_owner_name rides the same write as trace_result (fix round 1, D25 money)", () => {
+  it("writes null when no owner was supplied", async () => {
+    // MUTATION: drop input_owner_name from the tier 2 settle persist and this goes red.
+    H.dossier = DOSSIER_MISS;
+    await post(TIER2_BODY);
+    expect(persisted()).toMatchObject({ input_owner_name: null });
+  });
+
+  it("writes the supplied owner on the Full Property Trace opt-in", async () => {
+    H.dossier = DOSSIER_MISS;
+    await post({ ...BODY, full_property_trace: true });
+    expect(persisted()).toMatchObject({ input_owner_name: "ACME HOLDINGS LLC" });
+  });
+});
+
+describe("tier 2 single: the request budget reaches every vendor call (fix round 1)", () => {
+  it("passes VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS to every tier 2 vendor call", async () => {
+    // MUTATION: pass `deadlineMs: startedAt + 10 * 60 * 1000` to the tier 2 executeRoute call and
+    // this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const { lookupDossier, lookupBusinessTrace } = await vendorsCalled();
+    await post(TIER2_BODY);
+    let calls = 0;
+    for (const mocked of [lookupDossier, lookupBusinessTrace]) {
+      for (const call of vi.mocked(mocked).mock.calls) {
+        calls += 1;
+        const opts = call[1] as { timeoutMs: number };
+        expect(opts.timeoutMs).toBeGreaterThan(0);
+        expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+      }
+    }
+    expect(calls).toBeGreaterThan(0);
   });
 });

@@ -2977,6 +2977,9 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       address again for a different owner (D25) and finds nothing, loses the earlier paid contacts from History and
       the CSV, while `charge` keeps the running total (D34). Needs David's call on whether a free re-trace may
       replace a paid result.
+      Same family (Task 9 review): a Full Property Trace row stores no supplied owner (`input_owner_name` NULL), so a
+      later trace of that address WITH an owner never matches it under D25's text, runs a new Tier 1 trace, and
+      replaces the paid Full Property Trace contacts. Before Phase 1 that request was served the cached row free.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and
