@@ -1339,3 +1339,43 @@ describe("the property-trace sweep never pushes to HighLevel", () => {
     expect(settle.property_trace_status).toBe(PROPERTY_TRACE_SETTLED_STATUS);
   });
 });
+
+describe("D21 in the tier 2 cron: every owner, and no dossier contacts in Phase 1", () => {
+  const TWO_INDIVIDUALS = {
+    ...ENTITY_HIT,
+    owners: [
+      { first_name: "Testowner", last_name: "Placeholder", age: "00" },
+      { first_name: "Secondowner", last_name: "Placeholder", age: "00" },
+    ],
+    contacts: {
+      ownerName: null,
+      phones: [{ number: "5550000901", type: "mobile" }],
+      emails: [],
+      mailingAddress: null,
+    },
+  };
+
+  beforeEach(() => {
+    H.dossier = TWO_INDIVIDUALS;
+  });
+
+  it("asks about the second owner when the first misses", async () => {
+    vi.mocked(lookupPersonTrace)
+      .mockResolvedValueOnce({ ...CONTACTS_MISS })
+      .mockResolvedValueOnce({ ...CONTACTS_HIT });
+    await run();
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(lookupPersonTrace).mock.calls[1][0]).toMatchObject({ first_name: "Secondowner" });
+    expect(finalWrite()).toMatchObject({ status: "success", is_successful: true, contact_vendor: "tracerfy" });
+    expect((finalWrite().trace_result as Record<string, unknown>).name_verified).toBeUndefined();
+  });
+
+  it("does NOT return the dossier's own contacts in Phase 1, because bulk surfaces cannot show the label yet", async () => {
+    // D21 (b) is switched on by the two single routes only (ExecuteOptions.dossierContactsFallback).
+    // MUTATION: make the fallback ignore the flag and this goes red with phone_count 1.
+    H.personContacts = { ...CONTACTS_MISS };
+    await run();
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    expect(finalWrite()).toMatchObject({ status: "no_match", is_successful: false, phone_count: 0 });
+  });
+});

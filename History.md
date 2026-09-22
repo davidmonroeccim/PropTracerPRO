@@ -4,6 +4,29 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (f): Tier 1 Phase 1, Task 6: D21, every owner, then the dossier's own contacts.
+
+- The Tier 2 second pass now tries every owner the dossier names, each classified on its own
+  (individual to Tracerfy, entity to FastAppend, D14). When the property has no street or city, an
+  individual owner is searched at the dossier's mailing address with Instant, instead of the
+  nameless parcel lookup.
+- Every owner the dossier names was tried (an owner with no lookup key is skipped) and none came
+  back with contacts, and the owners are individuals: only then is the dossier's own contacts block
+  returned with name_verified false, and only to a caller that asks for it (the two single routes,
+  ExecuteOptions.dossierContactsFallback). The bulk cron does not get it in Phase 1: the CSV export,
+  the HighLevel push and the gateway cannot show the label yet. The dossier parser now surfaces
+  that block; checked against every saved dossier response
+  (tasks/research-scripts/phase1/check-dossier-contacts.ts, counts only): 31 hits across 34
+  responses (dossier, address-mode, ohio, phase0), all 31 carrying a contacts key, 26 parsed to a
+  non-empty block (28 owner_type entity, 3 individual, 2 of those 3 fallback-eligible), 199 phones
+  and 118 emails total, phone types landline and mobile only, no unexpected contacts keys, no
+  parse failures. Phase 0's three dossier records matched the expected shape exactly:
+  dossier_commercial individual with 8 phones 4 emails, dossier_land individual with 7 phones 5
+  emails, dossier_multifamily entity with no dossier contacts fallback eligibility.
+- traceResultFor no longer labels a supplied Tier 1 owner as the owner of record, so a Tier 1 miss
+  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: eight, all red (the
+  brief's seven plus a controller-added eighth on the owner loop's failure branch).
+
 ## 2026-09-22 (e): Tier 1 Phase 1, Task 5: step log, resend reuse, request budget.
 
 - executeRoute records every step with its outcome (hit, miss, name_not_matched, failed,

@@ -133,7 +133,10 @@ function phoneType(raw: string): TraceResult['phones'][number]['type'] {
  */
 export function traceResultFor(execution: ExecutionResult): TraceResult | null {
   const contacts = execution.contacts
-  const ownerOfRecord = execution.ownerName?.trim() || null
+  // The OWNER OF RECORD is what a Full Property Trace bought from the county. On a tier 1 trace the
+  // owner was SUPPLIED by the caller, and labelling it "the name on the county roll" would be
+  // false (spec 7.2), so a tier 1 result carries no owner_name_2 and a tier 1 miss is null.
+  const ownerOfRecord = execution.tier === 2 ? execution.ownerName?.trim() || null : null
   if (!contacts && !ownerOfRecord) return null
 
   const phones = (contacts?.phones ?? []).map((p) => ({
@@ -158,6 +161,8 @@ export function traceResultFor(execution: ExecutionResult): TraceResult | null {
     mailing_zip: useContactMailing ? null : mailing?.zip || null,
     // Same convention as parseTracerfyResult: contacts present or nothing.
     match_confidence: phones.length > 0 || emails.length > 0 ? 80 : 0,
+    // D21 (b): contacts from the dossier's nameless block after every owner's lookup missed.
+    ...(execution.contactsNameVerified === false ? { name_verified: false } : {}),
   }
 }
 

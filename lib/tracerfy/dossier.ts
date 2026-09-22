@@ -34,6 +34,7 @@ import {
   VendorTimeoutError,
   type VendorCallOptions,
 } from './fetchWithTimeout'
+import type { OwnerContacts } from '@/lib/routing/executeRoute'
 
 /** A dossier lookup key. The two modes are mutually exclusive by construction. */
 export type DossierKey =
@@ -92,6 +93,12 @@ export interface DossierResult {
   mailingAddress: DossierMailingAddress | null
   /** 10 on a hit, 0 on a miss. Read it rather than inferring the charge from `hit`. */
   creditsDeducted: number
+  /**
+   * The dossier's OWN contacts block, which carries no name (spec D21 b). Used only as the last
+   * resort after every owner's name-matched lookup missed, and always labelled not name-verified.
+   * Null when the block holds no phone and no email. Absent on a miss or a failure.
+   */
+  contacts?: OwnerContacts | null
   error?: string
 }
 
@@ -170,14 +177,39 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
+/** The nameless contacts block, deduplicated and capped the way the contact clients cap theirs. */
+function dossierContacts(v: unknown): OwnerContacts | null {
+  if (!isRecord(v)) return null
+  const phones: Array<{ number: string; type: string }> = []
+  for (const p of Array.isArray(v.phones) ? v.phones : []) {
+    if (!isRecord(p)) continue
+    const number = str(p.number).trim()
+    if (number && !phones.some((x) => x.number === number)) {
+      phones.push({ number, type: str(p.type).trim().toLowerCase() || 'unknown' })
+    }
+  }
+  const emails: string[] = []
+  for (const e of Array.isArray(v.emails) ? v.emails : []) {
+    const email = (isRecord(e) ? str(e.email) : str(e)).trim()
+    if (email && !emails.includes(email)) emails.push(email)
+  }
+  if (!phones.length && !emails.length) return null
+  return {
+    ownerName: null,
+    phones: phones.slice(0, TRACERFY.MAX_PHONES),
+    emails: emails.slice(0, TRACERFY.MAX_EMAILS),
+    mailingAddress: null,
+  }
+}
+
 /**
  * Parse a dossier response body. Pure, so it is testable without a network.
  *
  * A MISS is a success. The vendor returns { hit: false, credits_deducted: 0 } and echoes the
  * request keys back; there is no property, owners, contacts or skip_trace_hit key at all.
  *
- * `response.contacts` is deliberately not surfaced. It carries purchased skip-trace PII and
- * the contact step is a separate vendor call on a separate ledger line.
+ * `response.contacts` is surfaced as `contacts` only for the D21 (b) fallback in executeRoute: it
+ * has no name, so it is never used while a name-matched lookup can still answer.
  */
 export function parseDossierResponse(body: unknown): DossierResult {
   if (!isRecord(body)) {
@@ -223,7 +255,10 @@ export function parseDossierResponse(body: unknown): DossierResult {
       }
     : null
 
-  return { success: true, hit: true, owners, property, mailingAddress, creditsDeducted }
+  return {
+    success: true, hit: true, owners, property, mailingAddress, creditsDeducted,
+    contacts: dossierContacts(body.contacts),
+  }
 }
 
 /**

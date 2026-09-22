@@ -24,6 +24,7 @@ const execution = (over: Partial<ExecutionResult> = {}): ExecutionResult => ({
   mailingAddress: null,
   contactsFound: false,
   contacts: null,
+  contactsNameVerified: true,
   tier: 2,
   vendorSpend: 0,
   steps: [],
@@ -159,6 +160,17 @@ describe("traceResultFor", () => {
 
   it("is null only when there is genuinely nothing", () => {
     expect(traceResultFor(execution())).toBeNull();
+  });
+
+  it('never labels a SUPPLIED tier 1 owner as the owner of record (spec 7.2)', () => {
+    // MUTATION: drop the tier test in traceResultFor and this goes red.
+    expect(traceResultFor(execution({ tier: 1, ownerName: 'Acme Holdings Llc', contacts: null }))).toBeNull();
+    expect(traceResultFor(execution({ tier: 1, ownerName: 'Acme Holdings Llc', contacts: CONTACTS }))!.owner_name_2).toBeNull();
+  });
+
+  it('labels the dossier contacts not name-verified (D21 b), and nothing else', () => {
+    expect(traceResultFor(execution({ ownerName: 'X', contacts: CONTACTS, contactsNameVerified: false }))!.name_verified).toBe(false);
+    expect(traceResultFor(execution({ ownerName: 'X', contacts: CONTACTS }))).not.toHaveProperty('name_verified');
   });
 });
 

@@ -881,6 +881,107 @@ describe('executeRoute: the Tier 1 ladder and its step log (spec 4.3, 5.2)', () 
   })
 })
 
+describe('executeRoute: D21, every owner, the mailing address, then the dossier contacts', () => {
+  const TWO_INDIVIDUALS: DossierResult = {
+    ...HIT_INDIVIDUAL,
+    owners: [
+      { first_name: 'Testowner', last_name: 'Placeholder', age: '00' },
+      { first_name: 'Secondowner', last_name: 'Placeholder', age: '00' },
+    ],
+  }
+
+  it('asks about every owner the dossier names, in order, until one has contacts', async () => {
+    // MUTATION: loop over ownerNamesFrom(dossier).slice(0, 1) and this goes red.
+    // tier2Plan() has a street, a city and a parcel id, so each individual gets Instant then parcel.
+    const d = deps({
+      lookupDossier: dossierSequence(TWO_INDIVIDUALS),
+      tracePerson: contactSequence(CONTACT_MISS, CONTACT_MISS, CONTACT_HIT),
+    })
+    const r = await executeRoute(tier2Plan(), d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(d.tracePerson).mock.calls[2][0]).toMatchObject({ first_name: 'Secondowner', last_name: 'Placeholder' })
+    expect(r.contacts).toBe(CONTACT_HIT.contacts)
+    expect(r.contactsNameVerified).toBe(true)
+  })
+
+  it('sends an entity co-owner to FastAppend and an individual to Tracerfy (D14)', async () => {
+    const MIXED: DossierResult = {
+      ...HIT_INDIVIDUAL,
+      owners: [
+        { first_name: 'Testowner', last_name: 'Placeholder', age: '00' },
+        { first_name: '', last_name: 'Acme Holdings Llc', age: '' },
+      ],
+    }
+    const d = deps({ lookupDossier: dossierSequence(MIXED), traceEntity: vi.fn(async () => CONTACT_HIT) })
+    const r = await executeRoute(tier2Plan(), d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    expect(d.traceEntity).toHaveBeenCalledWith({ company_name: 'Acme Holdings Llc', state: 'UT' })
+    expect(r.contactsFound).toBe(true)
+  })
+
+  it('searches an individual at the dossier mailing address when the property has no street or city (D21 c)', async () => {
+    // MUTATION: return `base` unconditionally from contactParcelFor and the parcel lookup runs instead.
+    const plan = tier2Plan({ situsAddress: null, situsCity: null, situsState: null })
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson: vi.fn(async () => CONTACT_HIT) })
+    await executeRoute(plan, d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(1)
+    expect(d.tracePerson).toHaveBeenCalledWith({
+      first_name: 'Testowner', last_name: 'Placeholder',
+      address: '100 Placeholder Way', city: 'Redacted', state: 'ZZ', zip: '00000',
+      find_owner: false,
+    })
+  })
+
+  it("returns the dossier's own contacts, labelled not name-verified, only after every owner missed (D21 b)", async () => {
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
+    expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    expect(r.contactsFound).toBe(true)
+    expect(r.contactsNameVerified).toBe(false)
+    expect(r.contacts).toEqual(HIT_INDIVIDUAL.contacts)
+    expect(r.contacts?.ownerName).toBeNull()
+  })
+
+  it("prefers a name-matched hit over the dossier's contacts", async () => {
+    // MUTATION: take the dossier contacts before the owner loop and this goes red.
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson: vi.fn(async () => CONTACT_HIT) })
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
+    expect(r.contacts).toBe(CONTACT_HIT.contacts)
+    expect(r.contactsNameVerified).toBe(true)
+  })
+
+  it('never falls back when a lookup FAILED, because not every owner was asked', async () => {
+    const d = deps({
+      lookupDossier: dossierSequence(HIT_INDIVIDUAL),
+      tracePerson: vi.fn(async () => ({ success: false, hit: false, contacts: null, error: 'Tracerfy service unavailable' })),
+    })
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
+    expect(r.success).toBe(false)
+    expect(r.contacts).toBeNull()
+  })
+
+  it('never gives an ENTITY owner the dossier contacts (D14)', async () => {
+    // HIT_ENTITY_APN carries the same synthetic contacts block (fixtures README).
+    // MUTATION: drop `result.ownerType === 'individual'` from the fallback and this goes red.
+    const d = deps({ lookupDossier: dossierSequence(HIT_ENTITY_APN) })
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
+    expect(r.contactsFound).toBe(false)
+    expect(r.contacts).toBeNull()
+  })
+
+  it('returns NO dossier contacts without the flag: the Tier 2 cron in Phase 1', async () => {
+    // The bulk surfaces (the CSV export, the HighLevel push, the gateway) do not carry the
+    // not-name-verified label until Phase 2, so only the two single routes switch the fallback on.
+    // MUTATION: drop `options.dossierContactsFallback === true &&` from the fallback and this goes red.
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
+    const r = await executeRoute(tier2Plan(), d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    expect(r.contactsFound).toBe(false)
+    expect(r.contacts).toBeNull()
+    expect(r.contactsNameVerified).toBe(true)
+  })
+})
+
 describe('contactVendorFrom: the vendor that produced the contacts wins', () => {
   it('names fastappend when a trust ladder missed at Tracerfy and hit at FastAppend', () => {
     // MUTATION: drop the hit-first loop and this answers tracerfy.

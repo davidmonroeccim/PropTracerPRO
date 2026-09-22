@@ -21,7 +21,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 3: D6 name match and client signals
   - [x] Task 4: per-call vendor timeouts
   - [x] Task 5: step log, resend reuse and the request budget
-  - [ ] Task 6: D21, every owner then the dossier contacts
+  - [x] Task 6: D21, every owner then the dossier contacts
   - [ ] Task 7: outcome codes, sentences, rowSkipReason, webhook tier
   - [ ] Task 8: shared Tier 1 settle helper
   - [ ] Task 9: web single route inline
