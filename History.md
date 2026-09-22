@@ -4,6 +4,18 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (l): Tier 1 Phase 1, Task 11: Found by, the real reason, and History that shows single traces.
+
+- The single-trace result card shows "Found by" (Address, Parcel ID, Company name) and, when
+  nothing came back, the outcome sentence instead of three generic guesses. A zero charge reads
+  Free, and Free (cached) only when it was cached.
+- The single page stops polling: every answer arrives in one response.
+- History gains a Found by column and the reason on rows that found nothing. History and the
+  dashboard no longer hide single traces with no Tracerfy batch id for users who have run a bulk
+  job (NOT IN on a NULL column); bulk rows are kept out by trace_job_id, so a single trace that
+  reused a row an older bulk job created still stays hidden (unchanged, not fixed here).
+  Mutations: 5, all red.
+
 ## 2026-09-22 (k): Tier 1 Phase 1, Task 10: API single trace inline, by parcel id when there is no city.
 
 - app/api/v1/trace/single runs Tier 1 inline like the web route (camelCase foundBy, outcomeCode,

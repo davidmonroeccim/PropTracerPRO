@@ -41,6 +41,9 @@ interface TraceResponse {
   needs_manual_review?: boolean;
   warnings?: string[];
   charge: number;
+  found_by?: string | null;
+  outcome_code?: string | null;
+  skip_reason?: string | null;
 }
 
 export default function SingleTracePage() {
@@ -148,67 +151,8 @@ export default function SingleTracePage() {
         return;
       }
 
-      // Cached result - show immediately
-      if (data.is_cached || data.result) {
-        setResult(data);
-        setLoading(false);
-        return;
-      }
-
-      // Processing - poll for results
-      if (data.status === 'processing' && data.trace_id) {
-        const traceId = data.trace_id;
-        let attempts = 0;
-        const maxAttempts = 20; // ~65 seconds total
-
-        while (attempts < maxAttempts && !abortRef.current) {
-          // Wait 5s before first poll (Tracerfy needs processing time), then 3s
-          await new Promise((resolve) => setTimeout(resolve, attempts === 0 ? 5000 : 3000));
-          attempts++;
-
-          const statusResponse = await fetch(
-            `/api/trace/status?trace_id=${traceId}`
-          );
-          const statusData = await statusResponse.json();
-
-          if (!statusData.success) {
-            setError(statusData.error || 'Failed to check trace status');
-            setLoading(false);
-            return;
-          }
-
-          // Still processing
-          if (statusData.status === 'processing') {
-            continue;
-          }
-
-          // Results ready (success or no_match)
-          if (statusData._debug) {
-            setDebugInfo(JSON.stringify(statusData._debug, null, 2));
-          }
-          setResult({
-            success: true,
-            is_cached: statusData.is_cached || false,
-            trace_id: statusData.trace_id,
-            tier: statusData.tier ?? null,
-            result: statusData.result,
-            property_record: statusData.property_record ?? null,
-            owner_type: statusData.owner_type ?? null,
-            needs_manual_review: statusData.needs_manual_review ?? false,
-            warnings: statusData.warnings ?? [],
-            charge: statusData.charge || 0,
-          });
-          setLoading(false);
-          return;
-        }
-
-        // Timed out
-        setError('Trace is taking longer than expected. Check History for results.');
-        setLoading(false);
-        return;
-      }
-
-      // Unexpected response
+      // Every answer is final in this one response now: a cache hit, a Full Property Trace, and a
+      // supplied-owner trace (spec D1, D26). Nothing is polled.
       setResult(data);
     } catch {
       setError('Failed to connect to server');
@@ -422,6 +366,8 @@ export default function SingleTracePage() {
                 charge={result.charge}
                 address={`${address}, ${city}, ${state} ${zip}`}
                 traceId={result.trace_id}
+                foundBy={result.found_by ?? null}
+                skipReason={result.skip_reason ?? null}
               />
 
               {(result.warnings?.length || result.needs_manual_review) && (

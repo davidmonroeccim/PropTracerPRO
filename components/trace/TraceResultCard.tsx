@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Copy, Check, Phone, Mail, MapPin, User, Building2 } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
+import { foundByLabel } from '@/lib/trace/historyDisplay';
 import type { TraceResult } from '@/types';
 
 interface TraceResultCardProps {
@@ -14,9 +15,13 @@ interface TraceResultCardProps {
   charge: number;
   address: string;
   traceId?: string;
+  /** The KEY that found the owner (spec 7.1): address, parcel_id or company_name. */
+  foundBy?: string | null;
+  /** Why nothing came back, in the customer's words (spec 7.1). Shown instead of any guess. */
+  skipReason?: string | null;
 }
 
-export function TraceResultCard({ result, isCached, charge, address, traceId }: TraceResultCardProps) {
+export function TraceResultCard({ result, isCached, charge, address, traceId, foundBy, skipReason }: TraceResultCardProps) {
   const [copiedItem, setCopiedItem] = useState<string | null>(null);
 
   const copyToClipboard = async (text: string, id: string) => {
@@ -53,14 +58,9 @@ export function TraceResultCard({ result, isCached, charge, address, traceId }: 
           <CardDescription>{address}</CardDescription>
         </CardHeader>
         <CardContent>
-          <p className="text-gray-500">
-            We couldn&apos;t find owner information for this property. This may be due to:
+          <p className="text-gray-600">
+            {skipReason ?? 'We could not find owner information for this property.'}
           </p>
-          <ul className="mt-2 list-disc list-inside text-sm text-gray-500">
-            <li>Property owned by an entity (LLC, Trust, etc.)</li>
-            <li>Recently transferred property</li>
-            <li>Address format mismatch</li>
-          </ul>
         </CardContent>
       </Card>
     );
@@ -78,11 +78,14 @@ export function TraceResultCard({ result, isCached, charge, address, traceId }: 
               )}
             </CardTitle>
             <CardDescription>{address}</CardDescription>
+            {foundByLabel(foundBy) && (
+              <p className="text-sm text-gray-500 mt-1">Found by: {foundByLabel(foundBy)}</p>
+            )}
           </div>
           <div className="text-right">
             <p className="text-sm text-gray-500">Charge</p>
             <p className="text-lg font-semibold">
-              {charge > 0 ? formatCurrency(charge) : 'Free (cached)'}
+              {charge > 0 ? formatCurrency(charge) : isCached ? 'Free (cached)' : 'Free'}
             </p>
           </div>
         </div>

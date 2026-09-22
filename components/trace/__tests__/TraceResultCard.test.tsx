@@ -80,3 +80,44 @@ describe('the two owner names', () => {
     expect(markup.split('lucide-copy').length - 1).toBe(2);
   });
 });
+
+describe('when nothing came back', () => {
+  test('shows the real reason, not the three generic guesses', () => {
+    // MUTATION: put the "This may be due to" list back and this goes red.
+    const markup = renderToStaticMarkup(
+      <TraceResultCard
+        result={null}
+        isCached={false}
+        charge={0}
+        address="1 A St"
+        skipReason="We looked this owner up by address and found no match. You were not charged."
+      />
+    );
+    expect(markup).toContain('We looked this owner up by address and found no match. You were not charged.');
+    expect(markup).not.toContain('Recently transferred');
+    expect(markup).not.toContain('Address format mismatch');
+  });
+});
+
+describe('Found by and the charge label', () => {
+  const HIT: TraceResult = { ...BASE, owner_name: 'John Smith', phones: [{ number: '5550000101', type: 'mobile' }] };
+
+  test('names the key that found the owner', () => {
+    const markup = renderToStaticMarkup(
+      <TraceResultCard result={HIT} isCached={false} charge={0.15} address="1 A St" foundBy="parcel_id" />
+    );
+    expect(markup).toContain('Found by: Parcel ID');
+  });
+
+  test('a zero charge that was not cached says Free, not Free (cached)', () => {
+    // MUTATION: restore the unconditional 'Free (cached)' and this goes red.
+    const markup = renderToStaticMarkup(<TraceResultCard result={HIT} isCached={false} charge={0} address="1 A St" />);
+    expect(markup).toContain('>Free<');
+    expect(markup).not.toContain('Free (cached)');
+  });
+
+  test('a cached zero charge still says Free (cached)', () => {
+    const markup = renderToStaticMarkup(<TraceResultCard result={HIT} isCached={true} charge={0} address="1 A St" />);
+    expect(markup).toContain('Free (cached)');
+  });
+});

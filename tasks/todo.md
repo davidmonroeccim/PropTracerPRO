@@ -26,7 +26,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 8: shared Tier 1 settle helper
   - [x] Task 9: web single route inline
   - [x] Task 10: API single route inline, D23 and D24, docs
-  - [ ] Task 11: result card, single page, History
+  - [x] Task 11: result card, single page, History
   - [ ] Task 12: suite gates and the live check
 - [ ] Phase 2: bulk queue (plan written after Phase 1)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)

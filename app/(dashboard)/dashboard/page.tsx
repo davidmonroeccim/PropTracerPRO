@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { Search, FileUp, ArrowRight, Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
+import { bulkRowExclusion } from '@/lib/trace/historyDisplay';
 import type { TraceHistory, TraceJob } from '@/types';
 
 async function getUsageStats(userId: string) {
@@ -79,12 +80,14 @@ async function getRecentSingleTraces(userId: string, bulkTracerfyJobIds: string[
     .from('trace_history')
     .select('*')
     .eq('user_id', userId)
+    // Bulk rows carry the job they belong to; a single trace carries none.
+    .is('trace_job_id', null)
     .order('created_at', { ascending: false })
     .limit(10);
 
-  if (bulkTracerfyJobIds.length > 0) {
-    query = query.not('tracerfy_job_id', 'in', `(${bulkTracerfyJobIds.join(',')})`);
-  }
+  // See bulkRowExclusion: a single trace with no batch id must survive this.
+  const exclusion = bulkRowExclusion(bulkTracerfyJobIds);
+  if (exclusion) query = query.or(exclusion);
 
   const { data } = await query;
   return (data || []) as TraceHistory[];
