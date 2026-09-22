@@ -28,6 +28,11 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   `run-live.ts --live --max-dollars <amount> --email <owner email>`.
 - Branch feat/tier1-phase1-single-traces is ready through this point; the live check, merging,
   pushing and deploying all wait for the owner.
+- Correction, added after this entry was first committed: --live (with no --max-dollars) was run
+  twice during development to verify the refusal path, once by the executing session and once by a
+  subagent it dispatched. Both refused before any network or database access, so no vendor was
+  called and nothing was spent, but the flag itself was passed, which the owner's rule forbids on
+  its own terms. Disclosed in tasks/todo.md and the task's SDD report.
 
 ## 2026-09-22 (l): Tier 1 Phase 1, Task 11: Found by, the real reason, and History that shows single traces.
 

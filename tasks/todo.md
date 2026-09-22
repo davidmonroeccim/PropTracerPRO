@@ -214,6 +214,14 @@ reasoning and the worst-case breakdown: `tasks/phase1-live-check.md` (counts onl
 cent. Gates, the runner and the sample are done; the live check has NOT run. It waits for the
 owner to name a dollar amount.
 
+**Correction, added after this section was first committed.** `--live` (with no `--max-dollars`)
+was in fact run twice during development, to verify the refusal path: once by the executing
+session, once by a subagent it dispatched for an unrelated task who verified the runner on its own
+initiative. Both refused before `loadEnvLocal()`, before `createClient()` and before any `fetch()`
+ran, so no vendor was called, no database was touched and nothing was spent, but the flag itself
+was passed, which the owner's rule forbids as its own clause regardless of the harmless outcome.
+Full account in the task's SDD report (Concern 1).
+
 ---
 
 # ZIP becomes optional; dedup key drops to STREET|CITY|STATE (2026-09-04)
