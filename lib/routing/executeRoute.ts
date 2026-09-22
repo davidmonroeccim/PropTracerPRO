@@ -7,7 +7,9 @@
  *
  * Four rules, each of which has a measured reason behind it:
  *
- * 1. STOP AT THE FIRST HIT. planRoute emits DOSSIER_APN then DOSSIER_ADDRESS when both keys
+ * 1. STOP AT THE FIRST HIT. A dossier hit ends its stage; a contact step ends it only with a
+ *    name-matched phone or email (D6, spec 4.3), so a non-matched or contactless answer lets
+ *    the next step run. planRoute emits DOSSIER_APN then DOSSIER_ADDRESS when both keys
  *    exist, because they fail independently — Salt Lake missed on APN and hit on address,
  *    Napa did the reverse. Running the second after the first hits is a wasted $0.20 on
  *    every record that works.
@@ -47,6 +49,8 @@ import type {
   DossierProperty,
   DossierResult,
 } from '@/lib/tracerfy/dossier'
+import { VENDOR_TIMEOUT } from '@/lib/constants'
+import type { VendorCallOptions } from '@/lib/tracerfy/fetchWithTimeout'
 
 /* ------------------------------------------------------------------ *
  * Injected vendors
@@ -110,9 +114,9 @@ export interface PersonTraceRequest {
 }
 
 export interface RouteDeps {
-  lookupDossier: (key: DossierKey) => Promise<DossierResult>
-  traceEntity: (req: EntityTraceRequest) => Promise<ContactResult>
-  tracePerson: (req: PersonTraceRequest) => Promise<ContactResult>
+  lookupDossier: (key: DossierKey, opts?: VendorCallOptions) => Promise<DossierResult>
+  traceEntity: (req: EntityTraceRequest, opts?: VendorCallOptions) => Promise<ContactResult>
+  tracePerson: (req: PersonTraceRequest, opts?: VendorCallOptions) => Promise<ContactResult>
 }
 
 /* ------------------------------------------------------------------ *
@@ -124,9 +128,11 @@ export type StepOutcome =
   | 'hit'
   /** The vendor answered, with no record. Free and final. */
   | 'miss'
+  /** D6: the vendor returned people and charged, and none was the owner. Nothing is delivered. */
+  | 'name_not_matched'
   /** We could not ask. Free, not final, and not billable. */
   | 'failed'
-  /** Never attempted: an earlier step hit, or an earlier step failed. */
+  /** Never put to a vendor: an earlier step hit or failed, or our own request was refused. */
   | 'skipped'
 
 export interface StepReport {
@@ -134,11 +140,43 @@ export interface StepReport {
   outcome: StepOutcome
   /** Dollars actually spent on this step. Zero on a miss, a failure and a skip. */
   cost: number
-  /** Only the dossier reports credits. Read rather than inferred from `hit`. */
+  /** Credits the vendor said it deducted, read from its own answer. */
   creditsDeducted?: number
   error?: string
   /** Why a step was skipped. */
   note?: string
+  /** When the vendor answered, or the call failed. Absent on a skip. */
+  at?: string
+  /** requestKeyFor(step): the exact question this answer belongs to. */
+  requestKey?: string
+  /** How many people a billed non-match returned (D6). Never their names (spec D29). Internal: the step log only. */
+  peopleCount?: number
+  /** A contact hit that carried no phone and no email. */
+  noContacts?: boolean
+  /** Copied from a busy_try_again row's step log instead of asked again (spec 5.2). */
+  reused?: boolean
+}
+
+/** What a caller may tell executeRoute beyond the plan. */
+export interface ExecuteOptions {
+  /** Epoch ms after which no vendor call may start. The single routes pass one; the crons do not. */
+  deadlineMs?: number
+  /** A busy_try_again row's step log. Answered entries younger than 24 hours are reused. */
+  priorSteps?: StepReport[] | null
+  /** The clock, injectable for tests. */
+  now?: () => number
+}
+
+/** A logged answer older than this is never reused; the record runs fresh instead (spec 5.2). */
+export const STEP_REUSE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+/**
+ * The question a step asked, as a string: its kind plus its request, which already carries the
+ * owner's name and every key sent. A resend reuses a logged answer only for the IDENTICAL question,
+ * so a different owner, address or parcel id always asks again.
+ */
+export function requestKeyFor(step: RouteStep): string {
+  return `${step.kind}:${JSON.stringify(step.request)}`
 }
 
 export interface ExecutionResult {
@@ -201,17 +239,53 @@ const CONTACT_VENDOR_BY_STEP: Record<StepKind, ContactVendor | null> = {
  * miss leaves no contact name to mislabel anyway. A 'skipped' step is excluded because it was
  * never put to a vendor: it is the record of a question we decided not to ask.
  *
- * At most one vendor family can appear in a run. planRoute emits the entity step or the
- * individual steps, never both (lib/routing/ownerRoute.ts:379-442), and a stage stops at its
- * first hit, so this reads the first attempted contact step rather than resolving a conflict.
+ * A trust or unreadable name can ask BOTH vendors (spec 4.2, D3). The vendor whose answer
+ * produced the contacts wins; when none did, the first vendor asked answers the routing question.
  */
 export function contactVendorFrom(steps: StepReport[]): ContactVendor | null {
+  for (const step of steps) {
+    if (step.outcome !== 'hit' || step.noContacts) continue
+    const vendor = CONTACT_VENDOR_BY_STEP[step.kind]
+    if (vendor) return vendor
+  }
   for (const step of steps) {
     if (step.outcome === 'skipped') continue
     const vendor = CONTACT_VENDOR_BY_STEP[step.kind]
     if (vendor) return vendor
   }
   return null
+}
+
+const STEP_OUTCOMES: ReadonlySet<string> = new Set(['hit', 'miss', 'name_not_matched', 'failed', 'skipped'])
+
+/**
+ * A step log read back from trace_history.trace_steps (JSONB, so anything). Keeps only entries
+ * that are well-formed steps; a resend decides what NOT to buy from this, so a malformed entry is
+ * dropped rather than trusted.
+ */
+export function stepLogFrom(raw: unknown): StepReport[] {
+  if (!Array.isArray(raw)) return []
+  const out: StepReport[] = []
+  for (const e of raw) {
+    if (typeof e !== 'object' || e === null) continue
+    const r = e as Record<string, unknown>
+    if (typeof r.kind !== 'string' || !Object.prototype.hasOwnProperty.call(CONTACT_VENDOR_BY_STEP, r.kind)) continue
+    if (typeof r.outcome !== 'string' || !STEP_OUTCOMES.has(r.outcome)) continue
+    out.push({
+      kind: r.kind as StepKind,
+      outcome: r.outcome as StepOutcome,
+      cost: typeof r.cost === 'number' ? r.cost : 0,
+      ...(typeof r.creditsDeducted === 'number' ? { creditsDeducted: r.creditsDeducted } : {}),
+      ...(typeof r.error === 'string' ? { error: r.error } : {}),
+      ...(typeof r.note === 'string' ? { note: r.note } : {}),
+      ...(typeof r.at === 'string' ? { at: r.at } : {}),
+      ...(typeof r.requestKey === 'string' ? { requestKey: r.requestKey } : {}),
+      ...(typeof r.peopleCount === 'number' ? { peopleCount: r.peopleCount } : {}),
+      ...(r.noContacts === true ? { noContacts: true } : {}),
+      ...(r.reused === true ? { reused: true } : {}),
+    })
+  }
+  return out
 }
 
 /**
@@ -276,9 +350,35 @@ interface VendorCall {
   dossier?: DossierResult
   contacts?: OwnerContacts | null
   error?: string
+  nameNotMatched?: boolean
+  peopleCount?: number
+  inputError?: boolean
 }
 
-async function callVendor(step: RouteStep, deps: RouteDeps): Promise<VendorCall> {
+/** A contact vendor's answer, normalised. A hit costs costOnHit whether or not a name matched. */
+function contactCall(step: RouteStep, res: ContactResult, fallbackError: string): VendorCall {
+  if (!res.success) {
+    return {
+      success: false, hit: false, cost: 0, error: res.error ?? fallbackError,
+      ...(res.inputError ? { inputError: true } : {}),
+    }
+  }
+  return {
+    success: true,
+    hit: res.hit,
+    // The vendor bills a hit whether or not a returned person was the owner (D6).
+    cost: res.hit ? step.costOnHit : 0,
+    contacts: res.contacts,
+    ...(res.creditsDeducted === undefined ? {} : { creditsDeducted: res.creditsDeducted }),
+    ...(res.nameNotMatched
+      ? { nameNotMatched: true, ...(res.peopleCount === undefined ? {} : { peopleCount: res.peopleCount }) }
+      : {}),
+  }
+}
+
+async function callVendor(step: RouteStep, deps: RouteDeps, opts?: VendorCallOptions): Promise<VendorCall> {
+  // Only a caller with a request budget passes opts. The crons pass none, and their vendor calls
+  // keep the one-argument shape their tests pin.
   try {
     switch (step.kind) {
       case 'DOSSIER_APN':
@@ -286,7 +386,7 @@ async function callVendor(step: RouteStep, deps: RouteDeps): Promise<VendorCall>
         const key = dossierKeyFor(step)
         if (!key) return { success: false, hit: false, cost: 0, error: `Cannot key ${step.kind}` }
 
-        const res = await deps.lookupDossier(key)
+        const res = opts ? await deps.lookupDossier(key, opts) : await deps.lookupDossier(key)
         if (!res.success) {
           return { success: false, hit: false, cost: 0, error: res.error ?? `${step.kind} failed` }
         }
@@ -294,30 +394,20 @@ async function callVendor(step: RouteStep, deps: RouteDeps): Promise<VendorCall>
         const cost = res.hit
           ? round2((res.creditsDeducted / DOSSIER_CREDITS_PER_HIT) * step.costOnHit)
           : 0
-        return {
-          success: true,
-          hit: res.hit,
-          cost,
-          creditsDeducted: res.creditsDeducted,
-          dossier: res,
-        }
+        return { success: true, hit: res.hit, cost, creditsDeducted: res.creditsDeducted, dossier: res }
       }
 
       case 'FASTAPPEND_ENTITY': {
-        const res = await deps.traceEntity(entityRequest(step))
-        if (!res.success) {
-          return { success: false, hit: false, cost: 0, error: res.error ?? 'Entity trace failed' }
-        }
-        return { success: true, hit: res.hit, cost: res.hit ? step.costOnHit : 0, contacts: res.contacts }
+        const req = entityRequest(step)
+        const res = opts ? await deps.traceEntity(req, opts) : await deps.traceEntity(req)
+        return contactCall(step, res, 'Entity trace failed')
       }
 
       case 'TRACERFY_INSTANT_NAMED':
       case 'TRACERFY_PARCEL_APN': {
-        const res = await deps.tracePerson(personRequest(step))
-        if (!res.success) {
-          return { success: false, hit: false, cost: 0, error: res.error ?? 'Person trace failed' }
-        }
-        return { success: true, hit: res.hit, cost: res.hit ? step.costOnHit : 0, contacts: res.contacts }
+        const req = personRequest(step)
+        const res = opts ? await deps.tracePerson(req, opts) : await deps.tracePerson(req)
+        return contactCall(step, res, 'Person trace failed')
       }
     }
   } catch (error) {
@@ -339,15 +429,41 @@ interface StageResult {
   failure: string | null
 }
 
+interface StageContext {
+  deadlineMs?: number
+  prior: StepReport[]
+  now: () => number
+}
+
+const isContactStep = (kind: StepKind): boolean => CONTACT_VENDOR_BY_STEP[kind] !== null
+
+const hasPhoneOrEmail = (c: OwnerContacts | null | undefined): boolean =>
+  Boolean(c && (c.phones.length > 0 || c.emails.length > 0))
+
+/** An answer that can stand in for asking again: the vendor answered and nothing was delivered. */
+const isReusableAnswer = (e: StepReport): boolean =>
+  e.outcome === 'miss' || e.outcome === 'name_not_matched' || (e.outcome === 'hit' && e.noContacts === true)
+
+/** The logged answer to exactly this question, if it is younger than 24 hours by its OWN time. */
+function reusableAnswer(ctx: StageContext, requestKey: string): StepReport | null {
+  for (const e of ctx.prior) {
+    if (e.requestKey !== requestKey || !e.at || !isReusableAnswer(e)) continue
+    const age = ctx.now() - Date.parse(e.at)
+    if (Number.isFinite(age) && age >= 0 && age < STEP_REUSE_WINDOW_MS) return e
+  }
+  return null
+}
+
 /**
- * Run one stage's steps in order, stopping at the first hit.
+ * Run one stage's steps in order, stopping at the first step that DELIVERS: a dossier hit, or a
+ * contact hit with a name-matched phone or email.
  *
  * A failure also stops the stage. We cannot tell a transient outage from a key-specific
  * rejection here, and continuing through an incident both compounds load on a rate limit
  * that is SHARED across Tracerfy's endpoints and produces a half-run record the caller
- * cannot safely bill. Nothing was charged, so the caller retries for free.
+ * cannot safely bill.
  */
-async function runStage(steps: RouteStep[], deps: RouteDeps): Promise<StageResult> {
+async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext): Promise<StageResult> {
   const reports: StepReport[] = []
   let spend = 0
   let hit: VendorCall | null = null
@@ -365,22 +481,63 @@ async function runStage(steps: RouteStep[], deps: RouteDeps): Promise<StageResul
       continue
     }
 
-    const call = await callVendor(step, deps)
+    const requestKey = requestKeyFor(step)
+
+    // RESUME (spec 5.2). An answer this record already bought, inside 24 hours, is not bought again.
+    // It keeps its own time and cost, and adds nothing to this run's spend.
+    const prior = reusableAnswer(ctx, requestKey)
+    if (prior) {
+      reports.push({ ...prior, reused: true })
+      continue
+    }
+
+    // THE REQUEST BUDGET. A call that cannot finish before the deadline is not started: the record
+    // ends busy_try_again and the resend picks up at this step.
+    const left = ctx.deadlineMs === undefined ? undefined : ctx.deadlineMs - ctx.now()
+    if (left !== undefined && left < VENDOR_TIMEOUT.MIN_CALL_MS) {
+      failure = 'The request ran out of time before this lookup could start.'
+      reports.push({
+        kind: step.kind, outcome: 'failed', cost: 0, error: failure,
+        at: new Date(ctx.now()).toISOString(), requestKey,
+      })
+      continue
+    }
+
+    const call = await callVendor(step, deps, left === undefined ? undefined : { timeoutMs: left })
+    const at = new Date(ctx.now()).toISOString()
+
+    if (call.inputError) {
+      // OUR request, refused before spending (no name, no city, no state). Not a vendor failure, so
+      // never busy_try_again (spec 5.1): recorded as not asked, and the next step runs.
+      reports.push({
+        kind: step.kind, outcome: 'skipped', cost: 0,
+        note: `not sent: ${call.error ?? 'refused'}`, at, requestKey,
+      })
+      continue
+    }
 
     if (!call.success) {
       failure = call.error ?? `${step.kind} failed`
-      reports.push({ kind: step.kind, outcome: 'failed', cost: 0, error: failure })
+      reports.push({ kind: step.kind, outcome: 'failed', cost: 0, error: failure, at, requestKey })
       continue
     }
 
     spend = round2(spend + call.cost)
+    const delivered = !isContactStep(step.kind) || hasPhoneOrEmail(call.contacts)
     reports.push({
       kind: step.kind,
-      outcome: call.hit ? 'hit' : 'miss',
+      outcome: call.nameNotMatched ? 'name_not_matched' : call.hit ? 'hit' : 'miss',
       cost: call.cost,
+      at,
+      requestKey,
       ...(call.creditsDeducted === undefined ? {} : { creditsDeducted: call.creditsDeducted }),
+      ...(call.nameNotMatched && call.peopleCount !== undefined ? { peopleCount: call.peopleCount } : {}),
+      ...(call.hit && !call.nameNotMatched && !delivered ? { noContacts: true } : {}),
     })
-    if (call.hit) hit = call
+    // A dossier hit ends its stage. A contact step ends it only with a name-matched phone or email:
+    // a non-matched person (D6) or a matched one with neither is a no-contact result, and the next
+    // step runs (spec 4.3).
+    if (call.hit && delivered) hit = call
   }
 
   return { reports, spend, hit, failure }
@@ -426,7 +583,16 @@ function ownerNameFrom(dossier: DossierResult): string {
     .join(' | ')
 }
 
-export async function executeRoute(plan: RoutePlan, deps: RouteDeps): Promise<ExecutionResult> {
+export async function executeRoute(
+  plan: RoutePlan,
+  deps: RouteDeps,
+  options: ExecuteOptions = {},
+): Promise<ExecutionResult> {
+  const ctx: StageContext = {
+    deadlineMs: options.deadlineMs,
+    prior: options.priorSteps ?? [],
+    now: options.now ?? Date.now,
+  }
   const warnings = [...plan.warnings]
   const result: ExecutionResult = {
     success: true,
@@ -447,7 +613,7 @@ export async function executeRoute(plan: RoutePlan, deps: RouteDeps): Promise<Ex
   }
 
   // ---- Pass 1. Tier 2 discovers the owner here; tier 1 runs its contact step here. ----
-  const pass1 = await runStage(plan.steps, deps)
+  const pass1 = await runStage(plan.steps, deps, ctx)
   result.steps = pass1.reports
   result.vendorSpend = pass1.spend
 
@@ -524,7 +690,7 @@ export async function executeRoute(plan: RoutePlan, deps: RouteDeps): Promise<Ex
     return result
   }
 
-  const pass2 = await runStage(contactPlan.steps, deps)
+  const pass2 = await runStage(contactPlan.steps, deps, ctx)
   result.steps = [...result.steps, ...pass2.reports]
   result.vendorSpend = round2(result.vendorSpend + pass2.spend)
 
