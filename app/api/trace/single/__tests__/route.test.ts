@@ -576,7 +576,11 @@ describe("POST /api/trace/single: row creation, then the inline tier 1 settle", 
     const body = await res.json();
 
     const insert = H.ops.find((o) => o.op === "insert");
-    expect(insert!.payload).toMatchObject({ user_id: "user-1", city: "AUSTIN", state: "TX", zip: "78701", status: "processing" });
+    // MUTATION (fix round 2): delete input_owner_name from insertData and this goes red.
+    expect(insert!.payload).toMatchObject({
+      user_id: "user-1", city: "AUSTIN", state: "TX", zip: "78701", status: "processing",
+      input_owner_name: "ACME HOLDINGS LLC",
+    });
     expect(res.status).toBe(200);
     expect(body).toMatchObject({ success: true, status: "no_match", trace_id: "trace-new", tier: 1, charge: 0 });
   });
@@ -2087,16 +2091,64 @@ describe("tier 1 inline: auto-rebill fires only when money moved or should have 
     await post();
     expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
   });
+
+  it("triggers on insufficient_balance (fix round 2)", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.deductData = false;
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+
+  it("triggers on a deduct error (fix round 2)", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.deductError = { message: "wallet RPC timed out" };
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+
+  it("does not trigger on already_collected: an earlier attempt already paid (fix round 2)", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: new Date(Date.now() - 60 * 1000).toISOString() }];
+    await post();
+    expect(triggerAutoRebillIfNeeded).not.toHaveBeenCalled();
+  });
 });
 
 describe("tier 1 inline: Track A price, grant-aware (fix round 1)", () => {
   it("charges a pro profile the pro rate, not the wallet rate", async () => {
-    // MUTATION: swap chargePerTrace(profile) for a Track B derivation, or hard-code 0.25, and
-    // this goes red.
     H.profile = { ...H.profile, subscription_tier: "pro" };
     H.entity = CONTACTS_HIT;
     await post();
     expect(deducts()[0].args).toMatchObject({ p_amount: PRICING.CHARGE_PER_SUCCESS });
+  });
+
+  it("charges the grant-aware Track A rate, which a Track B derivation would miss (fix round 2)", async () => {
+    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. It is OFF in
+    // this environment, which makes Track A (chargePerTrace, grant-aware) and Track B
+    // (getChargePerTrace: subscription_tier or is_acquisition_pro_member only) AGREE for a plain
+    // wallet profile -- the test above passes under either derivation and proves nothing about
+    // which one actually ran. A gateway grant is the one input where they diverge.
+    // MUTATION: swap chargePerTrace(profile) for getChargePerTrace(profile.subscription_tier,
+    // profile.is_acquisition_pro_member) and this goes red (0.25 instead of 0.15).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    try {
+      H.profile = {
+        ...H.profile,
+        gateway_products: ["prop-tracer-pro"],
+        gateway_products_checked_at: new Date().toISOString(),
+      };
+      H.entity = CONTACTS_HIT;
+      await post();
+      expect(deducts()[0].args).toMatchObject({ p_amount: PRICING.CHARGE_PER_SUCCESS });
+    } finally {
+      process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
   });
 });
 
@@ -2137,6 +2189,7 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     // leaves the row on a queued rung. Under the old code it was merely ledgerProtected, which
     // only spared the SWEEPS -- the reuse branch still took it.
     // MUTATION: drop the isPropertyTracePending() clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
     H.survivingRow = { id: "trace-live-a", property_trace_status: "queued_2", charge: 0, tier: 2 };
     const { lookupDossier, lookupBusinessTrace, lookupPersonTrace } = await vendorsCalled();
 
@@ -2146,7 +2199,10 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("300");
     expect(body).toMatchObject({
-      success: false, outcome_code: "busy_try_again", charge: 0, trace_id: "trace-live-a",
+      success: false, status: "error", trace_id: "trace-live-a", tier: 1, charge: 0, result: null,
+      found_by: null, outcome_code: "busy_try_again",
+      skip_reason: "The system is busy. Try again in 5 minutes. You were not charged.",
+      error: "The system is busy. Try again in 5 minutes. You were not charged.",
     });
     expect(lookupDossier).not.toHaveBeenCalled();
     expect(lookupBusinessTrace).not.toHaveBeenCalled();
@@ -2154,12 +2210,14 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
     expect(deletes()).toHaveLength(0);
     expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
   });
 
   it("answers busy for a busy row bulk re-enqueued, even though outcome_code alone would exempt it", async () => {
     // Path B: a bulk upload re-enqueues a busy single row (ai_research_status back to a queued
     // rung) without clearing outcome_code, so the busy exemption alone would spare this live row.
     // MUTATION: drop the isEntityTracePending() clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
     H.survivingRow = {
       id: "trace-live-b", outcome_code: "busy_try_again", ai_research_status: "queued",
       charge: 0, tier: 1,
@@ -2167,16 +2225,26 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     const { lookupBusinessTrace } = await vendorsCalled();
 
     const res = await post();
+    const body = await res.json();
 
     expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toMatchObject({
+      success: false, status: "error", trace_id: "trace-live-b", tier: 1, charge: 0, result: null,
+      found_by: null, outcome_code: "busy_try_again",
+      skip_reason: "The system is busy. Try again in 5 minutes. You were not charged.",
+      error: "The system is busy. Try again in 5 minutes. You were not charged.",
+    });
     expect(lookupBusinessTrace).not.toHaveBeenCalled();
     expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
     expect(deletes()).toHaveLength(0);
     expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
   });
 
   it("answers busy for a fresh processing row from a concurrent request", async () => {
     // MUTATION: drop the processingIsLive clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
     H.survivingRow = {
       id: "trace-live-c", status: "processing", created_at: new Date().toISOString(),
       charge: 0, tier: null,
@@ -2184,12 +2252,21 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     const { lookupBusinessTrace } = await vendorsCalled();
 
     const res = await post();
+    const body = await res.json();
 
     expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toMatchObject({
+      success: false, status: "error", trace_id: "trace-live-c", tier: 1, charge: 0, result: null,
+      found_by: null, outcome_code: "busy_try_again",
+      skip_reason: "The system is busy. Try again in 5 minutes. You were not charged.",
+      error: "The system is busy. Try again in 5 minutes. You were not charged.",
+    });
     expect(lookupBusinessTrace).not.toHaveBeenCalled();
     expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
     expect(deletes()).toHaveLength(0);
     expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
   });
 
   it("still reuses an ordinary processing row abandoned longer ago than the cron's own threshold", async () => {

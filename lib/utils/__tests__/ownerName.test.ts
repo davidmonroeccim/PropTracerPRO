@@ -6,6 +6,9 @@ describe('ownerNamesMatch (D25)', () => {
     ['ACME HOLDINGS LLC', 'Acme Holdings, L.L.C.'],
     ['John T. Smith', 'JOHN SMITH'],
     ['John Smith Jr', 'john smith'],
+    // Fix round 2: a dropped (optional) token is fine when only ONE side carries it.
+    ['John A Smith', 'John Smith'],
+    ['John Smith', 'JOHN SMITH JR'],
   ])('%s is the same owner as %s', (a, b) => {
     expect(ownerNamesMatch(a, b)).toBe(true)
   })
@@ -21,6 +24,18 @@ describe('ownerNamesMatch (D25)', () => {
     ['Acme Fund II LLC', 'Acme Fund III LLC'],
     ['Oak Partners IV LP', 'Oak Partners LP'],
     ['Series A Holdings LLC', 'Series B Holdings LLC'],
+    // Fix round 2 (D25, residual): classifyOwnerName reads these as 'individual' too (no
+    // recognised entity word), so the drop rules -- not the individual/entity branch -- are what
+    // must keep them apart.
+    ['J & J Farms', 'K & K Farms'],
+    ['Acme Fund II', 'Acme Fund III'],
+    // A first-token initial alone, nothing else in the name to tell them apart by: the clean
+    // isolation case for "the first token is never optional".
+    ['J Farms', 'K Farms'],
+    // Fix round 2: a generational suffix or a middle initial present on BOTH sides must agree,
+    // never silently both-dropped. Same address, different people.
+    ['John Smith Jr', 'John Smith Sr'],
+    ['John A Smith', 'John B Smith'],
   ])('%s is not the same owner as %s', (a, b) => {
     expect(ownerNamesMatch(a, b)).toBe(false)
   })

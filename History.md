@@ -32,6 +32,22 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   routing note, auto-rebill fires only on a charged/insufficient/error deduction, Track A pricing
   is asserted for a pro profile, the fold test checks body.charge (not the receipt), and the busy
   body's full shape is asserted. Mutations: 22 total (7 original + 15 this round), all red.
+- Fix round 2 (D25, residual). classifyOwnerName reads some entity-shaped names as 'individual'
+  ("J & J Farms", "Acme Fund II": no recognised entity word), and a generational suffix or a
+  middle initial must not be silently dropped on BOTH sides when they disagree: "John Smith Jr"
+  and "John Smith Sr", "John A Smith" and "John B Smith", are different people, often at the same
+  address. lib/utils/ownerName.ts's ownerNamesMatch is no longer normalizeOwnerName(a) ===
+  normalizeOwnerName(b); it tokenizes both names and, only when BOTH classify individual, allows a
+  generational suffix or a non-first single letter to be OPTIONAL (present on one side, absent on
+  the other) while still requiring two PRESENT suffixes or same-position letters to agree; anyone
+  not individual on both sides matches on the full token list only. normalizeOwnerName itself is
+  unchanged (kept as a display/key form). Plus small test pins: the live-work responses now assert
+  the full busy body (sentence, tier, result, found_by) and that no webhook fires; a new insert is
+  pinned to still write input_owner_name; auto-rebill is pinned firing on insufficient_balance and
+  on error and not firing on already_collected; the Track A pricing test now uses a gateway grant
+  (with NEXT_PUBLIC_SUITE_SIGNIN_ENABLED on) so Track A and Track B genuinely diverge, since a
+  plain pro profile returns 0.15 under both and proved nothing about which one ran. Mutations: 28
+  total (22 prior + 6 this round), all red.
 
 ## 2026-09-22 (i): Tier 1 Phase 1, Task 8: one shared Tier 1 settle for both single routes.
 
