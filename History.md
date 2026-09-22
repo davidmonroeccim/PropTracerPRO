@@ -39,7 +39,12 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   existing row has a street. D37: the API docs pricing card now says a resubmit is free only with
   the same owner name, and that a different owner, or an owner trace that found no contacts, is
   traced again and charged only if contacts come back. An apn, parcelId or county that is not text
-  answers 400 before any write instead of being read as absent. Mutations: forty-two, all red.
+  answers 400 before any write instead of being read as absent.
+- Fix round 2. The webhook's address is keyed the same way the duplicate key is (the normalized key
+  only with BOTH a street and a city, else the street as sent, else nothing): after D36 a record
+  with a city, a parcel id and no street was sending the customer the internal APN key, and a
+  company posted with a city and no street the "||STATE" one. An ownerName that is not text now
+  answers 400 before any write instead of a bare 500. Mutations: forty-four, all red.
 
 ## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
 

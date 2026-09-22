@@ -71,10 +71,11 @@ export async function POST(request: Request) {
     // D23: a record with no city can be sent with its parcel id (`apn`, or `parcelId`) and county,
     // so Tracerfy's parcel lookup can serve an individual; a company needs only its name and
     // state. The web app stays address-only (D5).
-    // A parcel id or county that is present but not text (a number, say) is a caller bug. It is
-    // refused here, before any write, rather than treated as absent -- which answered "missing the
-    // city and the parcel ID" and sent the caller looking for a field they did send.
-    for (const field of ['apn', 'parcelId', 'county'] as const) {
+    // A field that is present but not text (a number, say) is a caller bug. It is refused here,
+    // before any write, rather than read as absent -- which answered "missing the city and the
+    // parcel ID" and sent the caller looking for a field they did send -- or carried into a trim()
+    // that throws and surfaces as a bare 500.
+    for (const field of ['apn', 'parcelId', 'county', 'ownerName'] as const) {
       const value: unknown = body[field];
       if (value !== undefined && value !== null && typeof value !== 'string') {
         return NextResponse.json(
@@ -182,13 +183,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // The duplicate key (spec 6.3): street, city and state when there is a city, as before; parcel
-    // id, county and state when there is not.
+    // The duplicate key (spec 6.3, D36): street, city and state when the record has BOTH a street
+    // and a city, as before; parcel id, county and state when it has a parcel id and county but no
+    // street; the street-and-state key otherwise.
     const normalizedAddress = traceKeyFor({ address, city, state, apn, county });
     const addressHash = createAddressHash(normalizedAddress);
-    // The webhook's `address`: the normalized key when there is a city (unchanged), else the street
-    // as sent, else nothing. Never the internal "APN|..." key.
-    const webhookAddress = hasCity ? normalizedAddress : hasStreet ? String(address).trim() : null;
+    // The webhook's `address`, keyed the SAME way traceKeyFor is: the normalized key only when
+    // there is both a street and a city, else the street as sent, else nothing. Never the internal
+    // "APN|..." or "||STATE" key, which is ours and means nothing to a caller.
+    const webhookAddress =
+      hasStreet && hasCity ? normalizedAddress : hasStreet ? String(address).trim() : null;
 
     const adminClient = createAdminClient();
 
@@ -614,10 +618,11 @@ export async function POST(request: Request) {
           trace_steps: execution.steps,
           tracerfy_job_id: null,
           // The situs zip the dossier taught us, and ONLY when the caller had none.
-          // address_hash is sha256 of STREET|CITY|STATE and deliberately excludes the
-          // zip (migration 20260904), so this column is free to gain a value: the row
-          // keeps matching its own cache key. Never recompute the hash here -- a row
-          // whose hash moves is a row that re-buys itself forever.
+          // address_hash is sha256 of the duplicate key (street, city and state, or the
+          // parcel key), and every form of it deliberately excludes the zip (migration
+          // 20260904, D36), so this column is free to gain a value: the row keeps matching
+          // its own cache key. Never recompute the hash here -- a row whose hash moves is
+          // a row that re-buys itself forever.
           ...(execution.learnedZip ? { zip: execution.learnedZip } : {}),
         })
         .eq('id', traceRecord.id);

@@ -385,6 +385,16 @@ describe("POST /api/v1/trace/single — gates", () => {
     expect(H.ops).toHaveLength(0);
   });
 
+  it("400s an owner name that is not text, before touching the database", async () => {
+    // It used to reach owner_name?.trim() and come back as a bare 500 (fix round 2).
+    // MUTATION: drop 'ownerName' from the type-check list and this goes red.
+    const res = await post({ ...BODY, ownerName: 123 });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ownerName must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
   it("400s a parcel id that is not text, before touching the database", async () => {
     // Silently treating it as absent answered "missing the city and the parcel ID", which sends
     // the caller looking for a field they did send.
@@ -2307,5 +2317,53 @@ describe("v1 tier 2: the request budget reaches every vendor call", () => {
       }
     }
     expect(calls).toBe(2);
+  });
+});
+
+/* ==================================================================== *
+ * THE WEBHOOK'S `address` IS NEVER THE INTERNAL KEY (fix round 2).
+ *
+ * D36 made `normalizedAddress` an APN key for a record that has a city, a
+ * parcel id and no street, so the old `hasCity ? normalizedAddress : ...`
+ * sent the customer "APN|0123-456|TRAVIS|TX" (and "||TX" for a company with
+ * a city and no street). The rule now mirrors traceKeyFor: the normalized
+ * key only when there is BOTH a street and a city.
+ * ==================================================================== */
+describe("v1 webhooks: the address is never the internal key", () => {
+  const CITY_PARCEL = { city: "Austin", state: "TX", apn: "0123-456", county: "Travis" };
+
+  beforeEach(() => {
+    H.profile = WEBHOOK_PROFILE;
+  });
+
+  it("sends the street and city key unchanged for a record that has both", async () => {
+    // MUTATION: `hasStreet && hasCity ? ... : hasStreet ? ...` back to `hasCity ? ...` and this
+    // stays green, which is why the three cases below exist.
+    await post();
+    expect(webhooks()[0].body).toMatchObject({ address: "123 MAIN ST|AUSTIN|TX", city: "AUSTIN", state: "TX" });
+  });
+
+  it("sends no address for a tier 1 record with a city, a parcel id and no street", async () => {
+    // MUTATION: restore `hasCity ? normalizedAddress : ...` and this goes red.
+    await post({ ...CITY_PARCEL, ownerName: "Testowner Placeholder" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 1, address: null, city: "AUSTIN", state: "TX" });
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("APN|");
+  });
+
+  it("sends no address for a tier 2 record with a city, a parcel id and no street", async () => {
+    H.dossier = DOSSIER_MISS;
+    await post(CITY_PARCEL);
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 2, address: null, city: "AUSTIN", state: "TX" });
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("APN|");
+  });
+
+  it("sends no address for a company posted with a city and no street", async () => {
+    // Its key is the street-and-state fallback, "||TX". That is ours, not the caller's.
+    await post({ city: "Austin", state: "TX", ownerName: "ACME HOLDINGS LLC" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body.address).toBeNull();
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("||");
   });
 });
