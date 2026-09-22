@@ -24,7 +24,13 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   busy_try_again 503; input_owner_name changes only in the same write as the result (the insert,
   runSingleTier1's persist, the Tier 2 persist, never the reuse UPDATE); the Tier 2 vendor calls
   carry the request budget and the Tier 2 persist writes contact_vendor and the step log. The
-  dossier's own contacts are never returned (D32). Mutations: thirty-one, all red.
+  dossier's own contacts are never returned (D32).
+- Fix round 1. The no_lookup_key 400's error is now exactly its sentence (no fallback to a routing
+  note), with the planRoute and missingLookupKey agreement asserted as an invariant; a county that
+  is not text answers 400 before any write instead of a bare 500. New pins: the cache is searched
+  by the APN key, a trust with no first name left runs FastAppend on its full name with only a
+  state (D16), the Tier 2 persist's step log, the Tier 2 webhook never carries the APN key, and the
+  zip-only, no-letter owner and invalid-state 400s. Mutations: thirty-nine, all red.
 
 ## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
 

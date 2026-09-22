@@ -67,12 +67,21 @@ export async function POST(request: Request) {
     // longer read. It is not rejected either: an integration still sending it keeps working
     // and simply gets the plain trace. What now serves a submit with no owner is TIER 2,
     // below.
-    const { address, city, state, zip, ownerName, county } = body;
+    const { address, city, state, zip, ownerName } = body;
     // D23: a record with no city can be sent with its parcel id (`apn`, or `parcelId`) and county,
     // so Tracerfy's parcel lookup can serve an individual; a company needs only its name and
     // state. The web app stays address-only (D5).
     const apn: string | undefined =
       typeof body.apn === 'string' ? body.apn : typeof body.parcelId === 'string' ? body.parcelId : undefined;
+    // county is narrowed to text the same way. One that is present but not text (a number, say) is
+    // a caller bug, refused here before any write rather than thrown on below as a bare 500.
+    if (body.county !== undefined && body.county !== null && typeof body.county !== 'string') {
+      return NextResponse.json(
+        { success: false, error: 'county must be a string when supplied' },
+        { status: 400 }
+      );
+    }
+    const county: string | undefined = typeof body.county === 'string' ? body.county : undefined;
     const hasCity = typeof city === 'string' && city.trim() !== '';
     const hasStreet = typeof address === 'string' && address.trim() !== '';
 
@@ -133,15 +142,19 @@ export async function POST(request: Request) {
     const tier1Owner = fullPropertyTrace ? null : String(ownerName).trim();
     const keyPlan = planRoute({ ...parcel, ownerName: tier1Owner }, rawPricePlanFor(profile));
     if (keyPlan.steps.length === 0) {
+      // INVARIANT: planRoute emits no step exactly when missingLookupKey names what is missing. The
+      // state and an owner name with no letters were refused above; a company, or a trust or
+      // unreadable name with no first name left (D16), always gets its FastAppend step; and a
+      // person's steps, like a Full Property Trace's dossier steps, need a street and city or a
+      // parcel id with its county, which is the test missingLookupKey makes. A null here is a
+      // broken invariant, never a reason to invent a sentence (CLAUDE.md rule 7).
       const missing = missingLookupKey({ address, city, state, apn, county });
-      const skipReason = missing ? noLookupKeyReason(missing) : null;
+      if (!missing) {
+        throw new Error('Invariant broken: planRoute found no lookup key but missingLookupKey found one');
+      }
+      const skipReason = noLookupKeyReason(missing);
       return NextResponse.json(
-        {
-          success: false,
-          outcomeCode: TIER1_OUTCOME.NO_LOOKUP_KEY,
-          skipReason,
-          error: skipReason ?? keyPlan.warnings[0] ?? 'This record has no lookup key.',
-        },
+        { success: false, outcomeCode: TIER1_OUTCOME.NO_LOOKUP_KEY, skipReason, error: skipReason },
         { status: 400 }
       );
     }

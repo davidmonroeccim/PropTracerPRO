@@ -345,11 +345,17 @@ describe("POST /api/v1/trace/single — gates", () => {
     expect(body.skipReason).toBe(
       "This record is missing a street address and the parcel ID, so it could not be looked up. You were not charged. Send it again with the street address or the parcel ID."
     );
+    // The error is the same sentence, never a routing note or a line that does not state the
+    // charge (fix round 1: the fallback chain is gone).
+    expect(body.error).toBe(body.skipReason);
     expect(H.ops).toHaveLength(0);
   });
 
   it("400s an invalid state as no_lookup_key", async () => {
-    const body = await (await post({ ...BODY, state: "Texas" })).json();
+    // MUTATION (fix round 1): answer the state branch with status 200 and this goes red.
+    const res = await post({ ...BODY, state: "Texas" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
     expect(body.outcomeCode).toBe("no_lookup_key");
     expect(body.skipReason).toContain("a valid state");
     expect(H.ops).toHaveLength(0);
@@ -358,6 +364,33 @@ describe("POST /api/v1/trace/single — gates", () => {
   it("still validates a street and city that were both sent", async () => {
     const res = await post({ ...BODY, address: "1" });
     expect(res.status).toBe(400);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a malformed zip on a record sent without a street and city, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the zip-only branch and this goes red (the record runs).
+    const res = await post({ state: "OH", apn: "0123-456", county: "Placeholder", ownerName: "Testowner Placeholder", zip: "2134" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ZIP code must be 5 or 9 digits when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s an owner name with no letters, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the letter check and this goes red.
+    const res = await post({ ...BODY, ownerName: "???" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ownerName must contain at least one letter" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a county that is not text, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the county type check and this goes red (it was a bare 500).
+    const res = await post({ state: "OH", apn: "0123-456", county: 12, ownerName: "Testowner Placeholder" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "county must be a string when supplied" });
     expect(H.ops).toHaveLength(0);
   });
 
@@ -1704,6 +1737,13 @@ describe("v1 tier 1, D23: a record with no city goes by parcel id", () => {
       parcel_id_local: "#0123-456",
       county: "Placeholder",
     });
+    // The 90-day cache is searched by the SAME key (fix round 1, L-018). The dedup mock answers
+    // H.cached whatever hash it is asked for, so only this filter pins which key was asked.
+    // MUTATION: search the cache by createAddressHash(normalizeAddress(address ?? '', city ?? '',
+    // state)) and this goes red.
+    const cacheSelect = H.ops.find((o) => isDedupSelect(o));
+    expect(cacheSelect).toBeDefined();
+    expect(cacheSelect!.filters).toContainEqual(["eq", "address_hash", createAddressHash("APN|0123-456|PLACEHOLDER|OH")]);
   });
 
   it("never sends the internal APN key as the webhook's address", async () => {
@@ -1728,6 +1768,22 @@ describe("v1 tier 1, D23: a record with no city goes by parcel id", () => {
       { company_name: "ACME HOLDINGS LLC", state: "OH" },
       expect.objectContaining({ timeoutMs: expect.any(Number) })
     );
+  });
+
+  it("traces a trust with no first name left on its full name and state, as a company (D16)", async () => {
+    // The approved docs promise it: "Smith Family Trust" leaves no first name once the trust words
+    // are removed, so it is looked up as a company, by name and state, with no street, city or
+    // parcel id.
+    // MUTATION (fix round 1): replace the keyPlan check with missingLookupKey(...) !== null and this
+    // goes red (the record is refused as missing the city and the parcel ID).
+    const { lookupBusinessTrace, lookupPersonTrace } = await v1Vendors();
+    const res = await post({ state: "OH", ownerName: "Smith Family Trust" });
+    expect(res.status).toBe(200);
+    expect(lookupBusinessTrace).toHaveBeenCalledWith(
+      { company_name: "Smith Family Trust", state: "OH" },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
   });
 
   it("refuses a person with neither a city nor a parcel id, as no_lookup_key", async () => {
@@ -1770,6 +1826,19 @@ describe("v1 tier 2, D24 and D21 on the API: the dossier by parcel id, the owner
     H.entity = CONTACTS_HIT;
     await post(TIER2_BODY);
     expect(persisted()).toMatchObject({ contact_vendor: "fastappend", outcome_code: null, found_by: null });
+    // MUTATION (fix round 1): delete trace_steps from the tier 2 persist and this goes red.
+    const steps = persisted()!.trace_steps as Array<{ kind: string }>;
+    expect(steps.map((s) => s.kind)).toEqual(["DOSSIER_ADDRESS", "FASTAPPEND_ENTITY"]);
+  });
+
+  it("never sends the internal APN key as the tier 2 webhook's address", async () => {
+    // MUTATION (fix round 1): send `address: normalizedAddress` on the tier 2 webhook and this
+    // goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_MISS;
+    await post({ state: "OH", apn: "0123-456", county: "Placeholder" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 2, address: null, city: null, state: "OH" });
   });
 
   it("never falls back to the dossier's own contacts: a Full Property Trace whose owner lookups all miss is a true null (D32)", async () => {
