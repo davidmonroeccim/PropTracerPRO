@@ -10,7 +10,7 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   whether it is an individual or an entity; phones and emails come ONLY from the separate Tracerfy
   (individual) or FastAppend (entity) call. Removed the fallback in executeRoute.ts, the
   ExecuteOptions.dossierContactsFallback and ExecutionResult.contactsNameVerified fields, the
-  TraceResult.name_verified column, and the dossier's own contacts parsing in dossier.ts
+  TraceResult.name_verified field, and the dossier's own contacts parsing in dossier.ts
   (dossierContacts, the response.contacts read, and the round-1 export of
   readPhones/readEmails from client.ts, which reverted to module-private).
 - D21's arm (c) stays: the Tier 2 second pass still tries every owner the dossier names, each
@@ -19,10 +19,11 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 - New executeRoute test: a dossier hit whose raw response carries a synthetic contacts block,
   individual owner, every contact lookup misses; the result is a true null, and
   JSON.stringify(result) carries none of the fixture's synthetic phone numbers or email.
-  Mutation: reintroduce a return of a contacts object built from the raw dossier response after
-  the owner loop; red. tasks/research-scripts/phase1/check-dossier-contacts.ts also checked owner
-  parsing beyond the contacts block, so it was kept and renamed check-dossier-parse.ts with every
-  contacts-specific counter removed, rather than deleted outright.
+  Mutation: reintroduce a hard-coded contacts object carrying the fixture's own phone numbers and
+  email after the owner loop; red. tasks/research-scripts/phase1/check-dossier-contacts.ts also
+  checked owner parsing beyond the contacts block, so it was kept and renamed
+  check-dossier-parse.ts with every contacts-specific counter removed, rather than deleted
+  outright.
 
 ## 2026-09-22 (f): Tier 1 Phase 1, Task 6: D21, every owner, then the dossier's own contacts.
 

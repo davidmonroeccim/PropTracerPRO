@@ -903,6 +903,22 @@ describe("executeRoute: D21 (c) every owner and the mailing address; D32, never 
     expect(r.contacts).toBe(CONTACT_HIT.contacts)
   })
 
+  it('stops asking on a contact FAILURE, rather than continuing to the next owner during an outage', async () => {
+    // MUTATION: delete the early `return result` in the owner loop's failure branch and this goes
+    // red: the loop keeps calling vendors for the second owner during the outage, and if that
+    // owner hits, the result comes back success:false with contacts set anyway.
+    // tier2Plan() has a street, a city and a parcel id, so owner one's stage is Instant then
+    // parcel; the Instant call fails, which stops that stage before the parcel step is even asked.
+    const tracePerson = vi.fn()
+      .mockResolvedValueOnce({ success: false, hit: false, contacts: null, error: 'Tracerfy service unavailable' })
+      .mockResolvedValue(CONTACT_HIT)
+    const d = deps({ lookupDossier: dossierSequence(TWO_INDIVIDUALS), tracePerson })
+    const r = await executeRoute(tier2Plan(), d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(1)
+    expect(r.success).toBe(false)
+    expect(r.contacts).toBeNull()
+  })
+
   it('sends an entity co-owner to FastAppend and an individual to Tracerfy (D14)', async () => {
     const MIXED: DossierResult = {
       ...HIT_INDIVIDUAL,
@@ -936,8 +952,8 @@ describe("executeRoute: D21 (c) every owner and the mailing address; D32, never 
     // identifies the owner and whether it is an individual or an entity; phones and emails come
     // ONLY from the separate Tracerfy (individual) or FastAppend (entity) call. If every owner's
     // lookup misses, the result is a true null: no fallback of any kind, in any phase.
-    // MUTATION: reintroduce a return of a contacts object built from the raw dossier response
-    // after the loop, and this goes red.
+    // MUTATION: reintroduce a hard-coded contacts object carrying this fixture's own phone
+    // numbers and email after the loop, and this goes red.
     const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
     const r = await executeRoute(tier2Plan(), d)
     expect(d.tracePerson).toHaveBeenCalledTimes(2)

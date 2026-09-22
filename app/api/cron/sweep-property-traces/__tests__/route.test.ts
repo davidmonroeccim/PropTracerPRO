@@ -1347,6 +1347,16 @@ describe("D21 (c) in the tier 2 cron: every owner, and D32, never the dossier's 
       { first_name: "Testowner", last_name: "Placeholder", age: "00" },
       { first_name: "Secondowner", last_name: "Placeholder", age: "00" },
     ],
+    // A synthetic dossier contacts block. H.dossier is typed loosely (Record<string, unknown>),
+    // so production code never reads this field; it exists only so the D32 test below has real
+    // data to prove never leaks, rather than an absent field a reintroduced fallback would find
+    // nothing on either way.
+    contacts: {
+      ownerName: null,
+      phones: [{ number: "5550000901", type: "mobile" }],
+      emails: ["dossier-leak@example.invalid"],
+      mailingAddress: null,
+    },
   };
 
   beforeEach(() => {
@@ -1370,5 +1380,9 @@ describe("D21 (c) in the tier 2 cron: every owner, and D32, never the dossier's 
     await run();
     expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
     expect(finalWrite()).toMatchObject({ status: "no_match", is_successful: false, phone_count: 0 });
+    // TWO_INDIVIDUALS' synthetic dossier contacts block never reaches what the cron persists.
+    const written = JSON.stringify(finalWrite());
+    expect(written).not.toContain("5550000901");
+    expect(written).not.toContain("dossier-leak@example.invalid");
   });
 });
