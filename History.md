@@ -30,7 +30,16 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   is not text answers 400 before any write instead of a bare 500. New pins: the cache is searched
   by the APN key, a trust with no first name left runs FastAppend on its full name with only a
   state (D16), the Tier 2 persist's step log, the Tier 2 webhook never carries the APN key, and the
-  zip-only, no-letter owner and invalid-state 400s. Mutations: thirty-nine, all red.
+  zip-only, no-letter owner and invalid-state 400s.
+- Fix round 1 part 2 (owner). D36: the address duplicate key is used only when a record has BOTH a
+  street and a city; with a parcel id and county but no street the key is APN, county and state;
+  anything else keeps today's street-and-state key. A record with a city, a parcel id and no street
+  used to key on the city alone, so every such parcel in one city shared one row: a paid result was
+  overwritten and a resend inside 90 days was charged again. No stored key moves, because every
+  existing row has a street. D37: the API docs pricing card now says a resubmit is free only with
+  the same owner name, and that a different owner, or an owner trace that found no contacts, is
+  traced again and charged only if contacts come back. An apn, parcelId or county that is not text
+  answers 400 before any write instead of being read as absent. Mutations: forty-two, all red.
 
 ## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
 

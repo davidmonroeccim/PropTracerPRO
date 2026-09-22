@@ -385,6 +385,23 @@ describe("POST /api/v1/trace/single — gates", () => {
     expect(H.ops).toHaveLength(0);
   });
 
+  it("400s a parcel id that is not text, before touching the database", async () => {
+    // Silently treating it as absent answered "missing the city and the parcel ID", which sends
+    // the caller looking for a field they did send.
+    // MUTATION: delete the apn type check and this goes red.
+    const res = await post({ ...BODY, apn: 12 });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "apn must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a parcelId that is not text, before touching the database", async () => {
+    const body = await (await post({ ...BODY, parcelId: 12 })).json();
+    expect(body).toEqual({ success: false, error: "parcelId must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
   it("400s a county that is not text, before touching the database", async () => {
     // MUTATION (fix round 1): delete the county type check and this goes red (it was a bare 500).
     const res = await post({ state: "OH", apn: "0123-456", county: 12, ownerName: "Testowner Placeholder" });
@@ -1752,6 +1769,23 @@ describe("v1 tier 1, D23: a record with no city goes by parcel id", () => {
     await post(APN_PERSON);
     expect(webhooks()).toHaveLength(1);
     expect(webhooks()[0].body).toMatchObject({ address: null, city: null, state: "OH" });
+  });
+
+  it("keys a record with a city but no street on its parcel, not on the city (D36)", async () => {
+    // The shape that shared one row per city before D36: a paid result was overwritten and a
+    // resend inside 90 days was charged again.
+    // MUTATION: key an address with a city first in traceKeyFor and this goes red.
+    await post({ city: "Austin", state: "TX", apn: "0123-456", county: "Travis", ownerName: "Testowner Placeholder" });
+    const insert = H.ops.find((o) => o.op === "insert");
+    expect(insert!.payload).toMatchObject({
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      address_hash: createAddressHash("APN|0123-456|TRAVIS|TX"),
+      city: "AUSTIN",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    });
+    const cacheSelect = H.ops.find((o) => isDedupSelect(o));
+    expect(cacheSelect!.filters).toContainEqual(["eq", "address_hash", createAddressHash("APN|0123-456|TRAVIS|TX")]);
   });
 
   it("accepts parcelId as the same field", async () => {

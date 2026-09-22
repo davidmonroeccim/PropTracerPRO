@@ -156,12 +156,16 @@ export function normalizeParcelId(apn?: string | null): string {
 }
 
 /**
- * The duplicate key for one record (spec 6.3, D9), in precedence order:
- *   1. a city:                        STREET|CITY|STATE, unchanged, so the 90-day history keeps working
- *   2. no city, a parcel id + county: APN|PARCEL|COUNTY|STATE
- *   3. neither:                       STREET||STATE, today's behaviour. Only a company gets this far
- *                                     (a person needs a key), and it carries today's collision risk,
- *                                     which the spec records rather than solves.
+ * The duplicate key for one record (spec 6.3, D9, amended by D36), in precedence order:
+ *   1. a street AND a city:     STREET|CITY|STATE, unchanged, so the 90-day history keeps working.
+ *                               Every row stored before this carries a street, so no key moves.
+ *   2. a parcel id + county:    APN|PARCEL|COUNTY|STATE
+ *   3. neither:                 STREET||STATE, today's behaviour. It carries today's collision
+ *                               risk, which the spec records rather than solves.
+ *
+ * D36: the address key needs BOTH halves. A record with a city, a parcel id and no street used to
+ * key on `|CITY|STATE`, so every such parcel in one city shared ONE row: the second parcel
+ * overwrote the first one's paid result, and a resend inside the 90 days was charged again.
  */
 export function traceKeyFor(input: {
   address?: string | null;
@@ -170,10 +174,11 @@ export function traceKeyFor(input: {
   apn?: string | null;
   county?: string | null;
 }): string {
+  const street = (input.address ?? '').trim();
   const city = (input.city ?? '').trim();
-  if (city) return normalizeAddress(input.address ?? '', city, input.state);
+  if (street && city) return normalizeAddress(street, city, input.state);
   const parcel = normalizeParcelId(input.apn);
   const county = (input.county ?? '').trim().toUpperCase();
   if (parcel && county) return `APN|${parcel}|${county}|${input.state.trim().toUpperCase()}`;
-  return normalizeAddress(input.address ?? '', '', input.state);
+  return normalizeAddress(street, '', input.state);
 }

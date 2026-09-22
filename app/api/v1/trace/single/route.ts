@@ -71,16 +71,20 @@ export async function POST(request: Request) {
     // D23: a record with no city can be sent with its parcel id (`apn`, or `parcelId`) and county,
     // so Tracerfy's parcel lookup can serve an individual; a company needs only its name and
     // state. The web app stays address-only (D5).
+    // A parcel id or county that is present but not text (a number, say) is a caller bug. It is
+    // refused here, before any write, rather than treated as absent -- which answered "missing the
+    // city and the parcel ID" and sent the caller looking for a field they did send.
+    for (const field of ['apn', 'parcelId', 'county'] as const) {
+      const value: unknown = body[field];
+      if (value !== undefined && value !== null && typeof value !== 'string') {
+        return NextResponse.json(
+          { success: false, error: `${field} must be a string when supplied` },
+          { status: 400 }
+        );
+      }
+    }
     const apn: string | undefined =
       typeof body.apn === 'string' ? body.apn : typeof body.parcelId === 'string' ? body.parcelId : undefined;
-    // county is narrowed to text the same way. One that is present but not text (a number, say) is
-    // a caller bug, refused here before any write rather than thrown on below as a bare 500.
-    if (body.county !== undefined && body.county !== null && typeof body.county !== 'string') {
-      return NextResponse.json(
-        { success: false, error: 'county must be a string when supplied' },
-        { status: 400 }
-      );
-    }
     const county: string | undefined = typeof body.county === 'string' ? body.county : undefined;
     const hasCity = typeof city === 'string' && city.trim() !== '';
     const hasStreet = typeof address === 'string' && address.trim() !== '';

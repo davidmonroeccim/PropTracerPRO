@@ -29,4 +29,10 @@ describe('the API docs describe the synchronous single-trace contract (spec D1, 
     expect(DOCS).not.toContain('a person matching the owner name came back')
     expect(DOCS).not.toContain('This is the one to retry')
   })
+
+  it('says what a resubmit costs now that the cache is owner-aware (D37)', () => {
+    // MUTATION: put the old two sentences back and this goes red.
+    expect(DOCS).toContain('with the same owner name')
+    expect(DOCS).not.toContain('traced returns your stored result and costs nothing. Polling')
+  })
 })

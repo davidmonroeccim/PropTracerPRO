@@ -135,8 +135,11 @@ export default function ApiDocsPage() {
             never changes the price. There is no entity rate and no surcharge.
           </p>
           <p className="text-gray-600 text-sm">
-            Results are kept for 90 days. Resubmitting an address you already traced returns your
-            stored result and costs nothing. Polling any status endpoint is free.
+            Results are kept for 90 days. Resubmitting an address you already traced,
+            with the same owner name, returns your stored result and costs nothing.
+            A different owner name, or an owner trace that found no contacts, is traced
+            again, and you are charged only if contacts come back. Polling any status
+            endpoint is free.
           </p>
         </CardContent>
       </Card>
