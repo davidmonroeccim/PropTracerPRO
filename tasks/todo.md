@@ -2958,6 +2958,12 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
+- [ ] 19. **KNOWN GAP, logged by David's choice 2026-09-22 (spec D35). A crashed single trace can charge once for
+      nothing.** A Tier 1 single trace finds contacts, `deductWallet` succeeds, then the process dies before the
+      persist, so the customer never sees the result. A resend within 24 hours that now finds nothing never runs
+      the ledger probe (it sits inside `if (billable)` in `lib/trace/singleTier1.ts`), so the earlier debit stays
+      unrecorded and the row says "You were not charged". Rare (the window is two database calls). Fix later,
+      together with task 16's transactional hold. David declined a Phase 1 refund path.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and
