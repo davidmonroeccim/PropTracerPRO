@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PRICING } from "@/lib/constants";
+import { PRICING, VENDOR_TIMEOUT } from "@/lib/constants";
+import { requestKeyFor } from "@/lib/routing/executeRoute";
+import { planRoute } from "@/lib/routing/ownerRoute";
+import { parcelForFullTrace } from "@/lib/trace/fullPropertyTrace";
 
 /**
  * Delete/insert fence for the session-side single-trace SUBMIT route.
@@ -370,6 +373,7 @@ describe("POST /api/trace/single — cache hit", () => {
   it("returns the cached contacts free of charge and deletes nothing", async () => {
     H.cached = {
       id: "trace-cached",
+      input_owner_name: "ACME HOLDINGS LLC",
       trace_result: { phones: ["512-555-0100"], emails: [] },
     };
 
@@ -382,7 +386,11 @@ describe("POST /api/trace/single — cache hit", () => {
   });
 
   it("emails alone count as contact data", async () => {
-    H.cached = { id: "trace-cached", trace_result: { phones: [], emails: ["a@b.com"] } };
+    H.cached = {
+      id: "trace-cached",
+      input_owner_name: "ACME HOLDINGS LLC",
+      trace_result: { phones: [], emails: ["a@b.com"] },
+    };
     const body = await (await post()).json();
     expect(body.is_cached).toBe(true);
   });
@@ -562,46 +570,21 @@ describe("POST /api/trace/single — reuse instead of collide", () => {
   });
 });
 
-describe("POST /api/trace/single — row creation and submission", () => {
-  it("inserts a processing row and returns the Tracerfy job id", async () => {
+describe("POST /api/trace/single: row creation, then the inline tier 1 settle", () => {
+  it("inserts a processing row and settles it in the same request", async () => {
     const res = await post();
     const body = await res.json();
 
     const insert = H.ops.find((o) => o.op === "insert");
-    expect(insert).toBeDefined();
-    expect(insert!.payload).toMatchObject({
-      user_id: "user-1",
-      city: "AUSTIN",
-      state: "TX",
-      zip: "78701",
-      status: "processing",
-    });
-    expect(body).toMatchObject({
-      success: true,
-      status: "processing",
-      trace_id: "trace-new",
-      tracerfy_job_id: "tj-1",
-    });
+    expect(insert!.payload).toMatchObject({ user_id: "user-1", city: "AUSTIN", state: "TX", zip: "78701", status: "processing" });
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ success: true, status: "no_match", trace_id: "trace-new", tier: 1, charge: 0 });
   });
 
   it("500s when the row cannot be created", async () => {
     H.insertError = { message: "duplicate key value violates unique constraint", code: "23505" };
     const res = await post();
     expect(res.status).toBe(500);
-  });
-
-  it("marks the row errored and 500s when Tracerfy refuses the submission", async () => {
-    H.submit = { success: false, error: "Tracerfy down" };
-
-    const res = await post();
-    const body = await res.json();
-
-    expect(res.status).toBe(500);
-    expect(body.error).toBe("Tracerfy down");
-    const statusUpdate = H.ops.find(
-      (o) => o.op === "update" && (o.payload as Record<string, unknown>)?.status === "error"
-    );
-    expect(statusUpdate).toBeDefined();
   });
 });
 
@@ -727,13 +710,15 @@ describe("tier 2 — the trigger", () => {
   });
 
   it("does NOT run when the owner of record was supplied", async () => {
-    const { lookupDossier, submitSingleTrace } = await vendorsCalled();
+    // WAS: submitted to the Tracerfy batch. A supplied owner now runs the tier 1 ladder inline.
+    const { lookupDossier, submitSingleTrace, lookupBusinessTrace } = await vendorsCalled();
 
     const body = await (await post(BODY)).json();
 
     expect(lookupDossier).not.toHaveBeenCalled();
-    expect(submitSingleTrace).toHaveBeenCalledTimes(1);
-    expect(body.tier).toBeUndefined();
+    expect(submitSingleTrace).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+    expect(body.tier).toBe(1);
     expect(deducts()).toHaveLength(0);
   });
 
@@ -761,13 +746,16 @@ describe("tier 2 — the trigger", () => {
 
     await post(TIER2_BODY);
 
-    expect(lookupDossier).toHaveBeenCalledWith({
-      mode: "address",
-      address: "123 Main St",
-      city: "Austin",
-      state: "TX",
-      zip_code: "78701",
-    });
+    expect(lookupDossier).toHaveBeenCalledWith(
+      {
+        mode: "address",
+        address: "123 Main St",
+        city: "Austin",
+        state: "TX",
+        zip_code: "78701",
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
   });
 });
 
@@ -1071,10 +1059,13 @@ describe("tier 2 — the discovered owner picks the vendor", () => {
 
     await post(TIER2_BODY);
 
-    expect(lookupBusinessTrace).toHaveBeenCalledWith({
-      company_name: "Colmaven, Llc",
-      state: "TX",
-    });
+    expect(lookupBusinessTrace).toHaveBeenCalledWith(
+      {
+        company_name: "Colmaven, Llc",
+        state: "TX",
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
     expect(lookupPersonTrace).not.toHaveBeenCalled();
   });
 
@@ -1092,7 +1083,8 @@ describe("tier 2 — the discovered owner picks the vendor", () => {
         last_name: "Placeholder",
         address: "123 Main St",
         find_owner: false,
-      })
+      }),
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
     );
   });
 });
@@ -1377,11 +1369,16 @@ describe("tier 2 — trace.completed", () => {
     expect(webhooks()).toHaveLength(0);
   });
 
-  it("does not fire on the TIER 1 path, where the poll route still owns it", async () => {
-    // Firing here too would double every tier 1 customer's events.
+  it("FIRES on the tier 1 path, which now completes inline, carrying tier 1 and its outcome", async () => {
+    // MUTATION: delete the tier 1 dispatchTraceCompleted call and this goes red.
     H.profile = WEBHOOK_PROFILE;
     await post(BODY);
-    expect(webhooks()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({
+      event: "trace.completed", status: "no_match", tier: 1, charge: 0, property_record: null,
+      found_by: null, outcome_code: "no_match",
+      skip_reason: "We looked this owner up by company name and found no match. You were not charged.",
+    });
   });
 
   it("does not fire when the answer was served free from the cache", async () => {
@@ -1892,5 +1889,246 @@ describe("tier 2 single never pushes to HighLevel", () => {
     expect(body.success).toBe(true);
     expect(persisted()!.is_successful).toBe(true);
     expect(body.result.phones?.[0]?.number).toBe("5550000101");
+  });
+});
+
+/* ==================================================================== *
+ * TIER 1, INLINE (spec D1, D26). The owner was supplied: planRoute and
+ * executeRoute run inside the request. Only the vendors are mocked.
+ * ==================================================================== */
+
+/** The UPDATE that writes a tier 1 outcome: it carries outcome_code and never property_record. */
+function tier1Persisted(): Record<string, unknown> | undefined {
+  const rec = H.ops.find(
+    (o) =>
+      o.op === "update" &&
+      o.payload !== null &&
+      typeof o.payload === "object" &&
+      "outcome_code" in (o.payload as object) &&
+      !("property_record" in (o.payload as object))
+  );
+  return rec?.payload as Record<string, unknown> | undefined;
+}
+
+describe("tier 1 inline: what the caller gets", () => {
+  it("returns the finished result with found_by, outcome_code and skip_reason, and no step log", async () => {
+    H.entity = CONTACTS_HIT;
+    const { submitSingleTrace, lookupBusinessTrace, lookupDossier } = await vendorsCalled();
+
+    const res = await post();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(submitSingleTrace).not.toHaveBeenCalled();
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).toHaveBeenCalledWith(
+      { company_name: "ACME HOLDINGS LLC", state: "TX" },
+      { timeoutMs: expect.any(Number) }
+    );
+    expect(body).toMatchObject({
+      success: true, status: "success", trace_id: "trace-new", tier: 1,
+      charge: PRICING.CHARGE_PER_SUCCESS_WALLET, found_by: "company_name",
+      outcome_code: "found_by_company_name", skip_reason: null, property_record: null,
+    });
+    expect(body.result.phones).toHaveLength(1);
+    expect(JSON.stringify(body)).not.toMatch(/trace_steps|requestKey/);
+  });
+
+  it("persists the outcome, the key, the vendor and the step log, and never property_record", async () => {
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(tier1Persisted()).toMatchObject({
+      status: "success", is_successful: true, charge: PRICING.CHARGE_PER_SUCCESS_WALLET, tier: 1,
+      contact_vendor: "fastappend", found_by: "company_name", outcome_code: "found_by_company_name",
+      tracerfy_job_id: null, ai_research_status: null, property_trace_status: null,
+    });
+    expect(Array.isArray(tier1Persisted()!.trace_steps)).toBe(true);
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args).toMatchObject({
+      p_amount: PRICING.CHARGE_PER_SUCCESS_WALLET, p_trace_history_id: "trace-new",
+      p_description: "Skip trace - successful match",
+    });
+  });
+
+  it("a miss is free and says which key was tried", async () => {
+    const body = await (await post()).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body).toMatchObject({
+      status: "no_match", charge: 0, result: null, outcome_code: "no_match",
+      skip_reason: "We looked this owner up by company name and found no match. You were not charged.",
+    });
+  });
+
+  it("a person owner whose returned people do not match is free and says so", async () => {
+    // D29: the step log stores a COUNT, never names.
+    H.person = {
+      success: true, hit: true, contacts: null, nameNotMatched: true,
+      peopleCount: 1, creditsDeducted: 5,
+    };
+    const body = await (await post({ ...BODY, owner_name: "Testowner Placeholder" })).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body.outcome_code).toBe("owner_name_not_matched");
+    expect(body.skip_reason).toBe(
+      "We found people linked to this property, but none matched the owner name, so no contacts were returned. You were not charged."
+    );
+    // D29: never a name reaches the persisted step log or the response, only the count.
+    expect(JSON.stringify(tier1Persisted())).not.toMatch(/Someoneelse|Different/);
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toMatch(/trace_steps/);
+    expect(bodyStr).not.toMatch(/peopleCount/);
+  });
+
+  it("a vendor failure is busy_try_again: 503, Retry-After, free, no webhook", async () => {
+    // MUTATION: return 200 on the busy branch and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.entity = { success: false, hit: false, contacts: null, error: "FastAppend service unavailable" };
+    const res = await post();
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toMatchObject({
+      success: false, status: "error", outcome_code: "busy_try_again", charge: 0,
+      error: "The system is busy. Try again in 5 minutes. You were not charged.",
+    });
+    expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
+    expect(tier1Persisted()).toMatchObject({ status: "error", outcome_code: "busy_try_again" });
+  });
+
+  it("passes the request budget to every vendor call", async () => {
+    // MUTATION: pass `deadlineMs: startedAt + 10 * 60 * 1000` and this goes red.
+    const { lookupBusinessTrace } = await vendorsCalled();
+    await post();
+    const calls = vi.mocked(lookupBusinessTrace).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      const opts = call[1] as { timeoutMs: number };
+      expect(opts.timeoutMs).toBeGreaterThan(0);
+      expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+    }
+  });
+
+  it("passes the request budget to every vendor call on a two-step ladder", async () => {
+    // A trust owner with a first name: the Instant lookup misses (the H.person default), so
+    // FastAppend runs next. Both calls must carry the request budget, not just the first.
+    const { lookupPersonTrace, lookupBusinessTrace } = await vendorsCalled();
+    await post({ ...BODY, owner_name: "Marcus Halloway Revocable Trust" });
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(1);
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+    for (const mocked of [lookupPersonTrace, lookupBusinessTrace]) {
+      for (const call of vi.mocked(mocked).mock.calls) {
+        const opts = call[1] as { timeoutMs: number };
+        expect(opts.timeoutMs).toBeGreaterThan(0);
+        expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+      }
+    }
+  });
+
+  it("400s an owner name with no letters, before touching the database", async () => {
+    const res = await post({ ...BODY, owner_name: "???" });
+    expect(res.status).toBe(400);
+    expect(H.ops.filter((o) => o.table === "trace_history")).toHaveLength(0);
+  });
+});
+
+describe("tier 1 inline: money on this call site (L-018)", () => {
+  it("records, and does not take again, a debit an earlier attempt booked", async () => {
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: new Date(Date.now() - 60 * 1000).toISOString() }];
+    const body = await (await post()).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body.charge).toBe(0.25);
+    expect(tier1Persisted()).toMatchObject({ charge: 0.25, tier: 1 });
+  });
+
+  it("folds a new charge onto the reused row's receipt", async () => {
+    // MUTATION: pass `row: { id: traceRecord.id }` to runSingleTier1 and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
+    H.insertedRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
+    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: "2026-08-01T00:00:00.000Z" }];
+    await post();
+    expect(deducts()).toHaveLength(1);
+    expect(tier1Persisted()).toMatchObject({ charge: 0.5, tier: 2 });
+  });
+});
+
+describe("tier 1 inline: the busy_try_again resend (spec 5.2)", () => {
+  const TRUST_BODY = { ...BODY, owner_name: "Marcus Halloway Revocable Trust" };
+  const instantKey = () =>
+    requestKeyFor(planRoute({ ...parcelForFullTrace(TRUST_BODY), ownerName: TRUST_BODY.owner_name }, "wallet").steps[0]);
+  const busyRow = () => ({
+    id: "trace-new", charge: 0, tier: 1, is_successful: false, property_record: null,
+    outcome_code: "busy_try_again",
+    trace_steps: [{
+      kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0,
+      at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), requestKey: instantKey(),
+    }],
+  });
+
+  it("keeps the busy row: no sweep deletes it", async () => {
+    // MUTATION: drop `|| busyResend` from runDelete and the failed sweep deletes it.
+    H.survivingRow = busyRow();
+    H.insertedRow = busyRow();
+    await post(TRUST_BODY);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("does not buy the answered step again", async () => {
+    H.survivingRow = busyRow();
+    H.insertedRow = busyRow();
+    const { lookupPersonTrace, lookupBusinessTrace } = await vendorsCalled();
+    await post(TRUST_BODY);
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("tier 1 inline: the 90-day cache serves only the SAME owner (D25)", () => {
+  const CACHED_CONTACTS = { phones: [{ number: "5550000101", type: "mobile" }], emails: [] };
+
+  it("runs a new trace when the cached contacts belong to a different owner", async () => {
+    // MUTATION: serve the cached row whatever its owner and this goes red.
+    H.cached = { id: "trace-cached", input_owner_name: "JANE DOE", trace_result: CACHED_CONTACTS, is_successful: true, charge: 0.25, tier: 1 };
+    const { lookupBusinessTrace } = await vendorsCalled();
+    const body = await (await post()).json();
+    expect(body.is_cached).toBeUndefined();
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the same owner written differently, free, with its found_by", async () => {
+    H.cached = {
+      id: "trace-cached", input_owner_name: "Acme Holdings, L.L.C.", trace_result: CACHED_CONTACTS,
+      is_successful: true, found_by: "company_name", outcome_code: "found_by_company_name",
+    };
+    const body = await (await post()).json();
+    expect(body).toMatchObject({ is_cached: true, charge: 0, trace_id: "trace-cached", found_by: "company_name" });
+  });
+});
+
+describe("tier 2 single: the shared-code changes reach this route (L-018)", () => {
+  it("writes contact_vendor and clears any stale tier 1 outcome", async () => {
+    // MUTATION: delete the contact_vendor line from the tier 2 persist and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    await post(TIER2_BODY);
+    expect(persisted()).toMatchObject({ contact_vendor: "fastappend", outcome_code: null, found_by: null });
+  });
+
+  it("never falls back to the dossier's own contacts: a Full Property Trace whose owner lookups all miss is a true null (D32)", async () => {
+    // Task 6b withdrew the dossier-contacts fallback entirely (spec D32): there is no toggle left
+    // at this route to mutate, so this asserts the shape rather than a deletable guard.
+    H.dossier = {
+      ...DOSSIER_INDIVIDUAL_HIT,
+      contacts: { ownerName: "Not The Real Contact", phones: [{ number: "5550000901", type: "mobile" }], emails: ["fallback@example.invalid"], mailingAddress: null },
+    };
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.result).toMatchObject({ phones: [], emails: [] });
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toContain("5550000901");
+    expect(bodyStr).not.toContain("fallback@example.invalid");
+    expect(bodyStr).not.toMatch(/name_verified/);
   });
 });

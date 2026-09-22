@@ -4,6 +4,20 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
+
+- app/api/trace/single no longer submits a Tier 1 trace to the batch CSV: it runs the ladder
+  inside the request through runSingleTier1 and returns the finished result with found_by,
+  outcome_code and skip_reason. A vendor failure answers 503 busy_try_again, free, Retry-After 300.
+  trace.completed fires from here with tier 1.
+- The 90-day cache serves a supplied owner only the same owner's result (D25, new
+  lib/utils/ownerName.ts). No sweep deletes a busy_try_again row, so a resend reuses its log.
+- Tier 2 single rows now write contact_vendor and the step log and clear any stale Tier 1 outcome;
+  every vendor call gets the 50 s request budget. D32 (owner) withdrew the dossier-contacts
+  fallback before this task started, so this route's Tier 2 executeRoute call carries only the
+  request budget, no fallback flag. D29's step log carries peopleCount, never a name, verified at
+  this call site too. Mutations: seven, all red.
+
 ## 2026-09-22 (i): Tier 1 Phase 1, Task 8: one shared Tier 1 settle for both single routes.
 
 - New lib/trace/singleTier1.ts: plans and runs the ladder inline, resuming only a busy row's step
