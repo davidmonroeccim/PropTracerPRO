@@ -4,6 +4,22 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (b): Tier 1 Phase 1, Task 2: one classifier and the Tier 1 ladders.
+
+- classifyOwnerName: a trailing TR or TTEE is a trust, not an entity, so trustee names reach the
+  trust ladder; a trailing TRS stays an entity (spec D30). TRUST_MARKER also knows REVOCABLE,
+  IRREVOCABLE, U/A and DTD.
+- planRoute Tier 1: person gets the Instant lookup then the parcel lookup (D2); company gets
+  FastAppend only (D4); trust and unknown get the person steps (trust words stripped) then
+  FastAppend on the full name (D3); no first name or initial left goes to FastAppend only (D16).
+  The parcel step now carries the owner names for the match. The "cheaper address-keyed path"
+  warning is gone.
+- A trust-only dossier owner now reaches FastAppend in the Tier 2 second pass (two executeRoute
+  tests updated). Mutations: seven, all red.
+- Departs from spec 4.2's text on one point, on purpose: maxVendorCost stays the SUM of the steps,
+  not the Tier 2 "only one can hit" figure, because under D6 a non-matched person hit is billed by
+  the vendor, so every step can cost. Nothing reads the field today.
+
 ## 2026-09-22 (a): Tier 1 Phase 1, Task 1: outcome, found-by and step-log columns.
 
 - Migration 20260922_trace_history_tier1_outcome.sql adds trace_history.outcome_code, found_by and

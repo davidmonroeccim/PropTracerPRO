@@ -152,10 +152,17 @@ export interface RoutePlan {
 const ENTITY_ANYWHERE =
   /\b(L\s*\.?\s*L\s*\.?\s*C|L\s*\.?\s*L\s*\.?\s*P|P\s*\.?\s*L\s*\.?\s*L\s*\.?\s*C|INC(ORPORATED)?|CORP(ORATION)?|LTD|LIMITED|L\s*\.?\s*P|PARTNERSHIP|ASSOCIATES?|ASSOCIATION|HOLDINGS?|PROPERT(Y|IES)|INVESTMENTS?|INVESTORS?|ENTERPRISES?|VENTURES?|REALTY|REAL ESTATE|MANAGEMENT|MGMT|DEVELOPMENT|RENTALS?|APARTMENTS?|ESTATES|STORAGE|GROUP|BANK|CHURCH|MINISTRIES|FOUNDATION|AUTHORITY|DISTRICT|CITY OF|COUNTY OF|STATE OF|BOARD OF|UNIVERSITY|COLLEGE|HOSPITAL)\b/i
 
-/** Ambiguous tokens that only count as entity markers at the END of the name. */
-const ENTITY_TRAILING = /\b(CO|PA|PC|TR|TTEE|TRS|ET AL CO)\.?$/i
+/**
+ * Ambiguous tokens that only count as entity markers at the END of the name.
+ *
+ * TR and TTEE are not here: they mark a TRUSTEE and must reach the trust ladder. TRS stays
+ * (spec D30): it is not on the trust-word list (D28), so a trust ladder would send TRS as
+ * the last name and could never match.
+ */
+const ENTITY_TRAILING = /\b(CO|PA|PC|TRS|ET AL CO)\.?$/i
 
-const TRUST_MARKER = /\b(TRUST|TTEE|TRUSTEE|TRS|LIVING TRUST|FAMILY TRUST|ESTATE OF)\b/i
+const TRUST_MARKER =
+  /\b(TRUST|TTEE|TRUSTEE|TRS|REVOCABLE|IRREVOCABLE|LIVING TRUST|FAMILY TRUST|ESTATE OF|DTD)\b|\bU\/A\b|\bTR\.?$/i
 
 /** Forms that indicate a natural person, including joint ownership. */
 const INDIVIDUAL_MARKER = /\b(ET AL|ET UX|ET VIR|JR|SR|III|IV|MRS?|DR)\b|&| AND /i
@@ -166,6 +173,34 @@ const INDIVIDUAL_MARKER = /\b(ET AL|ET UX|ET VIR|JR|SR|III|IV|MRS?|DR)\b|&| AND 
  */
 const splitOwners = (name: string): string[] =>
   name.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean)
+
+/**
+ * The fixed trust-word list (spec 4.2, D28). A trust's person steps run on the name with these
+ * removed: "John Smith Revocable Trust" becomes "John Smith". A multi-word entry matches as a
+ * phrase. A trailing date ("DTD 01/02/2003", "U/A 5-1-99") goes with the words before it.
+ */
+export const TRUST_WORDS: readonly string[] = [
+  'TRUST', 'REVOCABLE', 'IRREVOCABLE', 'LIVING', 'FAMILY', 'TRUSTEE', 'TTEE', 'TR', 'U/A', 'DTD',
+]
+
+const escapeWord = (w: string): string =>
+  w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')
+
+const TRUST_WORD_RE = new RegExp(
+  `(^|\\s)(?:${TRUST_WORDS.map(escapeWord).join('|')})\\.?(?=\\s|$)`,
+  'gi',
+)
+
+const TRAILING_DATE_RE = /\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s*$/
+
+/** The name a trust's person steps run on (spec 4.2). */
+export function stripTrustWords(name: string): string {
+  return name
+    .replace(TRAILING_DATE_RE, ' ')
+    .replace(TRUST_WORD_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 export function classifyOwnerName(raw?: string | null): OwnerType {
   if (!raw || !raw.trim()) return 'unknown'
@@ -308,7 +343,7 @@ function saleIsFresh(date?: string | null): boolean {
  * Routing
  * ------------------------------------------------------------------ */
 
-const hasSitus = (p: ParcelInput): boolean =>
+export const hasSitus = (p: ParcelInput): boolean =>
   Boolean(p.situsAddress?.trim() && p.situsCity?.trim() && p.situsState?.trim())
 
 /** Both halves or neither: the APN-keyed endpoints reject an apn without its county. */
@@ -376,69 +411,35 @@ export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan 
   const ownerName = parcel.ownerName!.trim()
   const ownerType = classifyOwnerName(ownerName)
 
-  if (ownerType === 'entity') {
-    const state = parcel.registrationState?.trim() || parcel.state
-    if (!parcel.registrationState?.trim()) {
-      warnings.push(
-        'Sending the property state. FastAppend keys on STATE OF REGISTRATION; an out-of-state ' +
-        'entity may miss. Measured: 13/22 entities matched using the property state.',
-      )
-    }
-    steps.push({
-      kind: 'FASTAPPEND_ENTITY',
-      endpoint: 'POST https://app.fastappend.com/v1/api/business-trace/lookup/',
-      request: { company_name: ownerName, state },
-      costOnHit: VENDOR_COST.FASTAPPEND_ENTITY,
-      freeOnMiss: true,
-      why: 'entity owner; no address needed, keyed on name plus state',
-    })
-    warnings.push('Read role and is_registered_agent on the response. A registered agent is a service of process, not necessarily a principal.')
-  } else if (ownerType === 'individual') {
-    if (hasSitus(parcel)) {
-      steps.push({
-        kind: 'TRACERFY_INSTANT_NAMED',
-        endpoint: 'POST https://tracerfy.com/v1/api/trace/lookup/',
-        request: {
-          address: parcel.situsAddress, city: parcel.situsCity, state: parcel.situsState,
-          ...(parcel.situsZip ? { zip: parcel.situsZip } : {}),
-          find_owner: false, ...splitPersonName(ownerName),
-        },
-        costOnHit: VENDOR_COST.TRACERFY_INSTANT,
-        freeOnMiss: true,
-        why: 'individual owner with situs; named lookup, not find_owner',
-      })
-      warnings.push(
-        'Do NOT filter on property_owner. It returned false for the verified owner of record ' +
-        'on an absentee-owned parcel. Match on the name instead.',
-      )
-      if (!parcel.situsZip?.trim()) {
-        warnings.push('No zip. Tracerfy calls it strongly recommended; without it a similar address in the same city can match.')
-      }
-    } else if (hasApn(parcel)) {
-      steps.push({
-        kind: 'TRACERFY_PARCEL_APN',
-        endpoint: 'POST https://tracerfy.com/v1/api/trace/parcel/lookup/',
-        request: { parcel_id: parcel.parcelIdLocal, county: parcel.county, state: parcel.state },
-        costOnHit: VENDOR_COST.TRACERFY_PARCEL,
-        freeOnMiss: true,
-        why: 'individual owner, situs incomplete; APN-keyed fallback',
-      })
-      warnings.push('Situs incomplete, so the cheaper address-keyed path is unavailable.')
-    } else {
-      // Exposed by making the APN optional: this branch used to build a request with
-      // parcel_id and county undefined, which cannot match a parcel and should never be sent.
-      warnings.push(
-        'Individual owner, but neither a complete situs nor a parcel id with county. ' +
-        'No lookup key exists for this owner. Route to manual review.',
-      )
-    }
-  } else if (ownerType === 'trust') {
+  if (!/[A-Za-z]/.test(ownerName)) {
     warnings.push(
-      'Trust-only owner. No Secretary of State registration to match and no natural person named, ' +
-      'so neither vendor lane applies. Route to manual review.',
+      `Owner name "${ownerName}" has no letters, so no vendor can look it up. ` +
+      'Route to manual review rather than guessing a vendor.',
     )
+  } else if (ownerType === 'entity') {
+    // D4: FastAppend on name and state, and the lane stops there.
+    steps.push(entityStep(parcel, ownerName, warnings))
   } else {
-    warnings.push(`Owner name "${ownerName}" did not classify. Route to manual review rather than guessing a vendor.`)
+    // Person, trust and unknown share one ladder (spec 4.2; D2, D3). A trust runs its person
+    // steps on the name with the trust words removed; an unknown name runs them as given.
+    const who = personNameFor(ownerType === 'trust' ? stripTrustWords(ownerName) : ownerName)
+    if (!who) {
+      // D16: no first name or initial left, so no person step can be asked. FastAppend on the
+      // FULL name, as an entity. An individual-looking name that leaves none ("SMITH JR") is read
+      // as unreadable under D16's own words ("a trust or unreadable name").
+      steps.push(entityStep(parcel, ownerName, warnings))
+    } else {
+      steps.push(...personSteps(parcel, who, warnings))
+      if (!steps.length) {
+        warnings.push(
+          'No lookup key: neither a street and city nor a parcel id with county. ' +
+          'Route to manual review.',
+        )
+      } else if (ownerType !== 'individual') {
+        // D3: the full trust (or unreadable) name goes to FastAppend if both person steps missed.
+        steps.push(entityStep(parcel, ownerName, warnings))
+      }
+    }
   }
 
   return {
@@ -446,9 +447,97 @@ export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan 
     billing: { model: 'per_successful_trace', amount: priceFor(pricePlan).tier1PerSuccess },
     pricePlan, parcel,
     ownerName, ownerType, needsOwnerDiscovery: false, steps,
+    // Every step can bill: a person hit whose people are not the owner still costs the vendor
+    // (D6), so the ceiling is the sum of the steps, not one of them.
     maxVendorCost: steps.reduce((a, s) => a + s.costOnHit, 0),
     warnings,
   }
+}
+
+const pushOnce = (warnings: string[], w: string): void => {
+  if (!warnings.includes(w)) warnings.push(w)
+}
+
+/** D4: company name plus state of registration, no address. Also the D3 and D16 fallback. */
+function entityStep(parcel: ParcelInput, name: string, warnings: string[]): RouteStep {
+  const state = parcel.registrationState?.trim() || parcel.state
+  if (!parcel.registrationState?.trim()) {
+    pushOnce(
+      warnings,
+      'Sending the property state. FastAppend keys on STATE OF REGISTRATION; an out-of-state ' +
+      'entity may miss. Measured: 13/22 entities matched using the property state.',
+    )
+  }
+  pushOnce(
+    warnings,
+    'Read role and is_registered_agent on the response. A registered agent is a service of process, not necessarily a principal.',
+  )
+  return {
+    kind: 'FASTAPPEND_ENTITY',
+    endpoint: 'POST https://app.fastappend.com/v1/api/business-trace/lookup/',
+    request: { company_name: name, state },
+    costOnHit: VENDOR_COST.FASTAPPEND_ENTITY,
+    freeOnMiss: true,
+    why: 'company name plus state; no address needed',
+  }
+}
+
+/** A first name or initial AND a last name, or null when the name leaves no such pair (D16). */
+function personNameFor(name: string): { first_name: string; last_name: string } | null {
+  const who = splitPersonName(name)
+  return who.first_name && who.last_name ? who : null
+}
+
+/**
+ * D2: the named Instant lookup when the record has a street and a city, then the parcel lookup
+ * when it has a parcel id and county. executeRoute stops at the first contact, so the parcel step
+ * runs only when there was no city or the Instant lookup found no contact. Both cost $0.10 on a
+ * hit. The order comes from the evidence and the owner's decision, never from a claim about which
+ * key is more accurate.
+ */
+function personSteps(
+  parcel: ParcelInput,
+  who: { first_name: string; last_name: string },
+  warnings: string[],
+): RouteStep[] {
+  const steps: RouteStep[] = []
+  if (hasSitus(parcel)) {
+    steps.push({
+      kind: 'TRACERFY_INSTANT_NAMED',
+      endpoint: 'POST https://tracerfy.com/v1/api/trace/lookup/',
+      request: {
+        address: parcel.situsAddress, city: parcel.situsCity, state: parcel.situsState,
+        ...(parcel.situsZip ? { zip: parcel.situsZip } : {}),
+        find_owner: false, ...who,
+      },
+      costOnHit: VENDOR_COST.TRACERFY_INSTANT,
+      freeOnMiss: true,
+      why: 'named lookup at the street and city (D2, D13); not find_owner',
+    })
+    pushOnce(
+      warnings,
+      'Do NOT filter on property_owner. It returned false for the verified owner of record ' +
+      'on an absentee-owned parcel. Match on the name instead.',
+    )
+    if (!parcel.situsZip?.trim()) {
+      pushOnce(warnings, 'No zip. Tracerfy calls it strongly recommended; without it a similar address in the same city can match.')
+    }
+  }
+  if (hasApn(parcel)) {
+    steps.push({
+      kind: 'TRACERFY_PARCEL_APN',
+      endpoint: 'POST https://tracerfy.com/v1/api/trace/parcel/lookup/',
+      // The names ride on the step for the NAME MATCH only. lookupPersonTrace sends Tracerfy
+      // parcel_id, county and state and nothing else (docs/vendor/tracerfy-api.md:1352-1356).
+      request: { parcel_id: parcel.parcelIdLocal, county: parcel.county, state: parcel.state, ...who },
+      costOnHit: VENDOR_COST.TRACERFY_PARCEL,
+      freeOnMiss: true,
+      why: hasSitus(parcel)
+        ? 'parcel lookup after the address lookup found no named contact (D2)'
+        : 'parcel lookup; the record has no street and city (D2)',
+    })
+  }
+  return steps
 }
 
 /**

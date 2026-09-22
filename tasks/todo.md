@@ -17,7 +17,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
 - [x] Merge `feat/contact-vendor-provenance` into main (95db059) and push (5c2b0ee, deployed 2026-09-21)
 - [ ] Phase 1: single traces. Plan: `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md`
   - [x] Task 1: schema columns and types
-  - [ ] Task 2: one classifier and the Tier 1 ladders
+  - [x] Task 2: one classifier and the Tier 1 ladders
   - [ ] Task 3: D6 name match and client signals
   - [ ] Task 4: per-call vendor timeouts
   - [ ] Task 5: step log, resend reuse and the request budget

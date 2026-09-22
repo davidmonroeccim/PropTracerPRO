@@ -243,20 +243,16 @@ describe('executeRoute — the two-pass', () => {
     }))
   })
 
-  it('sends a trust-only owner to manual review and asks no contact vendor', async () => {
+  it('sends a trust-only owner to FastAppend on the full trust name (D16)', async () => {
     const d = deps({ lookupDossier: dossierSequence(HIT_TRUST_ONLY) })
     const r = await executeRoute(tier2Plan(), d)
 
     expect(r.ownerFound).toBe(true)
-    expect(r.ownerName).toBe('Placeholder Family Living Trust')
     expect(r.ownerType).toBe('trust')
-    expect(r.needsManualReview).toBe(true)
-    expect(d.traceEntity).not.toHaveBeenCalled()
     expect(d.tracePerson).not.toHaveBeenCalled()
-    // The $0.20 is still sunk: the property record was bought and delivered.
-    expect(r.vendorSpend).toBe(VENDOR_COST.DOSSIER)
+    expect(d.traceEntity).toHaveBeenCalledWith({ company_name: 'Placeholder Family Living Trust', state: 'UT' })
+    expect(r.needsManualReview).toBe(false)
     expect(r.property).not.toBeNull()
-    expect(r.warnings.join(' ')).toMatch(/manual review/)
   })
 
   it('flags a hit that carries no owner at all for manual review', async () => {
@@ -602,14 +598,12 @@ describe('contactVendorFrom — which contact lane was actually asked', () => {
     expect(contactVendorFrom(r.steps)).toBe('tracerfy')
   })
 
-  it('records nothing for a trust, because no vendor was asked', async () => {
+  it('records fastappend for a trust-only owner, which D16 sends to FastAppend', async () => {
     const d = deps({ lookupDossier: dossierSequence(HIT_TRUST_ONLY) })
     const r = await executeRoute(tier2Plan(), d)
 
-    expect(r.needsManualReview).toBe(true)
-    expect(d.traceEntity).not.toHaveBeenCalled()
-    expect(d.tracePerson).not.toHaveBeenCalled()
-    expect(contactVendorFrom(r.steps)).toBeNull()
+    expect(d.traceEntity).toHaveBeenCalledTimes(1)
+    expect(contactVendorFrom(r.steps)).toBe('fastappend')
   })
 
   it('records nothing when the dossier itself missed, so no lane was reached', async () => {
