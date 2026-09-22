@@ -1,5 +1,11 @@
 # Tier 1 Phase 1: Single Traces Through planRoute Implementation Plan
 
+> **AMENDED DURING EXECUTION (2026-09-22): spec D30, D31, D32 bind over this plan's text.** D30: a trailing TRS stays
+> an entity. D31: three owner-approved copy fixes (Tasks 7 and 10). D32: the dossier's own contacts are never used; there
+> is no `dossierContactsFallback`, `contactsNameVerified`, `TraceResult.name_verified` or "Not name-verified" label
+> anywhere (every mention below is withdrawn). D29 applies throughout: `peopleCount`, never `people`. The per-task
+> overrides live in `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/task-N-resolutions.md` (gitignored).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A web or API single trace with a supplied owner runs `planRoute()` + `executeRoute()` inline and returns the finished result, with an outcome code, a one-sentence reason and the key that found the owner; a Tier 2 single trace tries every owner the dossier names before falling back to the dossier's own contacts, labelled not name-verified.

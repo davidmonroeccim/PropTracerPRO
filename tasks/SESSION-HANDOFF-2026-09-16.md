@@ -1,6 +1,31 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-22. PHASE 1 PLAN APPROVED, EXECUTE IT. Tier 1 through planRoute, Phase 0 (paid measurement).
+> # READ FIRST. STATE AS OF 2026-09-22 (execution session). PHASE 1 BEING EXECUTED on branch `feat/tier1-phase1-single-traces`.
+>
+> **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0; NOT pushed, NOT merged). Subagent-driven execution of
+> `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md`. **Ledger (gitignored, the recovery map):**
+> `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/progress.md`; per-task controller overrides in
+> `task-N-resolutions.md` there (they bind over the plan text), `global-constraints.md` (with the D27-D32 amendments).
+> Trust the ledger and `git log` over memory; tasks with a `Task N: complete` line are DONE.
+>
+> **Done:** Tasks 1-6 complete and reviewed (Task 1 migration APPLIED to production and read back: outcome_code,
+> found_by, trace_steps, index on (user_id, parcel_id_local, county); ACL unchanged). Task 7 committed (f2e96f3), in
+> review. Tasks 8-12 to go. Suite 1624 passing, tsc 0, eslint 47.
+>
+> **New owner decisions this session (spec, in David's words):** D30 a trailing TRS stays a company. D31 three copy
+> fixes approved word for word (Integrations webhook preview; API docs charge sentence, D16 trust sentence, 503 row;
+> no_match for a matched contactless owner). **D32: the dossier's own contacts block is NEVER used**; contacts only
+> from the separate Tracerfy/FastAppend call; a vendor miss is a true null. D21 arm (b) withdrawn and its code removed
+> (Task 6b, 6110f33); D31 (2c) withdrawn. Export clarified under D32: no change (CSV keeps a paid dossier row with blank
+> contact columns; Add to CRM refuses a row with no contact). Lessons L-028 (list copy fixes for approval, never
+> announce them) and L-029 (the dossier finds the OWNER, never contacts).
+>
+> **Hard stop still ahead:** Task 12's live check waits for David's dollar amount. Never push or merge without his go.
+> **For David at the end (not yet told in full):** pre-existing anon/authenticated rDxtm grant on trace_history
+> (TRUNCATE etc., not reachable via PostgREST, untouched); commit trailers name the model that wrote them (Sonnet);
+> a D27 consequence on the live Tier 2 cron (a matched contactless second lookup no longer fills owner_name).
+
+> # (PREVIOUS BLOCK) STATE AS OF 2026-09-22. PHASE 1 PLAN APPROVED, EXECUTE IT. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
 > **MERGED 2026-09-21 night on David's go ("go ahead and merge"): `feat/contact-vendor-provenance` -> `main` at
 > 95db059 (--no-ff), branch deleted. It carried b02f82d (older Tracerfy API
