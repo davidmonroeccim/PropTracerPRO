@@ -14,7 +14,7 @@
 
 ## Hard stops
 
-1. **Before Task 1:** the owner approves this plan and answers the two Open questions below.
+1. **Before Task 1:** the owner approves this plan and answers the three Open questions below.
 2. **Before the live check in Task 12:** the owner names a dollar amount.
 
 Nothing else stops the executor except a genuine plan defect (a step that cannot work as written, or a finding that changes what is charged, reported or measured). That goes to the owner as a QUESTION with where it came from (lessons L-021), never as a silent ruling in a ledger.
@@ -23,7 +23,7 @@ Nothing else stops the executor except a genuine plan defect (a step that cannot
 
 **Q1. A lookup that finds the owner (name matched) but returns no phone and no email.** D8 makes it free; the spec gives it no outcome code. Rare: every matched person in Phase 0 carried phones.
 - **(a) Treat it as a no-contact result.** The next step in the ladder runs; if nothing else finds contacts the record ends `no_match` ("We looked this owner up by address and found no match. You were not charged."). Cost: at most one more $0.10 vendor lookup on those records, and the sentence says "no match" when the owner was found without contacts.
-- **(b) Stop the ladder there** and add an eighth code, `found_no_contacts`: "We found this owner, but there was no phone number or email to return. You were not charged." Cost: no extra lookup; one more code that Phase 2 and the gateway must map.
+- **(b) Stop the ladder there** and add an eighth code, `found_no_contacts`: "We found this owner, but there was no phone number or email to return. You were not charged." Cost: no extra lookup; one more code that Phase 2 and the gateway must map (spec 7.1 fixes seven codes, so (b) amends it). And because the change is in the SHARED `runStage`, a matched-but-contactless owner would also end D21's owner loop in Tier 2, single traces and the cron alike, skipping the remaining owners and the dossier-contacts fallback.
 - The plan is written for (a). Under (b): Task 5 changes one line in `runStage` (`if (call.hit && delivered) hit = call` becomes `if (call.hit && !call.nameNotMatched) hit = call`), and Task 7 adds `FOUND_NO_CONTACTS: 'found_no_contacts'` to `TIER1_OUTCOME`, returns it from `tier1OutcomeFor` when a step has `outcome === 'hit' && noContacts`, and adds its sentence to `outcomeSentence` and the copy-rule list. Three tests pin (a) and change with it: Task 5 `'moves on after a matched hit that carries no phone and no email (Q1 a)'`, Task 7 `'answered misses, and a contactless hit (Q1 a), are no_match'`, and Task 8 `'charges nothing for a matched owner with no phone and no email'` (its expected outcome becomes `found_no_contacts`; it stays free).
 
 **Q2. Two common trust-name words are not in the spec's fixed trust-word list (spec 4.2): `THE` and `ESTATE OF`.** With the list as written, "The Smith Family Trust" strips to "The Smith", so a person lookup runs with first name THE; the match (first initial T, last name Smith) then accepts any Smith at that address whose first name starts with T, and that result is charged. "Estate of John Smith" sends ESTATE as the first name.
@@ -31,17 +31,22 @@ Nothing else stops the executor except a genuine plan defect (a step that cannot
 - **(b) Keep the spec's list exactly.** Cost: the false-match risk above, charged at the Tier 1 rate when it happens, plus a $0.10 vendor lookup on each such name.
 - Only Task 2 depends on this: the `TRUST_WORDS` constant and two test rows. Both versions are written out there.
 
+**Q3. The step log keeps third parties' names, and a signed-in customer can read it.** On a billed non-match, `trace_steps[].people` holds the names Tracerfy returned (spec 5.2 asks for "the parsed people"). `authenticated` keeps table-wide SELECT on `trace_history` (spec 8), so the row's owner can read those names through the Data API, although no page, response or webhook shows them. Spec 5.2 calls the log internal.
+- **(a) Accept it:** names only (no phones or emails), on the customer's own rows. Cost: none. The plan is written for (a).
+- **(b) Keep names out of the log:** store only how many people came back. Cost: Task 5 writes `peopleCount: number` instead of `people`, and the log no longer shows who was returned.
+- **(c) Hide `trace_steps` from `authenticated` with column-level SELECT.** Cost: a grants migration, and every cookie-client `select('*')` on `trace_history` (History, the dashboard and others) must list its columns or it fails with 42501.
+
 ## Global Constraints
 
 Every task's requirements include this section.
 
 **Decisions.** D1-D26 are settled. Implement them; do not reopen them. Where a later decision amends an earlier one, the later wins (D21 over D15, D22 over D18, D23 over D5).
 
-**Scope.** Single traces only: `app/api/trace/single` (web) and `app/api/v1/trace/single` (API). Bulk surfaces (MCP, API bulk, web upload, the Tier 1 queue and cron, CSV columns, the bulk page) are Phase 2 and are not edited, EXCEPT through shared library code this plan changes: `planRoute` (Task 2), the vendor clients (Tasks 3, 4), `executeRoute` (Tasks 5, 6), `traceResultFor` (Task 6) and `rowSkipReason` (Task 7). The Tier 2 cron `app/api/cron/sweep-property-traces` runs that shared code; its suite stays green and Task 6 adds coverage for it. The status poll routes (`app/api/trace/status`, `app/api/v1/trace/status`) and `sweep-stale-traces` are unchanged and keep serving rows already in flight. `submitSingleTrace` stays exported (Phase 4 deletes it); no single route calls it.
+**Scope.** Single traces only: `app/api/trace/single` (web) and `app/api/v1/trace/single` (API). Bulk surfaces (MCP, API bulk, web upload, the Tier 1 queue and cron, CSV columns, the bulk page) are Phase 2 and are not edited, EXCEPT through shared library code this plan changes: `planRoute` (Task 2), the vendor clients (Tasks 3, 4), `executeRoute` (Tasks 5, 6), `traceResultFor` (Task 6) and `rowSkipReason` (Task 7). The Tier 2 cron `app/api/cron/sweep-property-traces` runs that shared code; its suite stays green and Task 6 adds coverage for it. D21's first arm (try every owner, the mailing-address search) reaches the cron too. Its second arm, the dossier-contacts fallback, is switched on only by the two single routes (`ExecuteOptions.dossierContactsFallback`), because the bulk surfaces (the CSV export, the HighLevel push, the gateway) do not carry the not-name-verified label until Phase 2. The status poll routes (`app/api/trace/status`, `app/api/v1/trace/status`) and `sweep-stale-traces` are unchanged and keep serving rows already in flight. `submitSingleTrace` stays exported (Phase 4 deletes it); no single route calls it.
 
 **Prices (unchanged).** Tier 1, per successful trace: $0.15 Pro and AcquisitionPRO, $0.25 Pay-As-You-Go. Web charges `chargePerTrace(profile)` (Track A, `lib/suite/pricing.ts:41`); API charges `getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member)` (Track B, `lib/constants.ts:166`). Tier 2, per record submitted: $0.25 and $0.40, unchanged. Owner type never changes the price. No sentence quotes a price.
 
-**Billing gate (spec 6.1, D8).** A Tier 1 record is charged once, only when a name-matched result carries at least one phone or email: `hasContactData(traceResultFor(execution))` (`lib/trace/fullPropertyTrace.ts:165`). Free: `no_match`, `owner_name_not_matched`, `no_lookup_key`, `busy_try_again`. Before charging, ask the ledger (`collectedChargeFor`); a debit the row does not yet show is recorded, never taken again. Money is written through `foldBillingWrite(row, { charge, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE })`. Ledger description: `Skip trace - successful match`. `contact_vendor` is written from `contactVendorFrom(execution.steps)` on every single row, Tier 1 and Tier 2.
+**Billing gate (spec 6.1, D8).** A Tier 1 record is charged once, only when a name-matched result carries at least one phone or email: `hasContactData(traceResultFor(execution))` (`lib/trace/fullPropertyTrace.ts:165`). Free: `no_match`, `owner_name_not_matched`, `no_lookup_key`, `busy_try_again`. Before charging, ask the ledger the way the Tier 2 cron does (`collectedChargesFor(admin, id, since)`, spec 6.1) with `since` 24 hours back (the resend window): a debit inside that window that the row's `charge` does not yet show is an earlier attempt at THIS record that deducted and died before its persist, so it is recorded and never taken again; an older ledger surplus (a zeroed receipt, an old single-debit raw write) never makes this request free and is never reported as this request's charge. Money is written through `foldBillingWrite(row, { charge, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE })`. Ledger description: `Skip trace - successful match`. `contact_vendor` is written from `contactVendorFrom(execution.steps)` on every single row, Tier 1 and Tier 2.
 
 **Outcome codes (spec 7.1), exact strings.** `found_by_address`, `found_by_parcel_id`, `found_by_company_name`, `no_match`, `owner_name_not_matched`, `no_lookup_key`, `busy_try_again`. `found_by` values: `address`, `parcel_id`, `company_name` (the KEY, never the vendor; the vendor stays in `contact_vendor`). Tier 2 rows carry `outcome_code` and `found_by` NULL in Phase 1.
 
@@ -400,7 +405,19 @@ describe('Tier 1 ladders (spec 4.2; D2, D3, D4, D16)', () => {
   })
 
   it('never says the parcel id is cheaper or more accurate (spec 4.2)', () => {
+    // No situs is the case the removed "cheaper address-keyed path" warning fired on.
+    // MUTATION: put that warning back on the parcel step and this goes red.
+    const noSitus = { situsAddress: null, situsCity: null, situsState: null }
+    expect(JSON.stringify(t1('Marcus T Halloway', noSitus))).not.toMatch(/cheaper|more accurate/i)
     expect(JSON.stringify(t1('Marcus T Halloway'))).not.toMatch(/cheaper|more accurate/i)
+  })
+
+  it('reads an individual-looking name that leaves no first name ("SMITH JR") as unreadable: FastAppend only (D16)', () => {
+    // D16 covers "a trust or unreadable name". A name with no first name left cannot be asked of a
+    // person lookup, so it takes the same FastAppend-only lane. Stated and pinned, not implied.
+    const r = t1('SMITH JR')
+    expect(r.ownerType).toBe('individual')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
   })
 })
 
@@ -550,7 +567,8 @@ In `planRoute`, replace everything from `const ownerName = parcel.ownerName!.tri
     const who = personNameFor(ownerType === 'trust' ? stripTrustWords(ownerName) : ownerName)
     if (!who) {
       // D16: no first name or initial left, so no person step can be asked. FastAppend on the
-      // FULL name, as an entity.
+      // FULL name, as an entity. An individual-looking name that leaves none ("SMITH JR") is read
+      // as unreadable under D16's own words ("a trust or unreadable name").
       steps.push(entityStep(parcel, ownerName, warnings))
     } else {
       steps.push(...personSteps(parcel, who, warnings))
@@ -696,6 +714,9 @@ Run: `npx vitest run` and `npx tsc --noEmit`. Expected: 0 failed, 0 errors. Any 
   warning is gone.
 - A trust-only dossier owner now reaches FastAppend in the Tier 2 second pass (two executeRoute
   tests updated). Mutations: five, all red.
+- Departs from spec 4.2's text on one point, on purpose: maxVendorCost stays the SUM of the steps,
+  not the Tier 2 "only one can hit" figure, because under D6 a non-matched person hit is billed by
+  the vendor, so every step can cost. Nothing reads the field today.
 ```
 
 ```bash
@@ -850,7 +871,7 @@ Replace the test `'takes the first person when there is no name to match on'` an
   })
 
   it.each([
-    ['a stray comma', { first_name: 'Testowner,', last_name: 'Placeholder' }],
+    ['a stray comma', { first_name: 'Testowner', last_name: 'Placeholder,' }],
     ['a suffix', { first_name: 'Testowner', last_name: 'Placeholder Jr' }],
     ['upper case', { first_name: 'TESTOWNER', last_name: 'PLACEHOLDER' }],
     ['a middle initial', { first_name: 'Testowner Q', last_name: 'Placeholder' }],
@@ -1090,6 +1111,152 @@ In `lookupPersonTrace`, change the three refusals: `return contactFailure('Parce
 Run: `npx vitest run lib/tracerfy lib/routing`
 Expected: PASS, 0 failed.
 
+- [ ] **Step 5a: Check the new parser against the saved raw responses (counts only; spec 11, L-008)**
+
+The parcel fixtures above are constructed, so the parser must also meet the real payloads saved under `tasks/research-test/` (gitignored: purchased PII). Create `tasks/research-scripts/phase1/check-person-parser.ts`. It holds no data and prints counts only; its output is never saved or committed.
+
+```ts
+/**
+ * Tier 1 Phase 1, Task 3 check (spec 11, lessons L-008): run the NEW Tracerfy person parser over
+ * every saved Instant and parcel response in tasks/research-test/ and print COUNTS ONLY.
+ *
+ * Those files hold purchased PII. This script never prints a name, phone, email, address or parcel
+ * id, writes nothing, and is not a test. Its output is not saved or committed.
+ *
+ *   npx tsx tasks/research-scripts/phase1/check-person-parser.ts
+ */
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+// House pattern (tasks/research-scripts/phase0/run-small.ts): never carry the database key into a
+// process that imports lib/ code. This script needs no database.
+delete process.env.SUPABASE_SERVICE_ROLE_KEY
+
+type Want = { first_name?: string; last_name?: string } | undefined
+
+interface Sample {
+  source: string
+  body: unknown
+  want: Want
+}
+
+const RT = join(process.cwd(), 'tasks/research-test')
+
+/** The envelope keys the parser was written against, for both endpoints. */
+const KNOWN_KEYS = new Set([
+  'address', 'city', 'state', 'zip', 'find_owner', 'parcel_id', 'county',
+  'hit', 'persons_count', 'credits_deducted', 'persons', 'meta', 'error',
+])
+
+const readJson = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'))
+const rec = (v: unknown): Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+
+async function main(): Promise<void> {
+  const { parsePersonTraceResponse } = await import('../../../lib/tracerfy/client')
+  const { splitPersonName } = await import('../../../lib/routing/ownerRoute')
+  const wantFor = (owner: unknown): Want =>
+    typeof owner === 'string' && owner.trim() ? splitPersonName(owner) : undefined
+
+  const samples: Sample[] = []
+
+  // 1. The 2026-09-15 parcel study. The owner of record comes from its results.json, by parcel id.
+  const apnDir = join(RT, 'apn')
+  if (existsSync(apnDir)) {
+    const results = (rec(readJson(join(apnDir, 'results.json'))).results as unknown[] | undefined) ?? []
+    for (const f of readdirSync(apnDir).filter((n) => n.startsWith('raw-'))) {
+      const d = rec(readJson(join(apnDir, f)))
+      const parcel = rec(d.request).parcel_id
+      const row = results.map(rec).find((r) => r.parcel_id === parcel)
+      samples.push({ source: 'apn', body: d.response, want: wantFor(row?.owner_name) })
+    }
+  }
+
+  // 2. The 2026-09-16 Instant study: one parcel, one owner of record.
+  const tiDir = join(RT, 'tracerfy-individual')
+  if (existsSync(tiDir)) {
+    const owner = rec(readJson(join(tiDir, 'results.json'))).owner_of_record
+    for (const f of readdirSync(tiDir).filter((n) => n.startsWith('raw-'))) {
+      samples.push({ source: 'instant', body: rec(readJson(join(tiDir, f))).response, want: wantFor(owner) })
+    }
+  }
+
+  // 3. Phase 0: every Instant or parcel exchange, with the names production asked about.
+  const p0 = join(RT, 'phase0/small-calls.jsonl')
+  if (existsSync(p0)) {
+    for (const line of readFileSync(p0, 'utf8').split('\n').filter(Boolean)) {
+      const o = rec(JSON.parse(line))
+      for (const x of Array.isArray(o.raw) ? o.raw : []) {
+        const r = rec(x)
+        const path = String(r.path ?? '')
+        if (!path.includes('/trace/lookup/') && !path.includes('/trace/parcel/lookup/')) continue
+        const req = rec(r.request_body)
+        const want: Want =
+          typeof req.last_name === 'string'
+            ? { first_name: String(req.first_name ?? ''), last_name: req.last_name }
+            : wantFor(o.owner_name)
+        samples.push({ source: `phase0:${String(o.slot)}`, body: r.response_body, want })
+      }
+    }
+  }
+
+  const count: Record<string, number> = {}
+  const bump = (k: string): void => {
+    count[k] = (count[k] ?? 0) + 1
+  }
+  const unexpected = new Set<string>()
+
+  for (const s of samples) {
+    bump(`responses_${s.source.split(':')[0]}`)
+    for (const k of Object.keys(rec(Array.isArray(s.body) ? s.body[0] : s.body))) {
+      if (!KNOWN_KEYS.has(k)) unexpected.add(k)
+    }
+    const res = parsePersonTraceResponse(s.body, s.want)
+    const verdict = !res.success
+      ? 'parse_failure'
+      : !res.hit
+        ? 'miss'
+        : res.contacts
+          ? 'name_matched'
+          : res.nameNotMatched
+            ? 'name_not_matched'
+            : 'hit_without_people'
+    bump(verdict)
+    if (res.hit && res.creditsDeducted === undefined) bump('hits_without_credits')
+    if (res.hit && !s.want) bump('hits_with_no_owner_name_to_match')
+    if (s.source.startsWith('phase0:')) console.log(`${s.source}: ${verdict}`)
+  }
+
+  console.log(JSON.stringify(count, null, 2))
+  console.log(`unexpected top-level keys: ${[...unexpected].sort().join(', ') || 'none'}`)
+}
+
+main().catch((e) => {
+  console.error(e instanceof Error ? e.message : e)
+  process.exit(1)
+})
+```
+
+Type-check it (the repo tsconfig excludes `tasks/research-scripts`, and tsx does not type-check), then run it:
+
+```bash
+T=$(mktemp -d) && cat > $T/tsconfig.json <<'EOF'
+{
+  "extends": "/Users/davidmonroe/PropTracerPRO/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true, "incremental": false, "plugins": [],
+    "typeRoots": ["/Users/davidmonroe/PropTracerPRO/node_modules/@types"]
+  },
+  "include": ["/Users/davidmonroe/PropTracerPRO/tasks/research-scripts/phase1/*.ts"],
+  "exclude": []
+}
+EOF
+npx tsc --noEmit -p $T/tsconfig.json; echo "tsc exit $?"; rm -rf $T
+npx tsx tasks/research-scripts/phase1/check-person-parser.ts
+```
+
+Expected: `tsc exit 0`. The run prints one line per Phase 0 exchange, then the counts. It must show `phase0:t1_address_tracerfy: name_matched` and `phase0:t1_apn_tracerfy: name_matched` (Phase 0 recorded both owners as a natural-order name match), no `parse_failure` key, and `unexpected top-level keys: none`. The other counts (the parcel and Instant studies) are information: copy them into the History entry. If either Phase 0 Tier 1 hit comes out `name_not_matched`, stop: D6 as built would refuse a real owner, and that is a question for the owner, not a fix.
+
 - [ ] **Step 6: Mutations**
 
 1. In `parsePersonTraceResponse` use `const person = (want ? persons.find(...) : undefined) ?? persons[0]`: `'returns NO contacts when no person matches'` goes red.
@@ -1115,10 +1282,14 @@ Run: `npx vitest run` and `npx tsc --noEmit`. Expected: 0 failed, 0 errors. (The
   state) is marked inputError so it can never be reported busy.
 - New constructed fixtures for trace/parcel/lookup/ (hit and miss); the parcel request shape is
   pinned to parcel_id, county and state. Mutations: all red.
+- Checked against every saved Instant and parcel response in tasks/research-test/ with
+  tasks/research-scripts/phase1/check-person-parser.ts (counts only): <counts from Step 5a>. Both
+  Phase 0 Tier 1 hits still name-match.
 ```
 
 ```bash
-git add lib/routing/executeRoute.ts lib/tracerfy/client.ts lib/tracerfy/__tests__/contactLookups.test.ts lib/tracerfy/__tests__/fixtures/apn-person-hit.json lib/tracerfy/__tests__/fixtures/apn-miss.json lib/tracerfy/__tests__/fixtures/README.md History.md tasks/todo.md
+git add lib/routing/executeRoute.ts lib/tracerfy/client.ts lib/tracerfy/__tests__/contactLookups.test.ts lib/tracerfy/__tests__/fixtures/apn-person-hit.json lib/tracerfy/__tests__/fixtures/apn-miss.json lib/tracerfy/__tests__/fixtures/README.md tasks/research-scripts/phase1/check-person-parser.ts History.md tasks/todo.md
+git status --short tasks/research-test
 git commit -m "$(cat <<'EOF'
 feat(tracerfy): D6 name match with no persons[0] fallback; credits and input refusals
 
@@ -2157,7 +2328,8 @@ EOF
   - `DossierResult.contacts?: OwnerContacts | null` (the nameless block, `ownerName: null`, `mailingAddress: null`; null when it holds no phone and no email; absent on a miss or failure).
   - `ExecutionResult.contactsNameVerified: boolean` (false only for the D21 (b) fallback).
   - `traceResultFor`: `owner_name_2` is set only when `execution.tier === 2`; `name_verified: false` is added only when `contactsNameVerified === false`.
-  - Tier 2 second pass: every dossier owner in order, each through its own `planRoute`; an individual owner on a property with no street or city is searched at the dossier's mailing address; the fallback runs only when every owner was asked, none delivered, and the dossier's owners classify `individual` (D14).
+  - Tier 2 second pass: every dossier owner in order, each through its own `planRoute`; an individual owner on a property with no street or city is searched at the dossier's mailing address; the fallback runs only when the caller passed `dossierContactsFallback: true` (the two single routes; never the Tier 2 cron in Phase 1), every owner was asked, none delivered, and the dossier's owners classify `individual` (D14).
+  - `ExecuteOptions.dossierContactsFallback?: boolean`, default false.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2245,7 +2417,7 @@ describe('executeRoute: D21, every owner, the mailing address, then the dossier 
 
   it("returns the dossier's own contacts, labelled not name-verified, only after every owner missed (D21 b)", async () => {
     const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
-    const r = await executeRoute(tier2Plan(), d)
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
     expect(d.tracePerson).toHaveBeenCalledTimes(2)
     expect(r.contactsFound).toBe(true)
     expect(r.contactsNameVerified).toBe(false)
@@ -2256,7 +2428,7 @@ describe('executeRoute: D21, every owner, the mailing address, then the dossier 
   it("prefers a name-matched hit over the dossier's contacts", async () => {
     // MUTATION: take the dossier contacts before the owner loop and this goes red.
     const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL), tracePerson: vi.fn(async () => CONTACT_HIT) })
-    const r = await executeRoute(tier2Plan(), d)
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
     expect(r.contacts).toBe(CONTACT_HIT.contacts)
     expect(r.contactsNameVerified).toBe(true)
   })
@@ -2266,7 +2438,7 @@ describe('executeRoute: D21, every owner, the mailing address, then the dossier 
       lookupDossier: dossierSequence(HIT_INDIVIDUAL),
       tracePerson: vi.fn(async () => ({ success: false, hit: false, contacts: null, error: 'Tracerfy service unavailable' })),
     })
-    const r = await executeRoute(tier2Plan(), d)
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
     expect(r.success).toBe(false)
     expect(r.contacts).toBeNull()
   })
@@ -2275,9 +2447,21 @@ describe('executeRoute: D21, every owner, the mailing address, then the dossier 
     // HIT_ENTITY_APN carries the same synthetic contacts block (fixtures README).
     // MUTATION: drop `result.ownerType === 'individual'` from the fallback and this goes red.
     const d = deps({ lookupDossier: dossierSequence(HIT_ENTITY_APN) })
-    const r = await executeRoute(tier2Plan(), d)
+    const r = await executeRoute(tier2Plan(), d, { dossierContactsFallback: true })
     expect(r.contactsFound).toBe(false)
     expect(r.contacts).toBeNull()
+  })
+
+  it('returns NO dossier contacts without the flag: the Tier 2 cron in Phase 1', async () => {
+    // The bulk surfaces (the CSV export, the HighLevel push, the gateway) do not carry the
+    // not-name-verified label until Phase 2, so only the two single routes switch the fallback on.
+    // MUTATION: drop `options.dossierContactsFallback === true &&` from the fallback and this goes red.
+    const d = deps({ lookupDossier: dossierSequence(HIT_INDIVIDUAL) })
+    const r = await executeRoute(tier2Plan(), d)
+    expect(d.tracePerson).toHaveBeenCalledTimes(2)
+    expect(r.contactsFound).toBe(false)
+    expect(r.contacts).toBeNull()
+    expect(r.contactsNameVerified).toBe(true)
   })
 })
 ```
@@ -2302,7 +2486,7 @@ Append to `lib/trace/__tests__/fullPropertyTrace.test.ts` (inside the `traceResu
 Append to `app/api/cron/sweep-property-traces/__tests__/route.test.ts` (the Tier 2 cron shares executeRoute, L-018):
 
 ```ts
-describe("D21 in the tier 2 cron: every owner, then the dossier's own contacts", () => {
+describe("D21 in the tier 2 cron: every owner, and no dossier contacts in Phase 1", () => {
   const TWO_INDIVIDUALS = {
     ...ENTITY_HIT,
     owners: [
@@ -2332,12 +2516,13 @@ describe("D21 in the tier 2 cron: every owner, then the dossier's own contacts",
     expect((finalWrite().trace_result as Record<string, unknown>).name_verified).toBeUndefined();
   });
 
-  it("falls back to the dossier contacts, labelled not name-verified, after every owner missed", async () => {
+  it("does NOT return the dossier's own contacts in Phase 1, because bulk surfaces cannot show the label yet", async () => {
+    // D21 (b) is switched on by the two single routes only (ExecuteOptions.dossierContactsFallback).
+    // MUTATION: make the fallback ignore the flag and this goes red with phone_count 1.
     H.personContacts = { ...CONTACTS_MISS };
     await run();
     expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
-    expect(finalWrite()).toMatchObject({ status: "success", is_successful: true, phone_count: 1 });
-    expect((finalWrite().trace_result as Record<string, unknown>).name_verified).toBe(false);
+    expect(finalWrite()).toMatchObject({ status: "no_match", is_successful: false, phone_count: 0 });
   });
 });
 ```
@@ -2410,7 +2595,19 @@ In `lib/routing/executeRoute.ts`: add `hasSitus` to the import from `'./ownerRou
   contactsNameVerified: boolean
 ```
 
-and add `contactsNameVerified: true,` to the initial `result` object after `contacts: null,`. Replace `ownerNameFrom` with:
+and add `contactsNameVerified: true,` to the initial `result` object after `contacts: null,`. In `ExecuteOptions` (Task 5) add:
+
+```ts
+  /**
+   * D21 (b): return the dossier's own nameless contacts, labelled not name-verified, when every
+   * owner's lookup missed. Only a caller whose surfaces show that label may ask: the two single
+   * routes in Phase 1. The Tier 2 cron leaves it off until Phase 2 carries the label to the CSV
+   * export, the HighLevel push and the gateway. Default false.
+   */
+  dossierContactsFallback?: boolean
+```
+
+Replace `ownerNameFrom` with:
 
 ```ts
 /** Each owner the dossier names, as the one string classifyOwnerName() and splitPersonName() parse.
@@ -2526,8 +2723,13 @@ Replace everything in `executeRoute` from `// ---- Tier 2. What the $0.20 bought
 
   // D21 (b). Every owner was asked and none came back with contacts. The dossier's own block has
   // no name, so it is returned LABELLED not name-verified, and only when the dossier found
-  // individual owners: D14 says Tracerfy never supplies an entity's contacts.
-  if (result.ownerType === 'individual' && hasPhoneOrEmail(dossier.contacts)) {
+  // individual owners: D14 says Tracerfy never supplies an entity's contacts. Only a caller that
+  // can show the label asks for it: the two single routes in Phase 1, not the bulk cron.
+  if (
+    options.dossierContactsFallback === true &&
+    result.ownerType === 'individual' &&
+    hasPhoneOrEmail(dossier.contacts)
+  ) {
     result.contacts = dossier.contacts!
     result.contactsFound = true
     result.contactsNameVerified = false
@@ -2560,16 +2762,154 @@ and replace the final `match_confidence` line of the returned object with:
 - [ ] **Step 4: Run to see them pass**
 
 Run: `npx vitest run lib app/api/cron/sweep-property-traces` then `npx tsc --noEmit`.
-Expected: PASS, 0 errors. If `tsc` names another test that builds an `ExecutionResult` literal, add `contactsNameVerified: true` to it. If an existing test with an INDIVIDUAL dossier owner and a contact miss now sees the dossier contacts, that is D21 (b) working: update its expectation to `contactsFound: true, contactsNameVerified: false` and name it in the History entry.
+Expected: PASS, 0 errors. If `tsc` names another test that builds an `ExecutionResult` literal, add `contactsNameVerified: true` to it. Existing tests pass no options, so none of them sees the dossier contacts.
+
+- [ ] **Step 4a: Check the dossier parser against the saved raw responses (counts only; spec 11, L-008)**
+
+The contacts fixtures are synthetic, so the new `contacts` parsing must also meet the real dossier payloads saved under `tasks/research-test/` (gitignored: purchased PII). Create `tasks/research-scripts/phase1/check-dossier-contacts.ts`. It holds no data and prints counts only; its output is never saved or committed.
+
+```ts
+/**
+ * Tier 1 Phase 1, Task 6 check (spec 11, lessons L-008): run the dossier parser, which now surfaces
+ * the contacts block for D21 (b), over every saved dossier response in tasks/research-test/ and
+ * print COUNTS ONLY.
+ *
+ * Purchased PII: this script never prints a name, phone, email, address or parcel id, writes
+ * nothing, and is not a test. Its output is not saved or committed.
+ *
+ *   npx tsx tasks/research-scripts/phase1/check-dossier-contacts.ts
+ */
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+// House pattern: no database key in a process that imports lib/ code. No database is needed.
+delete process.env.SUPABASE_SERVICE_ROLE_KEY
+
+const RT = join(process.cwd(), 'tasks/research-test')
+
+/** The keys the contacts block carries in the sanitized fixtures (fixtures README). */
+const CONTACT_KEYS = new Set(['has_contact', 'contact_clean', 'litigator', 'phones', 'emails'])
+
+const readJson = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'))
+const rec = (v: unknown): Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+
+async function main(): Promise<void> {
+  const { parseDossierResponse } = await import('../../../lib/tracerfy/dossier')
+  const { classifyOwnerName } = await import('../../../lib/routing/ownerRoute')
+
+  const bodies: Array<{ source: string; body: unknown }> = []
+  for (const dir of ['dossier', 'address-mode']) {
+    const d = join(RT, dir)
+    if (!existsSync(d)) continue
+    for (const f of readdirSync(d).filter((n) => n.startsWith('raw-'))) {
+      bodies.push({ source: dir, body: rec(readJson(join(d, f))).response })
+    }
+  }
+  const ohio = join(RT, 'ohio')
+  if (existsSync(ohio)) {
+    for (const f of readdirSync(ohio).filter((n) => n.startsWith('dossier-'))) {
+      bodies.push({ source: 'ohio', body: readJson(join(ohio, f)) })
+    }
+  }
+  const p0 = join(RT, 'phase0/small-calls.jsonl')
+  if (existsSync(p0)) {
+    for (const line of readFileSync(p0, 'utf8').split('\n').filter(Boolean)) {
+      const o = rec(JSON.parse(line))
+      for (const x of Array.isArray(o.raw) ? o.raw : []) {
+        const r = rec(x)
+        if (String(r.path ?? '').includes('/property-search/lookup/')) {
+          bodies.push({ source: `phase0:${String(o.slot)}`, body: r.response_body })
+        }
+      }
+    }
+  }
+
+  const count: Record<string, number> = {}
+  const add = (k: string, n = 1): void => {
+    count[k] = (count[k] ?? 0) + n
+  }
+  const unexpected = new Set<string>()
+  const phoneTypes = new Set<string>()
+
+  for (const b of bodies) {
+    add(`responses_${b.source.split(':')[0]}`)
+    const raw = rec(b.body)
+    const block = rec(raw.contacts)
+    for (const k of Object.keys(block)) if (!CONTACT_KEYS.has(k)) unexpected.add(k)
+    for (const p of Array.isArray(block.phones) ? block.phones : []) {
+      const t = rec(p).type
+      if (typeof t === 'string') phoneTypes.add(t.trim().toLowerCase())
+    }
+    const res = parseDossierResponse(b.body)
+    if (!res.success) {
+      add('parse_failures')
+      continue
+    }
+    if (!res.hit) {
+      add('misses')
+      continue
+    }
+    add('hits')
+    if (raw.contacts !== undefined) add('hits_with_contacts_block')
+    if (res.contacts) {
+      add('contacts_parsed')
+      add('phones_total', res.contacts.phones.length)
+      add('emails_total', res.contacts.emails.length)
+    }
+    const joined = res.owners
+      .map((o) => [o.first_name, o.last_name].map((v) => v.trim()).filter(Boolean).join(' '))
+      .filter(Boolean)
+      .join(' | ')
+    const type = classifyOwnerName(joined)
+    add(`owner_type_${type}`)
+    if (type === 'individual' && res.contacts) add('fallback_eligible')
+    if (b.source.startsWith('phase0:')) {
+      const c = res.contacts ? `${res.contacts.phones.length} phones ${res.contacts.emails.length} emails` : 'none'
+      console.log(`${b.source}: hit, owner_type ${type}, dossier contacts ${c}`)
+    }
+  }
+
+  console.log(JSON.stringify(count, null, 2))
+  console.log(`unexpected contacts keys: ${[...unexpected].sort().join(', ') || 'none'}`)
+  console.log(`phone types seen: ${[...phoneTypes].sort().join(', ') || 'none'}`)
+}
+
+main().catch((e) => {
+  console.error(e instanceof Error ? e.message : e)
+  process.exit(1)
+})
+```
+
+Type-check the phase1 scripts, then run it:
+
+```bash
+T=$(mktemp -d) && cat > $T/tsconfig.json <<'EOF'
+{
+  "extends": "/Users/davidmonroe/PropTracerPRO/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true, "incremental": false, "plugins": [],
+    "typeRoots": ["/Users/davidmonroe/PropTracerPRO/node_modules/@types"]
+  },
+  "include": ["/Users/davidmonroe/PropTracerPRO/tasks/research-scripts/phase1/*.ts"],
+  "exclude": []
+}
+EOF
+npx tsc --noEmit -p $T/tsconfig.json; echo "tsc exit $?"; rm -rf $T
+npx tsx tasks/research-scripts/phase1/check-dossier-contacts.ts
+```
+
+Expected: `tsc exit 0`. It must show `phase0:dossier_commercial: hit, owner_type individual, dossier contacts 8 phones 4 emails` and `phase0:dossier_land: hit, owner_type individual, dossier contacts 7 phones 5 emails` (Phase 0 recorded 10 phones 4 emails and 7 phones 5 emails in those blocks; the parser caps phones at 8 and emails at 5, and is fewer only where a number repeats), `phase0:dossier_multifamily: hit, owner_type entity` (so D14 keeps it out of the fallback), no `parse_failures` key, and `unexpected contacts keys: none`. Copy the counts into the History entry. Any other shape is a parser defect: fix it here and re-run.
 
 - [ ] **Step 5: Mutations**
 
 1. Loop over `ownerNamesFrom(dossier).slice(0, 1)`: `'asks about every owner the dossier names'` (executeRoute) and `'asks about the second owner when the first misses'` (cron) go red.
 2. `return base` unconditionally in `contactParcelFor`: `'searches an individual at the dossier mailing address'` goes red.
 3. Move the D21 (b) block above the owner loop: `"prefers a name-matched hit over the dossier's contacts"` goes red.
-4. Drop `result.ownerType === 'individual' &&` from the fallback: `'never gives an ENTITY owner the dossier contacts'` and the existing `'reports a genuine contact MISS as a completed, cheaper run'` go red.
+4. Drop `result.ownerType === 'individual' &&` from the fallback: `'never gives an ENTITY owner the dossier contacts'` goes red.
 5. Drop `execution.tier === 2 ?` in `traceResultFor`: `'never labels a SUPPLIED tier 1 owner'` goes red.
 6. Delete `contacts: dossierContacts(body.contacts)`: `'surfaces the nameless contacts on a hit'` and the D21 (b) tests go red.
+7. Drop `options.dossierContactsFallback === true &&` from the fallback: `'returns NO dossier contacts without the flag'` (executeRoute) and the cron's `"does NOT return the dossier's own contacts in Phase 1..."` go red.
 
 - [ ] **Step 6: Suite, History, commit**
 
@@ -2583,14 +2923,18 @@ Run: `npx vitest run`. Expected: 0 failed.
   individual owner is searched at the dossier's mailing address with Instant, instead of the
   nameless parcel lookup.
 - Only when every owner was asked and none came back with contacts, and the owners are individuals,
-  the dossier's own contacts block is returned with name_verified false. The dossier parser now
-  surfaces that block.
+  the dossier's own contacts block is returned with name_verified false, and only to a caller that
+  asks (the two single routes). The bulk cron does not get it in Phase 1: the CSV export, the
+  HighLevel push and the gateway cannot show the label yet. The dossier parser now surfaces that
+  block; checked against every saved dossier response (check-dossier-contacts.ts, counts only):
+  <counts from Step 4a>.
 - traceResultFor no longer labels a supplied Tier 1 owner as the owner of record, so a Tier 1 miss
-  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: six, all red.
+  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: seven, all red.
 ```
 
 ```bash
-git add lib/tracerfy/dossier.ts lib/routing/executeRoute.ts lib/trace/fullPropertyTrace.ts lib/tracerfy/__tests__/dossier.test.ts lib/routing/__tests__/executeRoute.test.ts lib/trace/__tests__/fullPropertyTrace.test.ts app/api/cron/sweep-property-traces/__tests__/route.test.ts History.md tasks/todo.md
+git add lib/tracerfy/dossier.ts lib/routing/executeRoute.ts lib/trace/fullPropertyTrace.ts lib/tracerfy/__tests__/dossier.test.ts lib/routing/__tests__/executeRoute.test.ts lib/trace/__tests__/fullPropertyTrace.test.ts app/api/cron/sweep-property-traces/__tests__/route.test.ts tasks/research-scripts/phase1/check-dossier-contacts.ts History.md tasks/todo.md
+git status --short tasks/research-test
 git commit -m "$(cat <<'EOF'
 feat(routing): D21, every dossier owner, the mailing-address search, then labelled dossier contacts
 
@@ -2867,8 +3211,10 @@ describe('the Tier 1 outcome through the one accessor (spec 7.2)', () => {
     // A single-trace row can be re-enqueued by a bulk tier 2 submit (the row is REUSED); its stale
     // "not charged" sentence must never answer for a row tier 2 billed.
     // MUTATION: put tier1OutcomeReason first in rowSkipReason and this goes red.
+    // The Tier 1 half must be able to answer on its own, or the swap below cannot show.
+    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
     expect(
-      rowSkipReason({ outcome_code: 'no_match', trace_steps: [], is_successful: false, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })
+      rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })
     ).toBe(PROPERTY_TRACE_NO_REACH_REASON);
   });
 
@@ -3181,7 +3527,7 @@ EOF
 - Test: create `lib/trace/__tests__/singleTier1.test.ts`; modify `lib/trace/__tests__/chargeReceipt.test.ts` (`mustFold` list)
 
 **Interfaces:**
-- Consumes: `planRoute` (Task 2); `executeRoute`, `stepLogFrom`, `contactVendorFrom`, `requestKeyFor` (Task 5); `traceResultFor`, `hasContactData` (Task 6); `tier1OutcomeFor`, `outcomeSentence`, `missingLookupKey`, `TIER1_OUTCOME` (Task 7); `collectedChargeFor`, `deductWallet`, `foldBillingWrite`, `TRACE_TIER`.
+- Consumes: `planRoute` (Task 2); `executeRoute`, `stepLogFrom`, `contactVendorFrom`, `requestKeyFor` (Task 5); `traceResultFor`, `hasContactData` (Task 6); `tier1OutcomeFor`, `outcomeSentence`, `missingLookupKey`, `TIER1_OUTCOME` (Task 7); `STEP_REUSE_WINDOW_MS` (Task 5); `collectedChargesFor`, `deductWallet`, `foldBillingWrite`, `TRACE_TIER`.
 - Produces:
   - `export const TIER1_CHARGE_DESCRIPTION = 'Skip trace - successful match'`
   - `export interface SingleTier1Row extends CacheHitRow { id: string; outcome_code?: string | null; trace_steps?: unknown }`
@@ -3351,7 +3697,7 @@ describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
   it('records, and does not take again, a debit an earlier attempt booked but never wrote to the row', async () => {
     // The crash window: deduct, then die before the persist. The resend must not charge twice.
     // MUTATION: delete the probe (always deduct) and this goes red with a second debit.
-    H.ledger = [{ amount: 0.15, type: 'debit', created_at: '2026-09-22T11:59:00.000Z' }]
+    H.ledger = [{ amount: 0.15, type: 'debit', created_at: new Date(Date.now() - 60 * 1000).toISOString() }]
     const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
     expect(deducts()).toHaveLength(0)
     expect(r).toMatchObject({ charge: 0.15, deduction: 'already_collected' })
@@ -3359,7 +3705,7 @@ describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
   })
 
   it('still charges a new purchase on a reused row whose earlier debits are already on the row', async () => {
-    // MUTATION: probe for ANY debit (`ledger !== null && ledger > 0`) instead of an unrecorded one and this goes red.
+    // MUTATION: probe for ANY debit (`total !== null && total > 0 ? total : 0`) instead of an unrecorded one and this goes red.
     H.ledger = [{ amount: 0.25, type: 'debit', created_at: '2026-08-01T00:00:00.000Z' }]
     const r = await run({ row: { id: 'row-1', charge: 0.25, tier: 2 }, deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
     expect(deducts()).toHaveLength(1)
@@ -3367,6 +3713,19 @@ describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
     // Folded onto the receipt; a tier 2 receipt never downgrades.
     // MUTATION: write `{ charge: collectedNow, tier: 1 }` instead of the fold and this goes red.
     expect(persisted()).toMatchObject({ charge: 0.4, tier: 2 })
+  })
+
+  it("does not treat an OLD debit the row never recorded as this request's money", async () => {
+    // A row whose receipt was zeroed by the 2026-09-17 settle bug, or an old single-debit raw write,
+    // carries a ledger surplus that is not this record's charge. The decision is bounded to the
+    // 24 hour resend window, as the Tier 2 cron bounds its own (spec 6.1).
+    // MUTATION: decide on `total - recorded` with no window and this goes red: no deduct, and the
+    // old 0.40 reported as this request's charge.
+    H.ledger = [{ amount: 0.4, type: 'debit', created_at: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString() }]
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(r).toMatchObject({ charge: 0.15, deduction: 'charged' })
+    expect(persisted()).toMatchObject({ charge: 0.15, tier: 1 })
   })
 
   it('asks the ledger nothing when nothing is billable', async () => {
@@ -3444,6 +3803,7 @@ import {
   contactVendorFrom,
   executeRoute,
   stepLogFrom,
+  STEP_REUSE_WINDOW_MS,
   type ExecutionResult,
   type RouteDeps,
 } from '@/lib/routing/executeRoute'
@@ -3458,7 +3818,7 @@ import {
   type FoundBy,
   type Tier1OutcomeCode,
 } from '@/lib/trace/tier1Outcome'
-import { collectedChargeFor } from '@/lib/wallet/collectedCharge'
+import { collectedChargesFor } from '@/lib/wallet/collectedCharge'
 import { deductWallet } from '@/lib/wallet/deduct'
 import type { TraceResult } from '@/types'
 
@@ -3524,13 +3884,22 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
   let collectedNow = 0
   let deduction: Tier1Deduction = 'not_attempted'
   if (billable) {
-    // THE LEDGER PROBE. A debit the row does not show yet means an earlier attempt at THIS record
-    // deducted and died before its persist: that money is this record's charge, so it is recorded,
-    // never taken again. Asked as "unrecorded", not "any debit", because a reused row legitimately
-    // carries debits from earlier, separate purchases that its charge column already shows.
-    const ledger = await collectedChargeFor(input.adminClient, input.row.id)
+    // THE LEDGER PROBE, the Tier 2 cron's pattern (spec 6.1): one ledger read, two answers.
+    // `inWindow` DECIDES. A debit inside the last 24 hours (the resend window, spec 5.2) that the
+    // row's charge does not yet show is an earlier attempt at THIS record that deducted and died
+    // before its persist: it is recorded, never taken again. Bounded, because an OLDER surplus
+    // (a receipt zeroed by the 2026-09-17 settle bug, an old single-debit raw write, an earlier
+    // failed persist) is not this request's money and must not make this request free. Asked as
+    // "unrecorded" too, because a reused row legitimately carries debits from earlier, separate
+    // purchases that its charge column already shows.
+    const { total, inWindow } = await collectedChargesFor(
+      input.adminClient,
+      input.row.id,
+      new Date(Date.now() - STEP_REUSE_WINDOW_MS).toISOString(),
+    )
     const recorded = Number(input.row.charge ?? 0) || 0
-    const unrecorded = ledger === null ? 0 : round2(ledger - recorded)
+    const unrecorded =
+      inWindow !== null && inWindow > 0 ? round2(Math.min(inWindow, (total ?? 0) - recorded)) : 0
     if (unrecorded > 0) {
       collectedNow = unrecorded
       deduction = 'already_collected'
@@ -3614,7 +3983,8 @@ Expected: PASS (chargeReceipt and tierLedger included), 0 errors.
 
 1. `const billable = true`: `'charges nothing for a matched owner with no phone and no email'` goes red.
 2. Delete the `if (unrecorded > 0) { ... } else` branch so the deduct always runs: `'records, and does not take again, a debit'` goes red.
-3. `const unrecorded = ledger !== null && ledger > 0 ? ledger : 0`: `'still charges a new purchase on a reused row'` goes red.
+3. `const unrecorded = total !== null && total > 0 ? total : 0`: `'still charges a new purchase on a reused row'` goes red.
+3a. `const unrecorded = round2((total ?? 0) - recorded)` (the decision no longer bounded to the window): `"does not treat an OLD debit the row never recorded as this request's money"` goes red.
 4. `const priorSteps = stepLogFrom(input.row.trace_steps)` (no busy test): `'runs a row that is NOT busy fresh'` goes red.
 5. Replace the fold with `const billing = { charge: collectedNow, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE }`: the reused-row test (`charge: 0.4, tier: 2`) and chargeReceipt's `'folds the settles that reach reused rows'` go red.
 
@@ -3627,9 +3997,10 @@ Run: `npx vitest run`. Expected: 0 failed.
 
 - New lib/trace/singleTier1.ts: plans and runs the ladder inline, resuming only a busy row's step
   log, judges the outcome, charges once only for a name-matched phone or email, asks the ledger
-  first (an unrecorded earlier debit is recorded, never taken again), folds the receipt, and writes
-  outcome_code, found_by, trace_steps and contact_vendor. It never writes property_record.
-- Pinned as must-fold in chargeReceipt.test.ts. Mutations: five, all red.
+  first within the 24 hour window like the Tier 2 cron (a debit there that the row does not show
+  is recorded, never taken again; an older surplus never makes a trace free), folds the receipt,
+  and writes outcome_code, found_by, trace_steps and contact_vendor. It never writes property_record.
+- Pinned as must-fold in chargeReceipt.test.ts. Mutations: six, all red.
 ```
 
 ```bash
@@ -3697,14 +4068,22 @@ In `app/api/trace/single/__tests__/route.test.ts`:
 
 (b) Every `toHaveBeenCalledWith` on `lookupDossier`, `lookupBusinessTrace` or `lookupPersonTrace` (today at `:764`, `:1074`, `:1089`) gains a second argument `expect.objectContaining({ timeoutMs: expect.any(Number) })`: the route now passes its request budget.
 
-(c) In `"tier 2 — the trigger"`, the test `"does NOT run when the owner of record was supplied"` changes its last assertion to:
+(c) In `"tier 2 — the trigger"`, replace the test `"does NOT run when the owner of record was supplied"` with:
 
 ```ts
+  it("does NOT run when the owner of record was supplied", async () => {
+    // WAS: submitted to the Tracerfy batch. A supplied owner now runs the tier 1 ladder inline.
+    const { lookupDossier, submitSingleTrace, lookupBusinessTrace } = await vendorsCalled();
+
+    const body = await (await post(BODY)).json();
+
+    expect(lookupDossier).not.toHaveBeenCalled();
     expect(submitSingleTrace).not.toHaveBeenCalled();
     expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+    expect(body.tier).toBe(1);
+    expect(deducts()).toHaveLength(0);
+  });
 ```
-
-(destructure `lookupBusinessTrace` from `vendorsCalled()` there).
 
 (d) Replace the whole `describe("POST /api/trace/single — row creation and submission", ...)` block with:
 
@@ -3871,7 +4250,7 @@ describe("tier 1 inline: money on this call site (L-018)", () => {
     H.entity = CONTACTS_HIT;
     H.survivingRow = { id: "trace-new", charge: 0, tier: null };
     H.insertedRow = { id: "trace-new", charge: 0, tier: null };
-    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: "2026-09-22T11:59:00.000Z" }];
+    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: new Date(Date.now() - 60 * 1000).toISOString() }];
     const body = await (await post()).json();
     expect(deducts()).toHaveLength(0);
     expect(body.charge).toBe(0.25);
@@ -3953,6 +4332,7 @@ describe("tier 2 single: the shared-code changes reach this route (L-018)", () =
   });
 
   it("returns the dossier's own contacts labelled not name-verified when the owner lookup misses (D21 b)", async () => {
+    // MUTATION: drop `dossierContactsFallback: true` from this route's tier 2 executeRoute call and this goes red.
     H.dossier = {
       ...DOSSIER_INDIVIDUAL_HIT,
       contacts: { ownerName: null, phones: [{ number: "5550000901", type: "mobile" }], emails: [], mailingAddress: null },
@@ -4109,7 +4489,9 @@ to
       const execution = await executeRoute(
         plan,
         { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
-        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS }
+        // D21 (b) is switched on here, where the result card and the API response carry the
+        // not-name-verified label; the bulk cron leaves it off until Phase 2.
+        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS, dossierContactsFallback: true }
       );
 ```
 
@@ -4233,6 +4615,7 @@ Expected: PASS, 0 errors. `grep -n "submitSingleTrace" app/api/trace/single/rout
 5. Delete the Tier 2 `contact_vendor` line: `'writes contact_vendor and clears any stale tier 1 outcome'` goes red.
 6. Delete the tier 1 `dispatchTraceCompleted({ ... })` call: `'FIRES on the tier 1 path'` goes red.
 7. Change the busy branch's `{ status: 503, ... }` to `{ status: 200 }`: `'a vendor failure is busy_try_again: 503'` goes red.
+8. Drop `dossierContactsFallback: true` from the Tier 2 `executeRoute` call: `"returns the dossier's own contacts labelled not name-verified when the owner lookup misses (D21 b)"` goes red.
 
 - [ ] **Step 6: Suite, History, commit**
 
@@ -4248,7 +4631,8 @@ Run: `npx vitest run`. Expected: 0 failed.
 - The 90-day cache serves a supplied owner only the same owner's result (D25, new
   lib/utils/ownerName.ts). No sweep deletes a busy_try_again row, so a resend reuses its log.
 - Tier 2 single rows now write contact_vendor and the step log and clear any stale Tier 1 outcome;
-  every vendor call gets the 50 s request budget. Mutations: seven, all red.
+  every vendor call gets the 50 s request budget, and this route switches D21's dossier-contacts
+  fallback on. Mutations: eight, all red.
 ```
 
 ```bash
@@ -4410,7 +4794,7 @@ describe("POST /api/v1/trace/single: row creation, then the inline tier 1 settle
       foundBy: "company_name", outcomeCode: "found_by_company_name", skipReason: null,
     });
     expect(deducts()).toHaveLength(1);
-    expect(deducts()[0].args.p_amount).toBe(0.15);
+    expect(deducts()[0].args).toMatchObject({ p_amount: 0.15 });
   });
 ```
 
@@ -4423,6 +4807,27 @@ describe("POST /api/v1/trace/single: row creation, then the inline tier 1 settle
     await post(BODY);
     expect(webhooks()).toHaveLength(1);
     expect(webhooks()[0].body).toMatchObject({ tier: 1, status: "no_match", outcome_code: "no_match", found_by: null, property_record: null });
+  });
+```
+
+(f2) Replace the existing test `"writes no ai_research to the row from the request"` (in `"POST /api/v1/trace/single — the removed AI Search opt-in"`) with the version below. The Tier 1 settle writes `ai_research_status: null` on purpose, to clear a stale bulk queue value on a reused row so it cannot answer `rowSkipReason`; do NOT remove that write to satisfy the old assertion.
+
+```ts
+  it("writes no ai_research to the row from the request", async () => {
+    // A request body must never be able to put words into trace_history.ai_research. The tier 1
+    // settle DOES write ai_research_status, and only ever as null: it clears a stale bulk queue
+    // value on a reused row (Tier 1 Phase 1). That null write is load-bearing.
+    // MUTATION: write `ai_research_status: 'queued'` in runSingleTier1 and this goes red.
+    await post({ ...BODY, aiResearch: true, ai_research: { owner_name: "ACME LLC" } });
+    const payloads = H.ops
+      .filter((o) => o.table === "trace_history" && (o.op === "insert" || o.op === "update"))
+      .map((o) => (o.payload as Record<string, unknown>) || {});
+    const written = payloads.map((p) => Object.keys(p)).flat();
+    expect(written).not.toContain("ai_research");
+    expect(written).not.toContain("ai_research_charge");
+    for (const p of payloads) {
+      if ("ai_research_status" in p) expect(p.ai_research_status).toBeNull();
+    }
   });
 ```
 
@@ -4529,6 +4934,16 @@ describe("v1 tier 2, D24 and D21 on the API: the dossier by parcel id, the owner
     H.entity = CONTACTS_HIT;
     await post(TIER2_BODY);
     expect(persisted()).toMatchObject({ contact_vendor: "fastappend", outcome_code: null, found_by: null });
+  });
+
+  it("returns the dossier's own contacts labelled not name-verified when the owner lookup misses (D21 b)", async () => {
+    // MUTATION: drop `dossierContactsFallback: true` from this route's tier 2 executeRoute call and this goes red.
+    H.dossier = {
+      ...DOSSIER_INDIVIDUAL_HIT,
+      contacts: { ownerName: null, phones: [{ number: "5550000901", type: "mobile" }], emails: [], mailingAddress: null },
+    };
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.result).toMatchObject({ name_verified: false, phones: [{ number: "5550000901", type: "mobile" }] });
   });
 });
 
@@ -4918,7 +5333,9 @@ to `const plan = planRoute(parcel, rawPricePlanFor(profile));` (D24: the parcel 
       const execution = await executeRoute(
         plan,
         { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
-        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS }
+        // D21 (b) is switched on here, where the result card and the API response carry the
+        // not-name-verified label; the bulk cron leaves it off until Phase 2.
+        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS, dossierContactsFallback: true }
       );
 ```
 
@@ -5150,6 +5567,8 @@ The predicate, not just this list (L-016): every sentence or snippet on the page
             </p>
 ```
 
+Then append to the paragraph that begins `<code className="bg-gray-200 px-1 rounded">address</code> is the normalized pipe-delimited key` the sentence: `For a record sent by parcel ID with no city, <code className="bg-gray-200 px-1 rounded">address</code> is the street you sent, or <code className="bg-gray-200 px-1 rounded">null</code>.`
+
 - [ ] **Step 6: Run to see them pass**
 
 Run: `npx vitest run lib app/api "app/(dashboard)"` then `npx tsc --noEmit`.
@@ -5158,7 +5577,7 @@ Expected: PASS, 0 errors. `grep -n "submitSingleTrace\|normalizeAddress(" app/ap
 - [ ] **Step 7: Mutations (this call site, L-018)**
 
 1. Delete the `if (keyPlan.steps.length === 0) { ... }` block: `'400s a person with a city but no street and no parcel id'` and `'refuses a person with neither a city nor a parcel id'` go red.
-2. Key the row with `normalizeAddress(address ?? '', city ?? '', state)` again: `'keys the row on APN, county and state'` goes red.
+2. Re-add `normalizeAddress` to the address-normalizer import and key the row with `normalizeAddress(address ?? '', city ?? '', state)` again: `'keys the row on APN, county and state'` goes red on its assertion (with the import restored it is not a ReferenceError).
 3. In `traceKeyFor`, drop `${county}|` from the APN key: `'does not let the same parcel number in two counties share a key'` goes red.
 4. `const sameOwner = true`: `"does not serve a different owner's cached contacts (D25)"` goes red.
 5. Drop `|| busyResend` in `runDelete`: `'keeps a busy row: no sweep deletes it'` goes red.
@@ -5169,6 +5588,7 @@ Expected: PASS, 0 errors. `grep -n "submitSingleTrace\|normalizeAddress(" app/ap
 10. Delete the tier 1 `dispatchTraceCompleted`: the tier 1 webhook test goes red.
 11. Put the old "Response when you supplied the owner (poll for it)" heading back in the docs page: `docsContract` goes red.
 12. Drop `.eq('user_id', userId)` from `checkSingleDuplicateByHash`: the new deduplication test and the existing caller-scoping tests go red.
+13. Drop `dossierContactsFallback: true` from this route's Tier 2 `executeRoute` call: the v1 `"returns the dossier's own contacts labelled not name-verified..."` test goes red.
 
 - [ ] **Step 8: Suite, History, commit**
 
@@ -5185,7 +5605,7 @@ Run: `npx vitest run`. Expected: 0 failed.
   APN, county and state (new traceKeyFor) and stores parcel_id_local and county.
 - D24: a Full Property Trace sent with a parcel id tries the parcel id first, and D21's
   mailing-address search now runs on it. The API docs page describes the synchronous contract,
-  the parcel id input, the busy answer and name_verified. Mutations: twelve, all red.
+  the parcel id input, the busy answer and name_verified. Mutations: thirteen, all red.
 ```
 
 ```bash
@@ -5650,6 +6070,7 @@ Rules for picking:
 - Secondary or tertiary markets only: never a primary metro county, never Indiana, never Florida.
 - Never a county or parcel already in `tasks/research-test/` or `tasks/phase0-small-sample.md` (NY Broome, NY Monroe, LA East Baton Rouge, OH Summit, MN Ramsey, MD Wicomico, UT Washington, CA Shasta, and every county in the older research folders: list them with `ls tasks/research-test/` and a grep of the county fields).
 - Five different states, and not all one property type.
+- Single traces keep today's name order (D22): a two-word name is read FIRST LAST in both the request and the match. For L1, L2 and L4 pick counties whose registry stores owner names in natural order (tasks/phase0-county-shortlist.md records the order per county), or expect `owner_name_not_matched`, which is then the correct answer and not a defect.
 - Pull each parcel with the Suite Gateway registry tools (`registry_search_parcels`, `registry_parcel_detail`), which are free.
 
 Write them to `tasks/research-test/phase1/records.json` (gitignored) in this shape, one object per record:
@@ -5700,7 +6121,7 @@ const WORST_CASE: Record<LivePath, (r: LiveRecord) => number> = {
   tier1_apn_person: () => 0.1, // parcel lookup
   tier1_company: () => 0.1, // FastAppend
   tier1_trust: () => 0.3, // Instant + parcel + FastAppend
-  tier2_apn_no_city: (r) => 0.2 + 0.1 * Math.max(r.owners ?? 3, 1), // dossier + one lookup per owner
+  tier2_apn_no_city: (r) => 0.2 + 0.2 * Math.max(r.owners ?? 3, 1), // dossier + up to two lookups per owner (a trust on a parcel with no situs: parcel + FastAppend)
 }
 
 const ROOT = process.cwd()
@@ -5782,11 +6203,29 @@ main().catch((e) => {
 })
 ```
 
-Check it refuses without an amount: `npx tsx tasks/research-scripts/phase1/run-live.ts` must print the usage line and exit 1 without any network call.
+Type-check the phase1 scripts, then check the runner refuses without an amount:
+
+```bash
+T=$(mktemp -d) && cat > $T/tsconfig.json <<'EOF'
+{
+  "extends": "/Users/davidmonroe/PropTracerPRO/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true, "incremental": false, "plugins": [],
+    "typeRoots": ["/Users/davidmonroe/PropTracerPRO/node_modules/@types"]
+  },
+  "include": ["/Users/davidmonroe/PropTracerPRO/tasks/research-scripts/phase1/*.ts"],
+  "exclude": []
+}
+EOF
+npx tsc --noEmit -p $T/tsconfig.json; echo "tsc exit $?"; rm -rf $T
+npx tsx tasks/research-scripts/phase1/run-live.ts; echo "exit $?"
+```
+
+Expected: `tsc exit 0`; the runner prints the usage line and `exit 1`, with no network call.
 
 - [ ] **Step 5: HARD STOP 2. Ask the owner for a dollar amount.**
 
-Send the owner, in one message: the five records (id, path, state, county, property type, the reason each could break its path; no owner names or parcel ids), the worst-case vendor cost from `WORST_CASE` ($1.10 for five records with L5 at three owners: 0.10 + 0.10 + 0.10 + 0.30 + 0.50), a note that his own wallet is charged the Tier 1 rate on each found contact and the Tier 2 rate on L5 (money that moves inside PropTracerPRO, not vendor spend), and that his webhook, if he has one set, receives one trace.completed per completed record. Ask him to name the amount. Do not run anything until he names it.
+Send the owner, in one message: the five records (id, path, state, county, property type, the reason each could break its path; no owner names or parcel ids), the worst-case vendor cost from `WORST_CASE` ($1.40 for five records with L5 at three owners: 0.10 + 0.10 + 0.10 + 0.30 + 0.80), a note that his own wallet is charged the Tier 1 rate on each found contact and the Tier 2 rate on L5 (money that moves inside PropTracerPRO, not vendor spend), and that his webhook, if he has one set, receives one trace.completed per completed record. Ask him to name the amount. Do not run anything until he names it.
 
 - [ ] **Step 6: Run the live check**
 
@@ -5854,13 +6293,15 @@ Expected: `git status --short tasks/research-test` prints nothing (the folder is
 Recorded so nobody reads their absence as an oversight:
 
 1. Bulk surfaces onto the Tier 1 queue: MCP `skip_trace_bulk`, API bulk (with D23's parcel id), web upload; per-record judging; the whole-batch rejection removal (Phase 2).
-2. The shared Tracerfy rate budget (spec 5.3). D21 adds one lookup per additional owner to the Tier 2 cron (`sweep-property-traces`, 120 rows a minute at concurrency 5): a parcel naming three individual owners who all miss now costs up to five Tracerfy calls instead of two. The cron's sizing is Phase 2's to redo against the 450 a minute budget.
+2. The shared Tracerfy rate budget (spec 5.3). The Tier 2 cron (`sweep-property-traces`, 120 rows a minute at concurrency 5) now makes more Tracerfy calls per record: D21 tries every owner, and Task 2's person ladder adds the parcel lookup after an Instant miss on rows that carry `parcel_id_local` and `county` (MCP rows). Worst case 2 + 2N Tracerfy calls per record for N individual owners (8 for three), against 2 before. A 429 on a contact step after a dossier hit settles the row billed as NO_REACH. The cron's sizing is Phase 2's to redo against the 450 a minute budget, with that number.
 3. Per-arrival step-log writes and stale-claim recovery from the log, which a queue needs and an inline request does not (Phase 2).
 4. `found_by` and `outcome_code` in the CSV export, `list_traces`, `bulk_status` and its API twin (with payloadParity), the MCP tool descriptions, and the bulk page summary (Phase 2).
 5. The three bulk submit routes' reuse writes should clear `outcome_code`, `found_by` and `trace_steps` on a reused row; until then `rowSkipReason` orders Tier 2 first and ignores the outcome on a successful row (Phase 2).
 6. Widening the `ai_research_status` queue index (spec 8) for the Tier 1 queue (Phase 2).
 7. A Tier 2 single trace whose contact step fails still answers 502 and does not persist the property record it bought (pre-existing, research Section 3 step 4). D7's busy_try_again is written for Tier 1 records; Tier 2 single keeps today's failure answer in Phase 1.
 8. Removing `submitSingleTrace`, the batch path, the city and state matcher and `isLikelyBusiness` after in-flight rows drain (Phase 4).
+9. D21 (b) for bulk: Phase 2 turns `ExecuteOptions.dossierContactsFallback` on for the Tier 2 cron together with the not-name-verified label in the CSV export, the HighLevel push and the gateway's `crm_push_owners`. Until then only the two single routes return dossier contacts.
+10. A known key collision, the same class as spec 6.3 rule 3: the API now accepts a city with no street, so a company record of that shape keys `|CITY|ST`, and street-less companies in one city share one row (under D25 each new owner re-runs on it). Recorded, not solved, like the no-city case.
 
 ## Self-review
 
@@ -5874,7 +6315,7 @@ Recorded so nobody reads their absence as an oversight:
 | D22: single-trace name order unchanged; spec 4.3 match normalisation (case, suffixes, middle initials, stray comma) | 2, 3 |
 | D6, spec 4.3: no persons[0]; owner_name_not_matched free, vendor spend logged, route moves on | 3, 5, 8 |
 | D23: API takes apn/parcelId and county; validation by lookup key; web address-only | 10 |
-| D24, D21 (both arms): dossier by parcel id first; every owner; mailing-address Instant; labelled dossier contacts; shared with the Tier 2 cron, cron covered | 6, 10 |
+| D24, D21 (both arms): dossier by parcel id first; every owner; mailing-address Instant; labelled dossier contacts, switched on by the single routes only in Phase 1 (`dossierContactsFallback`); the first arm shared with the Tier 2 cron, cron covered both ways | 6, 9, 10 |
 | D25: cache served only to the same owner | 9, 10 |
 | D7, spec 5.1, 5.2: busy_try_again free; step log with kind, outcome, credits, people, timestamp; 24 hour resume by the log's own time; sweeps spare the busy row; own input problems not busy | 3, 5, 8, 9, 10 |
 | Per-call timeout on the person, FastAppend and dossier clients; worst-case arithmetic; ladder bounded inside maxDuration 60 | 4, 5 (Latency budget section) |
@@ -5889,4 +6330,4 @@ Recorded so nobody reads their absence as an oversight:
 
 **Placeholder scan.** The only angle-bracket fills are run-time results the executor writes after measuring them: the History `<date>` and `<letter>` (defined in Global Constraints), the Task 12 History figures, the owner's approved amount, and the five trace ids read from the runner's output. Every code step carries complete code. The two answers that change code (Q1, Q2) each have both versions written out.
 
-**Type consistency.** Checked across tasks: `ContactResult` fields (`nameNotMatched`, `people`, `creditsDeducted`, `inputError`) are defined in Task 3 and read in Task 5; `VendorCallOptions` is defined in Task 4 (`lib/tracerfy/fetchWithTimeout.ts`) and consumed by `RouteDeps` in Task 5; `StepReport` (`at`, `requestKey`, `people`, `noContacts`, `reused`), `ExecuteOptions`, `requestKeyFor`, `stepLogFrom`, `STEP_REUSE_WINDOW_MS` are defined in Task 5 and used in Tasks 6, 7, 8, 9; `ExecutionResult.contactsNameVerified` is defined in Task 6 and set in the Task 7 test literal; `hasSitus` is exported in Task 2 and imported in Task 6; `TIER1_OUTCOME`, `tier1OutcomeFor`, `outcomeSentence`, `missingLookupKey`, `noLookupKeyReason` are defined in Task 7 and used in Tasks 8 and 10; `runSingleTier1`, `SingleTier1Row`, `SingleTier1Result.deduction` values (`not_attempted`, `already_collected`, `charged`, `insufficient_balance`, `error`) are defined in Task 8 and branched on identically in Tasks 9 and 10; `dispatchTraceCompleted`'s required `tier` is added in Task 7 together with its two existing call sites and the egress test's call; `ownerNamesMatch` is defined in Task 9 and used in Task 10; `traceKeyFor` and `checkSingleDuplicateByHash` are defined and used in Task 10; `foundByLabel` and `bulkRowExclusion` are defined and used in Task 11.
+**Type consistency.** Checked across tasks: `ContactResult` fields (`nameNotMatched`, `people`, `creditsDeducted`, `inputError`) are defined in Task 3 and read in Task 5; `VendorCallOptions` is defined in Task 4 (`lib/tracerfy/fetchWithTimeout.ts`) and consumed by `RouteDeps` in Task 5; `StepReport` (`at`, `requestKey`, `people`, `noContacts`, `reused`), `ExecuteOptions`, `requestKeyFor`, `stepLogFrom`, `STEP_REUSE_WINDOW_MS` are defined in Task 5 and used in Tasks 6, 7, 8, 9; `ExecutionResult.contactsNameVerified` is defined in Task 6 and set in the Task 7 test literal; `ExecuteOptions.dossierContactsFallback` is added in Task 6 and passed `true` by the two single routes in Tasks 9 and 10; `hasSitus` is exported in Task 2 and imported in Task 6; `TIER1_OUTCOME`, `tier1OutcomeFor`, `outcomeSentence`, `missingLookupKey`, `noLookupKeyReason` are defined in Task 7 and used in Tasks 8 and 10; `runSingleTier1`, `SingleTier1Row`, `SingleTier1Result.deduction` values (`not_attempted`, `already_collected`, `charged`, `insufficient_balance`, `error`) are defined in Task 8 and branched on identically in Tasks 9 and 10; `dispatchTraceCompleted`'s required `tier` is added in Task 7 together with its two existing call sites and the egress test's call; `ownerNamesMatch` is defined in Task 9 and used in Task 10; `traceKeyFor` and `checkSingleDuplicateByHash` are defined and used in Task 10; `foundByLabel` and `bulkRowExclusion` are defined and used in Task 11.
