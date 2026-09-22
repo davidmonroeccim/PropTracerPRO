@@ -4,6 +4,25 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (c): Tier 1 Phase 1, Task 3: D6 name match, no persons[0] fallback.
+
+- parsePersonTraceResponse returns a person only when the name matches the owner we asked about
+  (last name equal, first initial equal, after dropping case, punctuation, JR/SR/II/III/IV and
+  middle names; order not swapped, D22). A hit with no match returns no contacts, nameNotMatched,
+  how many people came back and the vendor's credits, for the step log (never their names, D29).
+- Both contact parsers read credits_deducted. Every refusal of our own input (no name, no city, no
+  state) is marked inputError so it can never be reported busy.
+- New constructed fixtures for trace/parcel/lookup/ (hit and miss); the parcel request shape is
+  pinned to parcel_id, county and state. Mutations: all red.
+- Checked against every saved Instant and parcel response in tasks/research-test/ with
+  tasks/research-scripts/phase1/check-person-parser.ts (counts only, apn plus instant plus phase0
+  responses combined, since the parcel and Instant studies carry no per-record owner name to match
+  against for most rows): 20 total responses (13 parcel study, 2 Instant study, 5 phase0), 2
+  name_matched, 12 name_not_matched, 6 miss, 0 parse_failure, 11 of the hits had no owner name to
+  match on at all, no unexpected top-level keys. Both Phase 0 Tier 1 hits (t1_address_tracerfy,
+  t1_apn_tracerfy) still name-match; the other three phase0 responses were misses
+  (t1_nothing_found, dossier_commercial, dossier_land).
+
 ## 2026-09-22 (b): Tier 1 Phase 1, Task 2: one classifier and the Tier 1 ladders.
 
 - classifyOwnerName: a trailing TR or TTEE is a trust, not an entity, so trustee names reach the

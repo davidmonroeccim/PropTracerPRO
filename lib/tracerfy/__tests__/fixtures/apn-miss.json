@@ -1,0 +1,13 @@
+{
+  "request": { "parcel_id": "999-999-9999", "county": "Placeholder", "state": "ZZ" },
+  "response": {
+    "parcel_id": "999-999-9999",
+    "county": "Placeholder",
+    "state": "ZZ",
+    "hit": false,
+    "persons_count": 0,
+    "credits_deducted": 0,
+    "persons": [],
+    "meta": { "request_id": "req_00000000000000000000000000000007", "timestamp": "2026-09-21T00:00:00Z", "api_version": "2026-03-21" }
+  }
+}

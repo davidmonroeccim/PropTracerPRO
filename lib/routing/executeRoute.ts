@@ -73,6 +73,20 @@ export interface ContactResult {
   hit: boolean
   contacts: OwnerContacts | null
   error?: string
+  /**
+   * D6: the vendor returned people and none matched the owner's name. The vendor billed the hit,
+   * nothing is returned, and the route moves on to its next step. Tracerfy person lookups only.
+   */
+  nameNotMatched?: boolean
+  /** How many people the vendor returned on that billed non-match. Never their names (spec D29). */
+  peopleCount?: number
+  /** `credits_deducted` exactly as the vendor reported it, when it did. */
+  creditsDeducted?: number
+  /**
+   * The client refused OUR request before spending: no name, no city, no state. Never a vendor
+   * failure, so never busy_try_again (spec 5.1). `success` is false alongside it.
+   */
+  inputError?: boolean
 }
 
 /** FastAppend business-trace. Keyed on name plus STATE OF REGISTRATION, no address. */

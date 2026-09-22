@@ -95,3 +95,18 @@ mailing addresses are the same `100 Placeholder Way, Redacted ZZ 00000` shape us
 `person-hit.json` is the one file carrying a synthesised SECOND record: the source response
 returned a single person. The envelope, the key set and the field types are the vendor's; the
 multi-person ordering is constructed, deliberately, to pin the name-match rule.
+
+---
+
+# Parcel person-lookup fixtures, added for Tier 1 Phase 1
+
+Two files for `POST tracerfy.com/v1/api/trace/parcel/lookup/`, which had no fixture. They are
+CONSTRUCTED, not derived from a saved response: the envelope keys are the ones Phase 0 recorded for
+this endpoint (`parcel_id, county, state, hit, persons_count, credits_deducted, persons, meta`,
+tasks/phase0-small-sample.md) and the person object is copied key for key from `person-hit.json`.
+Every value is a placeholder. Nothing here came from tasks/research-test/.
+
+| File | Shape it exists to cover |
+|---|---|
+| `apn-person-hit.json` | A parcel hit returning two people. The owner we ask for is NOT `persons[0]`, and here `property_owner` is on the owner, the reverse of `person-hit.json`, so only a parser that trusts neither the order nor the flag passes both. |
+| `apn-miss.json` | An unknown parcel id: HTTP 200, `hit:false`, `credits_deducted:0`, `persons: []`, the shape Phase 0 measured (t1_nothing_found). |
