@@ -15,13 +15,18 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 - New constructed fixtures for trace/parcel/lookup/ (hit and miss); the parcel request shape is
   pinned to parcel_id, county and state. Mutations: all red.
 - Checked against every saved Instant and parcel response in tasks/research-test/ with
-  tasks/research-scripts/phase1/check-person-parser.ts (counts only, apn plus instant plus phase0
-  responses combined, since the parcel and Instant studies carry no per-record owner name to match
-  against for most rows): 20 total responses (13 parcel study, 2 Instant study, 5 phase0), 2
-  name_matched, 12 name_not_matched, 6 miss, 0 parse_failure, 11 of the hits had no owner name to
-  match on at all, no unexpected top-level keys. Both Phase 0 Tier 1 hits (t1_address_tracerfy,
-  t1_apn_tracerfy) still name-match; the other three phase0 responses were misses
-  (t1_nothing_found, dossier_commercial, dossier_land).
+  tasks/research-scripts/phase1/check-person-parser.ts (counts only, broken down by source study
+  and by which field produced the name to match on): 20 total responses (13 parcel study, 2
+  Instant study, 5 phase0), 3 name_matched, 11 name_not_matched, 6 miss, 0 parse_failure, no
+  unexpected top-level keys. `want` is the saved request's own first_name/last_name whenever the
+  request carried them (every Instant named lookup); only when the request carried none did `want`
+  fall back to splitting the study's recorded owner name the way planRoute's person steps do. All 3
+  hits tested against a name matched: both Phase 0 Tier 1 hits (t1_address_tracerfy,
+  t1_apn_tracerfy) and the Instant study's one hit. The 11 name_not_matched hits are all in the
+  parcel study: none of its 13 saved requests carried names (captured before Task 2 added them to
+  the parcel step), and for all 11 the study's results.json has a row for that parcel but no
+  owner_name value on it, so nothing was available to match against. The other three phase0
+  responses were misses (t1_nothing_found, dossier_commercial, dossier_land).
 
 ## 2026-09-22 (b): Tier 1 Phase 1, Task 2: one classifier and the Tier 1 ladders.
 
