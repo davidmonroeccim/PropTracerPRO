@@ -4,6 +4,25 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-029: The dossier finds the OWNER. It never supplies contacts, not even as a labelled fallback (2026-09-22)
+
+**What happened.** Spec D21 recorded "c then b", and arm (b) fell back to the dossier's own contacts block, labelled
+not name-verified. Phase 1 built it, and I asked David how to label those contacts in the CSV and in Add to CRM,
+calling them "the county record's own phones and emails". David: "First, there will be no phone or email from the
+county. Second, we don't take the phone and email from the dossier search, it gets a separate call to tracerfy or
+fastappend. I'm really getting tired of repeating this. If the vendors don't find it, then it's a true null request."
+Recorded as D32; arm (b) is withdrawn and its code removed.
+
+**The rules.**
+- The dossier answers two questions: who owns it, and is that owner a person or an entity (D14, D15). Contacts come
+  ONLY from the second call: Tracerfy for a person, FastAppend for an entity. A vendor miss is a true null.
+- Never propose, build or keep a path that returns the dossier's contacts block, labelled or not. If a spec row
+  seems to allow it, check it against D14/D15 and ask before building (L-027).
+- Say "the dossier" for the Tracerfy property search. "The county record" reads as county data, which has no
+  phones, and hides what is actually being proposed.
+
+---
+
 ## L-028: A fix that changes what the customer is told is listed for approval, not announced (2026-09-22)
 
 **What happened.** The Phase 1 pre-flight scan found four plan defects touching money or customer copy. I asked David
