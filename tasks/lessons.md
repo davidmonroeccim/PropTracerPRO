@@ -4,6 +4,20 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-028: A fix that changes what the customer is told is listed for approval, not announced (2026-09-22)
+
+**What happened.** The Phase 1 pre-flight scan found four plan defects touching money or customer copy. I asked David
+one question (TRS) and announced the other three as fixes I would make because their answers "followed from the
+decisions". David: "DO NOT assume I'm going to approve the other 3 fixes. List them so I can approve them first."
+Listed with the exact old and new wording, he approved all three (spec D31).
+
+**The rule.** L-027 decides whether an option is worth offering; it does not turn a change to customer-facing copy,
+a sentence, a charge or a payload into my call. When a defect changes what a customer or integrator is told or
+charged, list the fix with its exact current and proposed text and wait for David's approval, even when only one
+fix is possible. Only mechanical fixes (types, test hygiene, stale labels) go straight to the review loop.
+
+---
+
 ## L-027: Derive the answer from the decisions before asking (2026-09-22)
 
 **What happened.** The Phase 1 plan asked whether a matched owner with no contacts should stop the ladder. Option (b)
