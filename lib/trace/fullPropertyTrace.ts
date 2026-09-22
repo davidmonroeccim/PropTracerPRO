@@ -16,10 +16,10 @@ import type { ExecutionResult } from '@/lib/routing/executeRoute'
 import type { ParcelInput } from '@/lib/routing/ownerRoute'
 import type { TraceResult } from '@/types'
 
-/** What every PTP entry point actually has: an address, never a parcel id. */
+/** What a single-trace entry point has: an address, and on the API sometimes only a parcel id. */
 export interface TraceAddressInput {
-  address: string
-  city: string
+  address?: string | null
+  city?: string | null
   state: string
   zip?: string | null
 }
@@ -87,8 +87,8 @@ export function parcelForFullTrace(
   const state = input.state.trim().toUpperCase()
   return {
     state,
-    situsAddress: input.address.trim(),
-    situsCity: input.city.trim(),
+    situsAddress: (input.address ?? '').trim(),
+    situsCity: (input.city ?? '').trim(),
     situsState: state,
     situsZip: input.zip?.trim() || null,
     // THE SECOND DOSSIER KEY, and the first caller that has ever supplied it. hasApn()

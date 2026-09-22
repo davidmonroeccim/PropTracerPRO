@@ -138,16 +138,11 @@ export async function checkDuplicates(
  * `lib/utils/__tests__/deduplication.test.ts` and in both single-trace route
  * suites.
  */
-export async function checkSingleDuplicate(
+export async function checkSingleDuplicateByHash(
   userId: string,
-  address: string,
-  city: string,
-  state: string
+  hash: string
 ): Promise<TraceHistory | null> {
   const supabase = createAdminClient();
-
-  const normalizedAddress = normalizeAddress(address, city, state);
-  const hash = createAddressHash(normalizedAddress);
 
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - DEDUPE.WINDOW_DAYS);
@@ -181,6 +176,19 @@ export async function checkSingleDuplicate(
   }
 
   return data as TraceHistory | null;
+}
+
+/**
+ * checkSingleDuplicateByHash for a caller holding an address. The API single route calls
+ * checkSingleDuplicateByHash directly, because its key is not always an address (spec 6.3).
+ */
+export async function checkSingleDuplicate(
+  userId: string,
+  address: string,
+  city: string,
+  state: string
+): Promise<TraceHistory | null> {
+  return checkSingleDuplicateByHash(userId, createAddressHash(normalizeAddress(address, city, state)));
 }
 
 /**

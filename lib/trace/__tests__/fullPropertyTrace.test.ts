@@ -86,6 +86,12 @@ describe("parcelForFullTrace", () => {
     expect(parcelForFullTrace({ address: "1 A St", city: "B", state: "UT" }).situsZip).toBeNull();
     expect(parcelForFullTrace({ address: "1 A St", city: "B", state: "UT", zip: "  " }).situsZip).toBeNull();
   });
+
+  it("tolerates a record with no street or city (API, spec D23 and D24)", () => {
+    expect(parcelForFullTrace({ state: "oh", apn: "12-3", county: "Placeholder" })).toMatchObject({
+      state: "OH", situsAddress: "", situsCity: "", parcelIdLocal: "12-3", county: "Placeholder", ownerName: null,
+    });
+  });
 });
 
 describe("traceResultFor", () => {

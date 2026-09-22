@@ -91,9 +91,8 @@ vi.mock("@/lib/supabase/admin", () => ({
   },
 }));
 
-const { checkDuplicates, checkSingleDuplicate, removeBatchDuplicates } = await import(
-  "@/lib/utils/deduplication"
-);
+const { checkDuplicates, checkSingleDuplicate, checkSingleDuplicateByHash, removeBatchDuplicates } =
+  await import("@/lib/utils/deduplication");
 
 function filter(rec: Recorded, method: string, column: string): Filter | undefined {
   return rec.filters.find((f) => f[0] === method && f[1] === column);
@@ -401,5 +400,16 @@ describe("removeBatchDuplicates", () => {
     ]);
 
     expect(unique[0].address).toBe("123 Main Street");
+  });
+});
+
+describe("checkSingleDuplicateByHash (the API keys a city-less record on its parcel id)", () => {
+  it("looks up exactly the hash it is handed, on the admin client, for the caller only", async () => {
+    // MUTATION: drop `.eq('user_id', userId)` from checkSingleDuplicateByHash and this goes red.
+    H.results = [{ data: null, error: { code: "PGRST116" } }];
+    await checkSingleDuplicateByHash("user-1", "hash-apn");
+    expect(H.clientsBuilt).toEqual(["admin"]);
+    expect(filter(H.ops[0], "eq", "user_id")).toEqual(["eq", "user_id", "user-1"]);
+    expect(filter(H.ops[0], "eq", "address_hash")).toEqual(["eq", "address_hash", "hash-apn"]);
   });
 });

@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { rawChargePerRecord, rawPricePlanFor } from '@/lib/api/pricing';
-import { normalizeAddress, createAddressHash, validateAddressInput } from '@/lib/utils/address-normalizer';
-import { checkSingleDuplicate } from '@/lib/utils/deduplication';
+import { createAddressHash, traceKeyFor, usableZip, validateAddressInput } from '@/lib/utils/address-normalizer';
+import { checkSingleDuplicateByHash } from '@/lib/utils/deduplication';
 import {
   excludeBilledRows,
   foldBillingWrite,
@@ -12,13 +12,19 @@ import {
   isCacheHitRow,
   TRACE_TIER,
 } from '@/lib/trace/billedRows';
-import {
-  submitSingleTrace,
-  lookupBusinessTrace,
-  lookupPersonTrace,
-} from '@/lib/tracerfy/client';
+import { lookupBusinessTrace, lookupPersonTrace } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
-import { executeRoute } from '@/lib/routing/executeRoute';
+import { contactVendorFrom, executeRoute } from '@/lib/routing/executeRoute';
+import { runSingleTier1 } from '@/lib/trace/singleTier1';
+import {
+  BUSY_TRY_AGAIN_REASON,
+  missingLookupKey,
+  noLookupKeyReason,
+  TIER1_OUTCOME,
+} from '@/lib/trace/tier1Outcome';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
+import { ownerNamesMatch } from '@/lib/utils/ownerName';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
   FULL_PROPERTY_TRACE_DESCRIPTION,
@@ -33,19 +39,20 @@ import { dispatchTraceCompleted } from '@/lib/trace/traceCompletedWebhook';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { getChargePerTrace } from '@/lib/constants';
+import { getChargePerTrace, STALE_PROCESSING, VENDOR_TIMEOUT } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 /**
- * Tier 2 runs the whole route SYNCHRONOUSLY: a dossier lookup (sometimes two, stopping
- * at the first hit) and then one contact lookup, all JSON POSTs with no queue and no
- * polling. Three vendor round trips do not fit in the default function timeout. Already
- * 60 on this route; kept, and now load-bearing for tier 2 as well.
+ * Both tiers now finish INSIDE this request: tier 2 buys the dossier and then contacts, tier 1 runs
+ * its ladder (spec D1, D26). Every vendor call is capped at 25 s and no call starts later than 50 s
+ * after the request began (VENDOR_TIMEOUT), which leaves 10 s of this 60 for our own writes. The
+ * arithmetic is in docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md.
  */
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
+    const startedAt = Date.now();
     // Authenticate via API key
     const authResult = await validateApiKey(request);
     if (isAuthError(authResult)) {
@@ -60,13 +67,40 @@ export async function POST(request: Request) {
     // longer read. It is not rejected either: an integration still sending it keeps working
     // and simply gets the plain trace. What now serves a submit with no owner is TIER 2,
     // below.
-    const { address, city, state, zip, ownerName } = body;
+    const { address, city, state, zip, ownerName, county } = body;
+    // D23: a record with no city can be sent with its parcel id (`apn`, or `parcelId`) and county,
+    // so Tracerfy's parcel lookup can serve an individual; a company needs only its name and
+    // state. The web app stays address-only (D5).
+    const apn: string | undefined =
+      typeof body.apn === 'string' ? body.apn : typeof body.parcelId === 'string' ? body.parcelId : undefined;
+    const hasCity = typeof city === 'string' && city.trim() !== '';
+    const hasStreet = typeof address === 'string' && address.trim() !== '';
 
-    // Validate input
-    const validation = validateAddressInput(address, city, state, zip);
-    if (!validation.valid) {
+    if (typeof state !== 'string' || !/^[A-Za-z]{2}$/.test(state.trim())) {
+      const skipReason = noLookupKeyReason('state');
       return NextResponse.json(
-        { success: false, error: validation.error },
+        { success: false, outcomeCode: TIER1_OUTCOME.NO_LOOKUP_KEY, skipReason, error: skipReason },
+        { status: 400 }
+      );
+    }
+
+    // A street and a city sent together are validated exactly as before. Either one alone is judged
+    // below by whether any lookup key is left, rather than refused here.
+    if (hasStreet && hasCity) {
+      const validation = validateAddressInput(address, city, state, zip);
+      if (!validation.valid) {
+        return NextResponse.json({ success: false, error: validation.error }, { status: 400 });
+      }
+    } else if (typeof zip === 'string' && zip.trim() !== '' && usableZip(zip) === '') {
+      return NextResponse.json(
+        { success: false, error: 'ZIP code must be 5 or 9 digits when supplied' },
+        { status: 400 }
+      );
+    }
+
+    if (typeof ownerName === 'string' && ownerName.trim() !== '' && !/[A-Za-z]/.test(ownerName)) {
+      return NextResponse.json(
+        { success: false, error: 'ownerName must contain at least one letter' },
         { status: 400 }
       );
     }
@@ -92,6 +126,26 @@ export async function POST(request: Request) {
       full_property_trace: body.fullPropertyTrace === true || body.full_property_trace === true,
     });
 
+    // D23: the record is judged by whether ANY lookup key is left, using the same planRoute that
+    // will run it, instead of demanding a street and city of every record. No step means no key:
+    // nothing is written and nothing is charged.
+    const parcel = parcelForFullTrace({ address, city, state, zip, apn, county });
+    const tier1Owner = fullPropertyTrace ? null : String(ownerName).trim();
+    const keyPlan = planRoute({ ...parcel, ownerName: tier1Owner }, rawPricePlanFor(profile));
+    if (keyPlan.steps.length === 0) {
+      const missing = missingLookupKey({ address, city, state, apn, county });
+      const skipReason = missing ? noLookupKeyReason(missing) : null;
+      return NextResponse.json(
+        {
+          success: false,
+          outcomeCode: TIER1_OUTCOME.NO_LOOKUP_KEY,
+          skipReason,
+          error: skipReason ?? keyPlan.warnings[0] ?? 'This record has no lookup key.',
+        },
+        { status: 400 }
+      );
+    }
+
     /**
      * Check wallet balance for all users, AGAINST THE RATE THIS REQUEST WILL CHARGE.
      * Reserving the tier 1 rate for a tier 2 request under-reserves by $0.10-$0.15 and
@@ -111,9 +165,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // Normalize address and create hash
-    const normalizedAddress = normalizeAddress(address, city, state);
+    // The duplicate key (spec 6.3): street, city and state when there is a city, as before; parcel
+    // id, county and state when there is not.
+    const normalizedAddress = traceKeyFor({ address, city, state, apn, county });
     const addressHash = createAddressHash(normalizedAddress);
+    // The webhook's `address`: the normalized key when there is a city (unchanged), else the street
+    // as sent, else nothing. Never the internal "APN|..." key.
+    const webhookAddress = hasCity ? normalizedAddress : hasStreet ? String(address).trim() : null;
 
     const adminClient = createAdminClient();
 
@@ -128,10 +186,52 @@ export async function POST(request: Request) {
     // of every retrace with a 500 that names nothing.
     const { data: existingRow, error: existingRowError } = await adminClient
       .from('trace_history')
-      .select('id, charge, ai_research_charge, property_record, tier')
+      .select('id, charge, ai_research_charge, property_record, tier, outcome_code, property_trace_status, ai_research_status, status, created_at')
       .eq('user_id', profile.id)
       .eq('address_hash', addressHash)
       .maybeSingle();
+
+    // LIVE WORK IS NEVER TOUCHED BY THIS ROUTE (the rule app/api/trace/single carries, Task 9).
+    //
+    // A row with work still in flight (a Tier 2 cron row back on a queued rung after its crash
+    // window, a busy row a bulk upload re-enqueued, or a 'processing' row a concurrent request is
+    // still running) must not be reused: runSingleTier1 would count the cron's own debit as THIS
+    // request's charge and null the queue columns under the worker. Such a row answers the SAME
+    // busy_try_again shape a vendor failure does, completely untouched: no delete, no write, no
+    // vendor call, no deduct, no webhook. STALE_PROCESSING.CRON_TIMEOUT_MINUTES is the age at which
+    // app/api/cron/sweep-stale-traces itself gives up on a 'processing' row, so a younger one is
+    // presumptively still running somewhere.
+    const staleProcessingCutoff = new Date(
+      Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
+    );
+    const processingIsLive =
+      existingRow?.status === 'processing' &&
+      Boolean(existingRow.created_at) &&
+      new Date(existingRow.created_at) >= staleProcessingCutoff;
+    const liveWork = Boolean(
+      existingRow &&
+        (isPropertyTracePending(existingRow.property_trace_status) ||
+          isEntityTracePending(existingRow.ai_research_status) ||
+          processingIsLive)
+    );
+
+    if (liveWork) {
+      return NextResponse.json(
+        {
+          success: false,
+          status: 'error',
+          traceId: existingRow!.id,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: 0,
+          result: null,
+          foundBy: null,
+          outcomeCode: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+          skipReason: BUSY_TRY_AGAIN_REASON,
+          error: BUSY_TRY_AGAIN_REASON,
+        },
+        { status: 503, headers: { 'Retry-After': '300' } }
+      );
+    }
 
     // Fails CLOSED. Not knowing whether a row exists is not permission to
     // delete one: a refused delete is a 500 the caller cannot get past, while
@@ -143,6 +243,13 @@ export async function POST(request: Request) {
         ? isBilledRow(existingRow) || (await hasLedgerReceipt(adminClient, existingRow.id))
         : false;
 
+    // A busy_try_again row is the one a resend RESUMES (spec 5.2): its step log is what spares the
+    // retry from buying the answered steps again, so no sweep below may delete it. It is reused in
+    // place by the update branch further down, like a billed row. `liveWork` is already false by
+    // this line (live work returned above), named here so the rule, busy AND no live work, reads
+    // the same in code as in the web route.
+    const busyResend = !liveWork && existingRow?.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN;
+
     // Every delete below is narrowed by excludeBilledRows() and its error is
     // checked. wallet_transactions.trace_history_id references these rows with
     // no ON DELETE clause, so a delete on a billed row fails with 23503 — and
@@ -153,7 +260,7 @@ export async function POST(request: Request) {
       label: string,
       build: () => PromiseLike<{ error: { message: string } | null }>
     ) => {
-      if (ledgerProtected) return;
+      if (ledgerProtected || busyResend) return;
       const { error } = await build();
       if (error) {
         console.error(`API v1 single trace - ${label} delete failed:`, error.message);
@@ -162,14 +269,20 @@ export async function POST(request: Request) {
     };
 
     // Check for cached result (90-day dedup)
-    const cachedResult = await checkSingleDuplicate(profile.id, address, city, state);
+    const cachedResult = await checkSingleDuplicateByHash(profile.id, addressHash);
 
     if (cachedResult) {
       const cached = cachedResult.trace_result as TraceResult | null;
       const hasData = cached &&
         ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
 
-      if (hasData) {
+      // D25: a supplied owner is served an earlier result only when it is the SAME owner. A
+      // different owner runs a new trace, charged only on a name-matched result with contacts. A
+      // Full Property Trace request is served as before.
+      const sameOwner =
+        fullPropertyTrace || ownerNamesMatch(cachedResult.input_owner_name, ownerName);
+
+      if (hasData && sameOwner) {
         // property_record rides along: on a tier 2 row it is the thing the customer
         // paid for, and dropping it here would serve them a cache hit poorer than
         // the response they originally got.
@@ -182,6 +295,8 @@ export async function POST(request: Request) {
           success: true,
           cached: true,
           charge: 0,
+          foundBy: cachedResult.found_by ?? null,
+          outcomeCode: cachedResult.outcome_code ?? null,
           traceId: cachedResult.id,
           result: cached,
           propertyRecord: toPublicPropertyRecord(cachedResult.property_record),
@@ -197,7 +312,7 @@ export async function POST(request: Request) {
       // second time for the same absence. Without this branch the row falls through to
       // the submit below and the customer re-buys a record they already own.
       // isCacheHitRow is the JS twin of CACHE_HIT_FILTER, which is what let this row out
-      // of the database in checkSingleDuplicate in the first place.
+      // of the database in checkSingleDuplicateByHash in the first place.
       if (fullPropertyTrace && isCacheHitRow(cachedResult)) {
         return NextResponse.json({
           success: true,
@@ -211,9 +326,9 @@ export async function POST(request: Request) {
         });
       }
 
-      // Cached row holds no contacts, so re-trace. Delete it only if the
-      // customer has not paid for it — a tier 2 property record is billed
-      // whether or not contacts ever followed.
+      // Re-trace: either the cached row holds no contacts, or it holds a DIFFERENT owner's
+      // contacts (D25: sameOwner false above). Delete it only if the customer has not paid for
+      // it: a tier 2 property record is billed whether or not contacts ever followed.
       if (!isBilledRow(cachedResult)) {
         await runDelete('cached-empty', () =>
           adminClient.from('trace_history').delete().eq('id', cachedResult.id)
@@ -276,20 +391,28 @@ export async function POST(request: Request) {
 
     const resubmitData = {
       normalized_address: normalizedAddress,
-      city: city.toUpperCase(),
-      state: state.toUpperCase(),
+      city: hasCity ? city.toUpperCase() : null,
+      state: state.trim().toUpperCase(),
       // The zip is OPTIONAL at validation (it is not part of address_hash), so it can
       // legitimately be absent. `zip.substring(0, 5)` on an absent one threw a TypeError
       // and surfaced as a bare 500 before any vendor was called -- and an absent zip is
       // precisely the case tier 2 backfills. Same shape as app/api/trace/single:273.
       zip: zip ? zip.substring(0, 5) : null,
-      input_owner_name: ownerName || null,
+      // D23: the parcel id and county as sent, beside the key built from them (spec 6.3).
+      parcel_id_local: parcel.parcelIdLocal,
+      county: parcel.county,
       status: 'processing',
     };
 
     // Insert pending trace record, or reuse the billed row that survived.
     // charge, ai_research_charge, property_record and tier are never touched
     // here: they are what the customer already paid for.
+    //
+    // input_owner_name is written by the INSERT only (D25 money, the web route's Task 9 rule): on
+    // a reused row it must change in the SAME write as trace_result, never ahead of it, or the row
+    // would name a new owner while still holding the old owner's contacts and a second request for
+    // the new owner could be served them free. runSingleTier1 and the Tier 2 persist below write it
+    // together with trace_result.
     const { data: traceRecord, error: insertError } = surviving
       ? await adminClient
           .from('trace_history')
@@ -302,6 +425,7 @@ export async function POST(request: Request) {
           .insert({
             user_id: profile.id,
             address_hash: addressHash,
+            input_owner_name: ownerName || null,
             ...resubmitData,
           })
           .select()
@@ -321,9 +445,7 @@ export async function POST(request: Request) {
      * Mirrors app/api/trace/single:339-497 step for step. Synchronous end to
      * end: the dossier and the contact lookup are both plain JSON POSTs, so the
      * spend and the charge happen in this request rather than in a later poll.
-     * That is the whole reason billing lives here and nowhere else, and it is
-     * also why tier 2 returns the finished record INLINE while tier 1 still
-     * returns a traceId to poll.
+     * That is the whole reason billing lives here and nowhere else.
      *
      * THE CHARGE SEQUENCE, in order, and none of these steps may move:
      *   1. plan the route (pure, no spend) at the CALLER'S OWN rate
@@ -339,13 +461,12 @@ export async function POST(request: Request) {
       //    required argument so no route can quietly bill the wrong column: a
       //    hardcoded 'pro' once billed pay-as-you-go customers 40% under rate,
       //    silently, because nobody reports being undercharged (FAILSAFE_PRICE_PLAN).
-      const plan = planRoute(
-        parcelForFullTrace({ address, city, state, zip }),
-        rawPricePlanFor(profile)
-      );
+      //    D24: the parcel id key rides along, so a Full Property Trace sent with one tries it
+      //    first and the address second.
+      const plan = planRoute(parcel, rawPricePlanFor(profile));
 
       // Defence in depth: planRoute emits no step at all when the parcel has no usable
-      // key. Address validation makes that unreachable from this route, and it is
+      // key. The keyPlan check above makes that unreachable from this route, and it is
       // guarded anyway because the rule is that the charge follows the VENDOR CALL -- a
       // record no vendor was ever asked about must not reach the deduct below.
       if (plan.steps.length === 0) {
@@ -368,11 +489,11 @@ export async function POST(request: Request) {
       }
 
       // 2. Spend. executeRoute never throws and reports each step separately.
-      const execution = await executeRoute(plan, {
-        lookupDossier,
-        traceEntity: lookupBusinessTrace,
-        tracePerson: lookupPersonTrace,
-      });
+      const execution = await executeRoute(
+        plan,
+        { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
+        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS }
+      );
 
       // 3. A VENDOR FAILURE IS NEVER BILLED. `success: false` means we could not ask --
       //    an outage, a rate limit, a rejected key. It is NOT the same as
@@ -455,6 +576,9 @@ export async function POST(request: Request) {
         .update({
           status,
           trace_result: result,
+          // D25 money: the owner this result describes changes in the SAME write as the result,
+          // never a separate one. The supplied owner if there was one, else null.
+          input_owner_name: ownerName || null,
           phone_count: result?.phones?.length || 0,
           email_count: result?.emails?.length || 0,
           is_successful: isSuccessful,
@@ -464,6 +588,13 @@ export async function POST(request: Request) {
           // What the vendors actually took, read from their own credit counters rather
           // than assumed from a price list.
           cost: execution.vendorSpend,
+          // Which contact vendor was asked (spec 6.1); NULL when none was.
+          contact_vendor: contactVendorFrom(execution.steps),
+          // A tier 2 row carries no tier 1 outcome. Cleared because this row may be REUSED from a
+          // tier 1 trace whose outcome would otherwise answer rowSkipReason for it.
+          outcome_code: null,
+          found_by: null,
+          trace_steps: execution.steps,
           tracerfy_job_id: null,
           // The situs zip the dossier taught us, and ONLY when the caller had none.
           // address_hash is sha256 of STREET|CITY|STATE and deliberately excludes the
@@ -495,7 +626,7 @@ export async function POST(request: Request) {
         webhookUrl: profile.webhook_url,
         traceId: traceRecord.id,
         status,
-        address: normalizedAddress,
+        address: webhookAddress,
         city: resubmitData.city,
         state: resubmitData.state,
         zip: persistedZip,
@@ -542,42 +673,95 @@ export async function POST(request: Request) {
       });
     }
 
-    // TIER 1, unchanged: submit and return a traceId to poll. Reaching here means the
-    // caller supplied an owner of record, because an absent one is the tier 2 trigger
-    // above. Nothing here goes looking for an owner and nothing here books a charge --
-    // the per-successful-trace deduct still happens in the poll route.
-    const submitResult = await submitSingleTrace({
-      address,
-      city,
-      state,
-      zip,
-      owner_name: ownerName || undefined,
+    /* ---------------------------------------------------------------- *
+     * TIER 1, INLINE (spec D1, D26). The owner was supplied: planRoute
+     * picks the ladder, executeRoute runs it inside this request, and the
+     * finished result comes back here. The old "processing, then poll"
+     * contract is removed for new traces; /api/v1/trace/status still
+     * answers for trace ids already issued.
+     * ---------------------------------------------------------------- */
+    const tier1 = await runSingleTier1({
+      adminClient,
+      userId: profile.id,
+      row: traceRecord,
+      parcel: { ...parcel, ownerName: tier1Owner },
+      pricePlan: rawPricePlanFor(profile),
+      chargeAmount: getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member),
+      deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS,
+      deps: { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
+      // D25 money: written into the same UPDATE as trace_result inside runSingleTier1, never ahead
+      // of it.
+      inputOwnerName: ownerName || null,
     });
 
-    if (!submitResult.success || !submitResult.jobId) {
-      await adminClient
-        .from('trace_history')
-        .update({ status: 'error' })
-        .eq('id', traceRecord.id);
+    if (tier1.persistError) {
+      console.error('API v1 single trace tier 1 - failed to persist result:', tier1.persistError);
+    }
 
+    if (tier1.outcome === TIER1_OUTCOME.BUSY_TRY_AGAIN) {
+      // D7: free, no webhook, and the row keeps its step log so a resend within 24 hours resumes.
       return NextResponse.json(
-        { success: false, error: submitResult.error || 'Failed to submit trace' },
-        { status: 500 }
+        {
+          success: false,
+          status: 'error',
+          traceId: traceRecord.id,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: 0,
+          result: null,
+          foundBy: null,
+          outcomeCode: tier1.outcome,
+          skipReason: tier1.skipReason,
+          error: tier1.skipReason,
+        },
+        { status: 503, headers: { 'Retry-After': '300' } }
       );
     }
 
-    // Save Tracerfy job ID
-    await adminClient
-      .from('trace_history')
-      .update({ tracerfy_job_id: submitResult.jobId })
-      .eq('id', traceRecord.id);
+    if (tier1.deduction === 'charged' || tier1.deduction === 'insufficient_balance' || tier1.deduction === 'error') {
+      triggerAutoRebillIfNeeded(profile.id).catch(() => {});
+    }
+
+    const tier1Status = tier1.status === 'success' ? 'success' : 'no_match';
+
+    // trace.completed fires from here now; an integrator who never polls still hears about it.
+    dispatchTraceCompleted({
+      webhookUrl: profile.webhook_url,
+      traceId: traceRecord.id,
+      status: tier1Status,
+      address: webhookAddress,
+      city: resubmitData.city,
+      state: resubmitData.state,
+      zip: resubmitData.zip,
+      result: tier1.result,
+      charge: tier1.charge,
+      propertyRecord: null,
+      ownerType: tier1.execution.ownerType,
+      tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      foundBy: tier1.foundBy,
+      outcomeCode: tier1.outcome,
+      skipReason: tier1.skipReason,
+    });
+
+    // Only the two wallet sentences reach the caller; the routing notes are internal.
+    const tier1Warnings: string[] = [];
+    if (tier1.deduction === 'insufficient_balance') tier1Warnings.push(WALLET_SHORT_WARNING);
+    else if (tier1.deduction === 'error') tier1Warnings.push(WALLET_NOT_COLLECTED_WARNING);
 
     return NextResponse.json({
       success: true,
-      status: 'processing',
+      status: tier1Status,
       traceId: traceRecord.id,
-      tracerfyJobId: submitResult.jobId,
-      message: 'Trace submitted. Poll /api/v1/trace/status?trace_id=' + traceRecord.id + ' for results.',
+      tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      charge: tier1.charge,
+      result: tier1.result,
+      propertyRecord: null,
+      ownerName: tier1Owner,
+      ownerType: tier1.execution.ownerType,
+      needsManualReview: tier1.execution.needsManualReview,
+      foundBy: tier1.foundBy,
+      outcomeCode: tier1.outcome,
+      skipReason: tier1.skipReason,
+      warnings: tier1Warnings,
     });
   } catch (error) {
     console.error('API v1 single trace error:', error);

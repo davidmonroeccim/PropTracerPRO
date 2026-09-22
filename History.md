@@ -4,6 +4,28 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (k): Tier 1 Phase 1, Task 10: API single trace inline, by parcel id when there is no city.
+
+- app/api/v1/trace/single runs Tier 1 inline like the web route (camelCase foundBy, outcomeCode,
+  skipReason; 503 busy_try_again). The old processing-then-poll response is gone for new traces.
+- D23: the API takes apn (or parcelId) and county. A record is judged by whether planRoute finds a
+  key: a person needs a street and city or a parcel id with county; a company, or a trust or
+  unreadable name with no first name left (D16), only name and state; otherwise 400 no_lookup_key
+  with the sentence, before any write. A city-less record is keyed on APN, county and state (new
+  traceKeyFor, and checkSingleDuplicateByHash for the cache) and stores parcel_id_local and county.
+- D24: a Full Property Trace sent with a parcel id tries the parcel id first, and D21's
+  mailing-address search now runs on it. The API docs page describes the synchronous contract,
+  the parcel id input and the busy answer.
+- D31: the API docs state the charge rule truthfully, say how a trust with no first name is
+  looked up, and add a 503 row; the Integrations webhook preview shows found_by, outcome_code and
+  skip_reason.
+- The web route's Task 9 rules now hold on the API too: a row with live work (a queued Tier 2 rung,
+  a queued or processing ai_research_status, or a fresh 'processing' row) answers the untouched
+  busy_try_again 503; input_owner_name changes only in the same write as the result (the insert,
+  runSingleTier1's persist, the Tier 2 persist, never the reuse UPDATE); the Tier 2 vendor calls
+  carry the request budget and the Tier 2 persist writes contact_vendor and the step log. The
+  dossier's own contacts are never returned (D32). Mutations: thirty-one, all red.
+
 ## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
 
 - app/api/trace/single no longer submits a Tier 1 trace to the batch CSV: it runs the ladder

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeAddress,
   createAddressHash,
+  traceKeyFor,
   usableZip,
   validateAddressInput,
 } from '../address-normalizer';
@@ -162,5 +163,30 @@ describe('usableZip', () => {
       const accepted = validateAddressInput('123 Main St', 'Houston', 'TX', zip).valid;
       expect(usableZip(zip) !== '' || zip === '', zip).toBe(accepted);
     }
+  });
+});
+
+describe('traceKeyFor (spec 6.3, D9)', () => {
+  it('keys a record with a city exactly as before, whatever parcel id rides along', () => {
+    expect(traceKeyFor({ address: '123 Main St', city: 'Austin', state: 'TX', apn: '9', county: 'Travis' }))
+      .toBe(normalizeAddress('123 Main St', 'Austin', 'TX'));
+  });
+
+  it('keys a city-less record on parcel id, county and state: trimmed, upper case, leading # removed', () => {
+    // MUTATION: drop the leading-# strip in normalizeParcelId and this goes red.
+    expect(traceKeyFor({ state: 'oh', apn: ' #12-345 6 ', county: 'Placeholder' })).toBe('APN|12-345 6|PLACEHOLDER|OH');
+  });
+
+  it('keeps dashes and spaces, so two parcel numbers never collapse into one', () => {
+    expect(traceKeyFor({ state: 'OH', apn: '12-3456', county: 'X' })).not.toBe(traceKeyFor({ state: 'OH', apn: '123456', county: 'X' }));
+  });
+
+  it('does not let the same parcel number in two counties share a key', () => {
+    // MUTATION: drop the county from the key and this goes red.
+    expect(traceKeyFor({ state: 'OH', apn: '100', county: 'A' })).not.toBe(traceKeyFor({ state: 'OH', apn: '100', county: 'B' }));
+  });
+
+  it('falls back to street and state with neither a city nor a whole parcel key', () => {
+    expect(traceKeyFor({ address: '1 A St', state: 'OH', apn: '100' })).toBe('1 A ST||OH');
   });
 });

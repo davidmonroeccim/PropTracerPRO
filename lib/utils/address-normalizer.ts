@@ -145,3 +145,35 @@ export function formatAddress(
 ): string {
   return `${address}, ${city}, ${state} ${zip}`;
 }
+
+/**
+ * A parcel id as a duplicate key (spec 6.3): trimmed, upper case, leading "#" removed. Dashes and
+ * spaces are KEPT, so two different parcel numbers can never collapse into one. The vendor is sent
+ * the id as the caller sent it; this form is for the key only.
+ */
+export function normalizeParcelId(apn?: string | null): string {
+  return (apn ?? '').trim().toUpperCase().replace(/^#+\s*/, '');
+}
+
+/**
+ * The duplicate key for one record (spec 6.3, D9), in precedence order:
+ *   1. a city:                        STREET|CITY|STATE, unchanged, so the 90-day history keeps working
+ *   2. no city, a parcel id + county: APN|PARCEL|COUNTY|STATE
+ *   3. neither:                       STREET||STATE, today's behaviour. Only a company gets this far
+ *                                     (a person needs a key), and it carries today's collision risk,
+ *                                     which the spec records rather than solves.
+ */
+export function traceKeyFor(input: {
+  address?: string | null;
+  city?: string | null;
+  state: string;
+  apn?: string | null;
+  county?: string | null;
+}): string {
+  const city = (input.city ?? '').trim();
+  if (city) return normalizeAddress(input.address ?? '', city, input.state);
+  const parcel = normalizeParcelId(input.apn);
+  const county = (input.county ?? '').trim().toUpperCase();
+  if (parcel && county) return `APN|${parcel}|${county}|${input.state.trim().toUpperCase()}`;
+  return normalizeAddress(input.address ?? '', '', input.state);
+}
