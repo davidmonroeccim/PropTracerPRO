@@ -27,10 +27,192 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 9: web single route inline
   - [x] Task 10: API single route inline, D23 and D24, docs
   - [x] Task 11: result card, single page, History
-  - [ ] Task 12: suite gates and the live check
+  - [~] Task 12: gates green, runner built, sample chosen, dry `--plan` run ($1.10 worst case).
+        STOPPED at the owner's HARD STOP before any live vendor call. Live check, and re-ticking
+        this task, wait for the owner's dollar amount. Report: tasks/phase1-live-check.md.
 - [ ] Phase 2: bulk queue (plan written after Phase 1)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
+
+## Task 12 review: gates, then STOP (2026-09-22)
+
+**Suite gates (Step 1).** `npx vitest run`: **1795 passed / 83 files, 0 failed** (Task 1 baseline
+was 1517/75, so more passing and none failing). `npx tsc --noEmit`: **exit 0**. `npx eslint app lib
+components`: **46 problems** (baseline 47 per the brief; Task 11 already measured 46; unchanged,
+under the cap). `npx next build`: compiles clean, no network-dependent failure. The two greps:
+`submitSingleTrace` prints nothing in either single route; `persons[0]` in `lib/tracerfy/client.ts`
+appears only in two comments (D6, "NO persons[0] FALLBACK") naming the removed fallback, not code.
+
+**Runner (Step 4).** `tasks/research-scripts/phase1/run-live.ts` typechecks clean against the
+scoped phase1 tsconfig. With no flags it prints the usage line and exits 1, no network call. With
+`--live` and no `--max-dollars` it computes and prints the worst case, then refuses with the usage
+line, still no network or database call. `--plan` computes and prints the same worst case and exits
+0, no vendor call, no wallet, no database.
+
+**Mutation table, Tasks 2-11.** Every guard listed here was broken, run against its named test, and
+watched RED before being restored, exactly as each task's own report records (`.superpowers/sdd/
+2026-09-21-tier1-phase1-single-traces/task-<N>-report.md`, including their fix rounds; the LATEST
+result is used where a guard was mutated more than once across rounds). No mutant listed below
+survived, and none was caught only by `tsc`, except where marked. Per the Task 12 resolutions
+(D32), the rows that tested the D21(b) dossier-contacts fallback and its "not name-verified" label
+are dropped: Task 6b (D32) deleted that whole mechanism, so those mutations no longer have any
+guard to break. A single D32 row replaces them.
+
+| Task | Guard broken | Test | Result |
+|---|---|---|---|
+| T2 | `TR`/`TTEE` routes to trust, not entity | classifies a trailing TR or TTEE | RED |
+| T2 | D16: no first name left forces FastAppend | D16: a trust that leaves no first name | RED |
+| T2 | Trust person steps run on the stripped name | trust: the person steps on the stripped name | RED |
+| T2 | Parcel step carries the owner's name | the parcel step carries the owner names | RED |
+| T2 | Trust falls back to FastAppend after both person steps miss | trust: the person steps on the stripped name | RED |
+| T2 | Trailing TRS stays an entity (D30) | keeps a trailing TRS an entity | RED |
+| T2 | No "cheaper/more accurate" claim on the parcel step | never says the parcel id is cheaper or more accurate | RED |
+| T3 | No `persons[0]` fallback | returns NO contacts when no person matches the owner name (D6) + 2 more | RED |
+| T3 | Stray comma stripped before name match (spec 4.3) | still matches the owner through a stray comma | RED |
+| T3 | Suffix stripped before name match (spec 4.3) | still matches the owner through a suffix | RED |
+| T3 | D22: single-trace name order not swapped | does not swap first and last name | RED |
+| T3 | Address lookup with no city refused as inputError | an address lookup with no city is refused before spending | RED |
+| T3 | Nameless address lookup refused as inputError | a nameless address lookup is refused before spending | RED |
+| T3 | Parcel lookup with no state refused as inputError | a parcel lookup with no state is refused before spending | RED |
+| T3 | Business trace with no state refused the same way | a business trace with no state is refused the same way | RED |
+| T3 | Parcel request carries only parcel_id/county/state | sends Tracerfy only parcel_id, county and state (L-020) | RED |
+| T3 | D29: non-match returns peopleCount, never names | returns NO contacts when no person matches the owner name (D6) | RED |
+| T3 | Neither name half alone is a match (first initial) | does not match on just one half of the name (mutation 7a) | RED |
+| T3 | Neither name half alone is a match (last name) | does not match on just one half of the name (mutation 7b) | RED |
+| T3 | Both halves of both names required (empty-name guard) | personMatchesName needs both halves of both names | RED |
+| T3 | Missing FastAppend key is a plain failure, not inputError | a missing FastAppend API key is NOT an input error either (7d) | RED |
+| T4 | Vendor call actually aborts on timeout | aborts a call that never answers, plus 3 ceiling tests | RED |
+| T4 | Every call site uses the timeout wrapper (person, business, dossier) | ends a hung Tracerfy/FastAppend/dossier lookup (L-018, 3 sites) | RED |
+| T4 | Caller's own budget is honoured, not just the ceiling | honours a tighter budget | RED |
+| T4 | Requested timeout is clamped to VENDOR_TIMEOUT.CALL_MS | callTimeoutMs describe block | RED |
+| T5 | A named hit with the wrong people, or a contactless hit (D27), does not stop the ladder | moves on after a person hit whose people are not the owner + a matched hit that carries no phone and no email | RED |
+| T5 | Our own refused request is not asked, not `failed` | treats our own refused request as not asked | RED |
+| T5 | A call that can't finish in budget never starts | does not start a call it cannot finish inside the request budget | RED |
+| T5 | Reuse window is 24 hours, not unbounded | buys it again once the answer is 24 hours old | RED |
+| T5 | Reuse matches on the exact request, not just the step kind | never reuses an answer to a different question | RED |
+| T5 | Steps answered within 24h are not re-bought | does not buy an answered step again inside 24 hours | RED |
+| T5 | contact_vendor names the vendor that delivered, not asked first | names fastappend when a trust ladder missed at Tracerfy and hit at FastAppend | RED |
+| T5 | D29: a returned name never reaches trace_steps | never stores a returned name in the step log | RED (tsc 0 errors; genuine test kill, not tsc-only) |
+| T6 | D21 arm (a): every owner tried, in order, until one hits | asks about every owner the dossier names, in order + cron's second-owner test | RED |
+| T6 | D21 arm (c): individual owner with no situs searched at the mailing address | searches an individual at the dossier mailing address when the property has no street or city | RED |
+| T6 | spec 7.2: owner_name_2 only on a tier 2 result | never labels a SUPPLIED tier 1 owner as the owner of record | RED |
+| T6 | Owner loop stops on a FAILURE, not just a miss (does not skip owners on outage) | stops asking on a contact FAILURE, rather than continuing to the next owner during an outage | RED |
+| T6 | D21 arm (c) never sends a non-individual owner to the mailing address | never sends a non-individual owner to the mailing address, even with no situs | RED |
+| T6 | D21 arm (c) runs the parcel lookup, never throws, when the dossier has no mailing address | runs the parcel lookup rather than throwing when the dossier has no mailing address | RED |
+| T6 | D32: the dossier's own contacts are never returned, in any phase | reintroduced a post-loop dossier-contacts assignment; new D32 test | RED |
+| T7 | Any FAILED step forces busy_try_again, whatever else answered | any failed step is busy_try_again, whatever answered before it | RED |
+| T7 | Resend advice appears on exactly 2 outcomes | resend advice appears on exactly busy_try_again and no_lookup_key | RED |
+| T7 | Tier 2 terminal status wins over a stale Tier 1 outcome | lets a Tier 2 terminal status win over a stale Tier 1 outcome | RED |
+| T7 | Tier 1 outcome wins over a stale ai_research_status | lets the Tier 1 outcome win over a stale ai_research_status | RED |
+| T7 | Webhook carries the caller's real tier, not a hardcoded one | stamps tier 1 and the three outcome keys on a supplied-owner trace | RED |
+| T7 | no_match names only the keys that actually answered, in order | no_match names only the keys that answered, in order | RED |
+| T7 | D27/D31(3): a matched contactless hit is no_match, not owner_name_not_matched | a matched owner with no contacts beside a non-match is no_match, never "none matched" | RED |
+| T8 | Billing gated on hasContactData, not `true` | charges nothing for a matched owner with no phone and no email | RED |
+| T8 | Ledger probe branches, not an unconditional deduct | records, and does not take again, a debit an earlier attempt booked but never wrote to the row | RED |
+| T8 | Ledger probe only counts UNRECORDED debits | still charges a new purchase on a reused row whose earlier debits are already on the row | RED |
+| T8 | Ledger probe respects the 24h window (not any debit ever) | does not treat an OLD debit the row never recorded as this request's money | RED |
+| T8 | Ledger probe still charges an in-window recorded debit correctly | still charges when the row already RECORDED a debit inside the 24 hours | RED |
+| T8 | busy_try_again rows resume their log; other outcomes run fresh | runs a row that is NOT busy fresh, whatever its log says | RED |
+| T8 | `foldBillingWrite` folds onto the row's receipt, not a flat literal | still charges a new purchase on a reused row + folds the settles that reach reused rows | RED |
+| T8 | D29 cross-layer: a returned name never reaches persisted trace_steps | never writes a returned name to trace_steps (D29) | RED |
+| T8 | (fix round) `collectedNow` not hardcoded to chargeAmount | new singleTier1 test | RED |
+| T8 | (fix round) deduction outcome not hardcoded to `'charged'` | new singleTier1 test | RED |
+| T8 | (fix round) failed-deduct console.error not silently dropped | new singleTier1 test | RED |
+| T8 | (fix round) persistError not silently swallowed | new singleTier1 test | RED |
+| T8 | (fix round) row-key swap x2 | new singleTier1 tests | RED |
+| T8 | (fix round) chargeAmount not hardcoded to $0.15 | new singleTier1 test | RED |
+| T9 | D25: cached contacts served only to the SAME owner | runs a new trace when the cached contacts belong to a different owner | RED |
+| T9 | Busy row survives every sweep | keeps the busy row: no sweep deletes it | RED |
+| T9 | Reused row folds a new charge onto its receipt | folds a new charge onto the reused row's receipt | RED |
+| T9 | Tier 2 vendor calls carry the request budget | both tier 1 and tier 2 budget tests | RED |
+| T9 | Tier 2 persist writes contact_vendor and clears a stale tier 1 outcome | writes contact_vendor and clears any stale tier 1 outcome | RED |
+| T9 | trace.completed FIRES on the tier 1 inline path | FIRES on the tier 1 path | RED |
+| T9 | A vendor failure is busy_try_again: 503, not 200 | a vendor failure is busy_try_again: 503 | RED |
+| T9 | Live work (property trace pending) answers busy, untouched | Path A live-work test | RED |
+| T9 | Live work (entity trace pending) answers busy, untouched | Path B live-work test | RED |
+| T9 | Live work (fresh `processing` row) answers busy, untouched | concurrent-request test | RED |
+| T9 | D25 money: reuse UPDATE carries the new owner | the reuse UPDATE never carries the new owner | RED |
+| T9 | D25 money: settle UPDATE carries the new owner | new test + "the write carrying trace_result carries the new owner" | RED |
+| T9 | D25 money: Tier 2 persist carries the supplied owner | writes the supplied owner on the Full Property Trace opt-in | RED |
+| T9 | ownerName match ignores suffix/single-letter only where intended | all four entity "not the same owner" pairs | RED |
+| T9 | ownerName match: comma replaced with space, not dropped | "SMITH,JOHN"/"SMITH JOHN" test | RED |
+| T9 | ownerName match: `IV` is a stripped suffix | IV-suffix it.each row | RED |
+| T9 | Tier 2 executeRoute call carries the request budget | passes VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS to every tier 2 vendor call | RED |
+| T9 | Response never leaks a routing warning | does not leak a routing warning into body.warnings | RED |
+| T9 | Auto-rebill fires only on an attempted charge | does not trigger on a free outcome | RED |
+| T9 | Track A price used, not a hardcoded rate | charges a pro profile the pro rate | RED |
+| T9 | Response charge is `tier1.charge`, not a re-folded value | folds a new charge onto the reused row's receipt (0.5 vs 0.25) | RED |
+| T9 | Busy branch stamps tier 1, not tier 2 | busy-branch toMatchObject | RED |
+| T9 | ownerName.ts: suffix-equality guard (rule b) | John Smith Jr is not the same owner as John Smith Sr | RED |
+| T9 | ownerName.ts: single-letter exemption only past index 0 | J Farms is not the same owner as K Farms (equivalent on the J & J pair, reported) | RED (1 equivalent-in-context pair, evidenced) |
+| T9 | ownerName.ts: individual/non-individual branch (rule not vacuous) | Oak Partners IV LP is not the same owner as Oak Partners LP | RED |
+| T9 | Live-work early return uses the real BUSY_TRY_AGAIN_REASON string | all three live-work tests | RED |
+| T9 | Insert always writes input_owner_name | inserts a processing row and settles it in the same request | RED |
+| T9 | Track B: getChargePerTrace used, never Track A's grant-aware rate | charges the grant-aware Track A rate, which a Track B derivation would miss | RED |
+| T10 | keyPlan gate: no step means no write, no charge | 2 cases (city-no-street person; neither city nor parcel id) | RED |
+| T10 | Duplicate key stays hash-based, not re-derived | keys the row on APN | RED |
+| T10 | Parcel key includes the county (D36) | two counties share a key | RED |
+| T10 | Parcel key strips a leading `#` | brief test comment | RED |
+| T10 | D25: cached contacts served only to the same owner | D25 different owner | RED |
+| T10 | Busy row never deleted by a sweep | keeps a busy row | RED |
+| T10 | Reused row folds its charge | fold | RED |
+| T10 | D24: tier 2 tries the parcel id, not just address | dossier by parcel id | RED |
+| T10 | Tier 2 persist writes contact_vendor | new test | RED |
+| T10 | Tier 1 and Tier 2 vendor calls carry the request budget | both budget tests | RED |
+| T10 | trace.completed fires on the tier 1 inline path | new test | RED |
+| T10 | API docs describe the synchronous contract, not "poll for it" | docsContract | RED |
+| T10 | checkSingleDuplicateByHash scoped to the caller's own rows | 4 tests (new + existing caller-scoping) | RED |
+| T10 | D31: docs page has the 503 busy row | docsContract D31 | RED |
+| T10 | D31: docs no longer say "This is the one to retry" | docsContract D31 | RED |
+| T10 | Integrations webhook preview shows found_by/outcome_code/skip_reason | webhookPreview | RED |
+| T10 | Tier 2 does not write ai_research_status | writes no ai_research | RED |
+| T10 | Live work (3 arms) answers busy, untouched | m1/m2/m3, one row each | RED |
+| T10 | D25 money: reuse/insert/Tier 2 all carry input_owner_name correctly | n1-n4, one row each | RED |
+| T10 | Busy branch answers 503, not 200 | p1 | RED |
+| T10 | Response never leaks a routing warning | p2 | RED |
+| T10 | Auto-rebill fires only on an attempted charge | p3 (free; already_collected) | RED |
+| T10 | Track A price used (grant-aware), immune to a Track B derivation | p4 | RED |
+| T10 | chargeAmount not hardcoded | p5 | RED |
+| T10 | Webhook address never the internal APN key | p6 | RED |
+| T10 | (fix round) county destructured with a type check, not raw | F2 | RED |
+| T10 | (fix round) no-key branch error is exactly skipReason | F3 | RED |
+| T10 | (fix round) Tier 2 persist writes trace_steps | F4 | RED |
+| T10 | (fix round) Tier 2 webhook address is not the internal key | F5 | RED |
+| T10 | (fix round) malformed zip refused | F6 | RED |
+| T10 | (fix round) no-letter owner name refused before the DB | F7 | RED |
+| T10 | (fix round) invalid state refused | F8 | RED |
+| T10 | Cache search keys on the hash, not `normalizeAddress` re-derived | F1 | RED |
+| T10 | D36: traceKeyFor precedence (street+city, then parcel+county, then street+state) | key test + route test | RED |
+| T10 | D36: parcel key still includes county, and the cache key still keys on the hash, both re-run under the new precedence | G2 + F1, re-run | RED |
+| T10 | D37: pricing card sentence is the approved one | docsContract D37 | RED |
+| T10 | apn/parcelId/county type-checked before any write | G4 (3 cases) | RED |
+| T10 | (fix round 2) webhookAddress never the internal key, city-carrying cases | H1 (3 cases) | RED |
+| T10 | (fix round 2) ownerName type-checked before any write | H2 | RED |
+| T10 | D37 sentence re-pinned under the final precedence | G3 re-run | RED |
+| T11 | Single traces stay visible in History/dashboard (NOT IN on NULL) | bulkRowExclusion: single traces stay visible | RED |
+| T11 | Dashboard uses the shared exclusion, not its own `.not()` | source-scan: dashboard page | RED |
+| T11 | History page uses the shared exclusion, not its own `.not()` | source-scan: History page | RED |
+| T11 | Free (cached) shown only when actually cached | a zero charge that was not cached says Free, not Free (cached) | RED |
+| T11 | No-result card shows the real reason, not 3 generic guesses | shows the real reason, not the three generic guesses | RED |
+
+**139 mutations across Tasks 2-11, all RED; none survived; none caught only by `tsc`.** One
+reported as equivalent in the specific case tested (T9, the "J & J Farms" pair), with the evidence
+in task-9-report.md; every other mutant killed cleanly. Per the Task 12 resolutions (D32), four of
+Task 6's original eight mutations and one of its round-1 additions tested the D21(b) dossier-
+contacts fallback and its "not name-verified" label; Task 6b (D32) deleted that mechanism entirely,
+so those five rows are dropped here and replaced by the single D32 row above, which is the guard
+that actually exists in the codebase today.
+
+**Sample and dry plan.** Five records, one per lookup path, picked read-only from the property
+registry (secondary/tertiary markets, not IN or FL, none already tested, five different states,
+not all one property type). `npx tsx tasks/research-scripts/phase1/run-live.ts --plan` computed a
+**$1.10 total worst case** from `planRoute()` directly, no vendor call. Full detail, per-record
+reasoning and the worst-case breakdown: `tasks/phase1-live-check.md` (counts only) and
+`tasks/research-test/phase1/records.json` (gitignored).
+
+**HARD STOP.** The owner's rule: never call a live vendor, never pass `--live`, never spend a
+cent. Gates, the runner and the sample are done; the live check has NOT run. It waits for the
+owner to name a dollar amount.
 
 ---
 

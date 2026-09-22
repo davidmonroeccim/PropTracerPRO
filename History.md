@@ -4,6 +4,31 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (m): Tier 1 Phase 1, Task 12 up to the HARD STOP: gates, the runner, the sample, dry plan.
+
+- vitest 1795 passing / 83 files, 0 failing (baseline was 1517/75); tsc 0 errors; eslint 46
+  problems (baseline 47, unchanged from Task 11); next build compiles clean. The consolidated
+  mutation table (139 mutations across Tasks 2 to 11, in tasks/todo.md) shows every guard went red
+  when broken; none survived.
+- Built tasks/research-scripts/phase1/run-live.ts. It computes each record's worst case from
+  planRoute(...).maxVendorCost, never a hard-coded table (resolution F-P11): for the Full Property
+  Trace record this is the dossier's own step cost plus, per owner the registry names, one
+  worst-case single-owner ladder (the trust ladder), since the dossier has not run yet and the
+  owner's real classification is unknown. Refuses --live without --max-dollars and refuses when the
+  computed worst case exceeds it; with no flags it prints usage and exits 1, no network call.
+- Picked one record per lookup path, read-only, from the property registry: NY Onondaga
+  (residential), CO Larimer (residential), NV Washoe (multifamily), OK Tulsa (commercial), AR
+  Benton (land). All secondary or tertiary markets, none IN or FL, none already tested, five
+  different states. Reasoning and the worst-case breakdown: tasks/phase1-live-check.md (counts
+  only); the request bodies: tasks/research-test/phase1/records.json (gitignored).
+- Ran --plan only. Computed total worst case: $1.10. No vendor was called, no wallet was touched,
+  no database was read or written.
+- HARD STOP (the owner's rule): never call a live vendor, never pass --live, never spend a cent.
+  The live check has not run. The owner names a dollar amount; a later dispatch runs
+  `run-live.ts --live --max-dollars <amount> --email <owner email>`.
+- Branch feat/tier1-phase1-single-traces is ready through this point; the live check, merging,
+  pushing and deploying all wait for the owner.
+
 ## 2026-09-22 (l): Tier 1 Phase 1, Task 11: Found by, the real reason, and History that shows single traces.
 
 - The single-trace result card shows "Found by" (Address, Parcel ID, Company name) and, when
