@@ -92,17 +92,36 @@ async function worstCaseFor(record: LiveRecord): Promise<PricedRecord> {
   const parcel = parcelForFullTrace({ address, city, state, zip, apn, county })
 
   if (record.path === 'tier2_apn_no_city') {
-    // 1. The dossier itself: whichever key(s) planRoute emits for an absent owner (D24).
+    // 1. The dossier itself: whichever key(s) planRoute emits for an absent owner (D24). Only ONE
+    //    dossier key can ever bill -- executeRoute stops at the first hit (ownerRoute.ts: "Stop at
+    //    the first hit") -- so a record carrying BOTH an apn and a full situs must worst-case on
+    //    the pricier of the two keys, never their sum (fix round 1, item 4: summing double-counted
+    //    a record with both keys present; this record's own two keys happen to cost the same
+    //    $0.20, so the number does not move here, but the fix matters for a future record that
+    //    carries both).
     const dossierPlan = planRoute({ ...parcel, ownerName: null }, FAILSAFE_PRICE_PLAN)
-    const dossierCost = dossierPlan.steps.reduce((a, s) => a + s.costOnHit, 0)
-    const dossierDetail = dossierPlan.steps.map((s) => `${s.kind} $${s.costOnHit.toFixed(2)}`).join(' + ') || 'no dossier key'
+    const dossierCost = dossierPlan.steps.reduce((max, s) => Math.max(max, s.costOnHit), 0)
+    const dossierDetail =
+      dossierPlan.steps.map((s) => `${s.kind} $${s.costOnHit.toFixed(2)}`).join(' or ') || 'no dossier key'
 
     // 2. Each owner the registry names gets one worst-case ladder. The dossier has not run, so
     //    the owner's real classification is unknown; the trust ladder (person steps plus the
     //    FastAppend fallback, D3) is the most any single owner's route can cost. A mailing
     //    address is assumed present, because D21 arm (c) searches an individual owner at the
     //    dossier's mailing address even when the property itself carries no street or city.
-    const owners = Math.max(record.owners ?? 1, 1)
+    //
+    //    NO DEFAULT (fix round 1, item 1, CLAUDE.md rule 7): a missing or malformed owners count
+    //    is refused by assertOwnersProvided() before any record's worst case is computed at all
+    //    (see main()), so this line only ever runs against an already-validated number. No `?? 1`
+    //    fallback here: a future caller of worstCaseFor() that skipped that gate must fail loud,
+    //    never silently understate the worst case.
+    if (typeof record.owners !== 'number' || !Number.isFinite(record.owners) || record.owners <= 0) {
+      throw new Error(
+        `Record ${record.id} (${record.path}) has a missing or non-numeric owners count. ` +
+          'Refusing rather than defaulting to 1, which would understate the worst case.'
+      )
+    }
+    const owners = record.owners
     const perOwnerParcel: ParcelInput = {
       ...parcel,
       ownerName: 'WORST CASE OWNER FAMILY TRUST',
@@ -133,6 +152,24 @@ function summaryLine(p: PricedRecord): string {
   return `  ${p.record.id} ${p.record.path} (${where}): ${p.detail} = $${p.total.toFixed(2)}`
 }
 
+/**
+ * Fix round 1, item 1 (Important, CLAUDE.md rule 7). Run BEFORE any record's worst case is
+ * computed, for every record whose path needs an owner count (tier2_apn_no_city): a missing or
+ * non-numeric `owners` throws, naming the record, rather than letting worstCaseFor() silently
+ * default it to 1 and understate the worst case this script exists to bound.
+ */
+function assertOwnersProvided(records: LiveRecord[]): void {
+  for (const r of records) {
+    if (r.path !== 'tier2_apn_no_city') continue
+    if (typeof r.owners !== 'number' || !Number.isFinite(r.owners) || r.owners <= 0) {
+      throw new Error(
+        `Record ${r.id} (${r.path}) has a missing or non-numeric owners count. ` +
+          'Refusing rather than defaulting to 1, which would understate the worst case. Not run.'
+      )
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const isPlan = process.argv.includes('--plan')
   const isLive = process.argv.includes('--live')
@@ -149,6 +186,9 @@ async function main(): Promise<void> {
   if (new Set(records.map((r) => r.path)).size !== records.length) {
     throw new Error('One record per path (L-024): a path appears twice. Not run.')
   }
+  // Fix round 1, item 1: before anything else runs (before any worst-case math, before any
+  // printing), refuse a records file that is missing an owners count anywhere it is needed.
+  assertOwnersProvided(records)
 
   const priced = await Promise.all(records.map((r) => worstCaseFor(r)))
   const worst = Math.round(priced.reduce((a, p) => a + p.total, 0) * 100) / 100
@@ -157,14 +197,33 @@ async function main(): Promise<void> {
   for (const p of priced) console.log(summaryLine(p))
   console.log(`Total worst case: $${worst.toFixed(2)}`)
 
-  if (!isLive) {
-    console.log('PLAN MODE: no vendor call, no wallet spend, no database read or write.')
+  // Fix round 1, item 2: a NaN or non-positive worst case must refuse here, on its own terms,
+  // before the --live branch's own --max-dollars comparison ever runs -- `NaN > maxDollars` is
+  // always false, so that comparison alone would silently let a broken worst case through. This
+  // check sits before any environment load, client or fetch (all of which are further below),
+  // and it applies to --plan too: a plan run that cannot compute a real number is not a plan.
+  if (!Number.isFinite(worst) || worst <= 0) {
+    throw new Error(
+      `Worst case did not compute to a finite, positive dollar amount ($${worst}). Refusing before any vendor call.`
+    )
+  }
+
+  // Fix round 1, item 3: --plan and --live are not meant to be given together, but if they are,
+  // --plan wins -- print the plan, touch nothing live. This is the safer of the two choices the
+  // review offered (refusing both together is no safer, since --plan alone is always safe, so
+  // there is no reason to make that combination an error).
+  if (isPlan) {
+    console.log(
+      isLive
+        ? 'PLAN MODE: --plan and --live were both given; --plan wins. No vendor call, no wallet spend, no database read or write.'
+        : 'PLAN MODE: no vendor call, no wallet spend, no database read or write.'
+    )
     return
   }
 
-  // ---- Everything below here only runs with --live. Never invoked by the Task 12 executor
-  // ---- (the owner's HARD STOP): the owner names a dollar amount first, and a LATER dispatch
-  // ---- runs this with --live --max-dollars <that amount>.
+  // ---- Everything below here only runs with --live and no --plan. Never invoked by the Task 12
+  // ---- executor (the owner's HARD STOP): the owner names a dollar amount first, and a LATER
+  // ---- dispatch runs this with --live --max-dollars <that amount>.
   const maxDollars = Number(arg('max-dollars'))
   const email = arg('email')
   if (!Number.isFinite(maxDollars) || maxDollars <= 0 || !email) {
