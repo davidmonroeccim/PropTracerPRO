@@ -23,7 +23,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 5: step log, resend reuse and the request budget
   - [x] Task 6: D21, every owner then the dossier contacts
   - [x] Task 7: outcome codes, sentences, rowSkipReason, webhook tier
-  - [ ] Task 8: shared Tier 1 settle helper
+  - [x] Task 8: shared Tier 1 settle helper
   - [ ] Task 9: web single route inline
   - [ ] Task 10: API single route inline, D23 and D24, docs
   - [ ] Task 11: result card, single page, History

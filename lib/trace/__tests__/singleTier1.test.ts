@@ -1,0 +1,261 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { runSingleTier1, TIER1_CHARGE_DESCRIPTION, type SingleTier1Input } from '@/lib/trace/singleTier1'
+import { requestKeyFor, type ContactResult, type RouteDeps, type StepReport } from '@/lib/routing/executeRoute'
+import { planRoute, type ParcelInput } from '@/lib/routing/ownerRoute'
+import { BUSY_TRY_AGAIN_REASON, OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome'
+
+type Op = { table: string; op: 'select' | 'update'; payload?: Record<string, unknown>; filters: unknown[][] }
+
+const H = {
+  ops: [] as Op[],
+  rpc: [] as Array<{ fn: string; args: Record<string, unknown> }>,
+  ledger: [] as Array<Record<string, unknown>>,
+  deductData: true as unknown,
+  deductError: null as { message: string } | null,
+}
+
+/** Records every select and update; answers wallet_transactions from H.ledger. */
+function adminClient(): SupabaseClient {
+  return {
+    from(table: string) {
+      const rec: Op = { table, op: 'select', filters: [] }
+      const node: Record<string, unknown> = {}
+      node.select = () => { rec.op = 'select'; H.ops.push(rec); return node }
+      node.update = (payload: Record<string, unknown>) => { rec.op = 'update'; rec.payload = payload; H.ops.push(rec); return node }
+      node.eq = (...args: unknown[]) => { rec.filters.push(['eq', ...args]); return node }
+      node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+        Promise.resolve(
+          rec.op === 'update'
+            ? { data: null, error: null }
+            : { data: table === 'wallet_transactions' ? H.ledger : null, error: null }
+        ).then(res, rej)
+      return node
+    },
+    rpc(fn: string, args: Record<string, unknown>) {
+      H.rpc.push({ fn, args })
+      return Promise.resolve({ data: H.deductData, error: H.deductError })
+    },
+  } as unknown as SupabaseClient
+}
+
+const HIT: ContactResult = {
+  success: true, hit: true, creditsDeducted: 5,
+  contacts: { ownerName: 'Marcus Halloway', phones: [{ number: '5550000101', type: 'mobile' }], emails: [], mailingAddress: null },
+}
+const MISS: ContactResult = { success: true, hit: false, contacts: null, creditsDeducted: 0 }
+// D29: the step log stores a COUNT, never names. peopleCount, not people.
+const NOT_MATCHED: ContactResult = {
+  success: true, hit: true, contacts: null, nameNotMatched: true,
+  peopleCount: 1, creditsDeducted: 5,
+}
+const CONTACTLESS: ContactResult = {
+  success: true, hit: true,
+  contacts: { ownerName: 'Marcus Halloway', phones: [], emails: [], mailingAddress: null },
+}
+const DOWN: ContactResult = { success: false, hit: false, contacts: null, error: 'Tracerfy did not answer within 25 s' }
+
+/** A street and a city, no parcel id: the person ladder is the Instant lookup alone. */
+const PARCEL: ParcelInput = {
+  state: 'OH', situsAddress: '100 Placeholder Way', situsCity: 'Placeholderville', situsState: 'OH',
+  situsZip: null, parcelIdLocal: null, county: null, ownerName: 'Marcus T Halloway',
+}
+
+const deps = (over: Partial<RouteDeps> = {}): RouteDeps => ({
+  lookupDossier: vi.fn(),
+  traceEntity: vi.fn(async () => MISS),
+  tracePerson: vi.fn(async () => MISS),
+  ...over,
+})
+
+const run = (over: Partial<SingleTier1Input> = {}) =>
+  runSingleTier1({
+    adminClient: adminClient(),
+    userId: 'user-1',
+    row: { id: 'row-1', charge: 0, tier: null },
+    parcel: PARCEL,
+    pricePlan: 'pro',
+    chargeAmount: 0.15,
+    deadlineMs: Date.now() + 50_000,
+    deps: deps(),
+    ...over,
+  })
+
+const persisted = () => H.ops.find(o => o.op === 'update')?.payload
+const deducts = () => H.rpc.filter(c => c.fn === 'deduct_wallet_balance')
+
+beforeEach(() => {
+  H.ops = []
+  H.rpc = []
+  H.ledger = []
+  H.deductData = true
+  H.deductError = null
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('runSingleTier1: the billing gate (spec 6.1, D8)', () => {
+  it('charges once, at the rate it was given, for a name-matched result with a phone', async () => {
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(deducts()[0].args).toEqual({
+      p_user_id: 'user-1', p_amount: 0.15, p_trace_history_id: 'row-1', p_description: TIER1_CHARGE_DESCRIPTION,
+    })
+    expect(r).toMatchObject({
+      outcome: 'found_by_address', foundBy: 'address', status: 'success', charge: 0.15, deduction: 'charged', skipReason: null,
+    })
+    expect(persisted()).toMatchObject({
+      status: 'success', is_successful: true, charge: 0.15, tier: 1, outcome_code: 'found_by_address',
+      found_by: 'address', contact_vendor: 'tracerfy', cost: 0.1, tracerfy_job_id: null,
+      ai_research_status: null, property_trace_status: null,
+    })
+  })
+
+  it('charges nothing for a matched owner with no phone and no email', async () => {
+    // MUTATION: `const billable = true` (or any gate but hasContactData(result)) and this goes red.
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => CONTACTLESS) }) })
+    expect(deducts()).toHaveLength(0)
+    expect(r).toMatchObject({ outcome: 'no_match', status: 'no_match', charge: 0 })
+  })
+
+  it('charges nothing when the people returned are not the owner (D6), and logs what the vendor billed', async () => {
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => NOT_MATCHED) }) })
+    expect(deducts()).toHaveLength(0)
+    expect(r.skipReason).toBe(OWNER_NAME_NOT_MATCHED_REASON)
+    expect(persisted()).toMatchObject({ outcome_code: 'owner_name_not_matched', charge: 0, cost: 0.1 })
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({
+      outcome: 'name_not_matched', creditsDeducted: 5, peopleCount: 1,
+    })
+  })
+
+  it('never writes a returned name to trace_steps (D29)', async () => {
+    // A vendor result carrying names at runtime, despite ContactResult declaring peopleCount only.
+    const nameLeaking = {
+      ...NOT_MATCHED,
+      people: [{ first_name: 'Someoneelse', last_name: 'Different' }],
+    } as unknown as ContactResult
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => nameLeaking) }) })
+    expect(r.outcome).toBe('owner_name_not_matched')
+    expect(JSON.stringify(persisted())).not.toMatch(/Someoneelse|Different/)
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({ peopleCount: 1 })
+  })
+
+  it('a vendor failure, a timeout included, is busy_try_again: free, with its step log kept', async () => {
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => DOWN) }) })
+    expect(deducts()).toHaveLength(0)
+    expect(r).toMatchObject({ outcome: 'busy_try_again', status: 'error', charge: 0, skipReason: BUSY_TRY_AGAIN_REASON })
+    expect(persisted()).toMatchObject({ status: 'error', is_successful: false, outcome_code: 'busy_try_again' })
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({
+      outcome: 'failed', error: 'Tracerfy did not answer within 25 s',
+    })
+  })
+
+  it('our own refused input is never busy_try_again (spec 5.1)', async () => {
+    const refused: ContactResult = {
+      success: false, hit: false, contacts: null, error: 'Person trace requires address, city and state', inputError: true,
+    }
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => refused) }) })
+    expect(r.outcome).not.toBe('busy_try_again')
+    expect(deducts()).toHaveLength(0)
+  })
+})
+
+describe('runSingleTier1: the ledger probe (spec 6.1)', () => {
+  it('records, and does not take again, a debit an earlier attempt booked but never wrote to the row', async () => {
+    // The crash window: deduct, then die before the persist. The resend must not charge twice.
+    // MUTATION: delete the probe (always deduct) and this goes red with a second debit.
+    H.ledger = [{ amount: 0.15, type: 'debit', created_at: new Date(Date.now() - 60 * 1000).toISOString() }]
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(0)
+    expect(r).toMatchObject({ charge: 0.15, deduction: 'already_collected' })
+    expect(persisted()).toMatchObject({ charge: 0.15, tier: 1 })
+  })
+
+  it('still charges a new purchase on a reused row whose earlier debits are already on the row', async () => {
+    // MUTATION: probe for ANY debit (`total !== null && total > 0 ? total : 0`) instead of an unrecorded one and this goes red.
+    H.ledger = [{ amount: 0.25, type: 'debit', created_at: '2026-08-01T00:00:00.000Z' }]
+    const r = await run({ row: { id: 'row-1', charge: 0.25, tier: 2 }, deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(r.charge).toBe(0.15)
+    // Folded onto the receipt; a tier 2 receipt never downgrades.
+    // MUTATION: write `{ charge: collectedNow, tier: 1 }` instead of the fold and this goes red.
+    expect(persisted()).toMatchObject({ charge: 0.4, tier: 2 })
+  })
+
+  it("does not treat an OLD debit the row never recorded as this request's money", async () => {
+    // A row whose receipt was zeroed by the 2026-09-17 settle bug, or an old single-debit raw write,
+    // carries a ledger surplus that is not this record's charge. The decision is bounded to the
+    // 24 hour resend window, as the Tier 2 cron bounds its own (spec 6.1).
+    // MUTATION: decide on `total - recorded` with no window and this goes red: no deduct, and the
+    // old 0.40 reported as this request's charge.
+    H.ledger = [{ amount: 0.4, type: 'debit', created_at: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString() }]
+    const r = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(r).toMatchObject({ charge: 0.15, deduction: 'charged' })
+    expect(persisted()).toMatchObject({ charge: 0.15, tier: 1 })
+  })
+
+  it('still charges when the row already RECORDED a debit inside the 24 hours', async () => {
+    // A Full Property Trace then a supplied-owner trace on the same address the same day, or two
+    // owners on one address in a day: the earlier debit is inside the window but already on the row,
+    // so it is not this request's money.
+    // MUTATION: replace `Math.min(inWindow, (total ?? 0) - recorded)` with bare `inWindow` and this
+    // goes red: no deduct, and the earlier 0.40 reported as this request's charge.
+    H.ledger = [{ amount: 0.4, type: 'debit', created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() }]
+    const r = await run({ row: { id: 'row-1', charge: 0.4, tier: 2 }, deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(r).toMatchObject({ charge: 0.15, deduction: 'charged' })
+    // Folded onto the receipt the row already carried; the tier 2 receipt never downgrades.
+    expect(persisted()).toMatchObject({ charge: 0.55, tier: 2 })
+  })
+
+  it('asks the ledger nothing when nothing is billable', async () => {
+    await run()
+    expect(H.ops.some(o => o.table === 'wallet_transactions')).toBe(false)
+  })
+})
+
+describe('runSingleTier1: the busy_try_again resend (spec 5.2)', () => {
+  const TRUST: ParcelInput = { ...PARCEL, ownerName: 'Marcus Halloway Revocable Trust' }
+  const loggedInstantMiss = (): StepReport[] => [{
+    kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0,
+    at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    requestKey: requestKeyFor(planRoute(TRUST, 'pro').steps[0]),
+  }]
+
+  it('resumes a busy row: the answered Instant step is not bought again', async () => {
+    const d = deps()
+    await run({
+      parcel: TRUST, deps: d,
+      row: { id: 'row-1', charge: 0, tier: 1, outcome_code: 'busy_try_again', trace_steps: loggedInstantMiss() },
+    })
+    expect(d.tracePerson).not.toHaveBeenCalled()
+    expect(d.traceEntity).toHaveBeenCalledTimes(1)
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({ outcome: 'miss', reused: true })
+  })
+
+  it('runs a row that is NOT busy fresh, whatever its log says', async () => {
+    // MUTATION: pass the log through whatever the outcome_code and this goes red.
+    const d = deps()
+    await run({
+      parcel: TRUST, deps: d,
+      row: { id: 'row-1', charge: 0, tier: 1, outcome_code: 'no_match', trace_steps: loggedInstantMiss() },
+    })
+    expect(d.tracePerson).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('runSingleTier1: what it writes', () => {
+  it('never writes property_record, so a reused billed tier 2 row keeps the record it paid for', async () => {
+    await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(persisted()).not.toHaveProperty('property_record')
+  })
+
+  it('names every key that answered in the no_match sentence', async () => {
+    const r = await run({ parcel: { ...PARCEL, ownerName: 'Marcus Halloway Revocable Trust' } })
+    expect(r.skipReason).toBe('We looked this owner up by address and company name and found no match. You were not charged.')
+  })
+})
