@@ -544,8 +544,24 @@ describe('the file itself', () => {
   });
 
   it('carries a single trace Tier 1 sentence in the existing skip_reason column', () => {
-    const c = cells(row({ outcome_code: 'owner_name_not_matched', is_successful: false }));
+    // trace_job_id: null marks this as a row a single trace itself wrote (spec D33); a bulk
+    // row that reused this row would carry a real trace_job_id and get no Tier 1 sentence.
+    const c = cells(row({ outcome_code: 'owner_name_not_matched', is_successful: false, trace_job_id: null }));
     expect(c.skip_reason).toBe(`"${OWNER_NAME_NOT_MATCHED_REASON}"`);
+  });
+
+  it('never shows the Tier 1 sentence on a bulk row that reused a single trace row (spec D33)', () => {
+    // MUTATION: drop the `row.trace_job_id === null` condition in rowSkipReason and this goes red.
+    const c = cells(
+      row({
+        outcome_code: 'owner_name_not_matched',
+        is_successful: false,
+        trace_job_id: 'job-1',
+        property_trace_status: 'property_trace_done',
+        charge: 0.4,
+      })
+    );
+    expect(c.skip_reason).toBe('');
   });
 
   it('emits skip_reason and the research block on every job, blank when unused', () => {

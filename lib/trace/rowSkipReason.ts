@@ -61,20 +61,34 @@ import { tier1OutcomeReason, type Tier1OutcomeRow } from '@/lib/trace/tier1Outco
 export type SkipReasonRow = Tier1OutcomeRow & {
   ai_research_status?: string | null;
   property_trace_status?: string | null;
+  /**
+   * The bulk job this row belongs to, or explicitly null on a row a single trace wrote
+   * (spec D33). A bulk upload (web, API, MCP) upserts on (user_id, address_hash) rather than
+   * inserting, and never clears outcome_code on the row it reuses, so a row a single trace
+   * wrote and a later bulk trace overwrote can still carry a stale Tier 1 outcome_code long
+   * after everything else on the row says tier 2. `=== null`, not merely falsy: a caller that
+   * did not select this column gets `undefined`, and that row gets NO Tier 1 sentence either
+   * -- blank, never wrong (CLAUDE.md rule 7).
+   */
+  trace_job_id?: string | null;
 };
 
 /**
  * Why this row came back with no contacts, or null when there is nothing to say.
  *
- * Tier 2 first, deliberately (see the header). Then a single trace's Tier 1 outcome (spec 7.2):
- * a Tier 1 single row clears both queue columns when it settles, so a queue value can only be
- * stale there, while a bulk tier 2 re-enqueue sets property_trace_status and must win over a stale
- * outcome_code on a reused row.
+ * Tier 2 first, deliberately (see the header). Then a single trace's Tier 1 outcome (spec 7.2,
+ * D33): a Tier 1 single row clears both queue columns when it settles, so a queue value can
+ * only be stale there, while a bulk tier 2 re-enqueue sets property_trace_status and must win
+ * over a stale outcome_code on a reused row. The Tier 1 term applies ONLY when trace_job_id is
+ * explicitly null -- the row a single trace itself wrote. A bulk upload never clears
+ * outcome_code on the row it reuses (D33), so without this gate a bulk-billed row could still
+ * surface a stale "you were not charged" from before the bulk trace ran; bulk rows show
+ * exactly what they show today.
  */
 export function rowSkipReason(row: SkipReasonRow): string | null {
   return (
     propertyTraceSkipReason(row.property_trace_status) ??
-    tier1OutcomeReason(row) ??
+    (row.trace_job_id === null ? tier1OutcomeReason(row) : null) ??
     skipReasonFor(row.ai_research_status)
   );
 }

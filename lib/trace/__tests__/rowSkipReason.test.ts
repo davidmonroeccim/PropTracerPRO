@@ -265,7 +265,7 @@ describe('all four surfaces that serve a bulk row serve both queues', () => {
 
 describe('the Tier 1 outcome through the one accessor (spec 7.2)', () => {
   it('serves the Tier 1 sentence on a single-trace row', () => {
-    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, trace_job_id: null })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
   });
 
   it('lets a Tier 2 terminal status win over a stale Tier 1 outcome', () => {
@@ -273,16 +273,73 @@ describe('the Tier 1 outcome through the one accessor (spec 7.2)', () => {
     // "not charged" sentence must never answer for a row tier 2 billed.
     // MUTATION: put tier1OutcomeReason first in rowSkipReason and this goes red.
     // The Tier 1 half must be able to answer on its own, or the swap below cannot show.
-    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, trace_job_id: null })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
     expect(
-      rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })
+      rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, trace_job_id: null, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })
     ).toBe(PROPERTY_TRACE_NO_REACH_REASON);
   });
 
   it('lets the Tier 1 outcome win over a stale ai_research_status', () => {
     // MUTATION: put skipReasonFor before tier1OutcomeReason and this goes red.
     expect(
-      rowSkipReason({ outcome_code: 'busy_try_again', is_successful: false, ai_research_status: BLANK_OWNER_SKIP_STATUS })
+      rowSkipReason({ outcome_code: 'busy_try_again', is_successful: false, trace_job_id: null, ai_research_status: BLANK_OWNER_SKIP_STATUS })
     ).toBe(BUSY_TRY_AGAIN_REASON);
+  });
+});
+
+describe('the Tier 1 sentence shows only on a row a single trace wrote (spec D33)', () => {
+  // A bulk upload (web, API, MCP) upserts on (user_id, address_hash) rather than inserting, and
+  // never clears outcome_code on the row it reuses. So a row a single trace once wrote and a
+  // later bulk trace reused can still carry a stale Tier 1 outcome_code long after every other
+  // column on it says tier 2. The Tier 1 sentence must never answer for that row.
+
+  it('(a) a reused bulk row with a settled property_trace_status never shows the stale Tier 1 sentence', () => {
+    // MUTATION: drop the `row.trace_job_id === null` condition and this goes red.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        outcome_code: 'no_match',
+        trace_steps: [{ kind: 'FASTAPPEND_ENTITY', outcome: 'miss', cost: 0 }],
+        property_trace_status: PROPERTY_TRACE_SETTLED_STATUS,
+        is_successful: false,
+      })
+    ).toBeNull();
+  });
+
+  it('(b) a reused bulk row still queued answers with whatever the Tier 2/queue terms give today, never the Tier 1 sentence', () => {
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        outcome_code: 'no_match',
+        trace_steps: [{ kind: 'FASTAPPEND_ENTITY', outcome: 'miss', cost: 0 }],
+        property_trace_status: 'queued',
+        is_successful: false,
+      })
+    ).toBeNull();
+  });
+
+  it('(c) a stale busy_try_again outcome_code on a bulk row never shows the busy sentence', () => {
+    // MUTATION: drop the `row.trace_job_id === null` condition and this goes red.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        outcome_code: 'busy_try_again',
+        property_trace_status: PROPERTY_TRACE_SETTLED_STATUS,
+        is_successful: false,
+      })
+    ).toBeNull();
+  });
+
+  it('(d) a single-trace row (trace_job_id null) still gets its Tier 1 sentence', () => {
+    expect(
+      rowSkipReason({ trace_job_id: null, outcome_code: 'owner_name_not_matched', is_successful: false })
+    ).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+  });
+
+  it('(e) a row with no trace_job_id key (a caller that did not select it) gets no Tier 1 sentence: blank, never wrong', () => {
+    // MUTATION: loosen `row.trace_job_id === null` to `!row.trace_job_id` and this goes red.
+    expect(
+      rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })
+    ).toBeNull();
   });
 });

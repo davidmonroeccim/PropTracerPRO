@@ -114,6 +114,16 @@ export interface TraceHistory {
    */
   tier: number | null;
   /**
+   * The bulk job this row belongs to (migration 20260411), or NULL on a row a single trace
+   * wrote. Optional for the same reason as the columns below: every reader loads rows with
+   * select('*') so it is always present in production, but the test fixtures build this type
+   * by hand. lib/trace/rowSkipReason.ts reads it to decide whether a Tier 1 outcome sentence
+   * may answer for this row at all (spec D33): a bulk upload upserts on (user_id,
+   * address_hash) and never clears outcome_code on the row it reuses, so `=== null` (not
+   * merely falsy) is required -- an absent value must read as "not a single-trace row" too.
+   */
+  trace_job_id?: string | null;
+  /**
    * The TIER 2 queue, driven by app/api/cron/sweep-property-traces. Its terminal
    * values are also where a tier 2 row's customer-facing reason comes from, via
    * lib/trace/rowSkipReason.ts, which is why the results CSV needs it declared
