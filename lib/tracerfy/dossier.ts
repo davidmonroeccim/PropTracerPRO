@@ -28,6 +28,12 @@
  * a retry here would silently double a real charge.
  */
 import { TRACERFY } from '@/lib/constants'
+import {
+  callTimeoutMs,
+  fetchTextWithTimeout,
+  VendorTimeoutError,
+  type VendorCallOptions,
+} from './fetchWithTimeout'
 
 /** A dossier lookup key. The two modes are mutually exclusive by construction. */
 export type DossierKey =
@@ -225,7 +231,7 @@ export function parseDossierResponse(body: unknown): DossierResult {
  *
  * Never throws. No retries. Does not sequence the second key mode — see the module header.
  */
-export async function lookupDossier(key: DossierKey): Promise<DossierResult> {
+export async function lookupDossier(key: DossierKey, opts: VendorCallOptions = {}): Promise<DossierResult> {
   // Read at call time rather than at module load: the module-level capture in ./client.ts
   // freezes the value at import, which leaves the missing-key branch untestable.
   const apiKey = process.env.TRACERFY_API_KEY
@@ -241,37 +247,40 @@ export async function lookupDossier(key: DossierKey): Promise<DossierResult> {
   }
 
   try {
-    const response = await fetch(`${baseUrl}${ENDPOINT_PATH}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+    const res = await fetchTextWithTimeout(
+      `${baseUrl}${ENDPOINT_PATH}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildDossierRequest(key)),
       },
-      body: JSON.stringify(buildDossierRequest(key)),
-    })
+      callTimeoutMs(opts.timeoutMs)
+    )
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('Tracerfy dossier lookup error:', response.status, errorText)
+    if (!res.ok) {
+      console.error('Tracerfy dossier lookup error:', res.status, res.text)
 
-      if (response.status === 429) {
+      if (res.status === 429) {
         // The 500/min counter is SHARED with the other Tracerfy lookup endpoints, so this
         // can fire even when the dossier itself is running well under its own volume.
         return failure('Rate limit exceeded. Please wait a moment before trying again.')
       }
-      if (response.status === 503) {
+      if (res.status === 503) {
         return failure('Tracerfy service unavailable (503)')
       }
-      if (response.status === 401 || response.status === 403) {
-        return failure(`Tracerfy auth failed (${response.status})`)
+      if (res.status === 401 || res.status === 403) {
+        return failure(`Tracerfy auth failed (${res.status})`)
       }
 
-      return failure(`Dossier lookup failed (${response.status})`)
+      return failure(`Dossier lookup failed (${res.status})`)
     }
 
-    const data = await response.json()
-    return parseDossierResponse(data)
+    return parseDossierResponse(JSON.parse(res.text))
   } catch (error) {
+    if (error instanceof VendorTimeoutError) return failure(`Tracerfy dossier ${error.message}`)
     console.error('Tracerfy dossier lookup error:', error)
     return failure('Tracerfy service unavailable')
   }

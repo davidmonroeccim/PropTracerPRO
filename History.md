@@ -4,6 +4,14 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (d): Tier 1 Phase 1, Task 4: a 25 second ceiling on every vendor call.
+
+- New lib/tracerfy/fetchWithTimeout.ts: an AbortController fetch that reads the body inside the
+  window. The Tracerfy person, FastAppend and dossier clients use it; a call not answered in
+  25 s (Phase 0's slowest real answer was 20.4 s) is a vendor failure, never a miss.
+- Each client takes an optional tighter timeout from a caller with a request budget.
+  VENDOR_TIMEOUT in lib/constants.ts. Mutations: every client, all red.
+
 ## 2026-09-22 (c): Tier 1 Phase 1, Task 3: D6 name match, no persons[0] fallback.
 
 - parsePersonTraceResponse returns a person only when the name matches the owner we asked about

@@ -8,6 +8,12 @@ import type {
   EntityTraceRequest,
   PersonTraceRequest,
 } from '@/lib/routing/executeRoute';
+import {
+  callTimeoutMs,
+  fetchTextWithTimeout,
+  VendorTimeoutError,
+  type VendorCallOptions,
+} from '@/lib/tracerfy/fetchWithTimeout';
 
 const API_KEY = process.env.TRACERFY_API_KEY;
 const BASE_URL = process.env.TRACERFY_API_URL || TRACERFY.BASE_URL;
@@ -563,7 +569,10 @@ export function parseBusinessTraceResponse(body: unknown): ContactResult {
  * the property state: the caller decides which state to send (planRoute warns
  * when it is falling back to the property state).
  */
-export async function lookupBusinessTrace(req: EntityTraceRequest): Promise<ContactResult> {
+export async function lookupBusinessTrace(
+  req: EntityTraceRequest,
+  opts: VendorCallOptions = {}
+): Promise<ContactResult> {
   const apiKey = process.env.FASTAPPEND_API_KEY;
   if (!apiKey) return contactFailure('FastAppend API key not configured');
   if (!text(req.company_name) || !text(req.state)) {
@@ -571,15 +580,19 @@ export async function lookupBusinessTrace(req: EntityTraceRequest): Promise<Cont
   }
 
   try {
-    const response = await fetch(`${FASTAPPEND.BASE_URL}business-trace/lookup/`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+    const res = await fetchTextWithTimeout(
+      `${FASTAPPEND.BASE_URL}business-trace/lookup/`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ company_name: req.company_name, state: req.state }),
       },
-      body: JSON.stringify({ company_name: req.company_name, state: req.state }),
-    });
+      callTimeoutMs(opts.timeoutMs)
+    );
 
     // The discriminator is the BODY, not the status: FastAppend answers a
     // genuine miss with HTTP 404 and a valid envelope (`hit:false`), and that
@@ -592,23 +605,22 @@ export async function lookupBusinessTrace(req: EntityTraceRequest): Promise<Cont
     // one check; they must not -- that collapse is the exact defect this
     // block replaces (L-008). Read the body exactly once, below, however the
     // status turns out.
-    if (response.status >= 500) {
-      const errorText = await response.text();
-      console.error('FastAppend business trace lookup error:', response.status, errorText);
-      return contactFailure(transportError('FastAppend', response.status));
+    if (res.status >= 500) {
+      console.error('FastAppend business trace lookup error:', res.status, res.text);
+      return contactFailure(transportError('FastAppend', res.status));
     }
 
-    const raw = await response.text();
     let body: unknown;
     try {
-      body = JSON.parse(raw);
+      body = JSON.parse(res.text);
     } catch {
-      console.error('FastAppend business trace lookup error:', response.status, raw);
+      console.error('FastAppend business trace lookup error:', res.status, res.text);
       return contactFailure('Malformed business trace response');
     }
 
     return parseBusinessTraceResponse(body);
   } catch (error) {
+    if (error instanceof VendorTimeoutError) return contactFailure(`FastAppend ${error.message}`);
     console.error('FastAppend business trace lookup error:', error);
     return contactFailure('FastAppend service unavailable');
   }
@@ -676,7 +688,10 @@ export function parsePersonTraceResponse(
  * `find_owner: true` MISSED on an absentee-owned parcel where the named lookup
  * hit, so the named form is the one worth spending on whenever a name exists.
  */
-export async function lookupPersonTrace(req: PersonTraceRequest): Promise<ContactResult> {
+export async function lookupPersonTrace(
+  req: PersonTraceRequest,
+  opts: VendorCallOptions = {}
+): Promise<ContactResult> {
   const apiKey = process.env.TRACERFY_API_KEY;
   if (!apiKey) return contactFailure('Tracerfy API key not configured');
 
@@ -713,27 +728,31 @@ export async function lookupPersonTrace(req: PersonTraceRequest): Promise<Contac
   }
 
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+    const res = await fetchTextWithTimeout(
+      `${baseUrl}${path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
+      callTimeoutMs(opts.timeoutMs)
+    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Tracerfy person lookup error:', response.status, errorText);
-      return contactFailure(transportError('Tracerfy', response.status));
+    if (!res.ok) {
+      console.error('Tracerfy person lookup error:', res.status, res.text);
+      return contactFailure(transportError('Tracerfy', res.status));
     }
 
-    return parsePersonTraceResponse(await response.json(), {
+    return parsePersonTraceResponse(JSON.parse(res.text), {
       first_name: req.first_name,
       last_name: req.last_name,
     });
   } catch (error) {
+    if (error instanceof VendorTimeoutError) return contactFailure(`Tracerfy ${error.message}`);
     console.error('Tracerfy person lookup error:', error);
     return contactFailure('Tracerfy service unavailable');
   }

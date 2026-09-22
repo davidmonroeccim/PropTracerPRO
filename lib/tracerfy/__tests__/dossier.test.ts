@@ -5,6 +5,7 @@ import {
   parseDossierResponse,
   type DossierKey,
 } from '@/lib/tracerfy/dossier'
+import { VENDOR_TIMEOUT } from '@/lib/constants'
 
 import entityApn from './fixtures/entity-hit-apn.json'
 import entityAddress from './fixtures/entity-hit-address.json'
@@ -386,5 +387,26 @@ describe('lookupDossier — end to end against a sanitized payload', () => {
     expect(Object.keys(result.property!)).toHaveLength(86)
     expect(result.mailingAddress).not.toBeNull()
     expect(result.error).toBeUndefined()
+  })
+})
+
+describe('lookupDossier: the per-call ceiling (D7)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('ends a hung dossier call as a FAILURE, never a miss', async () => {
+    // MUTATION: call fetch directly in lookupDossier and this hangs red.
+    vi.useFakeTimers()
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+    )
+    const pending = lookupDossier(APN_KEY)
+    await vi.advanceTimersByTimeAsync(VENDOR_TIMEOUT.CALL_MS)
+    const result = await pending
+    expect(result).toMatchObject({ success: false, hit: false, error: 'Tracerfy dossier did not answer within 25 s' })
   })
 })

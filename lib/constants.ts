@@ -124,6 +124,22 @@ export const FASTAPPEND = {
   BASE_URL: 'https://app.fastappend.com/v1/api/',
 } as const;
 
+/**
+ * Vendor call ceilings (spec D7, Tier 1 Phase 1). The arithmetic is in
+ * docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md, "Latency budget".
+ *
+ * CALL_MS                 one vendor call. Phase 0's slowest REAL answer was an Instant lookup
+ *                         at 20.4 s; this is that plus about 20 percent.
+ * SINGLE_ROUTE_BUDGET_MS  a single-trace route starts no vendor call after this long, which
+ *                         leaves 10 s of its 60 s maxDuration for our own writes.
+ * MIN_CALL_MS             a call is not started with less budget than this left.
+ */
+export const VENDOR_TIMEOUT = {
+  CALL_MS: 25_000,
+  SINGLE_ROUTE_BUDGET_MS: 50_000,
+  MIN_CALL_MS: 5_000,
+} as const;
+
 // ===================
 // HighLevel
 // ===================

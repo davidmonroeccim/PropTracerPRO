@@ -6,6 +6,7 @@ import {
   parsePersonTraceResponse,
   personMatchesName,
 } from '@/lib/tracerfy/client'
+import { VENDOR_TIMEOUT } from '@/lib/constants'
 
 import businessHit from './fixtures/business-hit.json'
 import businessAgentManager from './fixtures/business-hit-agent-manager.json'
@@ -490,5 +491,45 @@ describe('our own input problems are refusals, never vendor failures (spec 5.1)'
     // own configuration problem, never something the customer's input caused.
     delete process.env.FASTAPPEND_API_KEY
     expect((await lookupBusinessTrace(ENTITY)).inputError).toBeUndefined()
+  })
+})
+
+describe('the per-call ceiling (D7: a timeout is a vendor failure, never a miss)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const hang = (_url: string, init: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    })
+
+  it('ends a hung Tracerfy person lookup as a FAILURE', async () => {
+    // MUTATION: call fetch directly in lookupPersonTrace instead of fetchTextWithTimeout and this hangs red.
+    vi.useFakeTimers()
+    fetchMock.mockImplementation(hang)
+    const pending = lookupPersonTrace(PERSON)
+    await vi.advanceTimersByTimeAsync(VENDOR_TIMEOUT.CALL_MS)
+    const res = await pending
+    expect(res).toMatchObject({ success: false, hit: false, contacts: null, error: 'Tracerfy did not answer within 25 s' })
+    expect(res.inputError).toBeUndefined()
+  })
+
+  it('ends a hung FastAppend lookup as a FAILURE', async () => {
+    // MUTATION: call fetch directly in lookupBusinessTrace and this hangs red.
+    vi.useFakeTimers()
+    fetchMock.mockImplementation(hang)
+    const pending = lookupBusinessTrace(ENTITY)
+    await vi.advanceTimersByTimeAsync(VENDOR_TIMEOUT.CALL_MS)
+    expect(await pending).toMatchObject({ success: false, error: 'FastAppend did not answer within 25 s' })
+  })
+
+  it('honours a tighter budget from the caller', async () => {
+    // MUTATION: ignore opts.timeoutMs in lookupPersonTrace and this goes red at 5 s.
+    vi.useFakeTimers()
+    fetchMock.mockImplementation(hang)
+    const pending = lookupPersonTrace(PERSON, { timeoutMs: 5_000 })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(await pending).toMatchObject({ success: false, error: 'Tracerfy did not answer within 5 s' })
   })
 })
