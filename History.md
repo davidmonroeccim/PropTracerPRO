@@ -4,6 +4,18 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-22 (h): Tier 1 Phase 1, Task 7: outcome codes, sentences and the webhook tier.
+
+- New lib/trace/tier1Outcome.ts: the seven outcome codes, found_by, and the sentences, built from
+  the step log (no_match names only the keys that answered) and from the record (no_lookup_key
+  names what is missing). Copy rules tested on every sentence; resend advice only on
+  busy_try_again and no_lookup_key; a matched owner with no contacts ends no_match, never
+  owner_name_not_matched (D31).
+- rowSkipReason reads the Tier 1 outcome after the Tier 2 status and before the old queue value,
+  so the single CSV download's skip_reason column carries the sentence. No new CSV columns.
+- trace.completed takes its tier from the caller and always carries found_by, outcome_code and
+  skip_reason. Mutations: all red.
+
 ## 2026-09-22 (g): Tier 1 Phase 1, Task 6b: the dossier never supplies contacts (spec D32).
 
 - D21's arm (b) is withdrawn (owner decision, spec D32). The dossier identifies the owner and

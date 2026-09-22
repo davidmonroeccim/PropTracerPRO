@@ -321,6 +321,7 @@ describe('the trace.completed webhook payload', () => {
       charge: 0.4,
       propertyRecord,
       ownerType: 'entity',
+      tier: 2,
     });
     return posts[0].body;
   }

@@ -503,6 +503,7 @@ export async function POST(request: Request) {
         charge,
         propertyRecord: execution.property,
         ownerType: execution.ownerType,
+        tier: TRACE_TIER.PER_RECORD_SUBMITTED,
       });
 
       // 7. NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel

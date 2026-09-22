@@ -47,6 +47,7 @@
 
 import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import { propertyTraceSkipReason } from '@/lib/trace/propertyTraceAttempts';
+import { tier1OutcomeReason, type Tier1OutcomeRow } from '@/lib/trace/tier1Outcome';
 
 /**
  * A row read down to the two queue columns. Structural, so every caller's own
@@ -57,7 +58,7 @@ import { propertyTraceSkipReason } from '@/lib/trace/propertyTraceAttempts';
  * Both optional, because a row written before either migration carries neither
  * and absent has to read as "nothing to explain" rather than throw.
  */
-export type SkipReasonRow = {
+export type SkipReasonRow = Tier1OutcomeRow & {
   ai_research_status?: string | null;
   property_trace_status?: string | null;
 };
@@ -65,11 +66,15 @@ export type SkipReasonRow = {
 /**
  * Why this row came back with no contacts, or null when there is nothing to say.
  *
- * Tier 2 first, deliberately. See the header.
+ * Tier 2 first, deliberately (see the header). Then a single trace's Tier 1 outcome (spec 7.2):
+ * a Tier 1 single row clears both queue columns when it settles, so a queue value can only be
+ * stale there, while a bulk tier 2 re-enqueue sets property_trace_status and must win over a stale
+ * outcome_code on a reused row.
  */
 export function rowSkipReason(row: SkipReasonRow): string | null {
   return (
     propertyTraceSkipReason(row.property_trace_status) ??
+    tier1OutcomeReason(row) ??
     skipReasonFor(row.ai_research_status)
   );
 }

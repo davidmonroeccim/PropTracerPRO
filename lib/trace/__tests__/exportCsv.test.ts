@@ -14,6 +14,7 @@ import {
   ZERO_MEANS_ABSENT_KEYS,
 } from '@/lib/trace/exportCsv';
 import { DOSSIER_EXPORT_KEYS } from '@/lib/trace/publicPropertyRecord';
+import { OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome';
 import entityHitAddress from '@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json';
 import type { TraceHistory } from '@/types';
 
@@ -540,6 +541,11 @@ describe('the file itself', () => {
     expect(c.skip_reason).toContain('You were charged for it');
     expect(c.skip_reason).not.toContain('not charged');
     expect(c.charge).toBe('0.40');
+  });
+
+  it('carries a single trace Tier 1 sentence in the existing skip_reason column', () => {
+    const c = cells(row({ outcome_code: 'owner_name_not_matched', is_successful: false }));
+    expect(c.skip_reason).toBe(`"${OWNER_NAME_NOT_MATCHED_REASON}"`);
   });
 
   it('emits skip_reason and the research block on every job, blank when unused', () => {

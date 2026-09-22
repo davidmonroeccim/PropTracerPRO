@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { rowSkipReason } from '@/lib/trace/rowSkipReason';
+import { BUSY_TRY_AGAIN_REASON, OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome';
 import {
   BLANK_OWNER_SKIP_REASON,
   BLANK_OWNER_SKIP_STATUS,
@@ -259,5 +260,29 @@ describe('all four surfaces that serve a bulk row serve both queues', () => {
     for (const select of selects) {
       expect(select, select).toContain('property_trace_status');
     }
+  });
+});
+
+describe('the Tier 1 outcome through the one accessor (spec 7.2)', () => {
+  it('serves the Tier 1 sentence on a single-trace row', () => {
+    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+  });
+
+  it('lets a Tier 2 terminal status win over a stale Tier 1 outcome', () => {
+    // A single-trace row can be re-enqueued by a bulk tier 2 submit (the row is REUSED); its stale
+    // "not charged" sentence must never answer for a row tier 2 billed.
+    // MUTATION: put tier1OutcomeReason first in rowSkipReason and this goes red.
+    // The Tier 1 half must be able to answer on its own, or the swap below cannot show.
+    expect(rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false })).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+    expect(
+      rowSkipReason({ outcome_code: 'owner_name_not_matched', is_successful: false, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })
+    ).toBe(PROPERTY_TRACE_NO_REACH_REASON);
+  });
+
+  it('lets the Tier 1 outcome win over a stale ai_research_status', () => {
+    // MUTATION: put skipReasonFor before tier1OutcomeReason and this goes red.
+    expect(
+      rowSkipReason({ outcome_code: 'busy_try_again', is_successful: false, ai_research_status: BLANK_OWNER_SKIP_STATUS })
+    ).toBe(BUSY_TRY_AGAIN_REASON);
   });
 });

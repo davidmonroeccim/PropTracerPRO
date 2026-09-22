@@ -1,5 +1,6 @@
 /**
- * The `trace.completed` webhook for a TIER 2 trace.
+ * The `trace.completed` webhook for a trace that completes INLINE: every Tier 2 trace, and since
+ * Tier 1 Phase 1 every single Tier 1 trace.
  *
  * WHY THIS EXISTS. Tier 1 completes in the POLL route (app/api/trace/status,
  * app/api/v1/trace/status) and both poll routes fire `trace.completed` from there.
@@ -36,7 +37,6 @@
  * Nothing awaits it and every rejection is swallowed into console.error.
  */
 import type { TraceResult } from '@/types';
-import { TRACE_TIER } from './billedRows';
 import { toPublicPropertyRecord } from './publicPropertyRecord';
 
 export interface TraceCompletedWebhookInput {
@@ -60,6 +60,12 @@ export interface TraceCompletedWebhookInput {
    */
   propertyRecord: unknown;
   ownerType?: string | null;
+  /** 1 for a supplied-owner trace, 2 for a Full Property Trace. */
+  tier: 1 | 2;
+  /** Tier 1 only (spec 7.1). Null on a Full Property Trace. */
+  foundBy?: string | null;
+  outcomeCode?: string | null;
+  skipReason?: string | null;
 }
 
 /**
@@ -100,8 +106,13 @@ export function dispatchTraceCompleted(input: TraceCompletedWebhookInput): void 
       // so there is exactly one place to get this wrong and it is this line.
       // 65 keys of the vendor's 86. See lib/trace/publicPropertyRecord.ts.
       property_record: toPublicPropertyRecord(input.propertyRecord),
-      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      tier: input.tier,
       owner_type: input.ownerType ?? null,
+      // Tier 1 (spec 7.2). Always present, null on a Full Property Trace, so the shape a
+      // consumer parses does not change with the tier.
+      found_by: input.foundBy ?? null,
+      outcome_code: input.outcomeCode ?? null,
+      skip_reason: input.skipReason ?? null,
       timestamp: new Date().toISOString(),
     }),
   }).catch((err) => console.error('Webhook dispatch error:', err));
