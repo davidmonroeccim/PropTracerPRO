@@ -27,12 +27,19 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 9: web single route inline
   - [x] Task 10: API single route inline, D23 and D24, docs
   - [x] Task 11: result card, single page, History
-  - [~] Task 12: gates green, runner built, sample chosen, dry `--plan` run ($1.10 worst case).
-        **RUN 2026-09-23 with the owner's approved $2: BLOCKED, $0.00 spent.** All five records
-        answered HTTP 403 from the v1 API's entitlement gate before any vendor call; nothing was
-        written (no `trace_history` row, no `api_logs` row, wallet unchanged). Cause is task 22
-        below, not the runner. The live check re-runs once the gate is fixed.
-        Report: tasks/phase1-live-check.md (written after the re-run).
+  - [x] Task 12: gates green, runner built, sample chosen, dry `--plan` run ($1.10 worst case).
+        First attempt 2026-09-23 was BLOCKED, $0.00 spent: all five records answered HTTP 403 from the
+        v1 entitlement gate before any vendor call (cause was task 22, not the runner; fixed, merged and
+        deployed). **RE-RUN AND COMPLETE 2026-09-23 on branch `fix/api-gate-gateway-grants`: five records,
+        five HTTP 200, vendor spend $0.20 of the $1.10 worst case and the $2 approved, customer charge
+        $0.55 reconciled exactly against the wallet.** Two hits (address/Instant, and a trust that hit on
+        rung 1), two free misses (APN person, FastAppend company), one Tier 2 dossier miss charged $0.25.
+        Proved: the Instant path end to end, free misses on both vendors, the trust ladder planned whole
+        and stopping at the first hit, D36's parcel key in production, the pricing collapse charging the
+        PRO rates, and no contact swapping (hash-compared). Left open: the APN person lookup is still
+        thinly proven (1 for 1 miss), FastAppend entity is now 3 for 3 misses across two live runs, the
+        trust ladder's fallback rungs are still unexercised, and L5 exposed the Tier 2 reporting gap below.
+        Report: tasks/phase1-live-check.md.
   - [x] Final review fix wave (2026-09-23): D38 parcel display, D39 keep the paid contacts, D40 the
         maxVendorCost floor, D41 the county refusal, plus the seven review findings (503 tier,
         live-work threshold, tier 2 warnings, the Tier 1 plan guard, TRS as a surname, the
@@ -3156,6 +3163,21 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
+- [ ] 23. **FOUND BY THE PHASE 1 LIVE CHECK, 2026-09-23. A paying Tier 2 single trace is told nothing.**
+      L5 of the live check (AR Benton, parcel with no city) was charged $0.25, cost us $0.00, returned no
+      contacts and no property record, and was given NO reason: the stored row has `outcome_code`,
+      `found_by` and `contact_vendor` all NULL, and the API response carries no `outcomeCode`, no
+      `foundBy` and no `skipReason` -- only `status: "no_match"`. Both Tier 1 misses in the same run
+      carried a `skipReason` sentence. Spec **D10** says every record reports an outcome code and a
+      sentence, so a charged Tier 2 record reporting neither is the widest live gap Phase 1 leaves.
+      Known deferral, not a surprise: Phase 1 plan carried item 7 ("Tier 2 single keeps today's failure
+      answer in Phase 1") and a Task 10 deferred minor recorded the tier 2 branch omitting
+      foundBy/outcomeCode. The live check turned it into a measured fact with money attached.
+      SECOND, SEPARATE POINT FOR DAVID (pricing rationale, not a bug): `lib/constants.ts` justifies
+      billing Tier 2 per record submitted on the grounds that "the county dossier lookup is spent on
+      submission whether or not contacts follow". On L5 it was NOT spent -- the vendor charged $0.00 for
+      the miss while the customer was charged $0.25. The model works as designed; the stated reason for
+      it does not hold on a miss. His call whether that matters.
 - [ ] 22. **LIVE DEFECT, found 2026-09-23 by the Phase 1 live check, David's call to fix it ("This more
       important than a test"). The v1 API refuses every gateway-granted customer.** `lib/api/auth.ts:95`
       gates the whole API on `subscription_tier === 'pro' || is_acquisition_pro_member` and never consults
