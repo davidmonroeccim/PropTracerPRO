@@ -4,6 +4,49 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (c): The v1 API entitlement gate fix, MERGED and DEPLOYED on David's go. Gateway-granted customers can use the API again.
+
+- David's instruction: "merge and deploy the gate fix, it's a live customer fix." Merged `--no-ff`
+  into main at `1beca0c`, pushed (origin/main `9a6823e..1beca0c`), Vercel production deploy Ready in
+  38 s, proptracerpro.com 200.
+- What shipped, and only this: `lib/api/auth.ts` now decides API access with `effectiveIsPro(profile)`
+  instead of `subscription_tier === 'pro' || is_acquisition_pro_member`, so a Suite Gateway grant
+  counts, exactly as the Settings "Generate API Key" button has always counted it. Plus the test
+  fence that stops it regressing (below). The revocation refresh and the pricing collapse are NOT in
+  this merge; they stay on `fix/api-gate-gateway-grants`.
+- The defect it closes, live since `133830c` (2026-01-29): a gateway-granted customer could mint an
+  API key in Settings and was then refused 403 on every v1 call. Measured before the fix on 53
+  accounts: 10 hold a `prop-tracer-pro` grant, 7 of those were refused, and none of the 7 held a key,
+  so no customer had hit it in anger.
+- The fence, which is the part with teeth. The reviewer proved the fix could be silently undone:
+  narrowing `lib/api/auth.ts`'s `.select('*')` to omit `gateway_products` reinstates the defect in
+  full while all 1847 tests stay GREEN, because the test mock discarded its select argument and the
+  admin client is untyped so `tsc` sees nothing either. `lib/api/__tests__/auth.test.ts` now emulates
+  PostgREST column projection with the same `projectRow` helper the v1 single-route tests use, so
+  dropping that column turns the fix's own test red. This is the third instance of the class tracked
+  in todo task 21(a).
+- Nothing about what a customer is told changed: all seven response branches (three 401s, two 500s,
+  the 403, the null-profile 401) are byte-for-byte identical, verified by extraction and diff rather
+  than by reading the diff. The Suite kill-switch still governs: a grant admits nobody while
+  `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED` is not `'true'`.
+- Four mutations, each re-run independently by the reviewer: reverting the gate, dropping the
+  kill-switch term, admitting everyone, and collapsing the PGRST116 branch. Each turned a named test
+  red; each restored green.
+- Gates on merged main before the push: vitest 1847 passing / 84 files 0 failing, `tsc` exit 0,
+  eslint 46 problems (cap 47). The merge was verified to introduce nothing: `git diff c77fd02 HEAD`
+  empty, so the reviewed tree and the deployed tree are the same tree. Vercel's own build was the
+  build gate.
+- Verified in production after the deploy, at zero cost: a temporary API key was minted, an empty
+  body was posted to the live `POST /api/v1/trace/single`, and it came back `400 no_lookup_key`
+  ("missing a valid state... You were not charged") instead of the old `403`. That proves the gate
+  admits and that the request stops at validation before any vendor call. The key was revoked
+  immediately and the account read back clean.
+- STILL OPEN on the branch, both decided by David and neither shipped here: the Track A/B pricing
+  collapse (a gateway customer is currently billed the Pay-As-You-Go rate on the API, $0.25/$0.40,
+  against $0.15/$0.25 on the dashboard) and the entitlement refresh (a revoked grant keeps API access
+  while that customer never loads the dashboard). Both windows are bounded by the fact that no
+  gateway-granted account holds an API key today.
+
 ## 2026-09-23 (b): The Phase 1 live check was refused by the v1 API's own entitlement gate. $0.00 spent. A live defect found instead.
 
 - The Phase 1 live check ran with the owner's approved $2 and the runner's computed worst case of

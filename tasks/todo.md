@@ -3156,8 +3156,13 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
-- [ ] 22. **LIVE DEFECT, found 2026-09-23 by the Phase 1 live check, David's call to fix it ("This more
-      important than a test"). The v1 API refuses every gateway-granted customer.** `lib/api/auth.ts:95`
+- [~] 22. **LIVE DEFECT, found 2026-09-23 by the Phase 1 live check. THE GATE HALF IS FIXED, MERGED AND
+      DEPLOYED (main 1beca0c, David: "merge and deploy the gate fix, it's a live customer fix"); verified
+      in production with a zero-cost probe that now answers 400 no_lookup_key instead of 403. TWO HALVES
+      REMAIN OPEN on `fix/api-gate-gateway-grants`, both decided by David: (1) the Track A/B pricing
+      collapse, so a gateway customer stops being billed $0.25/$0.40 on the API against $0.15/$0.25 on
+      the dashboard; (2) the entitlement refresh, so a revoked grant stops keeping API access. Neither
+      window can bite today: no gateway-granted account holds an API key. Original defect below.** `lib/api/auth.ts:95`
       gates the whole API on `subscription_tier === 'pro' || is_acquisition_pro_member` and never consults
       the Suite Gateway grant, while `app/api/user/generate-api-key/route.ts:26` gates the same access on
       `effectiveIsPro()`, which does. A gateway-granted customer can therefore generate an API key in
