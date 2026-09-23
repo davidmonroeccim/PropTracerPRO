@@ -43,6 +43,21 @@ export interface UserProfile {
   highlevel_invalid_status: number | null;
   highlevel_invalid_reason: string | null;
 
+  // Suite Gateway entitlement snapshot.
+  //
+  // DECLARED BECAUSE THE PRICE READS IT. Every surface, the /api/v1/* routes included, derives
+  // its rate and its price plan from lib/suite/pricing.ts, which is grant-aware: a
+  // `prop-tracer-pro` entry here is a PRO entitlement for price as well as access (lessons.md
+  // L-030). A UserProfile handed to that derivation without these columns loaded prices as
+  // pay-as-you-go silently, so lib/api/auth.ts selects '*' and a test in lib/api/__tests__ goes
+  // red if that select is ever narrowed to drop them.
+  //
+  // Optional because the rows PTP reads with a narrowed select are still UserProfiles, and
+  // hasSuiteAccess() treats absent exactly as it treats an empty grant list: no entitlement.
+  gateway_sub?: string | null;
+  gateway_products?: string[] | null;
+  gateway_products_checked_at?: string | null;
+
   // Wallet
   wallet_balance: number;
   wallet_auto_rebill_enabled: boolean;

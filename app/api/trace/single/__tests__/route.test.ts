@@ -2149,14 +2149,15 @@ describe("tier 1 inline: Track A price, grant-aware (fix round 1)", () => {
     expect(deducts()[0].args).toMatchObject({ p_amount: PRICING.CHARGE_PER_SUCCESS });
   });
 
-  it("charges the grant-aware Track A rate, which a Track B derivation would miss (fix round 2)", async () => {
+  it("charges the grant-aware rate, which a grant-blind derivation would miss (fix round 2)", async () => {
     // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. It is OFF in
-    // this environment, which makes Track A (chargePerTrace, grant-aware) and Track B
-    // (getChargePerTrace: subscription_tier or is_acquisition_pro_member only) AGREE for a plain
-    // wallet profile -- the test above passes under either derivation and proves nothing about
-    // which one actually ran. A gateway grant is the one input where they diverge.
-    // MUTATION: swap chargePerTrace(profile) for getChargePerTrace(profile.subscription_tier,
-    // profile.is_acquisition_pro_member) and this goes red (0.25 instead of 0.15).
+    // this environment, which makes the grant-aware derivation and a grant-blind one (reading
+    // subscription_tier or is_acquisition_pro_member only) AGREE for a plain wallet profile --
+    // the test above passes under either and proves nothing about which one actually ran. A
+    // gateway grant is the one input where they diverge, which is why the collapse of 2026-09-23
+    // left exactly this shape's price changed on the v1 surface and nobody else's.
+    // MUTATION: swap chargePerTrace(profile) for a derivation that reads only subscription_tier
+    // and is_acquisition_pro_member, and this goes red (0.25 instead of 0.15).
     const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     try {

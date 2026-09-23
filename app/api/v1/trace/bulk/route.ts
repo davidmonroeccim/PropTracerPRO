@@ -11,8 +11,7 @@ import {
   inFlightUnbilledCost,
   tracerfyCanRunTier2,
 } from '@/lib/trace/bulkPreflight';
-import { rawChargePerRecord } from '@/lib/api/pricing';
-import { getChargePerTrace } from '@/lib/constants';
+import { chargePerRecord, chargePerTrace } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
 
 export const maxDuration = 60;
@@ -152,26 +151,19 @@ export async function POST(request: Request) {
     // the wallet reserve is quoted on and what the job row claims was submitted.
     const traceableCount = personRecords.length + entityRecords.length + tier2Records.length;
 
-    // TRACK B PRICING, AND IT MAY NOT BORROW TRACK A'S HELPERS. This is the
-    // /api/v1/* API-key surface: it derives RAW, from the profile's own columns,
-    // and deliberately does not consult the Suite Gateway grant snapshot.
-    // Track A and Track B agree on a pro-tier profile and on an AcquisitionPRO
-    // member profile (both price 'pro' / 'acqPro' either way). They disagree on
-    // a wallet-tier profile whose only entitlement is a Suite Gateway grant:
-    // Track A prices it 'pro', Track B prices it 'wallet'. Before the gate fix
-    // in lib/api/auth.ts that shape could not reach this route at all; now it
-    // can. See lib/api/pricing.ts.
+    // THE ONE PRICE DERIVATION (lib/suite/pricing.ts), the same one the dashboard
+    // and the Suite MCP quote from. It is grant-aware: a Suite Gateway grant is a
+    // pro entitlement for price exactly as it is for access (lessons.md L-030), so
+    // a wallet-tier caller holding one is quoted the pro rates here, and the cron
+    // that settles these rows quotes the same two numbers back.
     //
     // Tier 1 is per SUCCESSFUL trace and free on a miss, so one charge per owned
     // record is its worst case. Tier 2 is per RECORD SUBMITTED, so it is owed
     // whether or not the county has a parcel at that address: not a worst case
     // at all, just the price. Owner type selects the VENDOR, never the rate
     // (L-005), so there is no entity term in either.
-    const tier1Rate = getChargePerTrace(
-      profile.subscription_tier,
-      profile.is_acquisition_pro_member
-    );
-    const tier2Rate = rawChargePerRecord(profile);
+    const tier1Rate = chargePerTrace(profile);
+    const tier2Rate = chargePerRecord(profile);
     const estimatedCost =
       (personRecords.length + entityRecords.length) * tier1Rate +
       tier2Records.length * tier2Rate;

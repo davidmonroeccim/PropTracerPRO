@@ -572,9 +572,9 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
 //
 // POLLS a bulk job and SETTLES it. This is where money actually moves, via the
 // shared settleBulkJob from Task 4 -- the SAME code path the v1 REST route uses,
-// so the two surfaces can never diverge on money. The one MCP-specific value is
-// the grant-aware person rate: chargePerTrace(profile) (CHARGE_PER_SUCCESS for a
-// grant holder), deliberately different from the v1 route's non-grant getChargePerTrace.
+// so the two surfaces can never diverge on money. The person rate is
+// chargePerTrace(profile) (CHARGE_PER_SUCCESS for a grant holder), which is the SAME rate the v1
+// route passes: one derivation, no MCP-specific price.
 // The ownership fence below is the money-safety boundary: a caller can only ever
 // settle their OWN job.
 

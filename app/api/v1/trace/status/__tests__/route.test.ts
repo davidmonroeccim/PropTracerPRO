@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { getChargePerTrace } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
+import { chargePerTrace } from "@/lib/suite/pricing";
 import { isBilledRow, TRACE_TIER } from "@/lib/trace/billedRows";
 import { BLOCKED_PROPERTY_RECORD_KEYS } from "@/lib/trace/publicPropertyRecord";
 import entityHitAddress from "@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json";
@@ -175,7 +176,7 @@ describe("v1 trace/status route reports only the wallet amount actually collecte
     const body = await res.json();
 
     expect(H.rpcCalls.filter((c) => c[0] === "deduct_wallet_balance")).toHaveLength(1);
-    expect(H.rpcCalls[0][1].p_amount).toBe(getChargePerTrace("wallet", false));
+    expect(H.rpcCalls[0][1].p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
 
     expect(billingUpdate()?.payload.charge).toBe(0);
     expect(body.charge).toBe(0);
@@ -214,10 +215,81 @@ describe("v1 trace/status route reports only the wallet amount actually collecte
     );
     const body = await res.json();
 
-    const rate = getChargePerTrace("wallet", false);
+    const rate = PRICING.CHARGE_PER_SUCCESS_WALLET;
     expect(billingUpdate()?.payload.charge).toBe(rate);
     expect(body.charge).toBe(rate);
     expect(webhookBody().charge).toBe(rate);
+  });
+
+  it("settles a gateway-grant holder at the PRO rate, agreeing with sweep-stale-traces", async () => {
+    // SITE: app/api/v1/trace/status/route.ts perTraceCharge -> chargePerTrace(profile).
+    //
+    // THE POINT OF THE WHOLE TASK, at the one row where it was provable before any code moved.
+    // app/api/cron/sweep-stale-traces settles the SAME stuck rows this route settles and has
+    // always priced through chargePerTrace(profile), with no source branch. Until 2026-09-23 this
+    // route priced through a grant-blind raw rate, so whichever of the two reached a
+    // gateway-grant holder's row first decided whether it cost $0.15 or $0.25: two prices for one
+    // piece of work, which lib/suite/pricing.ts says must never happen. They now agree.
+    //
+    // MUTATION: swap chargePerTrace(profile) for a grant-blind raw rate and this goes red
+    // (0.25 where 0.15 is owed), and the route disagrees with the cron again.
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    try {
+      H.deductResult = true;
+      H.apiProfile = {
+        id: "user-1",
+        subscription_tier: "wallet",
+        is_acquisition_pro_member: false,
+        gateway_products: ["prop-tracer-pro"],
+      };
+
+      const { GET } = await import("@/app/api/v1/trace/status/route");
+      const res = await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1")
+      );
+      const body = await res.json();
+
+      // The cron's derivation, called here on the same profile, is the oracle: not a copied
+      // number, the actual function app/api/cron/sweep-stale-traces/route.ts calls.
+      const cronRate = chargePerTrace(H.apiProfile);
+      expect(cronRate).toBe(PRICING.CHARGE_PER_SUCCESS);
+      expect(H.rpcCalls[0][1].p_amount).toBe(cronRate);
+      // All three doors: the ledger, the stored receipt, the body an integrator reconciles.
+      expect(billingUpdate()?.payload.charge).toBe(cronRate);
+      expect(body.charge).toBe(cronRate);
+      expect(webhookBody().charge).toBe(cronRate);
+      expect(body.charge).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    } finally {
+      if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+      else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("reverts that grant holder to the wallet rate when the kill-switch is off", async () => {
+    // The flag is what makes the grant count, so without this the test above would pass under a
+    // grant-blind implementation too (L-009).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    try {
+      H.deductResult = true;
+      H.apiProfile = {
+        id: "user-1",
+        subscription_tier: "wallet",
+        is_acquisition_pro_member: false,
+        gateway_products: ["prop-tracer-pro"],
+      };
+
+      const { GET } = await import("@/app/api/v1/trace/status/route");
+      const body = await (
+        await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"))
+      ).json();
+
+      expect(body.charge).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    } finally {
+      if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+      else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
   });
 
   it("stamps tier = 1 alongside the charge", async () => {
@@ -313,7 +385,7 @@ describe("v1 trace/status route never writes a billed row back to unbilled", () 
     const { GET } = await import("@/app/api/v1/trace/status/route");
     await GET(new Request("https://proptracerpro.com/api/v1/trace/status?trace_id=trace-1"));
 
-    expect(billingUpdate()?.payload.charge).toBe(0.4 + getChargePerTrace("wallet", false));
+    expect(billingUpdate()?.payload.charge).toBe(0.4 + PRICING.CHARGE_PER_SUCCESS_WALLET);
   });
 
   it("leaves an ordinary tier 1 row exactly as it always was", async () => {

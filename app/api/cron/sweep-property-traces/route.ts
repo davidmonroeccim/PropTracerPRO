@@ -20,8 +20,7 @@ import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { isParcelKey } from '@/lib/trace/historyDisplay';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
-import { isTrackASource, pricePlanFor } from '@/lib/suite/pricing';
-import { rawPricePlanFor } from '@/lib/api/pricing';
+import { pricePlanFor } from '@/lib/suite/pricing';
 import {
   MAX_PROPERTY_TRACE_ATTEMPTS,
   PROPERTY_TRACE_ATTEMPTS,
@@ -136,7 +135,8 @@ interface QueueRow {
   parcel_id_local: string | null;
   /** Bare county name for the APN key. Tracerfy wants "Stark", never "Stark County". */
   county: string | null;
-  /** Track A or Track B. See pricePlanForRow below; this is a PRICE decision. */
+  /** Where the row was submitted from (lib/suite/pricing.ts TRACE_SOURCE). A label; it no
+   *  longer selects a price. */
   source: string | null;
   property_trace_status: string | null;
   /** Receipt columns, read so foldBillingWrite can never downgrade them. */
@@ -209,24 +209,18 @@ export async function GET(request: Request) {
   let exhausted = 0;
 
   /**
-   * Which column of the price table this row pays, resolved once per
-   * (user, track) per run.
+   * Which column of the price table this row pays, resolved once per user per run.
    *
-   * THE TRACK IS THE AXIS, NOT THE USER, and the split is deliberate
-   * (lib/suite/pricing.ts). Track A -- the signed-in dashboard and the Suite MCP
-   * -- is GRANT-AWARE and prices through pricePlanFor(), which counts a gateway
-   * product grant. Track B -- the /api/v1/* API-key surface -- is RAW and prices
-   * through rawPricePlanFor(), which deliberately does not consult the gateway
-   * snapshot. Reusing the Track A helper for everything would move an existing
-   * API caller's tier 2 bill from $0.40 to $0.25, in the direction nobody
-   * reports.
+   * THE CALLER IS THE AXIS, AND THERE IS ONLY ONE DERIVATION. This used to branch on the row's
+   * `source` tag: a tagged row priced through the grant-aware pricePlanFor() and an untagged one
+   * (which is every /api/v1/* row) through a raw twin that ignored the gateway snapshot. That made
+   * one submit carry two prices for a gateway-grant holder, which lib/suite/pricing.ts says must
+   * never happen. David's named decision, 2026-09-23: "One price: make the API grant-aware." The
+   * `source` tag is now a label and switches nothing (lessons.md L-030).
    *
-   * Which track a row belongs to is read off its own `source` tag, which the
-   * submit routes write. An untagged row is Track B, which is also the dearer
-   * derivation, so the fallback errs in the safe direction. So does the
-   * no-profile fallback: FAILSAFE_PRICE_PLAN is the dearest column of all
-   * (lib/routing/ownerRoute.ts explains why a cheap default once cost 40% of a
-   * pay-as-you-go invoice, silently).
+   * The no-profile fallback stays FAILSAFE_PRICE_PLAN, the dearest column of all
+   * (lib/routing/ownerRoute.ts explains why a cheap default once cost 40% of a pay-as-you-go
+   * invoice, silently).
    *
    * OWNER TYPE SELECTS THE VENDOR, NEVER THE PRICE (L-005). There is no entity
    * rate and no individual rate anywhere below.
@@ -235,25 +229,16 @@ export async function GET(request: Request) {
    * can do is repeat a read-only profile query; nothing here is order-dependent.
    */
   const pricePlanCache = new Map<string, PricePlan>();
-  const pricePlanForRow = async (
-    userId: string,
-    source: string | null | undefined
-  ): Promise<PricePlan> => {
-    const isTrackA = isTrackASource(source);
-    const key = `${userId}:${isTrackA ? 'A' : 'B'}`;
-    const cached = pricePlanCache.get(key);
+  const pricePlanForRow = async (userId: string): Promise<PricePlan> => {
+    const cached = pricePlanCache.get(userId);
     if (cached !== undefined) return cached;
     const { data: rateProfile } = await adminClient
       .from('user_profiles')
       .select('subscription_tier, is_acquisition_pro_member, gateway_products')
       .eq('id', userId)
       .single();
-    const plan = !rateProfile
-      ? FAILSAFE_PRICE_PLAN
-      : isTrackA
-        ? pricePlanFor(rateProfile)
-        : rawPricePlanFor(rateProfile);
-    pricePlanCache.set(key, plan);
+    const plan = !rateProfile ? FAILSAFE_PRICE_PLAN : pricePlanFor(rateProfile);
+    pricePlanCache.set(userId, plan);
     return plan;
   };
 
@@ -374,7 +359,7 @@ export async function GET(request: Request) {
       // ownerName: null -- tier 2 is dossier-first by definition, and a plan
       // built with an owner name present returns a tier 1 route with no
       // dossier step at all.
-      const pricePlan = await pricePlanForRow(row.user_id, row.source);
+      const pricePlan = await pricePlanForRow(row.user_id);
       const plan = planRoute(parcelForRow(row), pricePlan);
 
       if (plan.steps.length === 0) {

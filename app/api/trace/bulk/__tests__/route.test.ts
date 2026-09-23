@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PRICING, getChargePerTrace } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
 import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
-import { TRACE_SOURCE, chargePerTrace, chargePerRecord, isTrackASource } from "@/lib/suite/pricing";
+import { TRACE_SOURCE, chargePerTrace, chargePerRecord } from "@/lib/suite/pricing";
 import {
   PROPERTY_TRACE_NO_KEY_STATUS,
   isPropertyTracePending,
@@ -743,15 +743,16 @@ describe("the entity-queue column on every row this route writes", () => {
  * ------------------------------------------------------------------ */
 
 /**
- * THE SOURCE TAG IS A PRICE DECISION, NOT A LABEL.
+ * THE SOURCE TAG IS A LABEL, AND AS OF 2026-09-23 THAT IS ALL IT IS.
  *
- * This route settles through app/api/trace/bulk/status, which prices with the
- * GRANT-AWARE chargePerTrace() -- Track A. The crons pick their derivation from
- * the row's `source` tag and read an UNTAGGED row as Track B, the raw and dearer
- * one. An untagged tier 2 row from this route would be billed $0.40 by the cron
- * while its siblings settled at $0.25 in the same batch.
+ * It used to be a PRICE DECISION: the crons chose between two derivations from it and read an
+ * UNTAGGED row as the raw, dearer one, so an untagged tier 2 row from this route was billed $0.40
+ * by the cron while its siblings settled at $0.25 in the same batch. David's decision -- "One
+ * price: make the API grant-aware" -- left one derivation, and `isTrackASource` went with the
+ * branches that called it. The tag is still WRITTEN, because it says where a row came from, and
+ * these tests still fence that it is written; what they no longer claim is that it picks a rate.
  */
-describe("the track this job is priced on", () => {
+describe("the source tag this job is written with", () => {
   it("tags the job row with its source", async () => {
     await post([rec("John Smith", 1)]);
     const job = H.ops.find((o) => o.table === "trace_jobs" && o.op === "insert");
@@ -759,9 +760,8 @@ describe("the track this job is priced on", () => {
   });
 
   it("tags every trace_history row it writes, queued and unaskable alike", async () => {
-    // The crons read the ROW's tag, not the job's, and sweep-property-traces
-    // reads it to choose the tier 2 price column. A queued row that loses it is
-    // billed from the dearer derivation.
+    // Provenance, not price: the crons read the ROW's tag rather than the job's, and a row that
+    // loses it can no longer say which surface submitted it.
     await post([rec("John Smith", 1), rec(undefined, 2), noKeyRec(3)]);
     expect(historyRows()).toHaveLength(3);
     for (const row of historyRows()) {
@@ -769,11 +769,11 @@ describe("the track this job is priced on", () => {
     }
   });
 
-  it("names a track the settle path actually prices on", async () => {
-    // L-009: this comparison is a tautology unless the flag is set, because
-    // hasSuiteAccess() is the only thing separating the two rates.
-    expect(isTrackASource(TRACE_SOURCE.WEB)).toBe(true);
-
+  it("is priced identically whatever the tag says, because the tag prices nothing", async () => {
+    // The replacement for "names a track the settle path actually prices on", which asserted the
+    // tag selected a derivation. Nothing keys off it now, so what is worth fencing is that the
+    // rate follows the CALLER: a grant holder pays the pro rate, and the tag is not consulted.
+    // L-009: without the flag a grant counts for nothing and this proves nothing.
     const GRANT_HOLDER = {
       subscription_tier: "wallet",
       is_acquisition_pro_member: false,
@@ -782,9 +782,10 @@ describe("the track this job is priced on", () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     try {
       expect(chargePerTrace(GRANT_HOLDER)).toBe(PRICING.CHARGE_PER_SUCCESS);
-      expect(chargePerTrace(GRANT_HOLDER)).not.toBe(
-        getChargePerTrace(GRANT_HOLDER.subscription_tier, false)
-      );
+      expect(chargePerRecord(GRANT_HOLDER)).toBe(PRICING.TIER2_PER_RECORD_SUBMITTED_PRO);
+      // The tag is not an input to either function: there is nowhere to pass it.
+      expect(chargePerTrace.length).toBe(1);
+      expect(chargePerRecord.length).toBe(1);
     } finally {
       delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
     }

@@ -2,9 +2,10 @@
  * A supplied-owner (Tier 1) single trace, run INLINE (spec D1, D26): plan, execute, judge,
  * charge, persist.
  *
- * Shared by app/api/trace/single (Track A price) and app/api/v1/trace/single (Track B price), so
- * the billing gate, the ledger probe and the fold live in ONE place and one set of tests fences
- * both routes. The routes keep what differs: auth, the price, the response casing, the webhook.
+ * Shared by app/api/trace/single and app/api/v1/trace/single, so the billing gate, the ledger
+ * probe and the fold live in ONE place and one set of tests fences both routes. The routes keep
+ * what differs: auth, the response casing, the webhook. Both now pass the SAME price, from the one
+ * derivation in lib/suite/pricing.ts.
  *
  * `execution.steps` is the step log. It is written to trace_steps and read back only by the next
  * resend of a busy_try_again row. It never goes into a response or a webhook.
@@ -66,7 +67,7 @@ export interface SingleTier1Input {
   /** The record, with ownerName set. */
   parcel: ParcelInput
   pricePlan: PricePlan
-  /** chargePerTrace(profile) on the web, getChargePerTrace(...) on the API. */
+  /** chargePerTrace(profile) on every surface. One derivation (lib/suite/pricing.ts). */
   chargeAmount: number
   /** Request start + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS. */
   deadlineMs: number

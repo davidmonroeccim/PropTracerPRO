@@ -7,7 +7,8 @@ import { deductWallet } from '@/lib/wallet/deduct';
 import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
 import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
-import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { PRICING, STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { TraceResult } from '@/types';
 
 // validateApiKey's blocking entitlement refresh (lib/suite/access.ts) can add up to 5s
@@ -161,13 +162,16 @@ export async function GET(request: Request) {
     const isSuccessful = result !== null &&
       ((result.phones?.length || 0) > 0 || (result.emails?.length || 0) > 0);
 
-    const chargePerTrace = getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+    // The ONE derivation (lib/suite/pricing.ts), grant-aware. This route settles rows whose
+    // siblings sweep-stale-traces also settles, and that cron has always priced through this same
+    // function, so the two now agree on every row instead of only on non-grant callers.
+    const perTraceCharge = chargePerTrace(profile);
     // Charge the wallet FIRST so `charge` is the amount that actually moved: a
     // short wallet returns false without deducting. `charge` is written to the
     // trace_history row, POSTed in the trace.completed webhook, and returned in
     // the response body -- and this is the API surface integrators reconcile
     // their own books against, so a phantom amount propagates outward.
-    const attemptedCharge = isSuccessful ? chargePerTrace : 0;
+    const attemptedCharge = isSuccessful ? perTraceCharge : 0;
     const deduction =
       attemptedCharge > 0
         ? await deductWallet(adminClient, {

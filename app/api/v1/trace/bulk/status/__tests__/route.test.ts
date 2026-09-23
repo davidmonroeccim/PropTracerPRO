@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getChargePerTrace, PRICING } from "@/lib/constants";
+import { PRICING } from "@/lib/constants";
+import { chargePerTrace } from "@/lib/suite/pricing";
 
 // Mutation fence for the route -> settleBulkJob money SEAM: proves the v1 bulk
-// status route passes its tier-aware getChargePerTrace(...) value as the
-// personRate, not 0, a hardcoded constant, or the grant-aware rate by mistake.
-// settleBulkJob itself is fenced by lib/trace/__tests__/settleBulkJob.test.ts;
-// this guards the caller's CHOICE of rate, which no other test observes.
+// status route passes chargePerTrace(profile) as the personRate, not 0, a hardcoded constant,
+// and not a grant-blind raw rate. settleBulkJob itself is fenced by
+// lib/trace/__tests__/settleBulkJob.test.ts; this guards the caller's CHOICE of rate, which no
+// other test observes.
 
 // Shared, mutable holder so the mock factories (hoisted above imports) read
 // per-test data lazily at call time.
@@ -126,10 +127,10 @@ beforeEach(() => {
 });
 
 describe("v1 bulk-status route personRate wiring", () => {
-  it("passes getChargePerTrace(tier, flag) as settleBulkJob's personRate", async () => {
-    // wallet tier + not acquisition-pro => getChargePerTrace = CHARGE_PER_SUCCESS_WALLET,
-    // which is deliberately DIFFERENT from the pro/grant rate (CHARGE_PER_SUCCESS). So the
-    // assertion catches a wire-up to 0, to the grant rate, or to any hardcoded constant.
+  it("passes chargePerTrace(profile) as settleBulkJob's personRate", async () => {
+    // wallet tier, no AcquisitionPRO flag and no grant => CHARGE_PER_SUCCESS_WALLET, which is
+    // deliberately DIFFERENT from the pro rate (CHARGE_PER_SUCCESS). So the assertion catches a
+    // wire-up to 0, to the pro rate, or to any hardcoded constant.
     H.profile = { id: "user-abc", subscription_tier: "wallet", is_acquisition_pro_member: false };
     H.job = {
       id: "job-1",
@@ -154,15 +155,100 @@ describe("v1 bulk-status route personRate wiring", () => {
 
     expect(H.settleBulkJobSpy).toHaveBeenCalledTimes(1);
     const passedArgs = H.settleBulkJobSpy.mock.calls[0][1];
-    const expectedRate = getChargePerTrace("wallet", false); // CHARGE_PER_SUCCESS_WALLET
+    const expectedRate = chargePerTrace(H.profile); // CHARGE_PER_SUCCESS_WALLET
 
     // The route must pass its tier-aware rate through verbatim.
     expect(passedArgs.personRate).toBe(expectedRate);
     // Sharpen the fence against the three named wrong-wirings.
     expect(passedArgs.personRate).not.toBe(0);
-    expect(passedArgs.personRate).not.toBe(PRICING.CHARGE_PER_SUCCESS); // the grant/pro rate
+    expect(passedArgs.personRate).not.toBe(PRICING.CHARGE_PER_SUCCESS); // the pro rate
     // Wallet owner is always the local profile id.
     expect(passedArgs.userId).toBe("user-abc");
+  });
+
+  it("passes the PRO rate for a gateway-grant holder, matching sweep-entity-traces", async () => {
+    // SITE: app/api/v1/trace/bulk/status/route.ts perTraceCharge -> chargePerTrace(profile).
+    //
+    // This route settles the PERSON rows of a bulk job; sweep-entity-traces settles the ENTITY
+    // rows of the same job. Until 2026-09-23 this route used a grant-blind raw rate and that cron
+    // branched on the row's source tag, so one job billed a gateway-grant holder $0.25 for person
+    // rows and $0.15 for entity rows -- the owner-type price split L-005 rules out. Both now read
+    // chargePerTrace(profile).
+    // MUTATION: swap in a grant-blind raw rate and this goes red (0.25 where 0.15 is owed).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    try {
+      H.profile = {
+        id: "user-abc",
+        subscription_tier: "wallet",
+        is_acquisition_pro_member: false,
+        gateway_products: ["prop-tracer-pro"],
+      };
+      H.job = {
+        id: "job-1",
+        status: "processing",
+        records_submitted: 1,
+        created_at: new Date().toISOString(),
+      };
+      H.rows = [
+        {
+          id: "row-1",
+          status: "processing",
+          tracerfy_job_id: "tj-1",
+          city: "Austin",
+          state: "TX",
+          ai_research_status: null,
+        },
+      ];
+
+      const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+      await GET(
+        new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1")
+      );
+
+      const passedArgs = H.settleBulkJobSpy.mock.calls[0][1];
+      expect(passedArgs.personRate).toBe(PRICING.CHARGE_PER_SUCCESS);
+      expect(passedArgs.personRate).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+      // The cron's own derivation on the same profile, not a copied number.
+      expect(passedArgs.personRate).toBe(chargePerTrace(H.profile));
+    } finally {
+      if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+      else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("reverts that grant holder to the wallet rate when the kill-switch is off", async () => {
+    // Without this the test above passes under a grant-blind implementation too (L-009).
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    H.profile = {
+      id: "user-abc",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_products: ["prop-tracer-pro"],
+    };
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "processing",
+        tracerfy_job_id: "tj-1",
+        city: "Austin",
+        state: "TX",
+        ai_research_status: null,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+
+    expect(H.settleBulkJobSpy.mock.calls[0][1].personRate).toBe(
+      PRICING.CHARGE_PER_SUCCESS_WALLET
+    );
   });
 });
 

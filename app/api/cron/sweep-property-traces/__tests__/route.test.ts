@@ -751,13 +751,19 @@ describe("owner type selects the vendor, never the price", () => {
  *
  * hasSuiteAccess() is gated on NEXT_PUBLIC_SUITE_SIGNIN_ENABLED, which is false
  * here and TRUE in production. With the flag off, a gateway grant counts for
- * nothing and both tracks collapse to the wallet column, so a pair of tests
- * asserting that the tracks DIFFER passes under the correct implementation and
+ * nothing and every shape collapses to the wallet column, so a test asserting
+ * anything about a grant holder passes under the correct implementation and
  * under the incorrect one alike. That is L-009, and this project has earned it
  * twice. Every test below sets the flag first, and the probe at the end proves
  * the flag is what makes the difference possible.
+ *
+ * WHAT CHANGED 2026-09-23. This cron used to branch on the row's `source` tag and price an
+ * untagged (/api/v1/*) row through a raw helper that ignored the gateway grant. One submit
+ * therefore carried two prices for a grant holder. David's decision -- "One price: make the API
+ * grant-aware" -- collapsed both arms onto pricePlanFor(). The pair below now asserts that the
+ * tag makes NO difference, which is the invariant that replaced it.
  */
-describe("the track is the pricing axis, not the user", () => {
+describe("the caller is the pricing axis, and the source tag is not", () => {
   const GRANT_HOLDER = {
     subscription_tier: "wallet",
     is_acquisition_pro_member: false,
@@ -773,17 +779,38 @@ describe("the track is the pricing axis, not the user", () => {
     expect(deducts()[0].args.p_amount).toBe(TIER2_PRO);
   });
 
-  it("bills that same grant holder the RAW rate on a Track B row", async () => {
+  it("bills that same grant holder the SAME grant-aware rate on an UNTAGGED v1 row", async () => {
+    // SITE: app/api/cron/sweep-property-traces/route.ts pricePlanForRow -> pricePlanFor.
+    // MUTATION: restore the source branch (untagged -> a grant-blind raw plan) and this goes red.
+    // A v1 row carries no source. Under one price that changes nothing: the rate follows the
+    // CALLER's entitlements, never the door the work came in by.
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = { ...GRANT_HOLDER };
-    // A v1 bulk row carries no source. Untagged is Track B, which is also the
-    // dearer derivation, so the fallback errs in the safe direction.
     H.queuedRows = [{ ...ROW, source: null }];
     await run();
-    expect(deducts()[0].args.p_amount).toBe(TIER2_WALLET);
-    // The whole point: reusing the Track A helper here would move an existing
-    // API caller's bill from $0.40 to $0.25, in the direction nobody reports.
-    expect(deducts()[0].args.p_amount).not.toBe(TIER2_PRO);
+    expect(deducts()[0].args.p_amount).toBe(TIER2_PRO);
+    expect(deducts()[0].args.p_amount).not.toBe(TIER2_WALLET);
+  });
+
+  it("prices a tagged and an untagged row for the same caller identically", async () => {
+    // The invariant in one assertion: 'web', 'mcp' and absent all pay the same, because the tag
+    // is a label. MUTATION: make any arm of a restored source branch price differently and this
+    // goes red without needing to know which arm.
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const amounts: number[] = [];
+    for (const source of ["web", "mcp", null]) {
+      // H.rpcCalls is reset per TEST, not per run(), so without this the three runs share one
+      // list and deducts()[0] returns the first run's amount every time -- a tautology that would
+      // pass under an implementation that still branched on the tag.
+      H.rpcCalls = [];
+      H.profile = { ...GRANT_HOLDER };
+      H.queuedRows = [{ ...ROW, source }];
+      await run();
+      expect(deducts()).toHaveLength(1);
+      amounts.push(deducts()[0].args.p_amount as number);
+    }
+    expect(new Set(amounts).size).toBe(1);
+    expect(amounts[0]).toBe(TIER2_PRO);
   });
 
   it("proves the flag is load-bearing, so the pair above is not a tautology", async () => {

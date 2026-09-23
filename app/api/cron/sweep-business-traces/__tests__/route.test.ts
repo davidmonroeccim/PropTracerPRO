@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
+import { chargePerTrace } from "@/lib/suite/pricing";
 
 /**
  * Money fences for the async FastAppend recovery cron.
@@ -476,14 +477,14 @@ describe("the charge write reports the ledger total, never a sum of its own", ()
 });
 
 /* ------------------------------------------------------------------ *
- * THE RATE FOLLOWS THE TRACK, NOT THE OWNER TYPE.
+ * THE RATE FOLLOWS THE CALLER, AND NOTHING ELSE.
  *
- * lib/suite/pricing.ts splits PTP's two price derivations: Track A (session,
- * MCP) is GRANT-AWARE, Track B (the /api/v1/* API-key surface) is RAW. This
- * cron's twin, sweep-entity-traces:178, takes the row's `source` tag and picks
- * the derivation from it. This one never got the argument, so it bills every
- * row grant-aware -- including a v1 row whose person siblings settle raw in the
- * same job, at the same moment, for the same work.
+ * lib/suite/pricing.ts holds PTP's ONE price derivation, and it is grant-aware. This cron used to
+ * branch on the row's `source` tag and settle an untagged (/api/v1/*) row through a raw, grant-
+ * blind rate, so a gateway-grant holder paid $0.15 for the entity row this cron recovered and
+ * $0.25 for the person rows the v1 status route settled beside it: same job, same work, two
+ * prices. David's decision, 2026-09-23 -- "One price: make the API grant-aware" -- removed the
+ * branch. These tests now assert the tag makes NO difference.
  *
  * Both tests set NEXT_PUBLIC_SUITE_SIGNIN_ENABLED, because hasSuiteAccess() is
  * behind it and without it the two rates are the same number (L-009).
@@ -498,22 +499,27 @@ describe("which price derivation a row is billed at", () => {
     };
   });
 
-  it("bills a grant holder the GRANT-AWARE rate on a Track A row", async () => {
+  it("bills a grant holder the GRANT-AWARE rate on a tagged row", async () => {
     H.historyRow = { ...H.historyRow, source: "mcp" };
     await run();
     expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS);
   });
 
-  it("bills that same grant holder the RAW rate on an untagged Track B row", async () => {
-    // A v1 bulk row carries no source. Untagged is Track B, which is also the
-    // dearer derivation, so the fallback errs in the safe direction.
+  it("bills that same grant holder the SAME grant-aware rate on an UNTAGGED v1 row", async () => {
+    // SITE: app/api/cron/sweep-business-traces/route.ts tier1RateFor -> chargePerTrace.
+    // MUTATION: restore the source branch (untagged -> a raw, grant-blind rate) and this goes red.
+    // A v1 row carries no source, and under one price that changes nothing.
     await run();
-    // MUTATION: drop the `source` argument from tier1RateFor (which is what
-    // this cron did until 2026-09-17) and this goes red.
-    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
-    // The whole point: the same profile, same vendor, two tracks, and the
-    // entity row is never cheaper than the person rows settling beside it.
-    expect(deducts()[0].args.p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(deducts()[0].args.p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
+
+  it("agrees with the v1 status route that settles the person rows beside it", async () => {
+    // The rule this whole collapse exists for: one job, one price. chargePerTrace is literally
+    // the function app/api/v1/trace/status/route.ts calls, so this compares the cron's deducted
+    // amount against the route's own derivation rather than against a copied number.
+    await run();
+    expect(deducts()[0].args.p_amount).toBe(chargePerTrace(H.profile!));
   });
 });
 

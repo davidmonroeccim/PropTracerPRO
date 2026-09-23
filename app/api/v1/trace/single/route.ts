@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
-import { rawChargePerRecord, rawPricePlanFor } from '@/lib/api/pricing';
+import { chargePerRecord, chargePerTrace, pricePlanFor } from '@/lib/suite/pricing';
 import { createAddressHash, traceKeyFor, usableZip, validateAddressInput } from '@/lib/utils/address-normalizer';
 import { checkSingleDuplicateByHash } from '@/lib/utils/deduplication';
 import {
@@ -39,7 +39,7 @@ import { dispatchTraceCompleted } from '@/lib/trace/traceCompletedWebhook';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { getChargePerTrace, STALE_PROCESSING, VENDOR_TIMEOUT } from '@/lib/constants';
+import { STALE_PROCESSING, VENDOR_TIMEOUT } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
 /**
@@ -145,7 +145,7 @@ export async function POST(request: Request) {
     // nothing is written and nothing is charged.
     const parcel = parcelForFullTrace({ address, city, state, zip, apn, county });
     const tier1Owner = fullPropertyTrace ? null : String(ownerName).trim();
-    const keyPlan = planRoute({ ...parcel, ownerName: tier1Owner }, rawPricePlanFor(profile));
+    const keyPlan = planRoute({ ...parcel, ownerName: tier1Owner }, pricePlanFor(profile));
     if (keyPlan.steps.length === 0) {
       // INVARIANT: planRoute emits no step exactly when missingLookupKey names what is missing. The
       // state and an owner name with no letters were refused above; a company, or a trust or
@@ -170,12 +170,14 @@ export async function POST(request: Request) {
      * lets a wallet that cannot pay reach the vendors, where the money is spent on our
      * side whether or not we can collect it.
      *
-     * Both rates are RAW (Track B). lib/api/pricing.ts documents why the grant-aware
-     * Track A helpers must not be used on this surface.
+     * Both rates come from the ONE derivation in lib/suite/pricing.ts, which is grant-aware:
+     * a Suite Gateway grant is a pro entitlement for price exactly as it is for access
+     * (lessons.md L-030). The gate and the charge below read the same two functions, because a
+     * gate on a different derivation from the charge reserves the wrong number.
      */
     const minBalance = fullPropertyTrace
-      ? rawChargePerRecord(profile)
-      : getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member);
+      ? chargePerRecord(profile)
+      : chargePerTrace(profile);
     if (profile.wallet_balance < minBalance) {
       return NextResponse.json(
         { success: false, error: 'Insufficient wallet balance' },
@@ -489,13 +491,13 @@ export async function POST(request: Request) {
      * ---------------------------------------------------------------- */
     if (fullPropertyTrace) {
       // 1. The caller's REAL plan, derived from their profile exactly as the tier 1
-      //    rate above is, and RAW because this is Track B. planRoute takes it as a
+      //    rate above is, through the one grant-aware derivation. planRoute takes it as a
       //    required argument so no route can quietly bill the wrong column: a
       //    hardcoded 'pro' once billed pay-as-you-go customers 40% under rate,
       //    silently, because nobody reports being undercharged (FAILSAFE_PRICE_PLAN).
       //    D24: the parcel id key rides along, so a Full Property Trace sent with one tries it
       //    first and the address second.
-      const plan = planRoute(parcel, rawPricePlanFor(profile));
+      const plan = planRoute(parcel, pricePlanFor(profile));
 
       // Defence in depth: planRoute emits no step at all when the parcel has no usable
       // key. The keyPlan check above makes that unreachable from this route, and it is
@@ -723,8 +725,8 @@ export async function POST(request: Request) {
       userId: profile.id,
       row: traceRecord,
       parcel: { ...parcel, ownerName: tier1Owner },
-      pricePlan: rawPricePlanFor(profile),
-      chargeAmount: getChargePerTrace(profile.subscription_tier, profile.is_acquisition_pro_member),
+      pricePlan: pricePlanFor(profile),
+      chargeAmount: chargePerTrace(profile),
       deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS,
       deps: { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
       // D25 money: written into the same UPDATE as trace_result inside runSingleTier1, never ahead
