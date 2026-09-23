@@ -72,7 +72,11 @@ Latency: 4.4 s and 4.1 s on the two hits, 1.5 to 2.0 s on the three misses. All 
   "the county dossier lookup is spent on submission whether or not contacts follow" (lib/constants.ts).
   On L5 it was not spent. The vendor charged $0.00 for the miss and the customer was charged $0.25.
   That is the documented model working as designed, but the reason given for it does not hold on a miss.
-  **Flagged for the owner; no code changed on the strength of it.**
+  **RULED BY DAVID, 2026-09-23: the billing is correct.** His words: "The L5 billing behavior was
+  accurate. It costs $0.25 no matter the result, per request, not per success, when the dossier is used."
+  So the $0.25 stands and is not a defect. What he did NOT rule on, and what stays open as todo task 23,
+  is the REPORTING half: a charged Tier 2 record still carries no outcome code and no sentence, while the
+  two free Tier 1 misses beside it each carried one.
 
 ## Housekeeping
 

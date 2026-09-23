@@ -3163,7 +3163,11 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
-- [ ] 23. **FOUND BY THE PHASE 1 LIVE CHECK, 2026-09-23. A paying Tier 2 single trace is told nothing.**
+- [ ] 23. **FOUND BY THE PHASE 1 LIVE CHECK, 2026-09-23. A paying Tier 2 single trace is told nothing.
+      THE BILLING HALF IS CLOSED BY DAVID, 2026-09-23: "The L5 billing behavior was accurate. It costs
+      $0.25 no matter the result, per request, not per success, when the dossier is used." So the $0.25 on
+      a dossier miss is CORRECT and is not to be revisited. THE REPORTING HALF IS STILL OPEN: he did not
+      rule on the missing outcome code and sentence, and that is what this task now tracks.**
       L5 of the live check (AR Benton, parcel with no city) was charged $0.25, cost us $0.00, returned no
       contacts and no property record, and was given NO reason: the stored row has `outcome_code`,
       `found_by` and `contact_vendor` all NULL, and the API response carries no `outcomeCode`, no
@@ -3173,11 +3177,12 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       Known deferral, not a surprise: Phase 1 plan carried item 7 ("Tier 2 single keeps today's failure
       answer in Phase 1") and a Task 10 deferred minor recorded the tier 2 branch omitting
       foundBy/outcomeCode. The live check turned it into a measured fact with money attached.
-      SECOND, SEPARATE POINT FOR DAVID (pricing rationale, not a bug): `lib/constants.ts` justifies
-      billing Tier 2 per record submitted on the grounds that "the county dossier lookup is spent on
-      submission whether or not contacts follow". On L5 it was NOT spent -- the vendor charged $0.00 for
-      the miss while the customer was charged $0.25. The model works as designed; the stated reason for
-      it does not hold on a miss. His call whether that matters.
+      RESOLVED, the pricing question: David ruled the charge correct -- Tier 2 is per REQUEST, not per
+      success, whenever the dossier is used, and the result does not change it. The only residue is that
+      `lib/constants.ts` explains the rule with "the county dossier lookup is spent on submission whether
+      or not contacts follow", which is not literally true on a miss (the vendor charged $0.00). That is a
+      COMMENT accuracy point, not a billing one, and it is not customer-facing. Fix it in passing the next
+      time that file is touched; do not re-open the rate.
 - [ ] 22. **LIVE DEFECT, found 2026-09-23 by the Phase 1 live check, David's call to fix it ("This more
       important than a test"). The v1 API refuses every gateway-granted customer.** `lib/api/auth.ts:95`
       gates the whole API on `subscription_tier === 'pro' || is_acquisition_pro_member` and never consults
