@@ -3180,13 +3180,13 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       later trace of that address WITH an owner never matches it under D25's text, runs a new Tier 1 trace, and
       would replace the paid Full Property Trace contacts. Since D39 the Tier 1 half no longer does; before Phase 1
       that request was served the cached row free.
-      **CONSEQUENCE OF D39 AS WRITTEN, for David:** the reuse UPDATE at the top of both single routes sets
-      `status = 'processing'` before the settle runs, and D39 names `status` among the columns the settle must leave
-      alone, so a preserved row keeps `status = 'processing'` beside `is_successful = true`. The contacts are safe
-      and the cache still serves them (`CACHE_HIT_FILTER` does not read `status`), but History shows the row as
-      Processing, and `app/api/cron/sweep-stale-traces` later writes `status = 'error'` on it (that cron writes only
-      that one column, so nothing is lost). One line in the settle (`status: 'success'` on the preserved branch)
-      would fix it; it was not added because D39 says to write ONLY the internal columns.
+      **CLOSED 2026-09-23 (part 2), by David's ruling on the wave's own concerns:** the preserved branch also writes
+      `status = 'success'` (the reuse UPDATE at the top of both single routes sets `processing` before the settle
+      runs, which contradicted `is_successful = true`, showed History a Processing row over paid contacts, and handed
+      it to `app/api/cron/sweep-stale-traces` to mark `error`), and writes `outcome_code` when, and only when, this
+      trace ended `busy_try_again`, so a resend inside 24 hours still resumes from the step log. `found_by` and every
+      other customer-visible column are still left alone, and a busy code on a successful row can never surface as a
+      sentence because `tier1OutcomeReason` returns null whenever `is_successful` is true.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and

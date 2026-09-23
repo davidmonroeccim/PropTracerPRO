@@ -284,6 +284,44 @@ describe('runSingleTier1: the busy_try_again resend (spec 5.2)', () => {
     expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({ outcome: 'miss', reused: true })
   })
 
+  it('resumes a preserved row that went busy while holding paid contacts (D39 part 2)', async () => {
+    // TWO RUNS, CHAINED THROUGH THE COLUMNS THE FIRST ONE WROTE, because that chain IS the fix:
+    // without outcome_code on the preserved branch the row keeps its old found_by_* code, the
+    // resend does not recognise it as busy, and the Instant step it already answered is bought
+    // again. The second run is handed exactly what the first run persisted.
+    // MUTATION: never write outcome_code on the preserved branch and this goes red.
+    const paidBusyRow = {
+      id: 'row-1', charge: 0.25, tier: 2,
+      trace_result: { owner_name: 'Earlier Owner', phones: [{ number: '5550000999', type: 'mobile' }], emails: [] },
+    }
+
+    // Run 1: the Instant step answers a miss, then the entity vendor is down. Busy, free, and the
+    // row's paid contacts are preserved.
+    const first = deps({ traceEntity: vi.fn(async () => DOWN) })
+    const r1 = await run({ parcel: TRUST, deps: first, row: paidBusyRow })
+    expect(r1.outcome).toBe('busy_try_again')
+    const written = persisted()!
+    expect(written).not.toHaveProperty('trace_result')
+
+    // Run 2: the row as the database now holds it.
+    H.ops = []
+    const second = deps()
+    await run({
+      parcel: TRUST, deps: second,
+      row: {
+        ...paidBusyRow,
+        outcome_code: written.outcome_code as string | null,
+        trace_steps: written.trace_steps,
+      },
+    })
+    expect(second.tracePerson).not.toHaveBeenCalled()
+    expect(second.traceEntity).toHaveBeenCalledTimes(1)
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({ outcome: 'miss', reused: true })
+    // Still preserved: the contacts and the receipt are untouched by the resend too.
+    expect(persisted()).not.toHaveProperty('trace_result')
+    expect(persisted()).not.toHaveProperty('charge')
+  })
+
   it('runs a row that is NOT busy fresh, whatever its log says', async () => {
     // MUTATION: pass the log through whatever the outcome_code and this goes red.
     const d = deps()
@@ -311,17 +349,59 @@ describe('runSingleTier1: a trace that finds nothing never erases a stored resul
     const p = persisted()!
     for (const column of [
       'trace_result', 'input_owner_name', 'phone_count', 'email_count',
-      'is_successful', 'status', 'charge', 'cost', 'found_by', 'outcome_code', 'tier',
+      'is_successful', 'charge', 'cost', 'found_by', 'outcome_code', 'tier',
     ]) {
       expect(p, column).not.toHaveProperty(column)
     }
-    // Only the internal columns and the queue columns this settle always nulls.
+    // Only the internal columns, the queue columns this settle always nulls, and the status the
+    // stored result has always had (part 2 below).
     expect(Object.keys(p).sort()).toEqual(
-      ['ai_research_status', 'contact_vendor', 'property_trace_status', 'trace_steps', 'tracerfy_job_id'].sort()
+      ['ai_research_status', 'contact_vendor', 'property_trace_status', 'status', 'trace_steps', 'tracerfy_job_id'].sort()
     )
     // The customer still hears THIS trace's own outcome, free.
     expect(r).toMatchObject({ outcome: 'no_match', status: 'no_match', charge: 0 })
     expect(deducts()).toHaveLength(0)
+  })
+
+  it('leaves the row reading success, so no sweep later writes error over the paid contacts', async () => {
+    // Both single routes set status 'processing' on the row BEFORE this settle runs. Leaving it
+    // there contradicts is_successful = true, shows the customer "Processing" in History, and
+    // hands the row to app/api/cron/sweep-stale-traces, whose query is
+    // status = 'processing' AND trace_job_id IS NULL and whose write is status = 'error'.
+    // MUTATION: drop `status: 'success'` from the preserved branch and this goes red.
+    const r = await run({ row: PAID_ROW, inputOwnerName: 'A Different Owner' })
+    const p = persisted()!
+    expect(p.status).toBe('success')
+    // The stale sweep's own predicate now matches nothing, so it has nothing to change.
+    expect(p.status).not.toBe('processing')
+    // is_successful is NOT rewritten: it is already true, and the two must not disagree.
+    expect(p).not.toHaveProperty('is_successful')
+    expect(r.status).toBe('no_match')
+  })
+
+  it('records busy_try_again on a preserved row, so a resend can still resume its step log', async () => {
+    // MUTATION: never write outcome_code on the preserved branch and the resume test below goes
+    // red (the resend reads outcome_code to decide whether to reuse the log).
+    const r = await run({ row: PAID_ROW, deps: deps({ tracePerson: vi.fn(async () => DOWN) }) })
+    const p = persisted()!
+    expect(p.outcome_code).toBe('busy_try_again')
+    // Everything the customer can see is still the stored result's.
+    expect(p).not.toHaveProperty('trace_result')
+    expect(p).not.toHaveProperty('found_by')
+    expect(p).not.toHaveProperty('is_successful')
+    expect(p).not.toHaveProperty('charge')
+    // status stays 'success': is_successful is true and tier1OutcomeReason returns null on a
+    // successful row, so the busy code can never surface as a sentence here.
+    expect(p.status).toBe('success')
+    expect(r).toMatchObject({ outcome: 'busy_try_again', status: 'error', charge: 0 })
+  })
+
+  it('writes NO outcome_code on a preserved row whose outcome is an ordinary free one', async () => {
+    // A no_match must not overwrite the found_by_* code the stored result was filed under.
+    // MUTATION: write outcome_code unconditionally on the preserved branch and this goes red.
+    const r = await run({ row: PAID_ROW })
+    expect(persisted()).not.toHaveProperty('outcome_code')
+    expect(r.outcome).toBe('no_match')
   })
 
   it('keeps a stored result whose only contact is an email', async () => {

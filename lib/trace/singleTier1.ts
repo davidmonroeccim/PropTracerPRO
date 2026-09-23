@@ -191,9 +191,10 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
   //
   // Only the INTERNAL columns are written on that path: the step log, the contact vendor, and the
   // queue columns this settle always nulls. `trace_result`, `input_owner_name`, the two counts,
-  // `is_successful`, `status`, `charge`, `cost`, `found_by` and `outcome_code` are left exactly as
-  // they are. The customer is still told THIS trace's own outcome, free: the returned
-  // SingleTier1Result is unchanged either way.
+  // `is_successful`, `charge`, `cost` and `found_by` are left exactly as they are. The customer is
+  // still told THIS trace's own outcome, free: the returned SingleTier1Result is unchanged either
+  // way. Two columns on that path are written rather than left, and both are written BECAUSE the
+  // row keeps its stored result; see `preservedStatus` and `preservedOutcome` below.
   const keepsPaidContacts = !billable && hasContactData(storedResultOf(input.row.trace_result))
 
   // The queue columns. A reused row can carry a stale value from a bulk job; it must not answer
@@ -210,7 +211,28 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
   // reads `.from('trace_history').update({` and parses the object literal that follows, so a
   // payload hidden behind a ternary would make the receipt fence blind to this settle.
   const { error } = keepsPaidContacts
-    ? await input.adminClient.from('trace_history').update({ ...internalWrite }).eq('id', input.row.id)
+    ? await input.adminClient
+        .from('trace_history')
+        .update({
+          ...internalWrite,
+          // THE ROW GENUINELY HOLDS A DELIVERED RESULT, SO IT READS AS ONE. Both single routes set
+          // status 'processing' on the row before this settle runs. Leaving it there would
+          // contradict `is_successful`, which is already true and is not rewritten here: History
+          // would show "Processing" over a set of paid contacts, and
+          // app/api/cron/sweep-stale-traces (status = 'processing' AND trace_job_id IS NULL) would
+          // later write status = 'error' on it. This is the stored result's own status, restored,
+          // not this trace's -- this trace reports its own outcome in SingleTier1Result.
+          status: 'success',
+          // BUSY IS THE ONE OUTCOME THE ROW STILL HAS TO CARRY. A resend inside 24 hours resumes
+          // from the step log only when it finds outcome_code 'busy_try_again' (above), so leaving
+          // the row's old found_by_* code here would make the retry buy the answered steps again.
+          // Safe: `tier1OutcomeReason` returns null whenever `is_successful` is true, so a busy
+          // code on a successful row can never surface as a sentence. Every other outcome is left
+          // alone, because overwriting found_by_address with no_match would relabel a result that
+          // did find contacts.
+          ...(outcome === TIER1_OUTCOME.BUSY_TRY_AGAIN ? { outcome_code: outcome } : {}),
+        })
+        .eq('id', input.row.id)
     : await input.adminClient
         .from('trace_history')
         .update({

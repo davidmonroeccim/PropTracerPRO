@@ -17,11 +17,17 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   status twin, and both HighLevel push sites. The Tier 2 cron's parcelForRow no longer reads the
   literal word APN out of such a key as a street.
 - D39. A trace that finds nothing no longer erases a stored result that already carries a phone or
-  an email. On that persist only the step log, the contact vendor and the queue columns are
-  written; the result, the owner name it belongs to, the counts, the charge, the cost, the success
-  flag and the outcome stay as they are. The customer still hears this trace's own outcome, free.
-  A row holding no contacts is overwritten as before, and a trace that delivers contacts
-  overwrites and charges as before.
+  an email. On that persist the result, the owner name it belongs to, the counts, the charge, the
+  cost, the success flag and the found-by key stay as they are; the step log, the contact vendor
+  and the queue columns are written. Two more columns are written on that path BECAUSE the row
+  keeps its stored result: status goes back to success (the routes set processing before the
+  settle runs, and leaving it there contradicted is_successful, showed History a Processing row
+  over paid contacts, and handed it to the stale sweep to mark error), and outcome_code is written
+  when, and only when, this trace ended busy_try_again, so a resend inside 24 hours still resumes
+  from the step log instead of buying the answered steps again. A busy code on a successful row can
+  never produce a sentence, because tier1OutcomeReason returns null whenever is_successful is true.
+  The customer still hears this trace's own outcome, free. A row holding no contacts is overwritten
+  as before, and a trace that delivers contacts overwrites and charges as before.
 - D40. No cap on owners tried, so no behaviour changed. The tier 2 plan's maxVendorCost comment
   was wrong: it called one dossier plus one contact call the realistic ceiling. It is now
   documented as a FLOOR, with the reason the true worst case cannot be computed before the dossier
@@ -43,9 +49,11 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   AL" was spending up to twenty cents on a match that could never succeed); the trace.completed
   module's header no longer says Tier 1 completes in the poll route; and the dead debugInfo and
   abortRef left by the de-polling are gone from the single-trace page.
-- vitest 1833 passing / 83 files, 0 failing (was 1795 / 83); tsc 0 errors; eslint 46 problems,
-  unchanged; next build compiles clean. 34 mutations run, one per fix and one per call site, every
+- vitest 1837 passing / 83 files, 0 failing (was 1795 / 83); tsc 0 errors; eslint 46 problems,
+  unchanged; next build compiles clean. 37 mutations run, one per fix and one per call site, every
   one RED when applied and green when restored; none survived.
+- Two commits: the wave, then the owner's part 2 (the status and outcome_code columns above), which
+  fixed the two defects the wave's own report had raised as concerns rather than papered over.
 - Report: .superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md.
 
 ## 2026-09-22 (m): Tier 1 Phase 1, Task 12 up to the HARD STOP: gates, the runner, the sample, dry plan.
