@@ -74,6 +74,24 @@ function isDedupSelect(rec: Recorded): boolean {
   return rec.op === "select" && rec.filters.some((f) => f[0] === "or");
 }
 
+/**
+ * POSTGREST COLUMN PROJECTION, EMULATED, for the plain trace_history selects this route makes.
+ *
+ * A column the query never asked for does not come back, and a stub that ignores `.select(...)`
+ * hides exactly that. Dropping `trace_job_id` from the existingRow probe would leave every test
+ * in this file green while the live-work threshold read EVERY row as a single-trace row, which
+ * is the failure that looks identical to success.
+ */
+function projectRow(row: Record<string, unknown> | null, select: unknown): unknown {
+  if (!row || typeof select !== "string" || select.trim() === "*") return row;
+  const columns = new Set(select.split(",").map((c) => c.trim()));
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (columns.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
   if (rec.op === "delete") return { data: null, error: H.deleteError };
   if (rec.op === "insert") {
@@ -94,7 +112,7 @@ function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
       ? { data: H.cached, error: null }
       : { data: null, error: { code: "PGRST116", message: "no rows" } };
   }
-  return { data: H.survivingRow, error: null };
+  return { data: projectRow(H.survivingRow, rec.payload), error: null };
 }
 
 function recordingClient() {
@@ -348,6 +366,33 @@ describe("POST /api/v1/trace/single — gates", () => {
     // The error is the same sentence, never a routing note or a line that does not state the
     // charge (fix round 1: the fallback chain is gone).
     expect(body.error).toBe(body.skipReason);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a parcel id sent with no county and no city, naming the COUNTY (D41)", async () => {
+    // The caller DID send a parcel id; the older sentence told them it was missing and sent them
+    // looking for a field they already supplied.
+    // MUTATION: delete the county_for_parcel arm of missingLookupKey and this goes red with
+    // "missing the city and the parcel ID".
+    const res = await post({ state: "OH", apn: "0123-456", ownerName: "Testowner Placeholder" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toMatchObject({ success: false, outcomeCode: "no_lookup_key" });
+    expect(body.skipReason).toBe(
+      "This record is missing the county for that parcel ID, so it could not be looked up. You were not charged. Send it again with the county."
+    );
+    expect(body.error).toBe(body.skipReason);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("names the county on a Full Property Trace sent the same way (D41)", async () => {
+    // No owner name, so this is the tier 2 door; the dossier needs the same three-part key.
+    const res = await post({ state: "OH", apn: "0123-456" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.skipReason).toBe(
+      "This record is missing the county for that parcel ID, so it could not be looked up. You were not charged. Send it again with the county."
+    );
     expect(H.ops).toHaveLength(0);
   });
 
@@ -2097,6 +2142,27 @@ describe("v1 tier 1: busy, money, the resend and D25 on this call site (L-018)",
   });
 });
 
+describe("v1 tier 2: warnings are wallet-only too, the routing notes stay internal", () => {
+  it("does not leak a routing warning into a Full Property Trace's body.warnings", async () => {
+    // Task 9 fixed exactly this for tier 1; tier 2 was still spreading execution.warnings.
+    // MUTATION: `const warnings = [...execution.warnings]` again and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([]);
+  });
+
+  it("still says the two wallet sentences, which are the caller's own money", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    H.deductData = false;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([
+      "The wallet did not cover this record, so nothing was charged for it.",
+    ]);
+  });
+});
+
 describe("v1 tier 1: warnings are wallet-only, the routing notes stay internal", () => {
   it("does not leak a routing warning into body.warnings", async () => {
     // MUTATION: return tier1.execution.warnings instead of the wallet-only array and this goes
@@ -2254,6 +2320,45 @@ describe("v1 tier 1: a row with live work is never touched", () => {
     H.insertedRow = { id: "trace-old", charge: 0, tier: null };
     const res = await post();
     expect(res.status).toBe(200);
+  });
+
+  it("reports the tier the request actually is, so a Full Property Trace is not told tier 1", async () => {
+    // MUTATION: hard-code `tier: TRACE_TIER.PER_SUCCESSFUL_TRACE` on the live-work 503 again and
+    // this goes red.
+    H.survivingRow = {
+      id: "trace-live-t2", status: "processing", created_at: new Date().toISOString(),
+      charge: 0, tier: null,
+    };
+    const res = await post(TIER2_BODY);
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.tier).toBe(2);
+  });
+
+  it("gives up on a single-trace processing row after minutes, not after the cron's hour", async () => {
+    // A single trace cannot outlive maxDuration = 60 s, so a row it left behind is dead long
+    // before CRON_TIMEOUT_MINUTES and every resend of that address would answer busy for an hour.
+    // MUTATION: use CRON_TIMEOUT_MINUTES for a row with no trace_job_id and this goes red.
+    // MUTATION: drop trace_job_id from the existingRow select and this goes red too: the column
+    // never arrives, every row reads as a single-trace row, and the bulk case below breaks.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = {
+      id: "trace-dead", status: "processing", trace_job_id: null,
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(), charge: 0, tier: null,
+    };
+    H.insertedRow = { id: "trace-dead", charge: 0, tier: null };
+    const res = await post();
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps the cron's hour for a processing row a BULK job owns", async () => {
+    // MUTATION: use SINGLE_REQUEST_TIMEOUT_MINUTES for every row and this goes red.
+    H.survivingRow = {
+      id: "trace-bulk", status: "processing", trace_job_id: "job-1",
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(), charge: 0, tier: null,
+    };
+    const res = await post();
+    expectUntouchedBusy(res, await res.json(), "trace-bulk");
   });
 });
 

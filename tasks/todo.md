@@ -30,6 +30,11 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [~] Task 12: gates green, runner built, sample chosen, dry `--plan` run ($1.10 worst case).
         STOPPED at the owner's HARD STOP before any live vendor call. Live check, and re-ticking
         this task, wait for the owner's dollar amount. Report: tasks/phase1-live-check.md.
+  - [x] Final review fix wave (2026-09-23): D38 parcel display, D39 keep the paid contacts, D40 the
+        maxVendorCost floor, D41 the county refusal, plus the seven review findings (503 tier,
+        live-work threshold, tier 2 warnings, the Tier 1 plan guard, TRS as a surname, the
+        trace.completed header, the de-polling dead code). Report:
+        `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md`.
 - [ ] Phase 2: bulk queue (plan written after Phase 1)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
@@ -3160,16 +3165,28 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       trace on the same row the same day that finds contacts, is treated as already paid and reports charge 0.40.
       The test "asks the ledger nothing when nothing is billable" (lib/trace/__tests__/singleTier1.test.ts) pins
       today's behaviour; a fix that probes on every path must invert it.
-- [ ] 20. **FOR DAVID, pre-existing, recorded 2026-09-22 (Task 8 review), not a Phase 1 change.** A trace row is one
-      per address per user, and every settle on a REUSED row overwrites `trace_result`, `phone_count`, `email_count`,
-      `is_successful` and `cost` (the Tier 2 single route does it today, app/api/trace/single/route.ts ~:508-523, and
-      the new Tier 1 settle does the same). So a customer who paid for contacts on an address, then traces the same
-      address again for a different owner (D25) and finds nothing, loses the earlier paid contacts from History and
-      the CSV, while `charge` keeps the running total (D34). Needs David's call on whether a free re-trace may
-      replace a paid result.
+- [~] 20. **ANSWERED for the SINGLE routes by spec D39 (2026-09-22 final review); the Tier 2 persist and the bulk
+      settles are still open.** A trace row is one per address per user, and every settle on a REUSED row used to
+      overwrite `trace_result`, `phone_count`, `email_count`, `is_successful` and `cost`. So a customer who paid for
+      contacts on an address, then traced the same address again for a different owner (D25) and found nothing, lost
+      the earlier paid contacts from History and the CSV, while `charge` kept the running total (D34).
+      **DONE 2026-09-23, Tier 1 single traces (`lib/trace/singleTier1.ts`):** a trace that finds nothing and meets a
+      row already carrying a phone or an email writes only the step log, the contact vendor and the queue columns,
+      and leaves the result, the owner name it belongs to, the counts, the charge, the cost, the success flag and the
+      outcome untouched. The response still reports this trace's own outcome, free.
+      **STILL OPEN:** the same overwrite on the TIER 2 single persists (app/api/trace/single/route.ts,
+      app/api/v1/trace/single/route.ts) and on the bulk settles, which D39 did not reach.
       Same family (Task 9 review): a Full Property Trace row stores no supplied owner (`input_owner_name` NULL), so a
       later trace of that address WITH an owner never matches it under D25's text, runs a new Tier 1 trace, and
-      replaces the paid Full Property Trace contacts. Before Phase 1 that request was served the cached row free.
+      would replace the paid Full Property Trace contacts. Since D39 the Tier 1 half no longer does; before Phase 1
+      that request was served the cached row free.
+      **CONSEQUENCE OF D39 AS WRITTEN, for David:** the reuse UPDATE at the top of both single routes sets
+      `status = 'processing'` before the settle runs, and D39 names `status` among the columns the settle must leave
+      alone, so a preserved row keeps `status = 'processing'` beside `is_successful = true`. The contacts are safe
+      and the cache still serves them (`CACHE_HIT_FILTER` does not read `status`), but History shows the row as
+      Processing, and `app/api/cron/sweep-stale-traces` later writes `status = 'error'` on it (that cron writes only
+      that one column, so nothing is lost). One line in the settle (`status: 'success'` on the preserved branch)
+      would fix it; it was not added because D39 says to write ONLY the internal columns.
 - [ ] 16. **DEFERRED, needs a migration: the wallet reserve is a RESERVE, not a LOCK.** 5c-3A's
       submit check now sizes against in-flight unbilled work, which closes the back-to-back
       double-submit gap. It does NOT close the sub-second window between one submit's own read and

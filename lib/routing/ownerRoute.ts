@@ -402,7 +402,14 @@ export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan 
       tier, billing: { model: 'per_record', amount: priceFor(pricePlan).tier2PerRecord },
       pricePlan, parcel,
       ownerName: null, ownerType: 'unknown', needsOwnerDiscovery: true, steps,
-      // Only one dossier key can hit, so the realistic ceiling is one dossier plus one contact call.
+      // A FLOOR, NOT A CEILING, and it is named maxVendorCost only because that is the field on
+      // every plan. Only one dossier key can hit, so the dossier is bought once; but D21 (c) then
+      // tries EVERY owner the dossier names, each on its own ladder, and D40 put no cap on that.
+      // The real cost of a tier 2 record is the dossier plus up to $0.30 for each owner named, and
+      // the owner count is unknowable here because the dossier has not run yet. This figure is the
+      // cheapest way the record can finish once it hits: one dossier plus one contact call. A
+      // caller that needs the true worst case has to compute it per owner AFTER the dossier
+      // answers (tasks/research-scripts/phase1/run-live.ts does exactly that).
       maxVendorCost: VENDOR_COST.DOSSIER + VENDOR_COST.FASTAPPEND_ENTITY,
       warnings,
     }
@@ -482,10 +489,23 @@ function entityStep(parcel: ParcelInput, name: string, warnings: string[]): Rout
   }
 }
 
+/**
+ * A TRUSTEE MARKER IS NEVER A SURNAME. D30 kept a name ENDING in TRS an entity because TRS is not
+ * a trust word (D28), so the trust ladder would send TRS as the last name and the D6 match could
+ * never succeed -- up to $0.20 spent for nothing, every time. The same reasoning applies wherever
+ * one of these markers lands as the surname: "JOHN SMITH TRS ET AL" does not END in TRS, so it
+ * reaches the person ladder with last_name "TRS", which is the case D30 was written to stop.
+ */
+const TRUSTEE_SURNAME = /^(TRS|TR|TTEE)\.?$/i
+
 /** A first name or initial AND a last name, or null when the name leaves no such pair (D16). */
 function personNameFor(name: string): { first_name: string; last_name: string } | null {
   const who = splitPersonName(name)
-  return who.first_name && who.last_name ? who : null
+  if (!who.first_name || !who.last_name) return null
+  // No person step. The caller falls back to FastAppend on the FULL name, exactly as D16 does for
+  // a name that leaves no first name at all.
+  if (TRUSTEE_SURNAME.test(who.last_name)) return null
+  return who
 }
 
 /**

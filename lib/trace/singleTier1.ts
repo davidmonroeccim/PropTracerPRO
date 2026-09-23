@@ -36,11 +36,27 @@ import type { TraceResult } from '@/types'
 /** The wallet ledger line: the words the retired poll route wrote for a Tier 1 charge. */
 export const TIER1_CHARGE_DESCRIPTION = 'Skip trace - successful match'
 
+/**
+ * runSingleTier1 was handed a record with no owner name. planRoute answers that with a TIER 2
+ * plan -- the dossier -- which this settle would buy and then charge at the Tier 1 rate.
+ */
+export class NotATier1PlanError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NotATier1PlanError'
+  }
+}
+
 /** The row this request reused or inserted, as it stood BEFORE this attempt. */
 export interface SingleTier1Row extends CacheHitRow {
   id: string
   outcome_code?: string | null
   trace_steps?: unknown
+  /**
+   * The result the row already holds. D39: a trace that finds nothing must not erase contacts
+   * the customer has already paid for. JSONB, so it is `unknown` and read defensively below.
+   */
+  trace_result?: unknown
 }
 
 export interface SingleTier1Input {
@@ -82,8 +98,22 @@ export interface SingleTier1Result {
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
+/** The result already on the row, read the way a JSONB column has to be: never cast blindly. */
+const storedResultOf = (value: unknown): TraceResult | null =>
+  value !== null && typeof value === 'object' ? (value as TraceResult) : null
+
 export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTier1Result> {
   const plan = planRoute(input.parcel, input.pricePlan)
+
+  // A TIER 1 SETTLE, AND ONLY A TIER 1 SETTLE. planRoute returns a tier 2 plan for a record with
+  // no owner name: the $0.20 dossier would be bought here and then billed at the Tier 1 rate, or
+  // not billed at all. Both single routes send an ownerless record down their own tier 2 branch,
+  // so this cannot fire today. It is here so a future caller cannot make it fire quietly.
+  if (plan.tier !== 1) {
+    throw new NotATier1PlanError(
+      'runSingleTier1 needs a record with an owner name: planRoute returned a Tier 2 plan.',
+    )
+  }
 
   // Only a busy_try_again row RESUMES (spec 5.2). Any other finished row runs fresh, and an answer
   // older than 24 hours is never reused either way: executeRoute judges each entry by its own time,
@@ -154,30 +184,51 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
         }),
       )
 
-  const { error } = await input.adminClient
-    .from('trace_history')
-    .update({
-      status,
-      trace_result: result,
-      input_owner_name: input.inputOwnerName,
-      phone_count: result?.phones?.length || 0,
-      email_count: result?.emails?.length || 0,
-      is_successful: status === 'success',
-      charge: billing.charge,
-      tier: billing.tier,
-      // What the vendors took for this record, answers reused from the log included.
-      cost: round2(execution.steps.reduce((sum, s) => sum + s.cost, 0)),
-      contact_vendor: contactVendorFrom(execution.steps),
-      outcome_code: outcome,
-      found_by: foundBy,
-      trace_steps: execution.steps,
-      tracerfy_job_id: null,
-      // A reused row can carry a stale queue value from a bulk job; it must not answer
-      // rowSkipReason for this single trace.
-      ai_research_status: null,
-      property_trace_status: null,
-    })
-    .eq('id', input.row.id)
+  // KEEP THE PAID CONTACTS (spec D39). A trace that finds NOTHING never erases a stored result
+  // that already carries a phone or an email. That result was bought, and it belongs to the owner
+  // the row already names, so `input_owner_name` has to stay with it (D25): writing this trace's
+  // owner over it would leave the row naming one owner while holding another's contacts.
+  //
+  // Only the INTERNAL columns are written on that path: the step log, the contact vendor, and the
+  // queue columns this settle always nulls. `trace_result`, `input_owner_name`, the two counts,
+  // `is_successful`, `status`, `charge`, `cost`, `found_by` and `outcome_code` are left exactly as
+  // they are. The customer is still told THIS trace's own outcome, free: the returned
+  // SingleTier1Result is unchanged either way.
+  const keepsPaidContacts = !billable && hasContactData(storedResultOf(input.row.trace_result))
+
+  // The queue columns. A reused row can carry a stale value from a bulk job; it must not answer
+  // rowSkipReason for this single trace.
+  const internalWrite = {
+    contact_vendor: contactVendorFrom(execution.steps),
+    trace_steps: execution.steps,
+    tracerfy_job_id: null,
+    ai_research_status: null,
+    property_trace_status: null,
+  }
+
+  // TWO STATEMENTS, NOT ONE WITH A TERNARY PAYLOAD. lib/trace/__tests__/chargeReceipt.test.ts
+  // reads `.from('trace_history').update({` and parses the object literal that follows, so a
+  // payload hidden behind a ternary would make the receipt fence blind to this settle.
+  const { error } = keepsPaidContacts
+    ? await input.adminClient.from('trace_history').update({ ...internalWrite }).eq('id', input.row.id)
+    : await input.adminClient
+        .from('trace_history')
+        .update({
+          status,
+          trace_result: result,
+          input_owner_name: input.inputOwnerName,
+          phone_count: result?.phones?.length || 0,
+          email_count: result?.emails?.length || 0,
+          is_successful: status === 'success',
+          charge: billing.charge,
+          tier: billing.tier,
+          // What the vendors took for this record, answers reused from the log included.
+          cost: round2(execution.steps.reduce((sum, s) => sum + s.cost, 0)),
+          outcome_code: outcome,
+          found_by: foundBy,
+          ...internalWrite,
+        })
+        .eq('id', input.row.id)
 
   return {
     execution,

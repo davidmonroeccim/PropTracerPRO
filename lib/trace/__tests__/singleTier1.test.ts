@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { runSingleTier1, TIER1_CHARGE_DESCRIPTION, type SingleTier1Input } from '@/lib/trace/singleTier1'
+import { NotATier1PlanError, runSingleTier1, TIER1_CHARGE_DESCRIPTION, type SingleTier1Input } from '@/lib/trace/singleTier1'
 import { requestKeyFor, type ContactResult, type RouteDeps, type StepReport } from '@/lib/routing/executeRoute'
 import { planRoute, type ParcelInput } from '@/lib/routing/ownerRoute'
 import { BUSY_TRY_AGAIN_REASON, OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome'
@@ -295,7 +295,78 @@ describe('runSingleTier1: the busy_try_again resend (spec 5.2)', () => {
   })
 })
 
+describe('runSingleTier1: a trace that finds nothing never erases a stored result (D39)', () => {
+  /** The row as a reused, already-paid address stands: an EARLIER owner's contacts on it. */
+  const PAID_ROW = {
+    id: 'row-1',
+    charge: 0.25,
+    tier: 2,
+    trace_result: { owner_name: 'Earlier Owner', phones: [{ number: '5550000999', type: 'mobile' }], emails: [] },
+  }
+
+  it('keeps the stored result, the old owner name, the counts, the charge and the outcome', async () => {
+    // MUTATION: delete the keepStoredContacts branch (always write the full payload) and this
+    // goes red: trace_result, input_owner_name, charge and the rest come back in the update.
+    const r = await run({ row: PAID_ROW, inputOwnerName: 'A Different Owner' })
+    const p = persisted()!
+    for (const column of [
+      'trace_result', 'input_owner_name', 'phone_count', 'email_count',
+      'is_successful', 'status', 'charge', 'cost', 'found_by', 'outcome_code', 'tier',
+    ]) {
+      expect(p, column).not.toHaveProperty(column)
+    }
+    // Only the internal columns and the queue columns this settle always nulls.
+    expect(Object.keys(p).sort()).toEqual(
+      ['ai_research_status', 'contact_vendor', 'property_trace_status', 'trace_steps', 'tracerfy_job_id'].sort()
+    )
+    // The customer still hears THIS trace's own outcome, free.
+    expect(r).toMatchObject({ outcome: 'no_match', status: 'no_match', charge: 0 })
+    expect(deducts()).toHaveLength(0)
+  })
+
+  it('keeps a stored result whose only contact is an email', async () => {
+    const r = await run({
+      row: { id: 'row-1', charge: 0.15, tier: 1, trace_result: { owner_name: 'Earlier Owner', phones: [], emails: ['a@b.example'] } },
+    })
+    expect(persisted()).not.toHaveProperty('trace_result')
+    expect(r.status).toBe('no_match')
+  })
+
+  it('overwrites a reused row that holds NO contacts, exactly as before', async () => {
+    // MUTATION: drop the hasContactData(storedResult) half of the condition and this goes red.
+    const r = await run({
+      row: { id: 'row-1', charge: 0.4, tier: 2, trace_result: { owner_name: 'Earlier Owner', phones: [], emails: [] } },
+    })
+    expect(persisted()).toMatchObject({
+      status: 'no_match', is_successful: false, trace_result: null, outcome_code: 'no_match', charge: 0.4, tier: 2,
+    })
+    expect(r.status).toBe('no_match')
+  })
+
+  it('overwrites when THIS trace delivers contacts, and charges for them', async () => {
+    // MUTATION: drop the `!billable` half of the condition and this goes red: the new contacts
+    // would never be written.
+    const r = await run({ row: PAID_ROW, deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+    expect(deducts()).toHaveLength(1)
+    expect(persisted()).toMatchObject({
+      status: 'success', is_successful: true, outcome_code: 'found_by_address', charge: 0.4, tier: 2,
+    })
+    expect(persisted()?.trace_result).toMatchObject({ phones: [{ number: '5550000101', type: 'mobile' }] })
+    expect(r.charge).toBe(0.15)
+  })
+})
+
 describe('runSingleTier1: what it writes', () => {
+  it('refuses a record with no owner name rather than buying a dossier at the Tier 1 rate', async () => {
+    // MUTATION: delete the plan.tier guard and this goes red: planRoute returns a TIER 2 plan
+    // for an ownerless record, so the dossier would be bought here and billed as Tier 1.
+    const d = deps()
+    await expect(run({ parcel: { ...PARCEL, ownerName: '' }, deps: d })).rejects.toThrow(NotATier1PlanError)
+    expect(d.lookupDossier).not.toHaveBeenCalled()
+    expect(deducts()).toHaveLength(0)
+    expect(H.ops.filter(o => o.op === 'update')).toHaveLength(0)
+  })
+
   it('never writes property_record, so a reused billed tier 2 row keeps the record it paid for', async () => {
     await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
     expect(persisted()).not.toHaveProperty('property_record')

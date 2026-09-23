@@ -14,7 +14,7 @@ import { Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceHistory, TraceJob } from '@/types';
 import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
-import { bulkRowExclusion, foundByLabel } from '@/lib/trace/historyDisplay';
+import { bulkRowExclusion, foundByLabel, propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 
 type HistoryEntry =
@@ -163,7 +163,7 @@ export default async function HistoryPage() {
                         </TableCell>
                         <TableCell>
                           <div>
-                            <p className="font-medium">{trace.normalized_address}</p>
+                            <p className="font-medium">{propertyAddressLabel(trace)}</p>
                             <p className="text-sm text-gray-500">
                               {trace.city}, {trace.state} {trace.zip}
                             </p>

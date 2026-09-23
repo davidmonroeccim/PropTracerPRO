@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { Search, FileUp, ArrowRight, Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
-import { bulkRowExclusion } from '@/lib/trace/historyDisplay';
+import { bulkRowExclusion, propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import type { TraceHistory, TraceJob } from '@/types';
 
 async function getUsageStats(userId: string) {
@@ -243,7 +243,7 @@ export default async function DashboardPage() {
                     >
                       <div>
                         <p className="text-sm font-medium text-gray-900">
-                          {trace.normalized_address}
+                          {propertyAddressLabel(trace)}
                         </p>
                         <p className="text-xs text-gray-500">
                           {trace.city}, {trace.state} {trace.zip}

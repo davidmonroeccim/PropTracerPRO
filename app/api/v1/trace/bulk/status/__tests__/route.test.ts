@@ -326,6 +326,29 @@ describe("the v1 per-record payload is paged", () => {
     H.rows = manyRows(300);
   });
 
+  it("never emits the internal parcel key as a record's address (D38)", async () => {
+    // MUTATION: put `address: row.normalized_address` back in buildPerRecordResult and this
+    // goes red. Its twin is lib/suite/mcp-tools.ts, which carries the same test.
+    H.rows = [
+      {
+        id: "row-apn",
+        status: "no_match",
+        tracerfy_job_id: null,
+        normalized_address: "APN|0123-456|TRAVIS|TX",
+        city: null,
+        state: "TX",
+        parcel_id_local: "0123-456",
+        county: "Travis",
+        charge: 0,
+        ai_research_status: null,
+        property_trace_status: "property_trace_done",
+      },
+    ] as never;
+    const body = await get("");
+    expect(body.results[0].address).toBe("Parcel 0123-456, Travis County");
+    expect(JSON.stringify(body)).not.toContain("APN|");
+  });
+
   it("AN EXISTING CALLER SEES EXACTLY WHAT IT SAW BEFORE", async () => {
     // THE WHOLE POINT OF THE DEFAULT. A consumer that reads `results` and passes
     // no query string gets every row of the job, as it always did. Any job is at

@@ -4,6 +4,7 @@ import { resolvePtpProfile, UNLINKED_MESSAGE } from "@/lib/suite/mcp-shared";
 import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import { isLikelyBusiness } from "@/lib/trace/ownerClassification";
+import { propertyAddressLabel } from "@/lib/trace/historyDisplay";
 import { rowSkipReason } from "@/lib/trace/rowSkipReason";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import { isPropertyTracePending, queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
@@ -62,7 +63,7 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   let q = admin
     .from("trace_history")
     .select(
-      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research, property_record, tier",
+      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research, property_record, tier, parcel_id_local, county",
     )
     .eq("user_id", profile.id)
     .order("created_at", { ascending: false })
@@ -77,15 +78,15 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
     // reordering the spread to the end cannot silently promote the raw 86-key object. The
     // actual guard is the filter, and the test that catches the reordering is the one that
     // scans the whole serialized trace for blocked key names.
-    const { trace_result, ai_research, property_record, tier, ...rest } = row as Record<
-      string,
-      unknown
-    > & {
-      trace_result: TraceResult | null;
-      ai_research: AIResearchResult | null;
-      property_record: unknown;
-      tier: number | null;
-    };
+    const { trace_result, ai_research, property_record, tier, parcel_id_local, county, ...rest } =
+      row as Record<string, unknown> & {
+        trace_result: TraceResult | null;
+        ai_research: AIResearchResult | null;
+        property_record: unknown;
+        tier: number | null;
+        parcel_id_local: string | null;
+        county: string | null;
+      };
     // THE NAME ONLY, never the source. resolveOwnerContact returns both, and a spread would
     // put the source back in the payload no matter how many other call sites removed it.
     //
@@ -97,6 +98,14 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
     const { owner_contact_name } = resolveOwnerContact({ trace_result, ai_research });
     return {
       ...rest,
+      // D38: a row keyed on a parcel carries an INTERNAL key in normalized_address. It is never
+      // handed to the gateway as the address; the caller gets "Parcel 0123-456, Travis County".
+      // Written AFTER the spread on purpose, so it wins over the raw column `rest` still holds.
+      normalized_address: propertyAddressLabel({
+        normalized_address: rest.normalized_address as string | null,
+        parcel_id_local,
+        county,
+      }),
       owner_contact_name,
       // 65 of the 86 stored keys. The other 21 are provably wrong, not merely missing, and this
       // payload is one the Suite Gateway maps into a customer's own CRM.
@@ -630,7 +639,8 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // compares the two key sets, so dropping it here alone would go red.
   const { owner_contact_name } = resolveOwnerContact(row);
   return {
-    address: row.normalized_address,
+    // D38: never the internal `APN|...` duplicate key. Same line as the v1 bulk status twin.
+    address: propertyAddressLabel(row),
     city: row.city,
     state: row.state,
     zip: row.zip,

@@ -4,6 +4,50 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (a): Tier 1 Phase 1, the final review fix wave: parcel display, paid contacts kept, the county refusal.
+
+- One wave over the whole branch, eleven items, from the owner's answers to the final review
+  (spec D38 to D41) and the review's own findings. No new capability; no migration.
+- D38. A row keyed by parcel stores an internal duplicate key in normalized_address. It is never
+  shown as the property address again. One helper, lib/trace/historyDisplay.ts
+  propertyAddressLabel, renders "Parcel 0123-456, Travis County" from the row's own
+  parcel_id_local and county columns, falling back to the key itself only when a column is
+  absent, and never inventing a county. Used at every display and export: History, the dashboard,
+  the CSV Address column, both status webhooks, MCP list_traces and bulk_status, the v1 bulk
+  status twin, and both HighLevel push sites. The Tier 2 cron's parcelForRow no longer reads the
+  literal word APN out of such a key as a street.
+- D39. A trace that finds nothing no longer erases a stored result that already carries a phone or
+  an email. On that persist only the step log, the contact vendor and the queue columns are
+  written; the result, the owner name it belongs to, the counts, the charge, the cost, the success
+  flag and the outcome stay as they are. The customer still hears this trace's own outcome, free.
+  A row holding no contacts is overwritten as before, and a trace that delivers contacts
+  overwrites and charges as before.
+- D40. No cap on owners tried, so no behaviour changed. The tier 2 plan's maxVendorCost comment
+  was wrong: it called one dossier plus one contact call the realistic ceiling. It is now
+  documented as a FLOOR, with the reason the true worst case cannot be computed before the dossier
+  names the owners.
+- D41. A fourth no_lookup_key pair. A record sent with a parcel id but no county and no city is
+  refused with "This record is missing the county for that parcel ID, so it could not be looked
+  up. You were not charged. Send it again with the county." It used to be told the parcel ID was
+  missing, which sent the caller looking for a field they had already supplied. Both API doors
+  reach it, tier 1 and the Full Property Trace; the web app is address only and cannot produce it.
+- Review findings in the same wave: the live-work 503 now reports the tier the request actually is
+  instead of always tier 1; the live-work threshold for a row no bulk job owns is
+  SINGLE_REQUEST_TIMEOUT_MINUTES (2), since a single trace cannot outlive its own 60 second
+  maxDuration and the cron's hour made one dead request answer busy to every resend for an hour;
+  Tier 2 single-trace responses no longer spread our internal routing notes into the customer's
+  warnings, which is what Task 9 had already fixed for Tier 1 and which was quoting a vendor price;
+  runSingleTier1 refuses a plan that is not Tier 1 rather than buying a dossier at the Tier 1 rate;
+  a name whose usable surname would be TRS, TR or TTEE gets no person step and goes to FastAppend
+  on the full name, which is D30's reasoning applied wherever the marker lands ("JOHN SMITH TRS ET
+  AL" was spending up to twenty cents on a match that could never succeed); the trace.completed
+  module's header no longer says Tier 1 completes in the poll route; and the dead debugInfo and
+  abortRef left by the de-polling are gone from the single-trace page.
+- vitest 1833 passing / 83 files, 0 failing (was 1795 / 83); tsc 0 errors; eslint 46 problems,
+  unchanged; next build compiles clean. 34 mutations run, one per fix and one per call site, every
+  one RED when applied and green when restored; none survived.
+- Report: .superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md.
+
 ## 2026-09-22 (m): Tier 1 Phase 1, Task 12 up to the HARD STOP: gates, the runner, the sample, dry plan.
 
 - vitest 1795 passing / 83 files, 0 failing (baseline was 1517/75); tsc 0 errors; eslint 46

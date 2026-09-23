@@ -437,6 +437,34 @@ describe('Tier 1 ladders (spec 4.2; D2, D3, D4, D16)', () => {
     expect(r.steps[0].request).toEqual({ company_name: 'SMITH JOHN TRS', state: 'UT' })
   })
 
+  it('sends a name whose surname would be TRS to FastAppend, with no person step (D30 reasoning)', () => {
+    // "JOHN SMITH TRS ET AL" does not END in TRS, so ENTITY_TRAILING misses it and TRUST_MARKER
+    // classifies it a trust. TRS is not a trust word (D28), so it survives stripTrustWords and
+    // splitPersonName hands the ladder last_name "TRS" -- a trustee marker, never a surname, so
+    // the D6 name match can never succeed and up to $0.20 is spent for nothing. D30 settled the
+    // trailing case for exactly this reason; the same reasoning applies wherever TRS lands.
+    // MUTATION: delete the TRUSTEE_SURNAME check in personNameFor and this goes red with
+    // ['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN', 'FASTAPPEND_ENTITY'].
+    const r = t1('JOHN SMITH TRS ET AL')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toEqual({ company_name: 'JOHN SMITH TRS ET AL', state: 'UT' })
+    expect(r.maxVendorCost).toBe(0.1)
+  })
+
+  it('does the same for TR, which lands as a surname the same way', () => {
+    // "JOHN SMITH TR ET AL" does not END in TR either, so TRUST_MARKER's `\\bTR\\.?$` misses it
+    // and ET AL reads it as an individual: the trust-word strip never runs and TR becomes the
+    // surname. TTEE is covered by the same guard, but no name can reach it -- TTEE is a trust
+    // word, so a name carrying it is either stripped of it or has a real person beside it.
+    // MUTATION: narrow TRUSTEE_SURNAME to TRS alone and this goes red.
+    expect(kinds(t1('JOHN SMITH TR ET AL'))).toEqual(['FASTAPPEND_ENTITY'])
+  })
+
+  it('leaves an ordinary person alone: only a trustee marker is refused as a surname', () => {
+    // MUTATION: make TRUSTEE_SURNAME match anything (e.g. /./) and this goes red.
+    expect(kinds(t1('JOHN SMITH ET AL'))).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN'])
+  })
+
   it('person: the Instant lookup at the street and city first, then the parcel lookup', () => {
     expect(kinds(t1('Marcus T Halloway'))).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN'])
   })

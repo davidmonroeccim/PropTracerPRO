@@ -6,6 +6,7 @@ import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
+import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
@@ -430,7 +431,8 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // every tier 2 FastAppend row until contact_vendor existed. See the MCP twin.
   const { owner_contact_name } = resolveOwnerContact(row);
   return {
-    address: row.normalized_address,
+    // D38: never the internal `APN|...` duplicate key. Same line as the MCP bulk_status twin.
+    address: propertyAddressLabel(row),
     city: row.city,
     state: row.state,
     zip: row.zip,

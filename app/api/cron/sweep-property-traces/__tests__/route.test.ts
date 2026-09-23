@@ -431,6 +431,24 @@ describe("parcelForRow", () => {
     expect(parcel.parcelIdLocal ?? null).toBeNull();
     expect(parcel.county ?? null).toBeNull();
   });
+
+  it("never reads the literal APN out of a parcel-keyed row as the street (D38)", () => {
+    // A row keyed APN|<parcel>|<COUNTY>|<STATE> has no street at all. split('|')[0] on it is the
+    // word "APN", which would be sent to the dossier as an address. Not reachable from today's
+    // bulk uploads, which all carry a street; guarded so it cannot become reachable quietly.
+    // MUTATION: drop the isParcelKey() arm and this goes red with situsAddress "APN".
+    const parcel = parcelForRow({
+      ...baseRow,
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      city: null,
+      state: "TX",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    });
+    expect(parcel.situsAddress).toBe("");
+    const plan = planRoute(parcel, "pro");
+    expect(plan.steps.map((s) => s.kind)).toEqual(["DOSSIER_APN"]);
+  });
 });
 
 describe("auth", () => {

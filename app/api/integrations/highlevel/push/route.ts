@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { effectiveIsPro } from '@/lib/suite/entitlements';
 import { pushTraceToHighLevel } from '@/lib/highlevel/client';
+import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import type { HighLevelFailureKind, HighLevelPushResult } from '@/lib/highlevel/client';
 import {
   recordHighLevelOutcomes,
@@ -102,7 +103,7 @@ export async function POST(request: NextRequest) {
     if (trace_id) {
       const { data: trace } = await adminClient
         .from('trace_history')
-        .select('id, trace_result, normalized_address, city, state, zip, is_successful')
+        .select('id, trace_result, normalized_address, city, state, zip, parcel_id_local, county, is_successful')
         .eq('id', trace_id)
         .eq('user_id', user.id)
         .single();
@@ -119,7 +120,9 @@ export async function POST(request: NextRequest) {
         apiKey: profile.highlevel_api_key,
         locationId: profile.highlevel_location_id,
         traceResult: trace.trace_result as TraceResult,
-        propertyAddress: trace.normalized_address || undefined,
+        // D38: the contact lands in the CUSTOMER'S OWN CRM, so it never carries our internal
+        // duplicate key. A parcel-keyed row reads "Parcel 0123-456, Travis County".
+        propertyAddress: propertyAddressLabel(trace) || undefined,
         propertyCity: trace.city || undefined,
         propertyState: trace.state || undefined,
         propertyZip: trace.zip || undefined,
@@ -172,7 +175,7 @@ export async function POST(request: NextRequest) {
       // from. The user scope stays on the query as well as on the job lookup.
       const { data: traces } = await adminClient
         .from('trace_history')
-        .select('id, trace_result, normalized_address, city, state, zip')
+        .select('id, trace_result, normalized_address, city, state, zip, parcel_id_local, county')
         .eq('user_id', user.id)
         .eq('trace_job_id', job_id)
         .eq('is_successful', true)
@@ -191,7 +194,8 @@ export async function POST(request: NextRequest) {
           apiKey: profile.highlevel_api_key,
           locationId: profile.highlevel_location_id,
           traceResult: trace.trace_result as TraceResult,
-          propertyAddress: trace.normalized_address || undefined,
+          // D38: the same rule on the job loop. Never the internal `APN|...` key.
+          propertyAddress: propertyAddressLabel(trace) || undefined,
           propertyCity: trace.city || undefined,
           propertyState: trace.state || undefined,
           propertyZip: trace.zip || undefined,

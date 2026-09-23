@@ -5,6 +5,7 @@ import { getJobStatus, parseTracerfyResult } from '@/lib/tracerfy/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { foldBillingWrite, TRACE_TIER } from '@/lib/trace/billedRows';
+import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
@@ -244,7 +245,9 @@ export async function GET(request: Request) {
             event: 'trace.completed',
             trace_id: trace.id,
             status: isSuccessful ? 'success' : 'no_match',
-            address: trace.normalized_address,
+            // D38: a row keyed on a parcel carries an INTERNAL key here. The customer's own
+            // system gets "Parcel 0123-456, Travis County", never `APN|0123-456|TRAVIS|TX`.
+            address: propertyAddressLabel(trace),
             city: trace.city,
             state: trace.state,
             zip: trace.zip,

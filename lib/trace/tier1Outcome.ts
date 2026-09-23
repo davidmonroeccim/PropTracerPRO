@@ -88,12 +88,15 @@ export function noMatchReason(steps: StepReport[]): string | null {
   return `We looked this owner up by ${joinKeys(keys)} and found no match. You were not charged.`
 }
 
-export type MissingLookupKey = 'city_and_parcel' | 'state' | 'street_and_parcel'
+export type MissingLookupKey = 'city_and_parcel' | 'state' | 'street_and_parcel' | 'county_for_parcel'
 
 const MISSING_WORDS: Record<MissingLookupKey, { missing: string; resend: string }> = {
   city_and_parcel: { missing: 'the city and the parcel ID', resend: 'the city or the parcel ID' },
   state: { missing: 'a valid state', resend: 'a valid two-letter state' },
   street_and_parcel: { missing: 'a street address and the parcel ID', resend: 'the street address or the parcel ID' },
+  // D41: the caller DID send a parcel ID. Telling them it is missing sends them looking for a
+  // field they already supplied; the parcel endpoints need the county with it.
+  county_for_parcel: { missing: 'the county for that parcel ID', resend: 'the county' },
 }
 
 export function noLookupKeyReason(missing: MissingLookupKey): string {
@@ -115,6 +118,10 @@ export function missingLookupKey(input: {
   const has = (v?: string | null): boolean => typeof v === 'string' && v.trim() !== ''
   if (!/^[A-Za-z]{2}$/.test((input.state ?? '').trim())) return 'state'
   if (has(input.apn) && has(input.county)) return null
+  // D41: a parcel id reached here means its county is missing (the line above took the pair). With
+  // no city either, there is no address key to fall back on, so the county is the one thing this
+  // record needs. "The city and the parcel ID" would name a field the caller already sent.
+  if (has(input.apn) && !has(input.city)) return 'county_for_parcel'
   if (!has(input.city)) return 'city_and_parcel'
   if (!has(input.address)) return 'street_and_parcel'
   return null

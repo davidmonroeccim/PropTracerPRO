@@ -207,7 +207,7 @@ export async function POST(request: Request) {
     // of every retrace with a 500 that names nothing.
     const { data: existingRow, error: existingRowError } = await adminClient
       .from('trace_history')
-      .select('id, charge, ai_research_charge, property_record, tier, outcome_code, property_trace_status, ai_research_status, status, created_at')
+      .select('id, charge, ai_research_charge, property_record, tier, outcome_code, property_trace_status, ai_research_status, trace_job_id, status, created_at')
       .eq('user_id', profile.id)
       .eq('address_hash', addressHash)
       .maybeSingle();
@@ -222,8 +222,17 @@ export async function POST(request: Request) {
     // vendor call, no deduct, no webhook. STALE_PROCESSING.CRON_TIMEOUT_MINUTES is the age at which
     // app/api/cron/sweep-stale-traces itself gives up on a 'processing' row, so a younger one is
     // presumptively still running somewhere.
+    //
+    // THE THRESHOLD DEPENDS ON WHO OWNS THE ROW, the rule app/api/trace/single carries. A row a
+    // BULK job owns is worked by a cron on its own schedule, so CRON_TIMEOUT_MINUTES is right for
+    // it. A row a SINGLE trace wrote (trace_job_id NULL) finishes inside its own request, capped
+    // at 60 s by maxDuration, so it cannot still be running an hour later: the cron's hour meant
+    // one request that died after its insert answered busy to every resend for up to an hour.
+    const processingTimeoutMinutes = existingRow?.trace_job_id
+      ? STALE_PROCESSING.CRON_TIMEOUT_MINUTES
+      : STALE_PROCESSING.SINGLE_REQUEST_TIMEOUT_MINUTES;
     const staleProcessingCutoff = new Date(
-      Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
+      Date.now() - processingTimeoutMinutes * 60 * 1000
     );
     const processingIsLive =
       existingRow?.status === 'processing' &&
@@ -242,7 +251,9 @@ export async function POST(request: Request) {
           success: false,
           status: 'error',
           traceId: existingRow!.id,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          // THE TIER THIS REQUEST ACTUALLY IS. Hard-coding tier 1 told a Full Property Trace
+          // caller they had submitted a per-successful-trace record.
+          tier: fullPropertyTrace ? TRACE_TIER.PER_RECORD_SUBMITTED : TRACE_TIER.PER_SUCCESSFUL_TRACE,
           charge: 0,
           result: null,
           foundBy: null,
@@ -667,7 +678,12 @@ export async function POST(request: Request) {
       // Two different zeros, two different sentences. Saying "your wallet did
       // not cover this" to a customer whose wallet is full, because OUR RPC
       // fell over, is a false statement about their money.
-      const warnings = [...execution.warnings];
+      // ONLY THE TWO WALLET SENTENCES REACH THE CALLER, the rule Task 9 set for tier 1.
+      // execution.warnings are OUR routing notes -- "Sending the property state. FastAppend keys
+      // on STATE OF REGISTRATION...", "The $0.20 dossier charge is sunk on a hit..." -- and they
+      // quote a vendor price, which no customer-facing sentence may do (spec 7.3). They stay
+      // internal; the step log and the server log are where we read them.
+      const warnings: string[] = [];
       if (deduction.outcome === 'insufficient_balance') {
         warnings.push(WALLET_SHORT_WARNING);
       } else if (deduction.outcome === 'error') {

@@ -108,6 +108,15 @@ export const STALE_PROCESSING = {
   TRACERFY_STALL_MINUTES: 15,
   // Minutes before the cron job marks a processing record as error
   CRON_TIMEOUT_MINUTES: 60,
+  /**
+   * How long a 'processing' row a SINGLE TRACE wrote (trace_job_id NULL) is presumptively still
+   * running somewhere. A single trace finishes inside its own request and `maxDuration` caps that
+   * request at 60 s, so a row it left behind is dead within two minutes, not within the hour a
+   * bulk row's cron is given. Two minutes is comfortably over the 60 s ceiling and short enough
+   * that a customer resending the address they just submitted is not told the system is busy for
+   * the rest of the hour.
+   */
+  SINGLE_REQUEST_TIMEOUT_MINUTES: 2,
 } as const;
 
 // ===================

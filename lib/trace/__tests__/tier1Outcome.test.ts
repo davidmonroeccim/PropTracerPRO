@@ -105,6 +105,11 @@ describe('the sentences (spec 7.1)', () => {
     expect(noLookupKeyReason('street_and_parcel')).toBe(
       'This record is missing a street address and the parcel ID, so it could not be looked up. You were not charged. Send it again with the street address or the parcel ID.'
     )
+    // D41: the fourth pair. A caller who DID send a parcel id must not be told it is missing.
+    // MUTATION: delete the county_for_parcel entry from MISSING_WORDS and this goes red.
+    expect(noLookupKeyReason('county_for_parcel')).toBe(
+      'This record is missing the county for that parcel ID, so it could not be looked up. You were not charged. Send it again with the county.'
+    )
   })
 
   it('missingLookupKey reads the record, state first', () => {
@@ -112,7 +117,13 @@ describe('the sentences (spec 7.1)', () => {
     expect(missingLookupKey({ state: 'TX' })).toBe('city_and_parcel')
     expect(missingLookupKey({ state: 'TX', city: 'Austin' })).toBe('street_and_parcel')
     expect(missingLookupKey({ state: 'TX', apn: '12-3', county: 'Travis' })).toBeNull()
-    expect(missingLookupKey({ state: 'TX', apn: '12-3' })).toBe('city_and_parcel')
+    // D41: a parcel id with no county and no city is missing the COUNTY, not the parcel ID.
+    // MUTATION: delete the county_for_parcel arm and this goes red with 'city_and_parcel'.
+    expect(missingLookupKey({ state: 'TX', apn: '12-3' })).toBe('county_for_parcel')
+    // A city still present is judged as before: the address key is what is short.
+    expect(missingLookupKey({ state: 'TX', apn: '12-3', city: 'Austin' })).toBe('street_and_parcel')
+    // No parcel id at all keeps the original sentence.
+    expect(missingLookupKey({ state: 'TX', county: 'Travis' })).toBe('city_and_parcel')
     expect(missingLookupKey({ state: 'TX', city: 'Austin', address: '1 A St' })).toBeNull()
   })
 
@@ -135,6 +146,7 @@ describe('copy rules (spec 7.3) on every new sentence', () => {
     noLookupKeyReason('city_and_parcel'),
     noLookupKeyReason('state'),
     noLookupKeyReason('street_and_parcel'),
+    noLookupKeyReason('county_for_parcel'),
   ]
 
   it('every one states the charge', () => {

@@ -204,6 +204,24 @@ describe("trace/status route reports only the wallet amount actually collected",
     expect(billingUpdate()?.payload.is_successful).toBe(true);
   });
 
+  it("never sends the internal parcel key as the webhook's address (D38)", async () => {
+    // MUTATION: send `address: trace.normalized_address` again and this goes red.
+    H.deductResult = true;
+    H.trace = {
+      ...H.trace,
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      city: null,
+      state: "TX",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    };
+
+    const { GET } = await import("@/app/api/trace/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/status?trace_id=trace-1"));
+
+    expect(webhookBody().address).toBe("Parcel 0123-456, Travis County");
+  });
+
   it("records and reports the full rate when the deduct succeeds", async () => {
     H.deductResult = true;
 

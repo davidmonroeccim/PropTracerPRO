@@ -50,7 +50,6 @@ export default function SingleTracePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TraceResponse | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string | null>(null);
 
   // Form state
   const [address, setAddress] = useState('');
@@ -110,15 +109,11 @@ export default function SingleTracePage() {
   // Skip trace cache ref: set to true after clearing, consumed on next Search Property.
   const skipTraceCacheRef = useRef(false);
 
-  const abortRef = useRef(false);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResult(null);
-    setDebugInfo(null);
-    abortRef.current = false;
 
     try {
       // Submit the trace
@@ -195,7 +190,6 @@ export default function SingleTracePage() {
       skipTraceCacheRef.current = true;
     }
 
-    abortRef.current = true;
     setAddress('');
     setCity('');
     setState('');
@@ -204,7 +198,6 @@ export default function SingleTracePage() {
     setWantsPropertyRecord(false);
     setResult(null);
     setError(null);
-    setDebugInfo(null);
     setLoading(false);
   };
 
@@ -424,13 +417,6 @@ export default function SingleTracePage() {
           )}
         </div>
       </div>
-
-      {debugInfo && (
-        <details className="mt-4">
-          <summary className="text-xs text-gray-400 cursor-pointer">Debug Info</summary>
-          <pre className="mt-2 p-3 bg-gray-100 rounded text-xs overflow-auto max-h-48">{debugInfo}</pre>
-        </details>
-      )}
     </div>
   );
 }

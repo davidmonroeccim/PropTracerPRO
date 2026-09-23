@@ -615,6 +615,20 @@ describe('the file itself', () => {
     expect(c.prop_property_type).toBe('"Retail Stores (Personal Servic"');
   });
 
+  it('never exports the internal parcel key as the address (D38)', () => {
+    // MUTATION: put `row.normalized_address` back in toExportValues and this goes red.
+    const csv = buildExportCsv([
+      row({
+        normalized_address: 'APN|0123-456|TRAVIS|TX',
+        parcel_id_local: '0123-456',
+        county: 'Travis',
+        city: null,
+      }),
+    ]);
+    expect(csv.split('\n')[1].startsWith('"Parcel 0123-456, Travis County",')).toBe(true);
+    expect(csv).not.toContain('APN|');
+  });
+
   it('keeps a comma in an address inside one cell', () => {
     const csv = buildExportCsv([row({ normalized_address: '100 MAIN ST, APT 2' })]);
     expect(csv.split('\n')[1].startsWith('"100 MAIN ST, APT 2",')).toBe(true);

@@ -74,6 +74,12 @@ export type TraceHistoryRow = {
   // again. Optional for the same reason as the two above: rows written before
   // the migration carry no value, and absent reads as not pending.
   property_trace_status?: string | null;
+  // The caller-supplied parcel id and bare county name (migration 20260919). Read by
+  // propertyAddressLabel so a row keyed on a parcel shows the parcel and its county rather than
+  // the internal `APN|...` duplicate key (D38). Optional for the same reason as the columns
+  // above: every reader loads with select('*'), and the fixtures build this type by hand.
+  parcel_id_local?: string | null;
+  county?: string | null;
   // `highlevel_pushed_at` was declared here for the v1 bulk status route, which
   // used it to skip a row the property-trace cron had already pushed. Both the
   // automatic pushes and that skip are gone: PTP never calls HighLevel unless a

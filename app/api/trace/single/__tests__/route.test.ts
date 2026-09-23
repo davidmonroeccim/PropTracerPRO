@@ -2066,6 +2066,28 @@ describe("tier 1 inline: money on this call site (L-018)", () => {
   });
 });
 
+describe("tier 2: warnings are wallet-only too, the routing notes stay internal", () => {
+  it("does not leak a routing warning into a Full Property Trace's body.warnings", async () => {
+    // Task 9 fixed exactly this for tier 1; tier 2 was still spreading execution.warnings, so a
+    // customer could read our own routing notes ("Sending the property state. FastAppend keys
+    // on STATE OF REGISTRATION...", "The $0.20 dossier charge is sunk on a hit...").
+    // MUTATION: `const warnings = [...execution.warnings]` again and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([]);
+  });
+
+  it("still says the two wallet sentences, which are the customer's own money", async () => {
+    H.dossier = DOSSIER_MISS;
+    H.deductData = false;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([
+      "The wallet did not cover this record, so nothing was charged for it.",
+    ]);
+  });
+});
+
 describe("tier 1 inline: warnings are wallet-only, the routing notes stay internal (fix round 1)", () => {
   it("does not leak a routing warning into body.warnings", async () => {
     // MUTATION: return tier1.execution.warnings instead of the wallet-only array and this goes
@@ -2280,6 +2302,51 @@ describe("tier 1 inline: a row with live work is never touched (fix round 1)", (
     H.insertedRow = { id: "trace-old", charge: 0, tier: null };
     const res = await post();
     expect(res.status).toBe(200);
+  });
+
+  it("reports the tier the request actually is, so a Full Property Trace is not told tier 1", async () => {
+    // MUTATION: hard-code `tier: TRACE_TIER.PER_SUCCESSFUL_TRACE` on the live-work 503 again and
+    // this goes red. The 503 states a tier, and stating the wrong one misdescribes the price the
+    // caller is about to be quoted when they resend.
+    H.survivingRow = {
+      id: "trace-live-t2", status: "processing", created_at: new Date().toISOString(),
+      charge: 0, tier: null,
+    };
+    const res = await post(TIER2_BODY);
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.tier).toBe(2);
+  });
+
+  it("gives up on a single-trace processing row after minutes, not after the cron's hour", async () => {
+    // A single trace cannot outlive maxDuration = 60 s. A row it left behind is dead long before
+    // CRON_TIMEOUT_MINUTES, and answering busy for an hour makes every resend of that address
+    // fail for an hour.
+    // MUTATION: use CRON_TIMEOUT_MINUTES for a row with no trace_job_id and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = {
+      id: "trace-dead", status: "processing", trace_job_id: null,
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      charge: 0, tier: null,
+    };
+    H.insertedRow = { id: "trace-dead", charge: 0, tier: null };
+    const res = await post();
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps the cron's hour for a processing row a BULK job owns", async () => {
+    // A bulk row is worked by a cron on its own schedule, so the short single-request threshold
+    // would declare live work dead and let this route reuse the row under the worker.
+    // MUTATION: use SINGLE_REQUEST_TIMEOUT_MINUTES for every row and this goes red.
+    H.survivingRow = {
+      id: "trace-bulk", status: "processing", trace_job_id: "job-1",
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      charge: 0, tier: null,
+    };
+    const res = await post();
+    expect(res.status).toBe(503);
+    expect(H.ops.filter((o) => o.op === "update")).toHaveLength(0);
+    expect(deletes()).toHaveLength(0);
   });
 });
 

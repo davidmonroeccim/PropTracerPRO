@@ -173,8 +173,18 @@ export async function POST(request: Request) {
     // is the threshold, the same age at which app/api/cron/sweep-stale-traces itself gives up on a
     // 'processing' row and marks it error, so a 'processing' row younger than that is presumptively
     // still running somewhere and this route must not race it.
+    //
+    // THE THRESHOLD DEPENDS ON WHO OWNS THE ROW. A row a BULK job owns is worked by a cron on its
+    // own schedule, so CRON_TIMEOUT_MINUTES is right for it: it is the age at which
+    // app/api/cron/sweep-stale-traces itself gives up. A row a SINGLE trace wrote (trace_job_id
+    // NULL) finishes inside its own request, and maxDuration caps that at 60 s, so it cannot
+    // still be running an hour later -- using the cron's hour for it meant one request that died
+    // after its insert answered busy to every resend of that address for up to an hour.
+    const processingTimeoutMinutes = existingRow?.trace_job_id
+      ? STALE_PROCESSING.CRON_TIMEOUT_MINUTES
+      : STALE_PROCESSING.SINGLE_REQUEST_TIMEOUT_MINUTES;
     const staleProcessingCutoff = new Date(
-      Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
+      Date.now() - processingTimeoutMinutes * 60 * 1000
     );
     const processingIsLive =
       existingRow?.status === 'processing' &&
@@ -193,7 +203,10 @@ export async function POST(request: Request) {
           success: false,
           status: 'error',
           trace_id: existingRow!.id,
-          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          // THE TIER THIS REQUEST ACTUALLY IS. Hard-coding tier 1 told a Full Property Trace
+          // caller they had submitted a per-successful-trace record, which misdescribes what
+          // their resend will be priced at.
+          tier: fullPropertyTrace ? TRACE_TIER.PER_RECORD_SUBMITTED : TRACE_TIER.PER_SUCCESSFUL_TRACE,
           charge: 0,
           result: null,
           found_by: null,
@@ -676,7 +689,12 @@ export async function POST(request: Request) {
       // Two different zeros, two different sentences. Saying "your wallet did
       // not cover this" to a customer whose wallet is full, because OUR RPC
       // fell over, is a false statement about their money.
-      const warnings = [...execution.warnings];
+      // ONLY THE TWO WALLET SENTENCES REACH THE CUSTOMER, the rule Task 9 set for tier 1.
+      // execution.warnings are OUR routing notes -- "Sending the property state. FastAppend keys
+      // on STATE OF REGISTRATION...", "The $0.20 dossier charge is sunk on a hit..." -- and they
+      // quote a vendor price, which no customer-facing sentence may do (spec 7.3). They stay
+      // internal; the step log and the server log are where we read them.
+      const warnings: string[] = [];
       if (deduction.outcome === 'insufficient_balance') {
         warnings.push(WALLET_SHORT_WARNING);
       } else if (deduction.outcome === 'error') {
