@@ -213,9 +213,14 @@ that happens anyway is a vendor failure (5.1).
 - Charged once per record, only when a name-matched result carries at least one phone or email
   (`hasContactData`, lib/trace/fullPropertyTrace.ts:165-168). `contactsFound` is not the gate; it is true
   for an empty contacts object.
-- Rate: the Tier 1 rate for the record's track, unchanged. Track A (session, MCP, crons) uses the
-  grant-aware `chargePerTrace` (lib/suite/pricing.ts:41): $0.15 Pro and AcquisitionPRO, $0.25
-  Pay-As-You-Go. Track B (API) uses the raw `getChargePerTrace` (lib/constants.ts:166-173).
+- Rate: the Tier 1 rate, unchanged in amount. **AMENDED 2026-09-23 (David approved): there is now ONE
+  derivation for every surface**, his ruling recorded as lesson L-030. `chargePerTrace(profile)`,
+  `chargePerRecord(profile)` and `pricePlanFor(profile)` in lib/suite/pricing.ts, all grant-aware through
+  `effectiveIsPro`. $0.15 per tier 1 success and $0.25 per tier 2 record for pro, AcquisitionPRO **and a
+  Suite Gateway grant**; $0.25 and $0.40 pay-as-you-go. The Track A / Track B split and
+  `getChargePerTrace` are GONE and lib/api/pricing.ts is deleted. Do not reintroduce a second derivation.
+  Tier 2 is billed per request whenever the dossier is used, whatever the result (David, 2026-09-23:
+  "It costs $0.25 no matter the result, per request, not per success, when the dossier is used.").
 - The same price whichever key found the owner and however many lookups ran.
 - Free: `no_match`, `owner_name_not_matched`, `no_lookup_key`, `busy_try_again`.
 - Before charging, the cron asks the ledger whether this row was already charged
@@ -237,7 +242,11 @@ a single submit (open task 16) is unchanged.
 two towns collide, and every APN-only record with no street collides on `||ST`.
 
 Key precedence per record:
-1. City present: street + city + state. Unchanged, so the 90-day history keeps working.
+1. Street AND city present: street + city + state. Unchanged, so the 90-day history keeps working.
+   (**AMENDED by D36**, 2026-09-23: the address key requires BOTH a street and a city; a record with a
+   city but no street keys on its parcel instead. Phase 2 must align the bulk surfaces, which still call
+   plain `normalizeAddress` with no APN branch, or the same record sent through single and bulk lands on
+   two rows.)
 2. No city, APN and county present: APN + county + state. The APN is stored as sent, only trimmed,
    uppercased and with a leading `#` removed. Dashes and spaces are kept so two different parcel numbers
    cannot collapse into one.
