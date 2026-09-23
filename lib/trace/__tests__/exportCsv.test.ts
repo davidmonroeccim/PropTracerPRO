@@ -14,6 +14,7 @@ import {
   ZERO_MEANS_ABSENT_KEYS,
 } from '@/lib/trace/exportCsv';
 import { DOSSIER_EXPORT_KEYS } from '@/lib/trace/publicPropertyRecord';
+import { OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome';
 import entityHitAddress from '@/lib/tracerfy/__tests__/fixtures/entity-hit-address.json';
 import type { TraceHistory } from '@/types';
 
@@ -542,6 +543,27 @@ describe('the file itself', () => {
     expect(c.charge).toBe('0.40');
   });
 
+  it('carries a single trace Tier 1 sentence in the existing skip_reason column', () => {
+    // trace_job_id: null marks this as a row a single trace itself wrote (spec D33); a bulk
+    // row that reused this row would carry a real trace_job_id and get no Tier 1 sentence.
+    const c = cells(row({ outcome_code: 'owner_name_not_matched', is_successful: false, trace_job_id: null }));
+    expect(c.skip_reason).toBe(`"${OWNER_NAME_NOT_MATCHED_REASON}"`);
+  });
+
+  it('never shows the Tier 1 sentence on a bulk row that reused a single trace row (spec D33)', () => {
+    // MUTATION: drop the `row.trace_job_id === null` condition in rowSkipReason and this goes red.
+    const c = cells(
+      row({
+        outcome_code: 'owner_name_not_matched',
+        is_successful: false,
+        trace_job_id: 'job-1',
+        property_trace_status: 'property_trace_done',
+        charge: 0.4,
+      })
+    );
+    expect(c.skip_reason).toBe('');
+  });
+
   it('emits skip_reason and the research block on every job, blank when unused', () => {
     // Both conditionals are gone. A header that depends on the rows is a header
     // that changes shape between two downloads of the same product.
@@ -591,6 +613,20 @@ describe('the file itself', () => {
     );
     expect(c.property_type).toBe('"commercial"');
     expect(c.prop_property_type).toBe('"Retail Stores (Personal Servic"');
+  });
+
+  it('never exports the internal parcel key as the address (D38)', () => {
+    // MUTATION: put `row.normalized_address` back in toExportValues and this goes red.
+    const csv = buildExportCsv([
+      row({
+        normalized_address: 'APN|0123-456|TRAVIS|TX',
+        parcel_id_local: '0123-456',
+        county: 'Travis',
+        city: null,
+      }),
+    ]);
+    expect(csv.split('\n')[1].startsWith('"Parcel 0123-456, Travis County",')).toBe(true);
+    expect(csv).not.toContain('APN|');
   });
 
   it('keeps a comma in an address inside one cell', () => {

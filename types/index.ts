@@ -114,6 +114,16 @@ export interface TraceHistory {
    */
   tier: number | null;
   /**
+   * The bulk job this row belongs to (migration 20260411), or NULL on a row a single trace
+   * wrote. Optional for the same reason as the columns below: every reader loads rows with
+   * select('*') so it is always present in production, but the test fixtures build this type
+   * by hand. lib/trace/rowSkipReason.ts reads it to decide whether a Tier 1 outcome sentence
+   * may answer for this row at all (spec D33): a bulk upload upserts on (user_id,
+   * address_hash) and never clears outcome_code on the row it reuses, so `=== null` (not
+   * merely falsy) is required -- an absent value must read as "not a single-trace row" too.
+   */
+  trace_job_id?: string | null;
+  /**
    * The TIER 2 queue, driven by app/api/cron/sweep-property-traces. Its terminal
    * values are also where a tier 2 row's customer-facing reason comes from, via
    * lib/trace/rowSkipReason.ts, which is why the results CSV needs it declared
@@ -125,6 +135,17 @@ export interface TraceHistory {
    * hand. Absent reads as nothing to explain.
    */
   property_trace_status?: string | null;
+  /** Tier 1 outcome (spec 7.1). NULL before 2026-09-22 and on tier 2 rows. See lib/trace/tier1Outcome.ts. */
+  outcome_code?: string | null;
+  /** The KEY that found the owner: address, parcel_id or company_name. Never the vendor. */
+  found_by?: string | null;
+  /** The step log (spec 5.2). Internal; never in a customer payload. Read it with stepLogFrom(). */
+  trace_steps?: unknown;
+  /** Caller-supplied parcel id and bare county name (migration 20260919). */
+  parcel_id_local?: string | null;
+  county?: string | null;
+  /** Which contact vendor was asked: fastappend, tracerfy, or NULL (migration 20260921). */
+  contact_vendor?: string | null;
   created_at: string;
 }
 

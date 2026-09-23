@@ -135,8 +135,11 @@ export default function ApiDocsPage() {
             never changes the price. There is no entity rate and no surcharge.
           </p>
           <p className="text-gray-600 text-sm">
-            Results are kept for 90 days. Resubmitting an address you already traced returns your
-            stored result and costs nothing. Polling any status endpoint is free.
+            Results are kept for 90 days. Resubmitting an address you already traced,
+            with the same owner name, returns your stored result and costs nothing.
+            A different owner name, or an owner trace that found no contacts, is traced
+            again, and you are charged only if contacts come back. Polling any status
+            endpoint is free.
           </p>
         </CardContent>
       </Card>
@@ -154,7 +157,7 @@ export default function ApiDocsPage() {
               <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-mono">POST</span>
               <code className="text-sm font-semibold">/trace/single</code>
             </div>
-            <p className="text-gray-600 text-sm">Trace a single property address. Send the owner of record and you get a skip trace on that owner. Leave it out and you get a Full Property Trace instead, which buys the county record for the address and then traces whoever it says owns it.</p>
+            <p className="text-gray-600 text-sm">Trace a single property. Send the owner of record and you get a skip trace on that owner, finished inside the request. Leave it out and you get a Full Property Trace instead, which buys the county record for the property and then traces whoever it says owns it. A record with no city can be sent with its parcel ID and county instead.</p>
 
             <h5 className="font-medium text-sm">Request Body:</h5>
             <CodeBlock
@@ -164,6 +167,8 @@ export default function ApiDocsPage() {
   "state": "TX",
   "zip": "78701",                 // optional
   "ownerName": "John Smith",      // optional. Leaving it out runs a Full Property Trace
+  "apn": "0123-456-789",          // optional. The county parcel ID ("parcelId" is accepted too)
+  "county": "Travis",             // optional. The county that parcel ID belongs to
   "fullPropertyTrace": false      // optional. Set true to get the property record anyway
 }`}
               section="single-request"
@@ -174,21 +179,62 @@ export default function ApiDocsPage() {
                 <strong>Which one runs.</strong> If <code className="bg-blue-100 px-1 rounded">ownerName</code> is missing or blank, a Full Property Trace runs automatically. If you already have the owner but you want the county record too, send <code className="bg-blue-100 px-1 rounded">fullPropertyTrace: true</code>. The spelling <code className="bg-blue-100 px-1 rounded">full_property_trace</code> is accepted as well.
               </p>
               <p className="text-blue-800 text-sm">
-                A Full Property Trace runs start to finish inside the request and returns the finished result, so give your HTTP client a timeout of at least 60 seconds. A trace where you supplied the owner returns a <code className="bg-blue-100 px-1 rounded">traceId</code> for you to poll instead.
+                <strong>What a record needs.</strong> Every record needs a two-letter <code className="bg-blue-100 px-1 rounded">state</code>. A person also needs either a street and city, or the parcel ID with its county. So does a trust or a name we cannot read, unless no first name is left once the trust words are removed (for example &quot;Smith Family Trust&quot;). That one is looked up as a company, by name and state. A company needs only its name and state. A record with none of these comes back <code className="bg-blue-100 px-1 rounded">400</code> with <code className="bg-blue-100 px-1 rounded">outcomeCode: &quot;no_lookup_key&quot;</code> and a <code className="bg-blue-100 px-1 rounded">skipReason</code> that says what to add, and nothing is charged.
+              </p>
+              <p className="text-blue-800 text-sm">
+                Both kinds of trace run start to finish inside the request and return the finished result, so give your HTTP client a timeout of at least 60 seconds. There is nothing to poll.
               </p>
             </div>
 
-            <h5 className="font-medium text-sm">Response when you supplied the owner (poll for it):</h5>
+            <h5 className="font-medium text-sm">Response when you supplied the owner (already finished):</h5>
             <CodeBlock
               code={`{
   "success": true,
-  "status": "processing",
+  "status": "success",
   "traceId": "uuid",
-  "tracerfyJobId": "job_abc123",
-  "message": "Trace submitted. Poll /api/v1/trace/status?trace_id=uuid for results."
+  "tier": 1,
+  "charge": 0.15,
+  "result": {
+    "owner_name": "John Smith",
+    "phones": [{ "number": "5125551234", "type": "mobile" }],
+    "emails": ["john.smith@email.com"],
+    "mailing_address": "456 Oak Ave, Austin, TX, 78702"
+  },
+  "propertyRecord": null,
+  "ownerName": "John Smith",
+  "ownerType": "individual",
+  "needsManualReview": false,
+  "foundBy": "address",
+  "outcomeCode": "found_by_address",
+  "skipReason": null,
+  "warnings": []
 }`}
               section="single-response"
             />
+
+            <p className="text-gray-600 text-sm">
+              You are charged only when at least one phone or email came back. For a person, the person returned must also match the owner name. <code className="bg-gray-100 px-1 rounded">foundBy</code> says which key found the owner: <code className="bg-gray-100 px-1 rounded">address</code>, <code className="bg-gray-100 px-1 rounded">parcel_id</code> or <code className="bg-gray-100 px-1 rounded">company_name</code>. When nothing came back, <code className="bg-gray-100 px-1 rounded">result</code> is <code className="bg-gray-100 px-1 rounded">null</code>, <code className="bg-gray-100 px-1 rounded">charge</code> is <code className="bg-gray-100 px-1 rounded">0</code> and <code className="bg-gray-100 px-1 rounded">skipReason</code> says why in one sentence. <code className="bg-gray-100 px-1 rounded">outcomeCode</code> is one of <code className="bg-gray-100 px-1 rounded">found_by_address</code>, <code className="bg-gray-100 px-1 rounded">found_by_parcel_id</code>, <code className="bg-gray-100 px-1 rounded">found_by_company_name</code>, <code className="bg-gray-100 px-1 rounded">no_match</code>, <code className="bg-gray-100 px-1 rounded">owner_name_not_matched</code>, <code className="bg-gray-100 px-1 rounded">no_lookup_key</code> or <code className="bg-gray-100 px-1 rounded">busy_try_again</code>.
+            </p>
+
+            <h5 className="font-medium text-sm">Response when a lookup service was busy (HTTP 503, header Retry-After: 300):</h5>
+            <CodeBlock
+              code={`{
+  "success": false,
+  "status": "error",
+  "traceId": "uuid",
+  "tier": 1,
+  "charge": 0,
+  "result": null,
+  "foundBy": null,
+  "outcomeCode": "busy_try_again",
+  "skipReason": "The system is busy. Try again in 5 minutes. You were not charged.",
+  "error": "The system is busy. Try again in 5 minutes. You were not charged."
+}`}
+              section="single-response-busy"
+            />
+            <p className="text-gray-600 text-sm">
+              Send the same record again after five minutes. A resend within 24 hours picks up where the busy one stopped, so a lookup that already answered is not bought twice.
+            </p>
 
             <h5 className="font-medium text-sm">Response from a Full Property Trace (already finished):</h5>
             <CodeBlock
@@ -254,7 +300,7 @@ export default function ApiDocsPage() {
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-mono">GET</span>
               <code className="text-sm font-semibold">/trace/status?trace_id=uuid</code>
             </div>
-            <p className="text-gray-600 text-sm">Poll for the result of a trace where you supplied the owner of record. A Full Property Trace does not need this: it has already finished by the time you get its response. Polling is free.</p>
+            <p className="text-gray-600 text-sm">Read a trace back by its id. Every trace now finishes inside its own request, so you only need this for a trace id you already hold, including one sent before this change. Reading is free.</p>
 
             <h5 className="font-medium text-sm">Response (completed):</h5>
             <CodeBlock
@@ -666,35 +712,15 @@ Request content:
 Parse response: Yes
 Timeout: 90 seconds
 
-// Drop ownerName to run a Full Property Trace instead. That one
-// comes back finished, so skip module 2 when tier == 2.`}
+// Drop ownerName to run a Full Property Trace instead. Either way the
+// response is the finished result.`}
                   section="make-step1"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <p className="font-medium text-sm">Module 2: Poll for Results</p>
-                <CodeBlock
-                  code={`Module: HTTP - Make a request (inside a Repeater)
-
-URL: https://proptracerpro.vercel.app/api/v1/trace/status?trace_id={{2.traceId}}
-Method: GET
-
-Headers:
-  Authorization: Bearer ptp_your_api_key
-
-Parse response: Yes
-
-// Add a Sleep module (15s) and Router:
-//   Route 1: status == "processing" -> loop back
-//   Route 2: status != "processing" -> continue`}
-                  section="make-step2"
                 />
               </div>
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Put a Router straight after module 1 that checks <code className="bg-blue-100 px-1 rounded">tier</code>. A Full Property Trace is already finished and has no job to poll, so sending it into the repeater just wastes runs. Use a second Router after the poll to handle success, no_match and error separately. Nothing goes to your CRM on its own, whichever tier ran, so either send the result on to your CRM from here or press Add to CRM on it in PropTracerPRO.
+                  <strong>Tip:</strong> Module 1 returns the finished result whichever tier ran, so there is no job to poll. Put a Router after it to handle <code className="bg-blue-100 px-1 rounded">success</code>, <code className="bg-blue-100 px-1 rounded">no_match</code> and <code className="bg-blue-100 px-1 rounded">busy_try_again</code> (run that record again after five minutes). Nothing goes to your CRM on its own, so either send the result on to your CRM from here or press Add to CRM on it in PropTracerPRO.
                 </p>
               </div>
             </TabsContent>
@@ -722,38 +748,16 @@ Body (JSON):
   "ownerName": "={{ $json.owner_name }}"
 }
 
-// Drop ownerName and a Full Property Trace runs instead. That one
-// returns the finished result in this same response.`}
+// Drop ownerName and a Full Property Trace runs instead. Either way
+// this same response is the finished result.`}
                   section="n8n-step1"
                 />
               </div>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Step 2: Branch on the tier, then poll if you need to</p>
+                <p className="font-medium text-sm">Step 2: Use the results</p>
                 <CodeBlock
-                  code={`// IF Node: is this already finished?
-// Condition: {{ $json.tier }} == 2
-//   True  -> skip straight to step 3, the result is in this response
-//   False -> carry on and poll
-
-// Wait Node: 15 seconds
-
-// HTTP Request Node, GET
-URL: https://proptracerpro.vercel.app/api/v1/trace/status?trace_id={{ $json.traceId }}
-Headers: Authorization: Bearer ptp_your_api_key
-
-// IF Node: still processing?
-// Condition: {{ $json.status }} == "processing"
-//   True  -> loop back to Wait
-//   False -> continue to step 3`}
-                  section="n8n-step2"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <p className="font-medium text-sm">Step 3: Use the results</p>
-                <CodeBlock
-                  code={`// From either branch:
+                  code={`// From the response:
 {{ $json.result.phones[0].number }}   -> Owner phone
 {{ $json.result.emails[0] }}          -> Owner email
 {{ $json.result.owner_name }}         -> Owner name
@@ -773,7 +777,7 @@ Headers: Authorization: Bearer ptp_your_api_key
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <p className="text-blue-800 text-sm">
-                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security. You can also skip polling entirely and use webhooks instead. Configure your webhook URL in Settings.
+                  <strong>Tip:</strong> Store your API key in n8n Credentials as &quot;Header Auth&quot; for better security. You can also use webhooks instead. Configure your webhook URL in Settings.
                 </p>
               </div>
             </TabsContent>
@@ -799,7 +803,7 @@ Headers: Authorization: Bearer ptp_your_api_key
               </div>
 
               <div className="space-y-2">
-                <p className="font-medium text-sm">Poll for results:</p>
+                <p className="font-medium text-sm">Read a trace back by id:</p>
                 <CodeBlock
                   code={`curl "https://proptracerpro.vercel.app/api/v1/trace/status?trace_id=YOUR_TRACE_ID" \\
   -H "Authorization: Bearer ptp_your_api_key"`}
@@ -944,16 +948,19 @@ Headers: Authorization: Bearer ptp_your_api_key
   "property_record": { /* the county record, over 60 fields */ },
   "tier": 2,
   "owner_type": "individual",
+  "found_by": null,
+  "outcome_code": null,
+  "skip_reason": null,
   "timestamp": "2026-09-17T15:30:00Z"
 }`}
             section="webhook-single"
           />
           <div className="bg-gray-50 border rounded-lg p-3 mt-2 space-y-2">
             <p className="text-gray-600 text-sm">
-              A trace where you supplied the owner sends the same event with the same keys, minus <code className="bg-gray-200 px-1 rounded">property_record</code>, <code className="bg-gray-200 px-1 rounded">tier</code> and <code className="bg-gray-200 px-1 rounded">owner_type</code>.
+              A trace where you supplied the owner sends the same event with the same keys, fired as soon as it finishes: <code className="bg-gray-200 px-1 rounded">tier</code> is <code className="bg-gray-200 px-1 rounded">1</code>, <code className="bg-gray-200 px-1 rounded">property_record</code> is <code className="bg-gray-200 px-1 rounded">null</code>, and <code className="bg-gray-200 px-1 rounded">found_by</code>, <code className="bg-gray-200 px-1 rounded">outcome_code</code> and <code className="bg-gray-200 px-1 rounded">skip_reason</code> say what happened. Those three are <code className="bg-gray-200 px-1 rounded">null</code> on a Full Property Trace. A busy answer fires no event, because nothing completed.
             </p>
             <p className="text-gray-600 text-sm">
-              <code className="bg-gray-200 px-1 rounded">address</code> is the normalized pipe-delimited key of street, city and state, not the street line you sent. The separate <code className="bg-gray-200 px-1 rounded">city</code> and <code className="bg-gray-200 px-1 rounded">state</code> keys carry those on their own. Note that this payload is snake_case while the Full Property Trace response that describes the same trace is camelCase.
+              <code className="bg-gray-200 px-1 rounded">address</code> is the normalized pipe-delimited key of street, city and state, not the street line you sent. The separate <code className="bg-gray-200 px-1 rounded">city</code> and <code className="bg-gray-200 px-1 rounded">state</code> keys carry those on their own. Note that this payload is snake_case while the Full Property Trace response that describes the same trace is camelCase. For a record sent by parcel ID with no city, <code className="bg-gray-200 px-1 rounded">address</code> is the street you sent, or <code className="bg-gray-200 px-1 rounded">null</code>.
             </p>
             <p className="text-gray-600 text-sm">
               <code className="bg-gray-200 px-1 rounded">charge</code> is what your wallet actually paid, so the figure above is one account&apos;s example and not a rate for everyone.
@@ -1060,10 +1067,15 @@ Headers: Authorization: Bearer ptp_your_api_key
                   <td className="py-2 pr-4">Server Error</td>
                   <td className="py-2">Internal server error</td>
                 </tr>
-                <tr>
+                <tr className="border-b">
                   <td className="py-2 pr-4 font-mono">502</td>
                   <td className="py-2 pr-4">Bad Gateway</td>
-                  <td className="py-2">A vendor lookup failed on our side during a Full Property Trace. Nothing was charged and nothing was stored, so retry it. This is the one to retry: it means we could not ask, not that we asked and came back empty</td>
+                  <td className="py-2">A vendor lookup failed on our side during a Full Property Trace. Nothing was charged and nothing was stored, so retry it. It means we could not ask, not that we asked and came back empty</td>
+                </tr>
+                <tr>
+                  <td className="py-2 pr-4 font-mono">503</td>
+                  <td className="py-2 pr-4">Service Unavailable</td>
+                  <td className="py-2">A lookup service was busy. Nothing was charged. Send the same record again after 5 minutes; a resend within 24 hours does not buy a lookup that already answered.</td>
                 </tr>
               </tbody>
             </table>

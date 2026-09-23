@@ -4,6 +4,346 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (a): Tier 1 Phase 1, the final review fix wave: parcel display, paid contacts kept, the county refusal.
+
+- One wave over the whole branch, eleven items, from the owner's answers to the final review
+  (spec D38 to D41) and the review's own findings. No new capability; no migration.
+- D38. A row keyed by parcel stores an internal duplicate key in normalized_address. It is never
+  shown as the property address again. One helper, lib/trace/historyDisplay.ts
+  propertyAddressLabel, renders "Parcel 0123-456, Travis County" from the row's own
+  parcel_id_local and county columns, falling back to the key itself only when a column is
+  absent, and never inventing a county. Used at every display and export: History, the dashboard,
+  the CSV Address column, both status webhooks, MCP list_traces and bulk_status, the v1 bulk
+  status twin, and both HighLevel push sites. The Tier 2 cron's parcelForRow no longer reads the
+  literal word APN out of such a key as a street.
+- D39. A trace that finds nothing no longer erases a stored result that already carries a phone or
+  an email. On that persist the result, the owner name it belongs to, the counts, the charge, the
+  cost, the success flag and the found-by key stay as they are; the step log, the contact vendor
+  and the queue columns are written. Two more columns are written on that path BECAUSE the row
+  keeps its stored result: status goes back to success (the routes set processing before the
+  settle runs, and leaving it there contradicted is_successful, showed History a Processing row
+  over paid contacts, and handed it to the stale sweep to mark error), and outcome_code is written
+  when, and only when, this trace ended busy_try_again, so a resend inside 24 hours still resumes
+  from the step log instead of buying the answered steps again. A busy code on a successful row can
+  never produce a sentence, because tier1OutcomeReason returns null whenever is_successful is true.
+  The customer still hears this trace's own outcome, free. A row holding no contacts is overwritten
+  as before, and a trace that delivers contacts overwrites and charges as before.
+- D40. No cap on owners tried, so no behaviour changed. The tier 2 plan's maxVendorCost comment
+  was wrong: it called one dossier plus one contact call the realistic ceiling. It is now
+  documented as a FLOOR, with the reason the true worst case cannot be computed before the dossier
+  names the owners.
+- D41. A fourth no_lookup_key pair. A record sent with a parcel id but no county and no city is
+  refused with "This record is missing the county for that parcel ID, so it could not be looked
+  up. You were not charged. Send it again with the county." It used to be told the parcel ID was
+  missing, which sent the caller looking for a field they had already supplied. Both API doors
+  reach it, tier 1 and the Full Property Trace; the web app is address only and cannot produce it.
+- Review findings in the same wave: the live-work 503 now reports the tier the request actually is
+  instead of always tier 1; the live-work threshold for a row no bulk job owns is
+  SINGLE_REQUEST_TIMEOUT_MINUTES (2), since a single trace cannot outlive its own 60 second
+  maxDuration and the cron's hour made one dead request answer busy to every resend for an hour;
+  Tier 2 single-trace responses no longer spread our internal routing notes into the customer's
+  warnings, which is what Task 9 had already fixed for Tier 1 and which was quoting a vendor price;
+  runSingleTier1 refuses a plan that is not Tier 1 rather than buying a dossier at the Tier 1 rate;
+  a name whose usable surname would be TRS, TR or TTEE gets no person step and goes to FastAppend
+  on the full name, which is D30's reasoning applied wherever the marker lands ("JOHN SMITH TRS ET
+  AL" was spending up to twenty cents on a match that could never succeed); the trace.completed
+  module's header no longer says Tier 1 completes in the poll route; and the dead debugInfo and
+  abortRef left by the de-polling are gone from the single-trace page.
+- vitest 1837 passing / 83 files, 0 failing (was 1795 / 83); tsc 0 errors; eslint 46 problems,
+  unchanged; next build compiles clean. 37 mutations run, one per fix and one per call site, every
+  one RED when applied and green when restored; none survived.
+- Two commits: the wave, then the owner's part 2 (the status and outcome_code columns above), which
+  fixed the two defects the wave's own report had raised as concerns rather than papered over.
+- Report: .superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md.
+
+## 2026-09-22 (m): Tier 1 Phase 1, Task 12 up to the HARD STOP: gates, the runner, the sample, dry plan.
+
+- vitest 1795 passing / 83 files, 0 failing (baseline was 1517/75); tsc 0 errors; eslint 46
+  problems (baseline 47, unchanged from Task 11); next build compiles clean. The consolidated
+  mutation table (139 mutations across Tasks 2 to 11, in tasks/todo.md) shows every guard went red
+  when broken; none survived.
+- Built tasks/research-scripts/phase1/run-live.ts. It computes each record's worst case from
+  planRoute(...).maxVendorCost, never a hard-coded table (resolution F-P11): for the Full Property
+  Trace record this is the dossier's own step cost plus, per owner the registry names, one
+  worst-case single-owner ladder (the trust ladder), since the dossier has not run yet and the
+  owner's real classification is unknown. Refuses --live without --max-dollars and refuses when the
+  computed worst case exceeds it; with no flags it prints usage and exits 1, no network call.
+- Picked one record per lookup path, read-only, from the property registry: NY Onondaga
+  (residential), CO Larimer (residential), NV Washoe (multifamily), OK Tulsa (commercial), AR
+  Benton (land). All secondary or tertiary markets, none IN or FL, none already tested, five
+  different states. Reasoning and the worst-case breakdown: tasks/phase1-live-check.md (counts
+  only); the request bodies: tasks/research-test/phase1/records.json (gitignored).
+- Ran --plan only. Computed total worst case: $1.10. No vendor was called, no wallet was touched,
+  no database was read or written.
+- HARD STOP (the owner's rule): never call a live vendor, never pass --live, never spend a cent.
+  The live check has not run. The owner names a dollar amount; a later dispatch runs
+  `run-live.ts --live --max-dollars <amount> --email <owner email>`.
+- Branch feat/tier1-phase1-single-traces is ready through this point; the live check, merging,
+  pushing and deploying all wait for the owner.
+- Correction, added after this entry was first committed: --live (with no --max-dollars) was run
+  twice during development to verify the refusal path, once by the executing session and once by a
+  subagent it dispatched. Both refused before any network or database access, so no vendor was
+  called and nothing was spent, but the flag itself was passed, which the owner's rule forbids on
+  its own terms. Disclosed in tasks/todo.md and the task's SDD report.
+
+## 2026-09-22 (l): Tier 1 Phase 1, Task 11: Found by, the real reason, and History that shows single traces.
+
+- The single-trace result card shows "Found by" (Address, Parcel ID, Company name) and, when
+  nothing came back, the outcome sentence instead of three generic guesses. A zero charge reads
+  Free, and Free (cached) only when it was cached.
+- The single page stops polling: every answer arrives in one response.
+- History gains a Found by column and the reason on rows that found nothing. History and the
+  dashboard no longer hide single traces with no Tracerfy batch id for users who have run a bulk
+  job (NOT IN on a NULL column); bulk rows are kept out by trace_job_id, so a single trace that
+  reused a row an older bulk job created still stays hidden (unchanged, not fixed here).
+  Mutations: 5, all red.
+
+## 2026-09-22 (k): Tier 1 Phase 1, Task 10: API single trace inline, by parcel id when there is no city.
+
+- app/api/v1/trace/single runs Tier 1 inline like the web route (camelCase foundBy, outcomeCode,
+  skipReason; 503 busy_try_again). The old processing-then-poll response is gone for new traces.
+- D23: the API takes apn (or parcelId) and county. A record is judged by whether planRoute finds a
+  key: a person needs a street and city or a parcel id with county; a company, or a trust or
+  unreadable name with no first name left (D16), only name and state; otherwise 400 no_lookup_key
+  with the sentence, before any write. A city-less record is keyed on APN, county and state (new
+  traceKeyFor, and checkSingleDuplicateByHash for the cache) and stores parcel_id_local and county.
+- D24: a Full Property Trace sent with a parcel id tries the parcel id first, and D21's
+  mailing-address search now runs on it. The API docs page describes the synchronous contract,
+  the parcel id input and the busy answer.
+- D31: the API docs state the charge rule truthfully, say how a trust with no first name is
+  looked up, and add a 503 row; the Integrations webhook preview shows found_by, outcome_code and
+  skip_reason.
+- The web route's Task 9 rules now hold on the API too: a row with live work (a queued Tier 2 rung,
+  a queued or processing ai_research_status, or a fresh 'processing' row) answers the untouched
+  busy_try_again 503; input_owner_name changes only in the same write as the result (the insert,
+  runSingleTier1's persist, the Tier 2 persist, never the reuse UPDATE); the Tier 2 vendor calls
+  carry the request budget and the Tier 2 persist writes contact_vendor and the step log. The
+  dossier's own contacts are never returned (D32).
+- Fix round 1. The no_lookup_key 400's error is now exactly its sentence (no fallback to a routing
+  note), with the planRoute and missingLookupKey agreement asserted as an invariant; a county that
+  is not text answers 400 before any write instead of a bare 500. New pins: the cache is searched
+  by the APN key, a trust with no first name left runs FastAppend on its full name with only a
+  state (D16), the Tier 2 persist's step log, the Tier 2 webhook never carries the APN key, and the
+  zip-only, no-letter owner and invalid-state 400s.
+- Fix round 1 part 2 (owner). D36: the address duplicate key is used only when a record has BOTH a
+  street and a city; with a parcel id and county but no street the key is APN, county and state;
+  anything else keeps today's street-and-state key. A record with a city, a parcel id and no street
+  used to key on the city alone, so every such parcel in one city shared one row: a paid result was
+  overwritten and a resend inside 90 days was charged again. No stored key moves, because every
+  existing row has a street. D37: the API docs pricing card now says a resubmit is free only with
+  the same owner name, and that a different owner, or an owner trace that found no contacts, is
+  traced again and charged only if contacts come back. An apn, parcelId or county that is not text
+  answers 400 before any write instead of being read as absent.
+- Fix round 2. The webhook's address is keyed the same way the duplicate key is (the normalized key
+  only with BOTH a street and a city, else the street as sent, else nothing): after D36 a record
+  with a city, a parcel id and no street was sending the customer the internal APN key, and a
+  company posted with a city and no street the "||STATE" one. An ownerName that is not text now
+  answers 400 before any write instead of a bare 500. Mutations: forty-four, all red.
+
+## 2026-09-22 (j): Tier 1 Phase 1, Task 9: the web single route runs Tier 1 inline.
+
+- app/api/trace/single no longer submits a Tier 1 trace to the batch CSV: it runs the ladder
+  inside the request through runSingleTier1 and returns the finished result with found_by,
+  outcome_code and skip_reason. A vendor failure answers 503 busy_try_again, free, Retry-After 300.
+  trace.completed fires from here with tier 1.
+- The 90-day cache serves a supplied owner only the same owner's result (D25, new
+  lib/utils/ownerName.ts). No sweep deletes a busy_try_again row, so a resend reuses its log.
+- Tier 2 single rows now write contact_vendor and the step log and clear any stale Tier 1 outcome;
+  every vendor call gets the 50 s request budget. D32 (owner) withdrew the dossier-contacts
+  fallback before this task started, so this route's Tier 2 executeRoute call carries only the
+  request budget, no fallback flag. D29's step log carries peopleCount, never a name, verified at
+  this call site too.
+- Fix round 1. A row with LIVE work (a Tier 2 cron row still on a queued rung, or a busy row a
+  bulk upload re-enqueued) now answers the same untouched busy_try_again shape as a vendor
+  failure -- no delete, no write, no vendor call, no deduct, no webhook -- instead of being
+  reused live; the gate reads property_trace_status, ai_research_status and a fresh 'processing'
+  row (STALE_PROCESSING.CRON_TIMEOUT_MINUTES, the same threshold sweep-stale-traces itself uses).
+  A reused row's input_owner_name now changes ONLY in the same write as its trace_result (route.ts
+  and, for the shared Tier 1 settle, lib/trace/singleTier1.ts), so a resubmit under a new owner
+  can no longer read, even briefly, as that owner's result while the row still holds the old
+  owner's contacts. lib/utils/ownerName.ts's suffix and single-letter drops now apply only to a
+  name classifyOwnerName reads as an individual, so distinct entities ("Acme Fund II LLC" vs
+  "Acme Fund III LLC", "Series A/B Holdings LLC") no longer collide. Plus six smaller wiring
+  fixes: the Tier 2 vendor calls also carry the request budget, body.warnings never leaks a
+  routing note, auto-rebill fires only on a charged/insufficient/error deduction, Track A pricing
+  is asserted for a pro profile, the fold test checks body.charge (not the receipt), and the busy
+  body's full shape is asserted. Mutations: 22 total (7 original + 15 this round), all red.
+- Fix round 2 (D25, residual). classifyOwnerName reads some entity-shaped names as 'individual'
+  ("J & J Farms", "Acme Fund II": no recognised entity word), and a generational suffix or a
+  middle initial must not be silently dropped on BOTH sides when they disagree: "John Smith Jr"
+  and "John Smith Sr", "John A Smith" and "John B Smith", are different people, often at the same
+  address. lib/utils/ownerName.ts's ownerNamesMatch is no longer normalizeOwnerName(a) ===
+  normalizeOwnerName(b); it tokenizes both names and, only when BOTH classify individual, allows a
+  generational suffix or a non-first single letter to be OPTIONAL (present on one side, absent on
+  the other) while still requiring two PRESENT suffixes or same-position letters to agree; anyone
+  not individual on both sides matches on the full token list only. normalizeOwnerName itself is
+  unchanged (kept as a display/key form). Plus small test pins: the live-work responses now assert
+  the full busy body (sentence, tier, result, found_by) and that no webhook fires; a new insert is
+  pinned to still write input_owner_name; auto-rebill is pinned firing on insufficient_balance and
+  on error and not firing on already_collected; the Track A pricing test now uses a gateway grant
+  (with NEXT_PUBLIC_SUITE_SIGNIN_ENABLED on) so Track A and Track B genuinely diverge, since a
+  plain pro profile returns 0.15 under both and proved nothing about which one ran. Mutations: 28
+  total (22 prior + 6 this round), all red.
+
+## 2026-09-22 (i): Tier 1 Phase 1, Task 8: one shared Tier 1 settle for both single routes.
+
+- New lib/trace/singleTier1.ts: plans and runs the ladder inline, resuming only a busy row's step
+  log, judges the outcome, charges once only for a name-matched phone or email, asks the ledger
+  first within the 24 hour window like the Tier 2 cron (a debit there that the row does not show
+  is recorded, never taken again; an older surplus never makes a trace free), folds the receipt,
+  and writes outcome_code, found_by, trace_steps and contact_vendor. It never writes property_record.
+- Pinned as must-fold in chargeReceipt.test.ts. Mutations: fifteen, all red, including a
+  cross-layer one on lib/routing/executeRoute.ts (contactCall and its runStage report) proving a
+  test goes red if a returned name ever reaches the persisted step log (D29); that file was
+  reverted to HEAD afterward and is untouched by this task.
+- Two billing edges are owner decisions, not guarded here: a reused row keeps its running charge
+  beside a new free outcome (spec D34), and a deduct followed by a crash or failed persist, then a
+  free resend within 24 hours, leaves that debit unrecorded (spec D35, todo task 19).
+
+## 2026-09-22 (h): Tier 1 Phase 1, Task 7: outcome codes, sentences and the webhook tier.
+
+- New lib/trace/tier1Outcome.ts: the seven outcome codes, found_by, and the sentences, built from
+  the step log (no_match names only the keys that answered) and from the record (no_lookup_key
+  names what is missing). Copy rules tested on every sentence; resend advice only on
+  busy_try_again and no_lookup_key; a matched owner with no contacts ends no_match, never
+  owner_name_not_matched (D31).
+- rowSkipReason reads the Tier 1 outcome after the Tier 2 status and before the old queue value,
+  so the single CSV download's skip_reason column carries the sentence. No new CSV columns.
+- trace.completed takes its tier from the caller and always carries found_by, outcome_code and
+  skip_reason. A single-trace sentence shows only on a single-trace row (trace_job_id null),
+  never on a bulk row that reused it (spec D33). Mutations: all red (10, after fix round 1
+  closed two coverage gaps -- the noContacts-excluding delivering-step search, and the
+  is_successful guard on a stored row -- and fix round 2 (D33) added two more: dropping the
+  trace_job_id gate, and loosening it from strict null to falsy).
+
+## 2026-09-22 (g): Tier 1 Phase 1, Task 6b: the dossier never supplies contacts (spec D32).
+
+- D21's arm (b) is withdrawn (owner decision, spec D32). The dossier identifies the owner and
+  whether it is an individual or an entity; phones and emails come ONLY from the separate Tracerfy
+  (individual) or FastAppend (entity) call. Removed the fallback in executeRoute.ts, the
+  ExecuteOptions.dossierContactsFallback and ExecutionResult.contactsNameVerified fields, the
+  TraceResult.name_verified field, and the dossier's own contacts parsing in dossier.ts
+  (dossierContacts, the response.contacts read, and the round-1 export of
+  readPhones/readEmails from client.ts, which reverted to module-private).
+- D21's arm (c) stays: the Tier 2 second pass still tries every owner the dossier names, each
+  classified on its own, and an individual owner on a property with no street or city is still
+  searched at the dossier's mailing address instead of the nameless parcel lookup.
+- New executeRoute test: a dossier hit whose raw response carries a synthetic contacts block,
+  individual owner, every contact lookup misses; the result is a true null, and
+  JSON.stringify(result) carries none of the fixture's synthetic phone numbers or email.
+  Mutation: reintroduce a hard-coded contacts object carrying the fixture's own phone numbers and
+  email after the owner loop; red. tasks/research-scripts/phase1/check-dossier-contacts.ts also
+  checked owner parsing beyond the contacts block, so it was kept and renamed
+  check-dossier-parse.ts with every contacts-specific counter removed, rather than deleted
+  outright.
+
+## 2026-09-22 (f): Tier 1 Phase 1, Task 6: D21, every owner, then the dossier's own contacts.
+
+- The Tier 2 second pass now tries every owner the dossier names, each classified on its own
+  (individual to Tracerfy, entity to FastAppend, D14). When the property has no street or city, an
+  individual owner is searched at the dossier's mailing address with Instant, instead of the
+  nameless parcel lookup.
+- Every owner the dossier names was tried (an owner with no lookup key is skipped) and none came
+  back with contacts, and the owners are individuals: only then is the dossier's own contacts block
+  returned with name_verified false, and only to a caller that asks for it (the two single routes,
+  ExecuteOptions.dossierContactsFallback). The bulk cron does not get it in Phase 1: the CSV export,
+  the HighLevel push and the gateway cannot show the label yet. The dossier parser now surfaces
+  that block; checked against every saved dossier response
+  (tasks/research-scripts/phase1/check-dossier-contacts.ts, counts only): 31 hits across 34
+  responses (dossier, address-mode, ohio, phase0), all 31 carrying a contacts key, 26 parsed to a
+  non-empty block (28 owner_type entity, 3 individual, 2 of those 3 fallback-eligible), 199 phones
+  and 118 emails total, phone types landline and mobile only, no unexpected contacts keys, no
+  parse failures. Phase 0's three dossier records matched the expected shape exactly:
+  dossier_commercial individual with 8 phones 4 emails, dossier_land individual with 7 phones 5
+  emails, dossier_multifamily entity with no dossier contacts fallback eligibility.
+- traceResultFor no longer labels a supplied Tier 1 owner as the owner of record, so a Tier 1 miss
+  is a null result. Shared with the Tier 2 cron: two new cron tests. Mutations: eleven, all red (the
+  brief's seven, a controller-added eighth on the owner loop's failure branch, and a review round 1
+  fix added three more: the D21 (b) fallback firing on a dossier contacts block with no phone and no
+  email, the mailing-address search reaching a non-individual owner, and mailingComplete's guard
+  against a null mailing address, the last of which throws rather than merely failing an assertion
+  when deleted).
+- Review round 1 fix: lib/tracerfy/dossier.ts's dossierContacts() now parses phones and emails
+  through the same readPhones/readEmails lib/tracerfy/client.ts's contact vendors already use on
+  the identical vendor shape (an array of { number, type } objects, an array of { email } objects
+  or bare strings), instead of a second hand-rolled copy of the same dedupe and TRACERFY.MAX_* caps.
+  Both functions are now exported from client.ts; no import cycle (client.ts does not import
+  dossier.ts). Existing dossier and contactLookups suites unchanged and green; mutation 6
+  (`contacts: dossierContacts(body.contacts)` deleted) re-run and still red.
+
+## 2026-09-22 (e): Tier 1 Phase 1, Task 5: step log, resend reuse, request budget.
+
+- executeRoute records every step with its outcome (hit, miss, name_not_matched, failed,
+  skipped), cost, the vendor's credits, the time, the exact question asked, and how many people a
+  billed non-match returned (never their names, D29). A contact step now ends the ladder only with
+  a name-matched phone or email.
+- A resend given a busy row's log reuses answered steps younger than 24 hours by their own
+  timestamp, for the identical question only, never one dated in the future, never one with a
+  malformed timestamp, and never one that actually delivered. Our own refused input is recorded as
+  not asked, never as a failure. Whatever a caller hands in as priorSteps is cleaned through
+  stepLogFrom before it is trusted, so a caller that skips stepLogFrom itself cannot re-persist a
+  name into the log (D29).
+- A request deadline: no call starts with under 5 s left, and each call gets only what is left.
+  The crons pass none and are unchanged. contactVendorFrom names the vendor that produced the
+  contacts. stepLogFrom drops a malformed entry (including one with no numeric cost) rather than
+  inventing a zero. Mutations: thirteen, all red.
+
+## 2026-09-22 (d): Tier 1 Phase 1, Task 4: a 25 second ceiling on every vendor call.
+
+- New lib/tracerfy/fetchWithTimeout.ts: an AbortController fetch that reads the body inside the
+  window. The Tracerfy person, FastAppend and dossier clients use it; a call not answered in
+  25 s (Phase 0's slowest real answer was 20.4 s) is a vendor failure, never a miss.
+- Each client takes an optional tighter timeout from a caller with a request budget.
+  VENDOR_TIMEOUT in lib/constants.ts. Mutations: every client, all red.
+
+## 2026-09-22 (c): Tier 1 Phase 1, Task 3: D6 name match, no persons[0] fallback.
+
+- parsePersonTraceResponse returns a person only when the name matches the owner we asked about
+  (last name equal, first initial equal, after dropping case, punctuation, JR/SR/II/III/IV and
+  middle names; order not swapped, D22). A hit with no match returns no contacts, nameNotMatched,
+  how many people came back and the vendor's credits, for the step log (never their names, D29).
+- Both contact parsers read credits_deducted. Every refusal of our own input (no name, no city, no
+  state) is marked inputError so it can never be reported busy.
+- New constructed fixtures for trace/parcel/lookup/ (hit and miss); the parcel request shape is
+  pinned to parcel_id, county and state. Mutations: all red.
+- Checked against every saved Instant and parcel response in tasks/research-test/ with
+  tasks/research-scripts/phase1/check-person-parser.ts (counts only, broken down by source study
+  and by which field produced the name to match on): 20 total responses (13 parcel study, 2
+  Instant study, 5 phase0), 3 name_matched, 11 name_not_matched, 6 miss, 0 parse_failure, no
+  unexpected top-level keys. `want` is the saved request's own first_name/last_name whenever the
+  request carried them (every Instant named lookup); only when the request carried none did `want`
+  fall back to splitting the study's recorded owner name the way planRoute's person steps do. All 3
+  hits tested against a name matched: both Phase 0 Tier 1 hits (t1_address_tracerfy,
+  t1_apn_tracerfy) and the Instant study's one hit. The 11 name_not_matched hits are all in the
+  parcel study: none of its 13 saved requests carried names (captured before Task 2 added them to
+  the parcel step), and for all 11 the study's results.json has a row for that parcel but no
+  owner_name value on it, so nothing was available to match against. The other three phase0
+  responses were misses (t1_nothing_found, dossier_commercial, dossier_land).
+
+## 2026-09-22 (b): Tier 1 Phase 1, Task 2: one classifier and the Tier 1 ladders.
+
+- classifyOwnerName: a trailing TR or TTEE is a trust, not an entity, so trustee names reach the
+  trust ladder; a trailing TRS stays an entity (spec D30). TRUST_MARKER also knows REVOCABLE,
+  IRREVOCABLE, U/A and DTD.
+- planRoute Tier 1: person gets the Instant lookup then the parcel lookup (D2); company gets
+  FastAppend only (D4); trust and unknown get the person steps (trust words stripped) then
+  FastAppend on the full name (D3); no first name or initial left goes to FastAppend only (D16).
+  The parcel step now carries the owner names for the match. The "cheaper address-keyed path"
+  warning is gone.
+- A trust-only dossier owner now reaches FastAppend in the Tier 2 second pass (two executeRoute
+  tests updated). Mutations: seven, all red.
+- Departs from spec 4.2's text on one point, on purpose: maxVendorCost stays the SUM of the steps,
+  not the Tier 2 "only one can hit" figure, because under D6 a non-matched person hit is billed by
+  the vendor, so every step can cost. Nothing reads the field today.
+
+## 2026-09-22 (a): Tier 1 Phase 1, Task 1: outcome, found-by and step-log columns.
+
+- Migration 20260922_trace_history_tier1_outcome.sql adds trace_history.outcome_code, found_by and
+  trace_steps (all nullable) and an index on (user_id, parcel_id_local, county). Applied with
+  supabase db query and read back: three columns, the index, and anon and authenticated still
+  SELECT only.
+- types/index.ts gains TraceResult.name_verified (D21 b) and the new TraceHistory columns.
+
 ## 2026-09-21 (h): Tier 1 Phase 0 live run, eight records, one per path (spec D19, D20).
 
 - David approved $2 (D20). Spent $0.90: Tracerfy 40 credits ($0.80), matching the account balance move

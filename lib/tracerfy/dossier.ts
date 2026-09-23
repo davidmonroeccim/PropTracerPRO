@@ -28,6 +28,12 @@
  * a retry here would silently double a real charge.
  */
 import { TRACERFY } from '@/lib/constants'
+import {
+  callTimeoutMs,
+  fetchTextWithTimeout,
+  VendorTimeoutError,
+  type VendorCallOptions,
+} from './fetchWithTimeout'
 
 /** A dossier lookup key. The two modes are mutually exclusive by construction. */
 export type DossierKey =
@@ -170,8 +176,10 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '')
  * A MISS is a success. The vendor returns { hit: false, credits_deducted: 0 } and echoes the
  * request keys back; there is no property, owners, contacts or skip_trace_hit key at all.
  *
- * `response.contacts` is deliberately not surfaced. It carries purchased skip-trace PII and
- * the contact step is a separate vendor call on a separate ledger line.
+ * `response.contacts` is deliberately not surfaced (spec D32). The dossier identifies the owner
+ * and whether it is an individual or an entity; phones and emails come ONLY from the separate
+ * Tracerfy (individual) or FastAppend (entity) call on a separate ledger line. If that call
+ * misses, the result is a true null: there is no fallback to the dossier's own contacts block.
  */
 export function parseDossierResponse(body: unknown): DossierResult {
   if (!isRecord(body)) {
@@ -225,7 +233,7 @@ export function parseDossierResponse(body: unknown): DossierResult {
  *
  * Never throws. No retries. Does not sequence the second key mode — see the module header.
  */
-export async function lookupDossier(key: DossierKey): Promise<DossierResult> {
+export async function lookupDossier(key: DossierKey, opts: VendorCallOptions = {}): Promise<DossierResult> {
   // Read at call time rather than at module load: the module-level capture in ./client.ts
   // freezes the value at import, which leaves the missing-key branch untestable.
   const apiKey = process.env.TRACERFY_API_KEY
@@ -241,37 +249,40 @@ export async function lookupDossier(key: DossierKey): Promise<DossierResult> {
   }
 
   try {
-    const response = await fetch(`${baseUrl}${ENDPOINT_PATH}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+    const res = await fetchTextWithTimeout(
+      `${baseUrl}${ENDPOINT_PATH}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildDossierRequest(key)),
       },
-      body: JSON.stringify(buildDossierRequest(key)),
-    })
+      callTimeoutMs(opts.timeoutMs)
+    )
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('Tracerfy dossier lookup error:', response.status, errorText)
+    if (!res.ok) {
+      console.error('Tracerfy dossier lookup error:', res.status, res.text)
 
-      if (response.status === 429) {
+      if (res.status === 429) {
         // The 500/min counter is SHARED with the other Tracerfy lookup endpoints, so this
         // can fire even when the dossier itself is running well under its own volume.
         return failure('Rate limit exceeded. Please wait a moment before trying again.')
       }
-      if (response.status === 503) {
+      if (res.status === 503) {
         return failure('Tracerfy service unavailable (503)')
       }
-      if (response.status === 401 || response.status === 403) {
-        return failure(`Tracerfy auth failed (${response.status})`)
+      if (res.status === 401 || res.status === 403) {
+        return failure(`Tracerfy auth failed (${res.status})`)
       }
 
-      return failure(`Dossier lookup failed (${response.status})`)
+      return failure(`Dossier lookup failed (${res.status})`)
     }
 
-    const data = await response.json()
-    return parseDossierResponse(data)
+    return parseDossierResponse(JSON.parse(res.text))
   } catch (error) {
+    if (error instanceof VendorTimeoutError) return failure(`Tracerfy dossier ${error.message}`)
     console.error('Tracerfy dossier lookup error:', error)
     return failure('Tracerfy service unavailable')
   }

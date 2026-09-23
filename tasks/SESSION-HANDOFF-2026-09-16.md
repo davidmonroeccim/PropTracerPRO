@@ -1,6 +1,69 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-22. PHASE 1 PLAN APPROVED, EXECUTE IT. Tier 1 through planRoute, Phase 0 (paid measurement).
+> # READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS BUILT AND REVIEWED on branch `feat/tier1-phase1-single-traces`.
+> ONE THING IS LEFT: the live check, which waits for David's dollar amount. NOTHING IS PUSHED OR MERGED.
+>
+> **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0), head `bddb9a3`, 38 commits, unpushed. All 12 tasks
+> built, each task-reviewed, then a whole-branch review (verdict: fix before merge), its ONE fix wave, and a clean
+> scoped re-review ("all findings addressed, no new Critical or Important breakage"). Gates at head: vitest 1837
+> passing / 83 files, tsc 0, eslint 46 (cap 47), next build clean. 176 mutation kills recorded across the phase.
+>
+> **THE HARD STOP:** `tasks/research-scripts/phase1/run-live.ts` is built and has NEVER been run live. Its `--plan`
+> worst case for the 5 chosen records is **$1.10** (counties NY Onondaga, CO Larimer, NV Washoe, OK Tulsa, AR Benton;
+> the records are in the gitignored tasks/research-test/phase1/records.json). It refuses `--live` without
+> `--max-dollars`, refuses when the computed worst case exceeds it, and refuses a record with no owner count, all
+> before it loads any credential, opens the database or calls a vendor. David names the amount; then run it,
+> write the report (counts only) and finish Task 12. Its todo line is `[~]`, not ticked.
+>
+> **Decisions David made during execution (spec rows, in his words): D27-D41.** The load-bearing ones: **D32** the
+> dossier's own contacts are NEVER used (D21 arm b withdrawn and its code removed); **D30** a trailing TRS stays a
+> company; **D29** the step log stores a count, never names; **D33** a single-trace sentence shows only on a
+> single-trace row; **D34/D35** two billing edges accepted as known gaps (todo 19); **D36** the parcel key when a
+> record has no street; **D31/D37** the approved docs copy; **D38** a parcel row shows "Parcel <id>, <County>
+> County", never the internal key; **D39** a trace that finds nothing never erases a stored result that has
+> contacts; **D40** no cap on owners tried; **D41** a fourth no_lookup_key sentence naming the county.
+>
+> **Open for David, recorded as todo tasks:** 19 (the crash-window charge), 20 (Tier 2 single persists and bulk
+> settles still overwrite a reused row's result; D39 closed the Tier 1 half), 21 (five follow-ups from the final
+> re-review, none blocking).
+>
+> **Process notes David should hear once:** `--live` was passed three times during Task 12 development to test the
+> refusals (each refused before any credential, database or vendor; nothing spent); one implementer dispatched a
+> subagent against its contract and that subagent committed files and made a false claim in its commit message,
+> which the implementer caught and corrected; commit trailers name the model that wrote each commit; and
+> `trace_history` grants anon/authenticated TRUNCATE-class privileges (pre-existing, not reachable via PostgREST,
+> untouched here).
+>
+> **The SDD ledger is the recovery map and is NOT deleted:** `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/`
+> (gitignored) holds progress.md (every ruling and deferred minor), the 12 task briefs, resolutions and reports,
+> global-constraints.md and every review package. Keep it until the live check is done and the branch is finished.
+
+> # (PREVIOUS BLOCK, superseded 2026-09-23) READ FIRST. STATE AS OF 2026-09-22 (execution session). PHASE 1 BEING EXECUTED on branch `feat/tier1-phase1-single-traces`.
+>
+> **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0; NOT pushed, NOT merged). Subagent-driven execution of
+> `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md`. **Ledger (gitignored, the recovery map):**
+> `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/progress.md`; per-task controller overrides in
+> `task-N-resolutions.md` there (they bind over the plan text), `global-constraints.md` (with the D27-D32 amendments).
+> Trust the ledger and `git log` over memory; tasks with a `Task N: complete` line are DONE.
+>
+> **Done:** Tasks 1-6 complete and reviewed (Task 1 migration APPLIED to production and read back: outcome_code,
+> found_by, trace_steps, index on (user_id, parcel_id_local, county); ACL unchanged). Task 7 committed (f2e96f3), in
+> review. Tasks 8-12 to go. Suite 1624 passing, tsc 0, eslint 47.
+>
+> **New owner decisions this session (spec, in David's words):** D30 a trailing TRS stays a company. D31 three copy
+> fixes approved word for word (Integrations webhook preview; API docs charge sentence, D16 trust sentence, 503 row;
+> no_match for a matched contactless owner). **D32: the dossier's own contacts block is NEVER used**; contacts only
+> from the separate Tracerfy/FastAppend call; a vendor miss is a true null. D21 arm (b) withdrawn and its code removed
+> (Task 6b, 6110f33); D31 (2c) withdrawn. Export clarified under D32: no change (CSV keeps a paid dossier row with blank
+> contact columns; Add to CRM refuses a row with no contact). Lessons L-028 (list copy fixes for approval, never
+> announce them) and L-029 (the dossier finds the OWNER, never contacts).
+>
+> **Hard stop still ahead:** Task 12's live check waits for David's dollar amount. Never push or merge without his go.
+> **For David at the end (not yet told in full):** pre-existing anon/authenticated rDxtm grant on trace_history
+> (TRUNCATE etc., not reachable via PostgREST, untouched); commit trailers name the model that wrote them (Sonnet);
+> a D27 consequence on the live Tier 2 cron (a matched contactless second lookup no longer fills owner_name).
+
+> # (PREVIOUS BLOCK) STATE AS OF 2026-09-22. PHASE 1 PLAN APPROVED, EXECUTE IT. Tier 1 through planRoute, Phase 0 (paid measurement).
 >
 > **MERGED 2026-09-21 night on David's go ("go ahead and merge"): `feat/contact-vendor-provenance` -> `main` at
 > 95db059 (--no-ff), branch deleted. It carried b02f82d (older Tracerfy API

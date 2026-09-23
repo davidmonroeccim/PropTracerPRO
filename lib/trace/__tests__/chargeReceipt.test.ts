@@ -423,6 +423,7 @@ describe("trace_history.charge is a receipt, not a scratch field", () => {
       "app/api/v1/trace/status/route.ts",
       "app/api/cron/sweep-stale-traces/route.ts",
       "app/api/trace/bulk/status/route.ts",
+      "lib/trace/singleTier1.ts",
     ];
     for (const file of mustFold) {
       const sites = updatePayloads(readFileSync(file, "utf8"))

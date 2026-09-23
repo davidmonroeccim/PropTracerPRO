@@ -38,6 +38,7 @@
  * customer bought.
  */
 
+import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
 import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 import { DOSSIER_EXPORT_KEYS, toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import type { AIResearchResult, TraceHistory, TraceResult } from '@/types';
@@ -341,7 +342,9 @@ export function toExportValues(row: TraceHistory): unknown[] {
   const dossier = toPublicPropertyRecord(row.property_record) ?? {};
 
   return [
-    row.normalized_address,
+    // D38: a row keyed by parcel carries an INTERNAL key here (`APN|0123-456|TRAVIS|TX`).
+    // It is never exported as the address; the customer gets "Parcel 0123-456, Travis County".
+    propertyAddressLabel(row),
     row.city,
     row.state,
     row.zip,

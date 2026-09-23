@@ -12,13 +12,14 @@ import {
   TRACE_TIER,
   type CacheHitRow,
 } from '@/lib/trace/billedRows';
-import {
-  submitSingleTrace,
-  lookupBusinessTrace,
-  lookupPersonTrace,
-} from '@/lib/tracerfy/client';
+import { lookupBusinessTrace, lookupPersonTrace } from '@/lib/tracerfy/client';
 import { lookupDossier } from '@/lib/tracerfy/dossier';
-import { executeRoute } from '@/lib/routing/executeRoute';
+import { contactVendorFrom, executeRoute } from '@/lib/routing/executeRoute';
+import { runSingleTier1 } from '@/lib/trace/singleTier1';
+import { BUSY_TRY_AGAIN_REASON, TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
+import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
+import { ownerNamesMatch } from '@/lib/utils/ownerName';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
   FULL_PROPERTY_TRACE_DESCRIPTION,
@@ -33,23 +34,21 @@ import { dispatchTraceCompleted } from '@/lib/trace/traceCompletedWebhook';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { deductWallet } from '@/lib/wallet/deduct';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { STALE_PROCESSING } from '@/lib/constants';
+import { STALE_PROCESSING, VENDOR_TIMEOUT } from '@/lib/constants';
 import { chargePerRecord, chargePerTrace, pricePlanFor } from '@/lib/suite/pricing';
 import type { SingleTraceRequest, TraceResult } from '@/types';
 
 /**
- * Tier 2 runs the whole route SYNCHRONOUSLY: a dossier lookup (sometimes two,
- * stopping at the first hit) and then one contact lookup, all JSON POSTs with
- * no queue and no polling. Three vendor round trips do not fit in the default
- * function timeout. 60 matches the only other route in this codebase that
- * makes inline vendor calls (app/api/v1/trace/single, which polls FastAppend
- * inline on a 15s budget). Tier 1 is unaffected: it still returns as soon as
- * Tracerfy accepts the job.
+ * Both tiers now finish INSIDE this request: tier 2 buys the dossier and then contacts, tier 1 runs
+ * its ladder (spec D1, D26). Every vendor call is capped at 25 s and no call starts later than 50 s
+ * after the request began (VENDOR_TIMEOUT), which leaves 10 s of this 60 for our own writes. The
+ * arithmetic is in docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md.
  */
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
+    const startedAt = Date.now();
     // Check authentication
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
@@ -86,6 +85,14 @@ export async function POST(request: Request) {
     if (!validation.valid) {
       return NextResponse.json(
         { success: false, error: validation.error },
+        { status: 400 }
+      );
+    }
+
+    // A supplied owner name must be something a vendor can look up.
+    if (owner_name?.trim() && !/[A-Za-z]/.test(owner_name)) {
+      return NextResponse.json(
+        { success: false, error: 'Owner name must contain at least one letter.' },
         { status: 400 }
       );
     }
@@ -141,10 +148,75 @@ export async function POST(request: Request) {
     // nothing.
     const { data: existingRow, error: existingRowError } = await adminClient
       .from('trace_history')
-      .select('id, charge, ai_research_charge, property_record, tier')
+      .select('id, charge, ai_research_charge, property_record, tier, outcome_code, property_trace_status, ai_research_status, trace_job_id, status, created_at')
       .eq('user_id', user.id)
       .eq('address_hash', addressHash)
       .maybeSingle();
+
+    // LIVE WORK IS NEVER TOUCHED BY THIS ROUTE (fix round 1, Task 9).
+    //
+    // Two paths could otherwise put an in-flight row in front of this probe while it still reads
+    // reusable:
+    //   A. The Tier 2 cron's crash window (sweep-property-traces: deduct, throw, requeue) leaves a
+    //      row `ledgerProtected` by the debit the cron already booked, with `property_trace_status`
+    //      back on a queued rung. ledgerProtected alone only stops the SWEEPS below; nothing stopped
+    //      the reuse branch taking the row, and runSingleTier1 would then count the cron's own debit
+    //      as THIS request's charge and null property_trace_status, so the cron's paid Tier 2 record
+    //      never finishes.
+    //   B. `busyResend` used to key on `outcome_code` alone. A bulk upload that re-enqueues a busy
+    //      single row (ai_research_status or property_trace_status back to a queued rung) does not
+    //      clear outcome_code, so the busy exemption spared that live queued work too.
+    //
+    // The fix: a row with live work answers the SAME busy_try_again shape a vendor failure does,
+    // completely untouched -- no delete, no write, no vendor call, no deduct, no webhook -- whether
+    // or not it is ALSO busy_try_again from an earlier attempt. STALE_PROCESSING.CRON_TIMEOUT_MINUTES
+    // is the threshold, the same age at which app/api/cron/sweep-stale-traces itself gives up on a
+    // 'processing' row and marks it error, so a 'processing' row younger than that is presumptively
+    // still running somewhere and this route must not race it.
+    //
+    // THE THRESHOLD DEPENDS ON WHO OWNS THE ROW. A row a BULK job owns is worked by a cron on its
+    // own schedule, so CRON_TIMEOUT_MINUTES is right for it: it is the age at which
+    // app/api/cron/sweep-stale-traces itself gives up. A row a SINGLE trace wrote (trace_job_id
+    // NULL) finishes inside its own request, and maxDuration caps that at 60 s, so it cannot
+    // still be running an hour later -- using the cron's hour for it meant one request that died
+    // after its insert answered busy to every resend of that address for up to an hour.
+    const processingTimeoutMinutes = existingRow?.trace_job_id
+      ? STALE_PROCESSING.CRON_TIMEOUT_MINUTES
+      : STALE_PROCESSING.SINGLE_REQUEST_TIMEOUT_MINUTES;
+    const staleProcessingCutoff = new Date(
+      Date.now() - processingTimeoutMinutes * 60 * 1000
+    );
+    const processingIsLive =
+      existingRow?.status === 'processing' &&
+      Boolean(existingRow.created_at) &&
+      new Date(existingRow.created_at) >= staleProcessingCutoff;
+    const liveWork = Boolean(
+      existingRow &&
+        (isPropertyTracePending(existingRow.property_trace_status) ||
+          isEntityTracePending(existingRow.ai_research_status) ||
+          processingIsLive)
+    );
+
+    if (liveWork) {
+      return NextResponse.json(
+        {
+          success: false,
+          status: 'error',
+          trace_id: existingRow!.id,
+          // THE TIER THIS REQUEST ACTUALLY IS. Hard-coding tier 1 told a Full Property Trace
+          // caller they had submitted a per-successful-trace record, which misdescribes what
+          // their resend will be priced at.
+          tier: fullPropertyTrace ? TRACE_TIER.PER_RECORD_SUBMITTED : TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: 0,
+          result: null,
+          found_by: null,
+          outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+          skip_reason: BUSY_TRY_AGAIN_REASON,
+          error: BUSY_TRY_AGAIN_REASON,
+        },
+        { status: 503, headers: { 'Retry-After': '300' } }
+      );
+    }
 
     // Fails CLOSED. Not knowing whether a row exists is not permission to
     // delete one: a refused delete is a 500 the customer cannot get past, while
@@ -156,6 +228,13 @@ export async function POST(request: Request) {
         ? isBilledRow(existingRow) || (await hasLedgerReceipt(adminClient, existingRow.id))
         : false;
 
+    // A busy_try_again row is the one a resend RESUMES (spec 5.2): its step log is what spares the
+    // retry from buying the answered steps again, so no sweep below may delete it. It is reused in
+    // place by the update branch further down, like a billed row. `liveWork` is already false by
+    // this line (live work returned above), named here explicitly so the rule -- busy AND no live
+    // work -- reads the same in code as in the fix.
+    const busyResend = !liveWork && existingRow?.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN;
+
     // Every delete below is narrowed by excludeBilledRows() and its error is
     // checked. A refused delete used to be invisible: the row survived, this
     // route carried on as though it had not, and the INSERT at the bottom died
@@ -166,7 +245,7 @@ export async function POST(request: Request) {
       label: string,
       build: () => PromiseLike<{ error: { message: string } | null }>
     ) => {
-      if (ledgerProtected) return;
+      if (ledgerProtected || busyResend) return;
       const { error } = await build();
       if (error) {
         console.error(`Single trace - ${label} delete failed:`, error.message);
@@ -197,7 +276,13 @@ export async function POST(request: Request) {
         const hasData = cached &&
           ((cached.phones?.length || 0) > 0 || (cached.emails?.length || 0) > 0);
 
-        if (hasData) {
+        // D25: a supplied owner is served an earlier result only when it is the SAME owner. A
+        // different owner runs a new trace, charged only on a name-matched result with contacts.
+        // A Full Property Trace request is served as before.
+        const sameOwner =
+          fullPropertyTrace || ownerNamesMatch(cachedResult.input_owner_name, owner_name);
+
+        if (hasData && sameOwner) {
           // Return cached result with actual data - no charge.
           // property_record rides along: on a tier 2 row it is the thing the
           // customer paid for, and dropping it here would serve them a cache
@@ -215,6 +300,8 @@ export async function POST(request: Request) {
             property_record: toPublicPropertyRecord(cachedResult.property_record),
             tier: cachedResult.tier ?? null,
             charge: 0,
+            found_by: cachedResult.found_by ?? null,
+            outcome_code: cachedResult.outcome_code ?? null,
           });
         }
 
@@ -239,9 +326,10 @@ export async function POST(request: Request) {
           });
         }
 
-        // Cached row holds no contacts, so re-trace. Delete it only if the
-        // customer has not paid for it: a tier 2 row's property record IS the
-        // thing they bought, and its wallet_transactions row references this id.
+        // Re-trace: either the cached row holds no contacts, or it holds a DIFFERENT owner's
+        // contacts (D25: sameOwner false above). Delete it only if the customer has not paid for
+        // it: a tier 2 row's property record IS the thing they bought, and its
+        // wallet_transactions row references this id.
         if (!isBilledRow(cachedResult)) {
           await runDelete('cached-empty', () =>
             adminClient.from('trace_history').delete().eq('id', cachedResult.id)
@@ -350,9 +438,17 @@ export async function POST(request: Request) {
       // (user_id, address_hash) already match, and charge, ai_research_charge,
       // property_record and tier are left untouched: they are what the customer
       // already paid for.
-      const { user_id: _u, address_hash: _h, ...resubmitData } = insertData;
+      //
+      // input_owner_name is excluded too (fix round 1, D25 money): it must change in the SAME
+      // write as trace_result, never ahead of it. Writing it here would let this UPDATE name a NEW
+      // owner while the row still carries the OLD owner's contacts -- readable that way for up to
+      // 50 s, or for 90 days if the settle write below never lands -- so a second request for the
+      // new owner would be served the old owner's contacts free. runSingleTier1 and the Tier 2
+      // persist below write input_owner_name together with trace_result.
+      const { user_id: _u, address_hash: _h, input_owner_name: _o, ...resubmitData } = insertData;
       void _u;
       void _h;
+      void _o;
       const { data, error } = await adminClient
         .from('trace_history')
         .update({ ...resubmitData, tracerfy_job_id: null })
@@ -428,11 +524,11 @@ export async function POST(request: Request) {
       }
 
       // 2. Spend. executeRoute never throws and reports each step separately.
-      const execution = await executeRoute(plan, {
-        lookupDossier,
-        traceEntity: lookupBusinessTrace,
-        tracePerson: lookupPersonTrace,
-      });
+      const execution = await executeRoute(
+        plan,
+        { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
+        { deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS }
+      );
 
       // 3. A VENDOR FAILURE IS NEVER BILLED. `success: false` means we could
       //    not ask -- an outage, a rate limit, a rejected key. It is NOT the
@@ -515,6 +611,9 @@ export async function POST(request: Request) {
         .update({
           status,
           trace_result: result,
+          // D25 money (fix round 1): the owner this result describes changes in the SAME write as
+          // the result, never a separate one. The supplied owner if there was one, else null.
+          input_owner_name: owner_name || null,
           phone_count: result?.phones?.length || 0,
           email_count: result?.emails?.length || 0,
           is_successful: isSuccessful,
@@ -524,6 +623,13 @@ export async function POST(request: Request) {
           // What the vendors actually took, read from their own credit
           // counters rather than assumed from a price list.
           cost: execution.vendorSpend,
+          // Which contact vendor was asked (spec 6.1); NULL when none was.
+          contact_vendor: contactVendorFrom(execution.steps),
+          // A tier 2 row carries no tier 1 outcome. Cleared because this row may be REUSED from a
+          // tier 1 trace whose outcome would otherwise answer rowSkipReason for it.
+          outcome_code: null,
+          found_by: null,
+          trace_steps: execution.steps,
           tracerfy_job_id: null,
           // The situs zip the dossier taught us, and ONLY when the caller had
           // none. address_hash is sha256 of STREET|CITY|STATE and deliberately
@@ -572,6 +678,7 @@ export async function POST(request: Request) {
         charge,
         propertyRecord: execution.property,
         ownerType: execution.ownerType,
+        tier: TRACE_TIER.PER_RECORD_SUBMITTED,
       });
 
       // NO CRM PUSH HERE, AND THAT IS THE DESIGN. PTP never calls HighLevel
@@ -582,7 +689,12 @@ export async function POST(request: Request) {
       // Two different zeros, two different sentences. Saying "your wallet did
       // not cover this" to a customer whose wallet is full, because OUR RPC
       // fell over, is a false statement about their money.
-      const warnings = [...execution.warnings];
+      // ONLY THE TWO WALLET SENTENCES REACH THE CUSTOMER, the rule Task 9 set for tier 1.
+      // execution.warnings are OUR routing notes -- "Sending the property state. FastAppend keys
+      // on STATE OF REGISTRATION...", "The $0.20 dossier charge is sunk on a hit..." -- and they
+      // quote a vendor price, which no customer-facing sentence may do (spec 7.3). They stay
+      // internal; the step log and the server log are where we read them.
+      const warnings: string[] = [];
       if (deduction.outcome === 'insufficient_balance') {
         warnings.push(WALLET_SHORT_WARNING);
       } else if (deduction.outcome === 'error') {
@@ -610,45 +722,97 @@ export async function POST(request: Request) {
       });
     }
 
-    // Submit to Tracerfy
-    const submitResult = await submitSingleTrace({
-      address,
-      city,
-      state,
-      zip,
-      owner_name,
+    /* ---------------------------------------------------------------- *
+     * TIER 1, INLINE (spec D1, D26). The owner was supplied: planRoute
+     * picks the ladder for this owner and executeRoute runs it inside this
+     * request. The deprecated batch submit is gone for new traces; the
+     * status poll route only serves rows already in flight.
+     * ---------------------------------------------------------------- */
+    const ownerName = (owner_name ?? '').trim();
+    const tier1 = await runSingleTier1({
+      adminClient,
+      userId: user.id,
+      row: traceRecord,
+      parcel: { ...parcelForFullTrace({ address, city, state, zip }), ownerName },
+      pricePlan: pricePlanFor(profile),
+      chargeAmount: chargePerTrace(profile),
+      deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS,
+      deps: { lookupDossier, traceEntity: lookupBusinessTrace, tracePerson: lookupPersonTrace },
+      // D25 money (fix round 1): written into the same UPDATE as trace_result inside
+      // runSingleTier1, never ahead of it.
+      inputOwnerName: owner_name || null,
     });
 
-    if (!submitResult.success || !submitResult.jobId) {
-      // Update trace record with error
-      await adminClient
-        .from('trace_history')
-        .update({
-          status: 'error',
-          tracerfy_job_id: null,
-        })
-        .eq('id', traceRecord.id);
+    if (tier1.persistError) {
+      console.error('Single trace tier 1 - failed to persist result:', tier1.persistError);
+    }
 
+    if (tier1.outcome === TIER1_OUTCOME.BUSY_TRY_AGAIN) {
+      // D7: a vendor failure ends the record busy_try_again, free, with no webhook: nothing
+      // completed. The row keeps its step log so a resend within 24 hours resumes here.
       return NextResponse.json(
-        { success: false, error: submitResult.error || 'Failed to submit trace' },
-        { status: 500 }
+        {
+          success: false,
+          status: 'error',
+          trace_id: traceRecord.id,
+          tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+          charge: 0,
+          result: null,
+          found_by: null,
+          outcome_code: tier1.outcome,
+          skip_reason: tier1.skipReason,
+          error: tier1.skipReason,
+        },
+        { status: 503, headers: { 'Retry-After': '300' } }
       );
     }
 
-    // Save Tracerfy job ID and return immediately.
-    // Client will poll /api/trace/status for results.
-    await adminClient
-      .from('trace_history')
-      .update({
-        tracerfy_job_id: submitResult.jobId,
-      })
-      .eq('id', traceRecord.id);
+    if (tier1.deduction === 'charged' || tier1.deduction === 'insufficient_balance' || tier1.deduction === 'error') {
+      triggerAutoRebillIfNeeded(user.id).catch(() => {});
+    }
+
+    const tier1Status = tier1.status === 'success' ? 'success' : 'no_match';
+
+    // trace.completed fires from here now (it used to fire from the poll), for every completed
+    // tier 1 trace, a free one included.
+    dispatchTraceCompleted({
+      webhookUrl: profile.webhook_url,
+      traceId: traceRecord.id,
+      status: tier1Status,
+      address: normalizedAddress,
+      city: city.toUpperCase(),
+      state: state.toUpperCase(),
+      zip: zip ? zip.substring(0, 5) : null,
+      result: tier1.result,
+      charge: tier1.charge,
+      propertyRecord: null,
+      ownerType: tier1.execution.ownerType,
+      tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      foundBy: tier1.foundBy,
+      outcomeCode: tier1.outcome,
+      skipReason: tier1.skipReason,
+    });
+
+    // Only the two wallet sentences reach the customer; the routing notes are internal.
+    const tier1Warnings: string[] = [];
+    if (tier1.deduction === 'insufficient_balance') tier1Warnings.push(WALLET_SHORT_WARNING);
+    else if (tier1.deduction === 'error') tier1Warnings.push(WALLET_NOT_COLLECTED_WARNING);
 
     return NextResponse.json({
       success: true,
-      status: 'processing',
+      status: tier1Status,
       trace_id: traceRecord.id,
-      tracerfy_job_id: submitResult.jobId,
+      tier: TRACE_TIER.PER_SUCCESSFUL_TRACE,
+      charge: tier1.charge,
+      result: tier1.result,
+      property_record: null,
+      owner_name: ownerName,
+      owner_type: tier1.execution.ownerType,
+      needs_manual_review: tier1.execution.needsManualReview,
+      found_by: tier1.foundBy,
+      outcome_code: tier1.outcome,
+      skip_reason: tier1.skipReason,
+      warnings: tier1Warnings,
     });
   } catch (error) {
     console.error('Single trace error:', error);

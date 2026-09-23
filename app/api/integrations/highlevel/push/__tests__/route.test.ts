@@ -483,6 +483,41 @@ describe('the job push finds tier 2 rows', () => {
     expect(owners).toContain('Tier Two Owner');
   });
 
+  it("never pushes the internal parcel key into the customer's CRM (D38)", async () => {
+    // Both push sites, the single and the job loop (L-018).
+    // MUTATION: put `trace.normalized_address || undefined` back at EITHER call site and this
+    // goes red for that site.
+    const APN_ROW = {
+      id: 'row-apn',
+      trace_result: { owner_name: 'Parcel Owner', phones: [], emails: [] },
+      normalized_address: 'APN|0123-456|TRAVIS|TX',
+      city: null,
+      state: 'TX',
+      zip: null,
+      parcel_id_local: '0123-456',
+      county: 'Travis',
+      is_successful: true,
+      tracerfy_job_id: null,
+    };
+    const { pushTraceToHighLevel } = await import('@/lib/highlevel/client');
+
+    H.trace = APN_ROW as never;
+    vi.mocked(pushTraceToHighLevel).mockClear();
+    await post({ trace_id: 't-1' });
+    expect(vi.mocked(pushTraceToHighLevel).mock.calls[0][0].propertyAddress).toBe(
+      'Parcel 0123-456, Travis County'
+    );
+
+    H.job = { tracerfy_job_id: null, status: 'completed' };
+    H.traces = [APN_ROW];
+    H.pushResults = [CREATED];
+    vi.mocked(pushTraceToHighLevel).mockClear();
+    await post({ job_id: 'j-1' });
+    expect(vi.mocked(pushTraceToHighLevel).mock.calls[0][0].propertyAddress).toBe(
+      'Parcel 0123-456, Travis County'
+    );
+  });
+
   it('records each pushed row against its own id', async () => {
     H.job = { tracerfy_job_id: null, status: 'completed' };
     H.traces = [TIER1_ROW, TIER2_ROW];

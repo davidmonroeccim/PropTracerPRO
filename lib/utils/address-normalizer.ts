@@ -145,3 +145,40 @@ export function formatAddress(
 ): string {
   return `${address}, ${city}, ${state} ${zip}`;
 }
+
+/**
+ * A parcel id as a duplicate key (spec 6.3): trimmed, upper case, leading "#" removed. Dashes and
+ * spaces are KEPT, so two different parcel numbers can never collapse into one. The vendor is sent
+ * the id as the caller sent it; this form is for the key only.
+ */
+export function normalizeParcelId(apn?: string | null): string {
+  return (apn ?? '').trim().toUpperCase().replace(/^#+\s*/, '');
+}
+
+/**
+ * The duplicate key for one record (spec 6.3, D9, amended by D36), in precedence order:
+ *   1. a street AND a city:     STREET|CITY|STATE, unchanged, so the 90-day history keeps working.
+ *                               Every row stored before this carries a street, so no key moves.
+ *   2. a parcel id + county:    APN|PARCEL|COUNTY|STATE
+ *   3. neither:                 STREET||STATE, today's behaviour. It carries today's collision
+ *                               risk, which the spec records rather than solves.
+ *
+ * D36: the address key needs BOTH halves. A record with a city, a parcel id and no street used to
+ * key on `|CITY|STATE`, so every such parcel in one city shared ONE row: the second parcel
+ * overwrote the first one's paid result, and a resend inside the 90 days was charged again.
+ */
+export function traceKeyFor(input: {
+  address?: string | null;
+  city?: string | null;
+  state: string;
+  apn?: string | null;
+  county?: string | null;
+}): string {
+  const street = (input.address ?? '').trim();
+  const city = (input.city ?? '').trim();
+  if (street && city) return normalizeAddress(street, city, input.state);
+  const parcel = normalizeParcelId(input.apn);
+  const county = (input.county ?? '').trim().toUpperCase();
+  if (parcel && county) return `APN|${parcel}|${county}|${input.state.trim().toUpperCase()}`;
+  return normalizeAddress(street, '', input.state);
+}

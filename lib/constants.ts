@@ -108,6 +108,15 @@ export const STALE_PROCESSING = {
   TRACERFY_STALL_MINUTES: 15,
   // Minutes before the cron job marks a processing record as error
   CRON_TIMEOUT_MINUTES: 60,
+  /**
+   * How long a 'processing' row a SINGLE TRACE wrote (trace_job_id NULL) is presumptively still
+   * running somewhere. A single trace finishes inside its own request and `maxDuration` caps that
+   * request at 60 s, so a row it left behind is dead within two minutes, not within the hour a
+   * bulk row's cron is given. Two minutes is comfortably over the 60 s ceiling and short enough
+   * that a customer resending the address they just submitted is not told the system is busy for
+   * the rest of the hour.
+   */
+  SINGLE_REQUEST_TIMEOUT_MINUTES: 2,
 } as const;
 
 // ===================
@@ -122,6 +131,22 @@ export const TRACERFY = {
 
 export const FASTAPPEND = {
   BASE_URL: 'https://app.fastappend.com/v1/api/',
+} as const;
+
+/**
+ * Vendor call ceilings (spec D7, Tier 1 Phase 1). The arithmetic is in
+ * docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md, "Latency budget".
+ *
+ * CALL_MS                 one vendor call. Phase 0's slowest REAL answer was an Instant lookup
+ *                         at 20.4 s; this is that plus about 20 percent.
+ * SINGLE_ROUTE_BUDGET_MS  a single-trace route starts no vendor call after this long, which
+ *                         leaves 10 s of its 60 s maxDuration for our own writes.
+ * MIN_CALL_MS             a call is not started with less budget than this left.
+ */
+export const VENDOR_TIMEOUT = {
+  CALL_MS: 25_000,
+  SINGLE_ROUTE_BUDGET_MS: 50_000,
+  MIN_CALL_MS: 5_000,
 } as const;
 
 // ===================

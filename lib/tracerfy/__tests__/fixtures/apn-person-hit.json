@@ -1,0 +1,45 @@
+{
+  "request": { "parcel_id": "000-000-0000", "county": "Placeholder", "state": "ZZ" },
+  "response": {
+    "parcel_id": "000-000-0000",
+    "county": "Placeholder",
+    "state": "ZZ",
+    "hit": true,
+    "persons_count": 2,
+    "credits_deducted": 5,
+    "persons": [
+      {
+        "first_name": "Someoneelse",
+        "last_name": "Different",
+        "full_name": "Someoneelse Different",
+        "dob": "",
+        "age": "00",
+        "deceased": false,
+        "property_owner": false,
+        "litigator": false,
+        "mailing_address": { "street": "100 Placeholder Way", "city": "Redacted", "state": "ZZ", "zip": "00000" },
+        "phones": [
+          { "number": "5550000701", "type": "mobile", "dnc": false, "tcpa": false, "carrier": "Placeholder Wireless", "rank": 1 }
+        ],
+        "emails": [{ "email": "other@example.invalid", "rank": 1 }]
+      },
+      {
+        "first_name": "Testowner",
+        "last_name": "Placeholder",
+        "full_name": "Testowner Placeholder",
+        "dob": "",
+        "age": "00",
+        "deceased": false,
+        "property_owner": true,
+        "litigator": false,
+        "mailing_address": { "street": "100 Placeholder Way", "city": "Redacted", "state": "ZZ", "zip": "00000" },
+        "phones": [
+          { "number": "5550000801", "type": "mobile", "dnc": false, "tcpa": false, "carrier": "Placeholder Wireless", "rank": 1 },
+          { "number": "5550000802", "type": "landline", "dnc": false, "tcpa": false, "carrier": "Placeholder Telco", "rank": 2 }
+        ],
+        "emails": [{ "email": "apnowner@example.invalid", "rank": 1 }]
+      }
+    ],
+    "meta": { "request_id": "req_00000000000000000000000000000006", "timestamp": "2026-09-21T00:00:00Z", "api_version": "2026-03-21" }
+  }
+}

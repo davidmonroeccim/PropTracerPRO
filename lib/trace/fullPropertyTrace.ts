@@ -16,10 +16,10 @@ import type { ExecutionResult } from '@/lib/routing/executeRoute'
 import type { ParcelInput } from '@/lib/routing/ownerRoute'
 import type { TraceResult } from '@/types'
 
-/** What every PTP entry point actually has: an address, never a parcel id. */
+/** What a single-trace entry point has: an address, and on the API sometimes only a parcel id. */
 export interface TraceAddressInput {
-  address: string
-  city: string
+  address?: string | null
+  city?: string | null
   state: string
   zip?: string | null
 }
@@ -87,8 +87,8 @@ export function parcelForFullTrace(
   const state = input.state.trim().toUpperCase()
   return {
     state,
-    situsAddress: input.address.trim(),
-    situsCity: input.city.trim(),
+    situsAddress: (input.address ?? '').trim(),
+    situsCity: (input.city ?? '').trim(),
     situsState: state,
     situsZip: input.zip?.trim() || null,
     // THE SECOND DOSSIER KEY, and the first caller that has ever supplied it. hasApn()
@@ -133,7 +133,10 @@ function phoneType(raw: string): TraceResult['phones'][number]['type'] {
  */
 export function traceResultFor(execution: ExecutionResult): TraceResult | null {
   const contacts = execution.contacts
-  const ownerOfRecord = execution.ownerName?.trim() || null
+  // The OWNER OF RECORD is what a Full Property Trace bought from the county. On a tier 1 trace the
+  // owner was SUPPLIED by the caller, and labelling it "the name on the county roll" would be
+  // false (spec 7.2), so a tier 1 result carries no owner_name_2 and a tier 1 miss is null.
+  const ownerOfRecord = execution.tier === 2 ? execution.ownerName?.trim() || null : null
   if (!contacts && !ownerOfRecord) return null
 
   const phones = (contacts?.phones ?? []).map((p) => ({

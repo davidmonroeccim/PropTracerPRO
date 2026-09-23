@@ -14,6 +14,8 @@ import { Download } from 'lucide-react';
 import { PushToCrmButton } from '@/components/trace/PushToCrmButton';
 import type { TraceHistory, TraceJob } from '@/types';
 import { getBulkJobCharges } from '@/lib/trace/bulkJobCharges';
+import { bulkRowExclusion, foundByLabel, propertyAddressLabel } from '@/lib/trace/historyDisplay';
+import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 
 type HistoryEntry =
   | { type: 'single'; date: string; data: TraceHistory }
@@ -26,14 +28,15 @@ async function getSingleTraces(userId: string, bulkTracerfyJobIds: string[]) {
     .from('trace_history')
     .select('*')
     .eq('user_id', userId)
+    // Bulk rows carry the job they belong to; a single trace carries none.
+    .is('trace_job_id', null)
     .order('created_at', { ascending: false })
     .limit(100);
 
-  if (bulkTracerfyJobIds.length > 0) {
-    // Exclude rows that belong to bulk jobs so the 100-row limit
-    // only counts actual single traces
-    query = query.not('tracerfy_job_id', 'in', `(${bulkTracerfyJobIds.join(',')})`);
-  }
+  // Older bulk rows predate trace_job_id and are recognised by their batch id instead. See
+  // bulkRowExclusion for why a single trace with no batch id must survive this.
+  const exclusion = bulkRowExclusion(bulkTracerfyJobIds);
+  if (exclusion) query = query.or(exclusion);
 
   const { data, error } = await query;
 
@@ -143,6 +146,7 @@ export default async function HistoryPage() {
                   <TableHead>Date</TableHead>
                   <TableHead>Description</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="hidden lg:table-cell">Found by</TableHead>
                   <TableHead className="hidden xl:table-cell">Results</TableHead>
                   <TableHead className="hidden xl:table-cell text-right">Charge</TableHead>
                   <TableHead>Action</TableHead>
@@ -159,13 +163,16 @@ export default async function HistoryPage() {
                         </TableCell>
                         <TableCell>
                           <div>
-                            <p className="font-medium">{trace.normalized_address}</p>
+                            <p className="font-medium">{propertyAddressLabel(trace)}</p>
                             <p className="text-sm text-gray-500">
                               {trace.city}, {trace.state} {trace.zip}
                             </p>
                           </div>
                         </TableCell>
                         <TableCell>{getStatusBadge(trace.status)}</TableCell>
+                        <TableCell className="hidden lg:table-cell text-sm">
+                          {foundByLabel(trace.found_by) ?? <span className="text-gray-400">-</span>}
+                        </TableCell>
                         <TableCell className="hidden xl:table-cell">
                           {trace.is_successful ? (
                             <div className="text-sm">
@@ -173,6 +180,8 @@ export default async function HistoryPage() {
                               {', '}
                               <span className="text-blue-600">{trace.email_count} emails</span>
                             </div>
+                          ) : rowSkipReason(trace) ? (
+                            <span className="text-xs text-gray-500">{rowSkipReason(trace)}</span>
                           ) : (
                             <span className="text-gray-400">-</span>
                           )}
@@ -214,6 +223,7 @@ export default async function HistoryPage() {
                         </div>
                       </TableCell>
                       <TableCell>{getStatusBadge(job.status)}</TableCell>
+                      <TableCell className="hidden lg:table-cell"><span className="text-gray-400">-</span></TableCell>
                       <TableCell className="hidden xl:table-cell">
                         {job.status === 'completed' ? (
                           <div className="text-sm">

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  classifyOwnerName, splitPersonName, assessLoan, planRoute, PRICE, FAILSAFE_PRICE_PLAN, VENDOR_COST,
+  classifyOwnerName, splitPersonName, assessLoan, planRoute, stripTrustWords,
+  PRICE, FAILSAFE_PRICE_PLAN, VENDOR_COST,
   type ParcelInput, type PricePlan, type RoutePlan,
 } from '../ownerRoute'
 
@@ -395,11 +396,11 @@ describe('planRoute', () => {
     expect(r.warnings.join(' ')).toMatch(/Neither dossier key/)
   })
 
-  it('sends a trust-only owner to manual review rather than guessing a vendor', () => {
+  it('sends a trust-only owner with no first name to FastAppend on the full name (D16)', () => {
     const r = routeFor(parcel({ ownerName: 'Halloway Living Trust' }))
     expect(r.ownerType).toBe('trust')
-    expect(r.steps).toHaveLength(0)
-    expect(r.warnings.join(' ')).toMatch(/manual review/)
+    expect(r.steps.map(s => s.kind)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toMatchObject({ company_name: 'Halloway Living Trust' })
   })
 
   it('never invents a vendor for an unclassifiable owner', () => {
@@ -412,5 +413,151 @@ describe('planRoute', () => {
     for (const p of [parcel(), parcel({ ownerName: 'Abc Rentals Llc' }), parcel({ ownerName: 'Marcus T Halloway' })]) {
       for (const s of routeFor(p).steps) expect(s.freeOnMiss).toBe(true)
     }
+  })
+})
+
+describe('Tier 1 ladders (spec 4.2; D2, D3, D4, D16)', () => {
+  const t1 = (ownerName: string, over: Partial<ParcelInput> = {}) =>
+    planRoute(parcel({ ownerName, ...over }), 'wallet')
+  const kinds = (r: RoutePlan) => r.steps.map(s => s.kind)
+
+  it('classifies a trailing TR or TTEE as a trust, so the name reaches the trust ladder (spec 4.1)', () => {
+    // MUTATION: put TR|TTEE back into ENTITY_TRAILING and this goes red.
+    expect(classifyOwnerName('SMITH JOHN TR')).toBe('trust')
+    expect(classifyOwnerName('SMITH JOHN TTEE')).toBe('trust')
+    expect(classifyOwnerName('Mary Jones Revocable Trust U/A')).toBe('trust')
+    expect(classifyOwnerName('Storage Trust Properties')).toBe('entity')
+  })
+
+  it('keeps a trailing TRS an entity: FastAppend on the full name only (spec D30)', () => {
+    // MUTATION: take TRS out of ENTITY_TRAILING and this goes red.
+    expect(classifyOwnerName('SMITH JOHN TRS')).toBe('entity')
+    const r = t1('SMITH JOHN TRS')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toEqual({ company_name: 'SMITH JOHN TRS', state: 'UT' })
+  })
+
+  it('sends a name whose surname would be TRS to FastAppend, with no person step (D30 reasoning)', () => {
+    // "JOHN SMITH TRS ET AL" does not END in TRS, so ENTITY_TRAILING misses it and TRUST_MARKER
+    // classifies it a trust. TRS is not a trust word (D28), so it survives stripTrustWords and
+    // splitPersonName hands the ladder last_name "TRS" -- a trustee marker, never a surname, so
+    // the D6 name match can never succeed and up to $0.20 is spent for nothing. D30 settled the
+    // trailing case for exactly this reason; the same reasoning applies wherever TRS lands.
+    // MUTATION: delete the TRUSTEE_SURNAME check in personNameFor and this goes red with
+    // ['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN', 'FASTAPPEND_ENTITY'].
+    const r = t1('JOHN SMITH TRS ET AL')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toEqual({ company_name: 'JOHN SMITH TRS ET AL', state: 'UT' })
+    expect(r.maxVendorCost).toBe(0.1)
+  })
+
+  it('does the same for TR, which lands as a surname the same way', () => {
+    // "JOHN SMITH TR ET AL" does not END in TR either, so TRUST_MARKER's `\\bTR\\.?$` misses it
+    // and ET AL reads it as an individual: the trust-word strip never runs and TR becomes the
+    // surname. TTEE is covered by the same guard, but no name can reach it -- TTEE is a trust
+    // word, so a name carrying it is either stripped of it or has a real person beside it.
+    // MUTATION: narrow TRUSTEE_SURNAME to TRS alone and this goes red.
+    expect(kinds(t1('JOHN SMITH TR ET AL'))).toEqual(['FASTAPPEND_ENTITY'])
+  })
+
+  it('leaves an ordinary person alone: only a trustee marker is refused as a surname', () => {
+    // MUTATION: make TRUSTEE_SURNAME match anything (e.g. /./) and this goes red.
+    expect(kinds(t1('JOHN SMITH ET AL'))).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN'])
+  })
+
+  it('person: the Instant lookup at the street and city first, then the parcel lookup', () => {
+    expect(kinds(t1('Marcus T Halloway'))).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN'])
+  })
+
+  it('person with no city: the parcel lookup only', () => {
+    expect(kinds(t1('Marcus T Halloway', { situsCity: null }))).toEqual(['TRACERFY_PARCEL_APN'])
+  })
+
+  it('the parcel step carries the owner names for the match (L-020)', () => {
+    // MUTATION: drop `...who` from the parcel step request and this goes red.
+    expect(t1('Marcus T Halloway').steps[1].request).toEqual({
+      parcel_id: '16183060290000', county: 'Salt Lake', state: 'UT',
+      first_name: 'Marcus', last_name: 'Halloway',
+    })
+  })
+
+  it('company: FastAppend on name and state only, and the lane stops there (D4)', () => {
+    const r = t1('Abc Rentals Llc')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toEqual({ company_name: 'Abc Rentals Llc', state: 'UT' })
+  })
+
+  it('trust: the person steps on the stripped name, then FastAppend on the full name (D3)', () => {
+    // MUTATION: run the person steps on the unstripped name and last_name becomes "Trust".
+    // MUTATION: drop the trailing FastAppend push and the third kind disappears.
+    const r = t1('Marcus Halloway Revocable Trust')
+    expect(r.ownerType).toBe('trust')
+    expect(kinds(r)).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN', 'FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toMatchObject({ first_name: 'Marcus', last_name: 'Halloway' })
+    expect(r.steps[2].request).toEqual({ company_name: 'Marcus Halloway Revocable Trust', state: 'UT' })
+  })
+
+  it('D16: a trust that leaves no first name or initial goes to FastAppend only', () => {
+    // MUTATION: drop the personNameFor gate and a person step runs on "Smith".
+    const r = t1('Smith Family Trust')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toEqual({ company_name: 'Smith Family Trust', state: 'UT' })
+  })
+
+  it('unknown, one word: FastAppend only (D16)', () => {
+    const r = t1('Halloway')
+    expect(r.ownerType).toBe('unknown')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+  })
+
+  it('unknown, five words: the person steps on the name as given, then FastAppend', () => {
+    const r = t1('Alpha Bravo Charlie Delta Echo')
+    expect(r.ownerType).toBe('unknown')
+    expect(kinds(r)).toEqual(['TRACERFY_INSTANT_NAMED', 'TRACERFY_PARCEL_APN', 'FASTAPPEND_ENTITY'])
+    expect(r.steps[0].request).toMatchObject({ first_name: 'Alpha', last_name: 'Echo' })
+  })
+
+  it('a trust with a first name and no lookup key gets no step at all (spec 4.2)', () => {
+    const r = t1('Marcus Halloway Revocable Trust', {
+      situsAddress: null, situsCity: null, situsState: null, parcelIdLocal: null, county: null,
+    })
+    expect(r.steps).toEqual([])
+    expect(r.warnings.join(' ')).toMatch(/No lookup key/)
+  })
+
+  it('keeps today name order for single traces (D22): SMITH JOHN is sent as first SMITH', () => {
+    expect(t1('SMITH JOHN').steps[0].request).toMatchObject({ first_name: 'SMITH', last_name: 'JOHN' })
+  })
+
+  it('never says the parcel id is cheaper or more accurate (spec 4.2)', () => {
+    // No situs is the case the removed "cheaper address-keyed path" warning fired on.
+    // MUTATION: put that warning back on the parcel step and this goes red.
+    const noSitus = { situsAddress: null, situsCity: null, situsState: null }
+    expect(JSON.stringify(t1('Marcus T Halloway', noSitus))).not.toMatch(/cheaper|more accurate/i)
+    expect(JSON.stringify(t1('Marcus T Halloway'))).not.toMatch(/cheaper|more accurate/i)
+  })
+
+  it('reads an individual-looking name that leaves no first name ("SMITH JR") as unreadable: FastAppend only (D16)', () => {
+    // D16 covers "a trust or unreadable name". A name with no first name left cannot be asked of a
+    // person lookup, so it takes the same FastAppend-only lane. Stated and pinned, not implied.
+    const r = t1('SMITH JR')
+    expect(r.ownerType).toBe('individual')
+    expect(kinds(r)).toEqual(['FASTAPPEND_ENTITY'])
+  })
+})
+
+describe('stripTrustWords (the fixed list, spec 4.2)', () => {
+  it.each([
+    ['John Smith Revocable Trust', 'John Smith'],
+    ['SMITH JOHN TR', 'SMITH JOHN'],
+    ['JOHN SMITH TTEE', 'JOHN SMITH'],
+    ['Mary Jones Irrevocable Living Trust U/A 5/1/99', 'Mary Jones'],
+    ['JOHN SMITH FAMILY TRUST DTD 01/02/2003', 'JOHN SMITH'],
+    ['Smith Family Trust', 'Smith'],
+    ['Trustman John', 'Trustman John'],
+    ['The Smith Family Trust', 'The Smith'],
+    ['Estate of John Smith', 'Estate of John Smith'],
+  ])('%s strips to %s', (input, out) => {
+    expect(stripTrustWords(input)).toBe(out)
   })
 })

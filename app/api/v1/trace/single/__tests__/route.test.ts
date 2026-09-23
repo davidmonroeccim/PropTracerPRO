@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { VENDOR_TIMEOUT } from "@/lib/constants";
+import { requestKeyFor } from "@/lib/routing/executeRoute";
+import { planRoute } from "@/lib/routing/ownerRoute";
+import { parcelForFullTrace } from "@/lib/trace/fullPropertyTrace";
+import { createAddressHash } from "@/lib/utils/address-normalizer";
 
 /**
  * Delete/insert fence for the PUBLIC v1 single-trace SUBMIT route.
@@ -69,6 +74,24 @@ function isDedupSelect(rec: Recorded): boolean {
   return rec.op === "select" && rec.filters.some((f) => f[0] === "or");
 }
 
+/**
+ * POSTGREST COLUMN PROJECTION, EMULATED, for the plain trace_history selects this route makes.
+ *
+ * A column the query never asked for does not come back, and a stub that ignores `.select(...)`
+ * hides exactly that. Dropping `trace_job_id` from the existingRow probe would leave every test
+ * in this file green while the live-work threshold read EVERY row as a single-trace row, which
+ * is the failure that looks identical to success.
+ */
+function projectRow(row: Record<string, unknown> | null, select: unknown): unknown {
+  if (!row || typeof select !== "string" || select.trim() === "*") return row;
+  const columns = new Set(select.split(",").map((c) => c.trim()));
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (columns.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
   if (rec.op === "delete") return { data: null, error: H.deleteError };
   if (rec.op === "insert") {
@@ -89,7 +112,7 @@ function envelopeFor(rec: Recorded): { data: unknown; error: unknown } {
       ? { data: H.cached, error: null }
       : { data: null, error: { code: "PGRST116", message: "no rows" } };
   }
-  return { data: H.survivingRow, error: null };
+  return { data: projectRow(H.survivingRow, rec.payload), error: null };
 }
 
 function recordingClient() {
@@ -331,9 +354,115 @@ beforeEach(() => {
 });
 
 describe("POST /api/v1/trace/single — gates", () => {
-  it("400s on an invalid address before touching the database", async () => {
-    const res = await post({ ...BODY, address: "" });
+  it("400s a person with a city but no street and no parcel id, as no_lookup_key, before touching the database", async () => {
+    // MUTATION: delete the keyPlan check and the record reaches the database.
+    const res = await post({ ...BODY, ownerName: "Marcus Halloway", address: "" });
+    const body = await res.json();
     expect(res.status).toBe(400);
+    expect(body).toMatchObject({ success: false, outcomeCode: "no_lookup_key" });
+    expect(body.skipReason).toBe(
+      "This record is missing a street address and the parcel ID, so it could not be looked up. You were not charged. Send it again with the street address or the parcel ID."
+    );
+    // The error is the same sentence, never a routing note or a line that does not state the
+    // charge (fix round 1: the fallback chain is gone).
+    expect(body.error).toBe(body.skipReason);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a parcel id sent with no county and no city, naming the COUNTY (D41)", async () => {
+    // The caller DID send a parcel id; the older sentence told them it was missing and sent them
+    // looking for a field they already supplied.
+    // MUTATION: delete the county_for_parcel arm of missingLookupKey and this goes red with
+    // "missing the city and the parcel ID".
+    const res = await post({ state: "OH", apn: "0123-456", ownerName: "Testowner Placeholder" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toMatchObject({ success: false, outcomeCode: "no_lookup_key" });
+    expect(body.skipReason).toBe(
+      "This record is missing the county for that parcel ID, so it could not be looked up. You were not charged. Send it again with the county."
+    );
+    expect(body.error).toBe(body.skipReason);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("names the county on a Full Property Trace sent the same way (D41)", async () => {
+    // No owner name, so this is the tier 2 door; the dossier needs the same three-part key.
+    const res = await post({ state: "OH", apn: "0123-456" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.skipReason).toBe(
+      "This record is missing the county for that parcel ID, so it could not be looked up. You were not charged. Send it again with the county."
+    );
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s an invalid state as no_lookup_key", async () => {
+    // MUTATION (fix round 1): answer the state branch with status 200 and this goes red.
+    const res = await post({ ...BODY, state: "Texas" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.outcomeCode).toBe("no_lookup_key");
+    expect(body.skipReason).toContain("a valid state");
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("still validates a street and city that were both sent", async () => {
+    const res = await post({ ...BODY, address: "1" });
+    expect(res.status).toBe(400);
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a malformed zip on a record sent without a street and city, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the zip-only branch and this goes red (the record runs).
+    const res = await post({ state: "OH", apn: "0123-456", county: "Placeholder", ownerName: "Testowner Placeholder", zip: "2134" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ZIP code must be 5 or 9 digits when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s an owner name with no letters, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the letter check and this goes red.
+    const res = await post({ ...BODY, ownerName: "???" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ownerName must contain at least one letter" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s an owner name that is not text, before touching the database", async () => {
+    // It used to reach owner_name?.trim() and come back as a bare 500 (fix round 2).
+    // MUTATION: drop 'ownerName' from the type-check list and this goes red.
+    const res = await post({ ...BODY, ownerName: 123 });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "ownerName must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a parcel id that is not text, before touching the database", async () => {
+    // Silently treating it as absent answered "missing the city and the parcel ID", which sends
+    // the caller looking for a field they did send.
+    // MUTATION: delete the apn type check and this goes red.
+    const res = await post({ ...BODY, apn: 12 });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "apn must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a parcelId that is not text, before touching the database", async () => {
+    const body = await (await post({ ...BODY, parcelId: 12 })).json();
+    expect(body).toEqual({ success: false, error: "parcelId must be a string when supplied" });
+    expect(H.ops).toHaveLength(0);
+  });
+
+  it("400s a county that is not text, before touching the database", async () => {
+    // MUTATION (fix round 1): delete the county type check and this goes red (it was a bare 500).
+    const res = await post({ state: "OH", apn: "0123-456", county: 12, ownerName: "Testowner Placeholder" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ success: false, error: "county must be a string when supplied" });
     expect(H.ops).toHaveLength(0);
   });
 
@@ -347,7 +476,11 @@ describe("POST /api/v1/trace/single — gates", () => {
 
 describe("POST /api/v1/trace/single — cache hit", () => {
   it("returns cached contacts free of charge and deletes nothing", async () => {
-    H.cached = { id: "trace-cached", trace_result: { phones: ["512-555-0100"], emails: [] } };
+    H.cached = {
+      id: "trace-cached",
+      input_owner_name: "ACME HOLDINGS LLC",
+      trace_result: { phones: ["512-555-0100"], emails: [] },
+    };
 
     const body = await (await post()).json();
 
@@ -439,37 +572,25 @@ describe("POST /api/v1/trace/single — the deletes", () => {
   });
 });
 
-describe("POST /api/v1/trace/single — row creation and submission", () => {
-  it("inserts a processing row and returns the Tracerfy job id", async () => {
-    const body = await (await post()).json();
-
+describe("POST /api/v1/trace/single: row creation, then the inline tier 1 settle", () => {
+  it("inserts a processing row and settles it in the same request", async () => {
+    const res = await post();
+    const body = await res.json();
     const insert = H.ops.find((o) => o.op === "insert");
+    // MUTATION: delete input_owner_name from the insert and this goes red. A NEW row still names
+    // its owner from the start; only the reuse UPDATE leaves it to the settle (D25 money).
     expect(insert!.payload).toMatchObject({
-      user_id: "user-1",
-      city: "AUSTIN",
-      state: "TX",
-      status: "processing",
+      user_id: "user-1", city: "AUSTIN", state: "TX", status: "processing",
+      input_owner_name: "ACME HOLDINGS LLC",
     });
-    expect(body).toMatchObject({ success: true, status: "processing", traceId: "trace-new" });
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ success: true, status: "no_match", traceId: "trace-new", tier: 1, charge: 0 });
   });
 
   it("500s when the row cannot be created", async () => {
     H.insertError = { message: "duplicate key value violates unique constraint", code: "23505" };
     const res = await post();
     expect(res.status).toBe(500);
-  });
-
-  it("marks the row errored and 500s when Tracerfy refuses the submission", async () => {
-    H.submit = { success: false, error: "Tracerfy down" };
-
-    const body = await (await post()).json();
-
-    expect(body.error).toBe("Tracerfy down");
-    expect(
-      H.ops.some(
-        (o) => o.op === "update" && (o.payload as Record<string, unknown>)?.status === "error"
-      )
-    ).toBe(true);
   });
 });
 
@@ -487,15 +608,20 @@ describe("POST /api/v1/trace/single — the removed AI Search opt-in", () => {
   });
 
   it("writes no ai_research to the row from the request", async () => {
-    // A request body must never be able to put words into trace_history.ai_research.
+    // A request body must never be able to put words into trace_history.ai_research. The tier 1
+    // settle DOES write ai_research_status, and only ever as null: it clears a stale bulk queue
+    // value on a reused row (Tier 1 Phase 1). That null write is load-bearing.
+    // MUTATION: write `ai_research_status: 'queued'` in runSingleTier1 and this goes red.
     await post({ ...BODY, aiResearch: true, ai_research: { owner_name: "ACME LLC" } });
-    const written = H.ops
+    const payloads = H.ops
       .filter((o) => o.table === "trace_history" && (o.op === "insert" || o.op === "update"))
-      .map((o) => Object.keys((o.payload as object) || {}))
-      .flat();
+      .map((o) => (o.payload as Record<string, unknown>) || {});
+    const written = payloads.map((p) => Object.keys(p)).flat();
     expect(written).not.toContain("ai_research");
-    expect(written).not.toContain("ai_research_status");
     expect(written).not.toContain("ai_research_charge");
+    for (const p of payloads) {
+      if ("ai_research_status" in p) expect(p.ai_research_status).toBeNull();
+    }
   });
 
   it("reserves only the tier 1 rate, so a wallet holding exactly that is let through", async () => {
@@ -515,7 +641,8 @@ describe("POST /api/v1/trace/single — the removed AI Search opt-in", () => {
     const { lookupDossier } = await import("@/lib/tracerfy/dossier");
     await post({ ...TIER2_BODY, aiResearch: true });
     expect(lookupDossier).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "address", address: "123 Main St" })
+      expect.objectContaining({ mode: "address", address: "123 Main St" }),
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
     );
     const keyed = (lookupDossier as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0];
     expect(JSON.stringify(keyed)).not.toContain("owner");
@@ -548,19 +675,20 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
     expect(body.tier).toBe(2);
   });
 
-  it("still sends a body WITH an ownerName down the tier 1 async path", async () => {
-    // Unchanged, and the half of the trigger that must not drift: tier 1 still
-    // returns a traceId to poll and books no charge here.
+  it("runs a body WITH an ownerName inline at the Track B tier 1 rate", async () => {
+    // WAS: submitted to the Tracerfy batch and returned a traceId to poll. Removed (spec D26).
+    H.entity = CONTACTS_HIT;
     const { submitSingleTrace } = await import("@/lib/tracerfy/client");
     const { lookupDossier } = await import("@/lib/tracerfy/dossier");
-
     const body = await (await post(BODY)).json();
-
-    expect(submitSingleTrace).toHaveBeenCalledTimes(1);
+    expect(submitSingleTrace).not.toHaveBeenCalled();
     expect(lookupDossier).not.toHaveBeenCalled();
-    expect(body).toMatchObject({ success: true, status: "processing", traceId: "trace-new" });
-    expect(body.tier).toBeUndefined();
-    expect(deducts()).toHaveLength(0);
+    expect(body).toMatchObject({
+      success: true, status: "success", traceId: "trace-new", tier: 1, charge: 0.15,
+      foundBy: "company_name", outcomeCode: "found_by_company_name", skipReason: null,
+    });
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args).toMatchObject({ p_amount: 0.15 });
   });
 
   it("reserves the TIER 2 rate when there is no ownerName", async () => {
@@ -800,13 +928,16 @@ describe("v1 tier 2 — the trigger", () => {
 
     await post(TIER2_BODY);
 
-    expect(lookupDossier).toHaveBeenCalledWith({
-      mode: "address",
-      address: "123 Main St",
-      city: "Austin",
-      state: "TX",
-      zip_code: "78701",
-    });
+    expect(lookupDossier).toHaveBeenCalledWith(
+      {
+        mode: "address",
+        address: "123 Main St",
+        city: "Austin",
+        state: "TX",
+        zip_code: "78701",
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
   });
 });
 
@@ -1263,10 +1394,12 @@ describe("v1 tier 2 — trace.completed", () => {
     expect(webhooks()).toHaveLength(0);
   });
 
-  it("does not fire on the TIER 1 path, where the poll route still owns it", async () => {
+  it("FIRES on the tier 1 path, which now completes inline, carrying tier 1 and its outcome", async () => {
+    // MUTATION: delete the tier 1 dispatchTraceCompleted call and this goes red.
     H.profile = WEBHOOK_PROFILE;
     await post(BODY);
-    expect(webhooks()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 1, status: "no_match", outcome_code: "no_match", found_by: null, property_record: null });
   });
 
   it("does not fire when the answer was served free from the cache", async () => {
@@ -1628,5 +1761,714 @@ describe("tier 2 single (v1) never pushes to HighLevel", () => {
     expect(body.success).toBe(true);
     expect(persisted()!.is_successful).toBe(true);
     expect(body.result.phones?.[0]?.number).toBe("5550000101");
+  });
+});
+
+/* ==================================================================== *
+ * TIER 1 INLINE ON THE API, plus D23 (a parcel id when there is no city)
+ * and D24 (a Full Property Trace keyed by parcel id).
+ * ==================================================================== */
+
+/** The UPDATE that writes a tier 1 outcome: it carries outcome_code and never property_record. */
+function tier1Persisted(): Record<string, unknown> | undefined {
+  const rec = H.ops.find(
+    (o) =>
+      o.op === "update" &&
+      o.payload !== null &&
+      typeof o.payload === "object" &&
+      "outcome_code" in (o.payload as object) &&
+      !("property_record" in (o.payload as object))
+  );
+  return rec?.payload as Record<string, unknown> | undefined;
+}
+
+const BUSY_SENTENCE = "The system is busy. Try again in 5 minutes. You were not charged.";
+
+describe("v1 tier 1, D23: a record with no city goes by parcel id", () => {
+  const APN_PERSON = { state: "OH", apn: "#0123-456", county: "Placeholder", ownerName: "Testowner Placeholder" };
+
+  it("looks an individual up by parcel id, with the names carried for the match only", async () => {
+    H.person = CONTACTS_HIT;
+    const { lookupPersonTrace } = await v1Vendors();
+    const body = await (await post(APN_PERSON)).json();
+    expect(lookupPersonTrace).toHaveBeenCalledWith(
+      expect.objectContaining({ parcel_id: "#0123-456", county: "Placeholder", state: "OH", first_name: "Testowner", last_name: "Placeholder" }),
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(body).toMatchObject({ success: true, tier: 1, foundBy: "parcel_id", outcomeCode: "found_by_parcel_id" });
+  });
+
+  it("keys the row on APN, county and state, and stores the parcel id and county (spec 6.3)", async () => {
+    // MUTATION: key the row with normalizeAddress(address, city, state) again and this goes red.
+    await post(APN_PERSON);
+    const insert = H.ops.find((o) => o.op === "insert");
+    expect(insert!.payload).toMatchObject({
+      normalized_address: "APN|0123-456|PLACEHOLDER|OH",
+      address_hash: createAddressHash("APN|0123-456|PLACEHOLDER|OH"),
+      city: null,
+      parcel_id_local: "#0123-456",
+      county: "Placeholder",
+    });
+    // The 90-day cache is searched by the SAME key (fix round 1, L-018). The dedup mock answers
+    // H.cached whatever hash it is asked for, so only this filter pins which key was asked.
+    // MUTATION: search the cache by createAddressHash(normalizeAddress(address ?? '', city ?? '',
+    // state)) and this goes red.
+    const cacheSelect = H.ops.find((o) => isDedupSelect(o));
+    expect(cacheSelect).toBeDefined();
+    expect(cacheSelect!.filters).toContainEqual(["eq", "address_hash", createAddressHash("APN|0123-456|PLACEHOLDER|OH")]);
+  });
+
+  it("never sends the internal APN key as the webhook's address", async () => {
+    // MUTATION: send `address: normalizedAddress` on the tier 1 webhook and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    await post(APN_PERSON);
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ address: null, city: null, state: "OH" });
+  });
+
+  it("keys a record with a city but no street on its parcel, not on the city (D36)", async () => {
+    // The shape that shared one row per city before D36: a paid result was overwritten and a
+    // resend inside 90 days was charged again.
+    // MUTATION: key an address with a city first in traceKeyFor and this goes red.
+    await post({ city: "Austin", state: "TX", apn: "0123-456", county: "Travis", ownerName: "Testowner Placeholder" });
+    const insert = H.ops.find((o) => o.op === "insert");
+    expect(insert!.payload).toMatchObject({
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      address_hash: createAddressHash("APN|0123-456|TRAVIS|TX"),
+      city: "AUSTIN",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    });
+    const cacheSelect = H.ops.find((o) => isDedupSelect(o));
+    expect(cacheSelect!.filters).toContainEqual(["eq", "address_hash", createAddressHash("APN|0123-456|TRAVIS|TX")]);
+  });
+
+  it("accepts parcelId as the same field", async () => {
+    H.person = CONTACTS_HIT;
+    const body = await (await post({ state: "OH", parcelId: "0123-456", county: "Placeholder", ownerName: "Testowner Placeholder" })).json();
+    expect(body.foundBy).toBe("parcel_id");
+  });
+
+  it("traces a company with only its name and state (D23)", async () => {
+    const { lookupBusinessTrace } = await v1Vendors();
+    const res = await post({ state: "OH", ownerName: "ACME HOLDINGS LLC" });
+    expect(res.status).toBe(200);
+    expect(lookupBusinessTrace).toHaveBeenCalledWith(
+      { company_name: "ACME HOLDINGS LLC", state: "OH" },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+  });
+
+  it("traces a trust with no first name left on its full name and state, as a company (D16)", async () => {
+    // The approved docs promise it: "Smith Family Trust" leaves no first name once the trust words
+    // are removed, so it is looked up as a company, by name and state, with no street, city or
+    // parcel id.
+    // MUTATION (fix round 1): replace the keyPlan check with missingLookupKey(...) !== null and this
+    // goes red (the record is refused as missing the city and the parcel ID).
+    const { lookupBusinessTrace, lookupPersonTrace } = await v1Vendors();
+    const res = await post({ state: "OH", ownerName: "Smith Family Trust" });
+    expect(res.status).toBe(200);
+    expect(lookupBusinessTrace).toHaveBeenCalledWith(
+      { company_name: "Smith Family Trust", state: "OH" },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+  });
+
+  it("refuses a person with neither a city nor a parcel id, as no_lookup_key", async () => {
+    const res = await post({ state: "OH", ownerName: "Testowner Placeholder" });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.skipReason).toBe(
+      "This record is missing the city and the parcel ID, so it could not be looked up. You were not charged. Send it again with the city or the parcel ID."
+    );
+    expect(H.ops).toHaveLength(0);
+  });
+});
+
+describe("v1 tier 2, D24 and D21 on the API: the dossier by parcel id, the owner at the mailing address", () => {
+  it("keys the dossier on the parcel id when there is no city, then searches the owner at the mailing address", async () => {
+    H.dossier = DOSSIER_INDIVIDUAL_HIT;
+    H.person = CONTACTS_HIT;
+    const { lookupDossier, lookupPersonTrace } = await v1Vendors();
+    const body = await (await post({ state: "OH", apn: "0123-456", county: "Placeholder" })).json();
+    expect(lookupDossier).toHaveBeenCalledWith(
+      { mode: "apn", apn: "0123-456", county: "Placeholder", state: "OH" },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    const personReq = vi.mocked(lookupPersonTrace).mock.calls[0][0];
+    expect(personReq).toMatchObject({ address: "100 Placeholder Way", city: "Redacted", state: "ZZ", first_name: "Testowner", last_name: "Placeholder" });
+    expect(personReq).not.toHaveProperty("parcel_id");
+    expect(body.tier).toBe(2);
+  });
+
+  it("tries the parcel id first and the address second when both are sent", async () => {
+    H.dossier = DOSSIER_MISS;
+    const { lookupDossier } = await v1Vendors();
+    await post({ ...TIER2_BODY, apn: "0123-456", county: "Placeholder" });
+    expect(vi.mocked(lookupDossier).mock.calls.map((c) => (c[0] as { mode: string }).mode)).toEqual(["apn", "address"]);
+  });
+
+  it("writes contact_vendor on the tier 2 persist", async () => {
+    // MUTATION: delete the contact_vendor line from the tier 2 persist and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    await post(TIER2_BODY);
+    expect(persisted()).toMatchObject({ contact_vendor: "fastappend", outcome_code: null, found_by: null });
+    // MUTATION (fix round 1): delete trace_steps from the tier 2 persist and this goes red.
+    const steps = persisted()!.trace_steps as Array<{ kind: string }>;
+    expect(steps.map((s) => s.kind)).toEqual(["DOSSIER_ADDRESS", "FASTAPPEND_ENTITY"]);
+  });
+
+  it("never sends the internal APN key as the tier 2 webhook's address", async () => {
+    // MUTATION (fix round 1): send `address: normalizedAddress` on the tier 2 webhook and this
+    // goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.dossier = DOSSIER_MISS;
+    await post({ state: "OH", apn: "0123-456", county: "Placeholder" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 2, address: null, city: null, state: "OH" });
+  });
+
+  it("never falls back to the dossier's own contacts: a Full Property Trace whose owner lookups all miss is a true null (D32)", async () => {
+    // D32 withdrew the dossier-contacts fallback entirely: there is no toggle left at this route
+    // to mutate, so this asserts the shape rather than a deletable guard.
+    H.dossier = {
+      ...DOSSIER_INDIVIDUAL_HIT,
+      contacts: {
+        ownerName: "Not The Real Contact",
+        phones: [{ number: "5550000901", type: "mobile" }],
+        emails: ["fallback@example.invalid"],
+        mailingAddress: null,
+      },
+    };
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.result).toMatchObject({ phones: [], emails: [] });
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toContain("5550000901");
+    expect(bodyStr).not.toContain("fallback@example.invalid");
+    expect(bodyStr).not.toMatch(/name_verified/);
+  });
+});
+
+describe("v1 tier 1: what the caller gets", () => {
+  it("returns the finished result, camelCase, with no step log in the response or the webhook", async () => {
+    H.profile = WEBHOOK_PROFILE;
+    H.entity = CONTACTS_HIT;
+    const res = await post();
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true, status: "success", traceId: "trace-new", tier: 1, charge: 0.15,
+      propertyRecord: null, ownerName: "ACME HOLDINGS LLC", ownerType: "entity",
+      foundBy: "company_name", outcomeCode: "found_by_company_name", skipReason: null,
+    });
+    expect(body.result.phones).toHaveLength(1);
+    expect(JSON.stringify(body)).not.toMatch(/trace_steps|traceSteps|requestKey/);
+    expect(JSON.stringify(webhooks()[0].body)).not.toMatch(/trace_steps|traceSteps|requestKey/);
+  });
+
+  it("persists the outcome, the key, the vendor and the step log, and never property_record", async () => {
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(tier1Persisted()).toMatchObject({
+      status: "success", is_successful: true, charge: 0.15, tier: 1,
+      contact_vendor: "fastappend", found_by: "company_name", outcome_code: "found_by_company_name",
+      tracerfy_job_id: null, ai_research_status: null, property_trace_status: null,
+    });
+    expect(Array.isArray(tier1Persisted()!.trace_steps)).toBe(true);
+    expect(deducts()[0].args).toMatchObject({
+      p_amount: 0.15, p_trace_history_id: "trace-new", p_description: "Skip trace - successful match",
+    });
+  });
+
+  it("a miss is free and says which key was tried", async () => {
+    const body = await (await post()).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body).toMatchObject({
+      status: "no_match", charge: 0, result: null, outcomeCode: "no_match",
+      skipReason: "We looked this owner up by company name and found no match. You were not charged.",
+    });
+  });
+
+  it("a person owner whose returned people do not match is free, and no name of theirs is kept (D29)", async () => {
+    // `people` rides alongside peopleCount at runtime (H.person is typed unknown, so tsc will not
+    // catch a missed edit) so the assertions below can actually fail if a name ever leaked.
+    H.person = {
+      success: true, hit: true, contacts: null, nameNotMatched: true,
+      peopleCount: 1, creditsDeducted: 5,
+      people: [{ first_name: "Someoneelse", last_name: "Different" }],
+    };
+    const body = await (await post({ ...BODY, ownerName: "Testowner Placeholder" })).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body.outcomeCode).toBe("owner_name_not_matched");
+    expect(body.skipReason).toBe(
+      "We found people linked to this property, but none matched the owner name, so no contacts were returned. You were not charged."
+    );
+    expect(JSON.stringify(tier1Persisted())).not.toMatch(/Someoneelse|Different/);
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toMatch(/Someoneelse|Different/);
+    expect(bodyStr).not.toMatch(/trace_steps|peopleCount/);
+  });
+});
+
+describe("v1 tier 1: busy, money, the resend and D25 on this call site (L-018)", () => {
+  it("a vendor failure is busy_try_again: 503, Retry-After, free, no webhook", async () => {
+    // MUTATION: return 200 on the busy branch and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.entity = { success: false, hit: false, contacts: null, error: "FastAppend service unavailable" };
+    const res = await post();
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toEqual({
+      success: false, status: "error", traceId: "trace-new", tier: 1, charge: 0, result: null,
+      foundBy: null, outcomeCode: "busy_try_again", skipReason: BUSY_SENTENCE, error: BUSY_SENTENCE,
+    });
+    expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
+    expect(tier1Persisted()).toMatchObject({ status: "error", outcome_code: "busy_try_again" });
+  });
+
+  it("records, and does not take again, a debit an earlier attempt booked", async () => {
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    H.ledgerRefs = [{ amount: 0.15, type: "debit", created_at: new Date(Date.now() - 60 * 1000).toISOString() }];
+    const body = await (await post()).json();
+    expect(deducts()).toHaveLength(0);
+    expect(body.charge).toBe(0.15);
+    expect(tier1Persisted()).toMatchObject({ charge: 0.15, tier: 1 });
+  });
+
+  it("folds a new charge onto the reused row's receipt", async () => {
+    // MUTATION: pass `row: { id: traceRecord.id }` to runSingleTier1 and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
+    H.insertedRow = { id: "trace-new", charge: 0.25, tier: 2, property_record: null };
+    H.ledgerRefs = [{ amount: 0.25, type: "debit", created_at: "2026-08-01T00:00:00.000Z" }];
+    const body = await (await post()).json();
+    expect(deducts()).toHaveLength(1);
+    expect(tier1Persisted()).toMatchObject({ charge: 0.4, tier: 2 });
+    // The receipt reads 0.40 (both purchases), but this REQUEST only collected its own 0.15.
+    expect(body.charge).toBe(0.15);
+  });
+
+  it("keeps a busy row: no sweep deletes it", async () => {
+    // MUTATION: drop `|| busyResend` from runDelete and this goes red.
+    const busy = { id: "trace-new", charge: 0, tier: 1, is_successful: false, property_record: null, outcome_code: "busy_try_again", trace_steps: [] };
+    H.survivingRow = busy;
+    H.insertedRow = busy;
+    await post();
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("resumes a busy row: the answered step is not bought again", async () => {
+    const TRUST_BODY = { ...BODY, ownerName: "Marcus Halloway Revocable Trust" };
+    const instantKey = requestKeyFor(
+      planRoute({ ...parcelForFullTrace(TRUST_BODY), ownerName: TRUST_BODY.ownerName }, "pro").steps[0]
+    );
+    const busy = {
+      id: "trace-new", charge: 0, tier: 1, is_successful: false, property_record: null,
+      outcome_code: "busy_try_again",
+      trace_steps: [{
+        kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0,
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), requestKey: instantKey,
+      }],
+    };
+    H.survivingRow = busy;
+    H.insertedRow = busy;
+    const { lookupPersonTrace, lookupBusinessTrace } = await v1Vendors();
+    await post(TRUST_BODY);
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not serve a different owner's cached contacts (D25)", async () => {
+    // MUTATION: serve the cached row whatever its owner and this goes red.
+    H.cached = {
+      id: "trace-cached", input_owner_name: "JANE DOE",
+      trace_result: { phones: [{ number: "5550000101", type: "mobile" }], emails: [] }, is_successful: true, charge: 0.15, tier: 1,
+    };
+    const { lookupBusinessTrace } = await v1Vendors();
+    const body = await (await post()).json();
+    expect(body.cached).toBeUndefined();
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the same owner written differently, free, with its foundBy and outcomeCode", async () => {
+    H.cached = {
+      id: "trace-cached", input_owner_name: "Acme Holdings, L.L.C.",
+      trace_result: { phones: [{ number: "5550000101", type: "mobile" }], emails: [] },
+      is_successful: true, found_by: "company_name", outcome_code: "found_by_company_name",
+    };
+    const body = await (await post()).json();
+    expect(body).toMatchObject({
+      cached: true, charge: 0, traceId: "trace-cached", foundBy: "company_name", outcomeCode: "found_by_company_name",
+    });
+    expect(deducts()).toHaveLength(0);
+  });
+
+  it("passes the request budget to every vendor call", async () => {
+    // MUTATION: pass `deadlineMs: startedAt + 10 * 60 * 1000` and this goes red.
+    const { lookupDossier, lookupBusinessTrace, lookupPersonTrace } = await v1Vendors();
+    await post();
+    let calls = 0;
+    for (const mocked of [lookupDossier, lookupBusinessTrace, lookupPersonTrace]) {
+      for (const call of vi.mocked(mocked).mock.calls as unknown[][]) {
+        calls += 1;
+        const opts = call[1] as { timeoutMs: number };
+        expect(opts.timeoutMs).toBeGreaterThan(0);
+        expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+      }
+    }
+    expect(calls).toBeGreaterThan(0);
+  });
+
+  it("passes the request budget to every vendor call on a two-step ladder", async () => {
+    // A trust owner with a first name: the Instant lookup misses (the H.person default), so
+    // FastAppend runs next. Both calls must carry the request budget, not just the first.
+    const { lookupPersonTrace, lookupBusinessTrace } = await v1Vendors();
+    await post({ ...BODY, ownerName: "Marcus Halloway Revocable Trust" });
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(1);
+    expect(lookupBusinessTrace).toHaveBeenCalledTimes(1);
+    for (const mocked of [lookupPersonTrace, lookupBusinessTrace]) {
+      for (const call of vi.mocked(mocked).mock.calls as unknown[][]) {
+        const opts = call[1] as { timeoutMs: number };
+        expect(opts.timeoutMs).toBeGreaterThan(0);
+        expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+      }
+    }
+  });
+});
+
+describe("v1 tier 2: warnings are wallet-only too, the routing notes stay internal", () => {
+  it("does not leak a routing warning into a Full Property Trace's body.warnings", async () => {
+    // Task 9 fixed exactly this for tier 1; tier 2 was still spreading execution.warnings.
+    // MUTATION: `const warnings = [...execution.warnings]` again and this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([]);
+  });
+
+  it("still says the two wallet sentences, which are the caller's own money", async () => {
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    H.deductData = false;
+    const body = await (await post(TIER2_BODY)).json();
+    expect(body.warnings).toEqual([
+      "The wallet did not cover this record, so nothing was charged for it.",
+    ]);
+  });
+});
+
+describe("v1 tier 1: warnings are wallet-only, the routing notes stay internal", () => {
+  it("does not leak a routing warning into body.warnings", async () => {
+    // MUTATION: return tier1.execution.warnings instead of the wallet-only array and this goes
+    // red: planRoute always warns on an entity step with no registrationState, and BODY's owner
+    // (ACME HOLDINGS LLC) takes that step.
+    H.entity = CONTACTS_HIT;
+    const body = await (await post()).json();
+    expect(body.warnings).toEqual([]);
+  });
+
+  it("says the wallet was short when it was", async () => {
+    H.entity = CONTACTS_HIT;
+    H.deductData = false;
+    const body = await (await post()).json();
+    expect(body.charge).toBe(0);
+    expect(body.warnings).toEqual(["The wallet did not cover this record, so nothing was charged for it."]);
+  });
+});
+
+describe("v1 tier 1: auto-rebill fires only when money moved or should have", () => {
+  it("does not trigger on a free outcome", async () => {
+    // MUTATION: call triggerAutoRebillIfNeeded unconditionally and this goes red.
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    await post();
+    expect(triggerAutoRebillIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it("triggers on a charged outcome", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+
+  it("triggers on insufficient_balance", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.deductData = false;
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+
+  it("triggers on a deduct error", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.deductError = { message: "wallet RPC timed out" };
+    await post();
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
+  });
+
+  it("does not trigger on already_collected: an earlier attempt already paid", async () => {
+    const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    H.ledgerRefs = [{ amount: 0.15, type: "debit", created_at: new Date(Date.now() - 60 * 1000).toISOString() }];
+    await post();
+    expect(triggerAutoRebillIfNeeded).not.toHaveBeenCalled();
+  });
+});
+
+describe("v1 tier 1: the Track B price", () => {
+  it("charges a pro profile the pro rate", async () => {
+    H.profile = PRO_PROFILE;
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(deducts()[0].args).toMatchObject({ p_amount: 0.15 });
+  });
+
+  it("charges a pay-as-you-go profile the wallet rate", async () => {
+    // MUTATION: pass a fixed pro rate as chargeAmount and this goes red.
+    H.profile = PAYG_PROFILE;
+    H.entity = CONTACTS_HIT;
+    await post();
+    expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
+  });
+
+  it("is blind to a gateway grant, because v1 is Track B", async () => {
+    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. With it off,
+    // Track A and Track B agree and the two tests above pass under either derivation.
+    // MUTATION: swap getChargePerTrace(...) for Track A's chargePerTrace(profile) and this goes
+    // red (0.15 instead of 0.25).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    try {
+      H.profile = {
+        ...PAYG_PROFILE,
+        gateway_products: ["prop-tracer-pro"],
+        gateway_products_checked_at: new Date().toISOString(),
+      };
+      H.entity = CONTACTS_HIT;
+      await post();
+      expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
+    } finally {
+      process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+});
+
+describe("v1 tier 1: a row with live work is never touched", () => {
+  function expectUntouchedBusy(res: Response, body: Record<string, unknown>, traceId: string) {
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(body).toEqual({
+      success: false, status: "error", traceId, tier: 1, charge: 0, result: null,
+      foundBy: null, outcomeCode: "busy_try_again", skipReason: BUSY_SENTENCE, error: BUSY_SENTENCE,
+    });
+    expect(H.ops.filter((o) => o.op === "update" || o.op === "insert")).toHaveLength(0);
+    expect(deletes()).toHaveLength(0);
+    expect(deducts()).toHaveLength(0);
+    expect(webhooks()).toHaveLength(0);
+  }
+
+  it("answers busy without touching a row whose Tier 2 rung is still queued (cron crash window)", async () => {
+    // MUTATION: drop the isPropertyTracePending() clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.survivingRow = { id: "trace-live-a", property_trace_status: "queued_2", charge: 0, tier: 2 };
+    const { lookupDossier, lookupBusinessTrace, lookupPersonTrace } = await v1Vendors();
+    const res = await post();
+    expectUntouchedBusy(res, await res.json(), "trace-live-a");
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+  });
+
+  it("answers busy for a busy row bulk re-enqueued, even though outcome_code alone would exempt it", async () => {
+    // MUTATION: drop the isEntityTracePending() clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.survivingRow = {
+      id: "trace-live-b", outcome_code: "busy_try_again", ai_research_status: "queued", charge: 0, tier: 1,
+    };
+    const { lookupBusinessTrace } = await v1Vendors();
+    const res = await post();
+    expectUntouchedBusy(res, await res.json(), "trace-live-b");
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+  });
+
+  it("answers busy for a fresh processing row from a concurrent request", async () => {
+    // MUTATION: drop the processingIsLive clause and this goes red.
+    H.profile = WEBHOOK_PROFILE;
+    H.survivingRow = { id: "trace-live-c", status: "processing", created_at: new Date().toISOString(), charge: 0, tier: null };
+    const { lookupBusinessTrace } = await v1Vendors();
+    const res = await post();
+    expectUntouchedBusy(res, await res.json(), "trace-live-c");
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+  });
+
+  it("still reuses an ordinary processing row abandoned longer ago than the cron's own threshold", async () => {
+    // Not live work: the gate is not a blanket refusal of every 'processing' row.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = {
+      id: "trace-old", status: "processing",
+      created_at: new Date(Date.now() - 90 * 60 * 1000).toISOString(), charge: 0, tier: null,
+    };
+    H.insertedRow = { id: "trace-old", charge: 0, tier: null };
+    const res = await post();
+    expect(res.status).toBe(200);
+  });
+
+  it("reports the tier the request actually is, so a Full Property Trace is not told tier 1", async () => {
+    // MUTATION: hard-code `tier: TRACE_TIER.PER_SUCCESSFUL_TRACE` on the live-work 503 again and
+    // this goes red.
+    H.survivingRow = {
+      id: "trace-live-t2", status: "processing", created_at: new Date().toISOString(),
+      charge: 0, tier: null,
+    };
+    const res = await post(TIER2_BODY);
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body.tier).toBe(2);
+  });
+
+  it("gives up on a single-trace processing row after minutes, not after the cron's hour", async () => {
+    // A single trace cannot outlive maxDuration = 60 s, so a row it left behind is dead long
+    // before CRON_TIMEOUT_MINUTES and every resend of that address would answer busy for an hour.
+    // MUTATION: use CRON_TIMEOUT_MINUTES for a row with no trace_job_id and this goes red.
+    // MUTATION: drop trace_job_id from the existingRow select and this goes red too: the column
+    // never arrives, every row reads as a single-trace row, and the bulk case below breaks.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = {
+      id: "trace-dead", status: "processing", trace_job_id: null,
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(), charge: 0, tier: null,
+    };
+    H.insertedRow = { id: "trace-dead", charge: 0, tier: null };
+    const res = await post();
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps the cron's hour for a processing row a BULK job owns", async () => {
+    // MUTATION: use SINGLE_REQUEST_TIMEOUT_MINUTES for every row and this goes red.
+    H.survivingRow = {
+      id: "trace-bulk", status: "processing", trace_job_id: "job-1",
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(), charge: 0, tier: null,
+    };
+    const res = await post();
+    expectUntouchedBusy(res, await res.json(), "trace-bulk");
+  });
+});
+
+describe("v1 tier 1: a reused row's owner and its result change together (D25 money)", () => {
+  it("the reuse UPDATE never carries the new owner ahead of the new result", async () => {
+    // MUTATION: put input_owner_name back in the reuse UPDATE and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", input_owner_name: "JANE DOE", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    await post(); // BODY's owner is ACME HOLDINGS LLC
+    const reuse = H.ops.find(
+      (o) =>
+        o.op === "update" &&
+        o.filters.some((f) => f[0] === "eq" && f[1] === "id") &&
+        !("outcome_code" in (o.payload as object))
+    );
+    expect(reuse).toBeDefined();
+    expect(reuse!.payload).not.toHaveProperty("input_owner_name");
+  });
+
+  it("the write carrying trace_result carries the new owner", async () => {
+    // MUTATION: pass `inputOwnerName: null` to runSingleTier1 and this goes red.
+    H.entity = CONTACTS_HIT;
+    H.survivingRow = { id: "trace-new", input_owner_name: "JANE DOE", charge: 0, tier: null };
+    H.insertedRow = { id: "trace-new", charge: 0, tier: null };
+    await post();
+    expect(tier1Persisted()).toMatchObject({ input_owner_name: "ACME HOLDINGS LLC" });
+  });
+});
+
+describe("v1 tier 2: input_owner_name rides the same write as trace_result (D25 money)", () => {
+  it("writes null when no owner was supplied", async () => {
+    // MUTATION: drop input_owner_name from the tier 2 persist and this goes red.
+    H.dossier = DOSSIER_MISS;
+    await post(TIER2_BODY);
+    expect(persisted()).toMatchObject({ input_owner_name: null });
+  });
+
+  it("writes the supplied owner on the Full Property Trace opt-in", async () => {
+    H.dossier = DOSSIER_MISS;
+    await post({ ...BODY, fullPropertyTrace: true });
+    expect(persisted()).toMatchObject({ input_owner_name: "ACME HOLDINGS LLC" });
+  });
+});
+
+describe("v1 tier 2: the request budget reaches every vendor call", () => {
+  it("passes VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS to every tier 2 vendor call", async () => {
+    // MUTATION: pass `deadlineMs: startedAt + 10 * 60 * 1000` to the tier 2 executeRoute call and
+    // this goes red.
+    H.dossier = DOSSIER_ENTITY_HIT;
+    H.entity = CONTACTS_HIT;
+    const { lookupDossier, lookupBusinessTrace } = await v1Vendors();
+    await post(TIER2_BODY);
+    let calls = 0;
+    for (const mocked of [lookupDossier, lookupBusinessTrace]) {
+      for (const call of vi.mocked(mocked).mock.calls as unknown[][]) {
+        calls += 1;
+        const opts = call[1] as { timeoutMs: number };
+        expect(opts.timeoutMs).toBeGreaterThan(0);
+        expect(opts.timeoutMs).toBeLessThanOrEqual(VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS);
+      }
+    }
+    expect(calls).toBe(2);
+  });
+});
+
+/* ==================================================================== *
+ * THE WEBHOOK'S `address` IS NEVER THE INTERNAL KEY (fix round 2).
+ *
+ * D36 made `normalizedAddress` an APN key for a record that has a city, a
+ * parcel id and no street, so the old `hasCity ? normalizedAddress : ...`
+ * sent the customer "APN|0123-456|TRAVIS|TX" (and "||TX" for a company with
+ * a city and no street). The rule now mirrors traceKeyFor: the normalized
+ * key only when there is BOTH a street and a city.
+ * ==================================================================== */
+describe("v1 webhooks: the address is never the internal key", () => {
+  const CITY_PARCEL = { city: "Austin", state: "TX", apn: "0123-456", county: "Travis" };
+
+  beforeEach(() => {
+    H.profile = WEBHOOK_PROFILE;
+  });
+
+  it("sends the street and city key unchanged for a record that has both", async () => {
+    // MUTATION: `hasStreet && hasCity ? ... : hasStreet ? ...` back to `hasCity ? ...` and this
+    // stays green, which is why the three cases below exist.
+    await post();
+    expect(webhooks()[0].body).toMatchObject({ address: "123 MAIN ST|AUSTIN|TX", city: "AUSTIN", state: "TX" });
+  });
+
+  it("sends no address for a tier 1 record with a city, a parcel id and no street", async () => {
+    // MUTATION: restore `hasCity ? normalizedAddress : ...` and this goes red.
+    await post({ ...CITY_PARCEL, ownerName: "Testowner Placeholder" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 1, address: null, city: "AUSTIN", state: "TX" });
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("APN|");
+  });
+
+  it("sends no address for a tier 2 record with a city, a parcel id and no street", async () => {
+    H.dossier = DOSSIER_MISS;
+    await post(CITY_PARCEL);
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body).toMatchObject({ tier: 2, address: null, city: "AUSTIN", state: "TX" });
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("APN|");
+  });
+
+  it("sends no address for a company posted with a city and no street", async () => {
+    // Its key is the street-and-state fallback, "||TX". That is ours, not the caller's.
+    await post({ city: "Austin", state: "TX", ownerName: "ACME HOLDINGS LLC" });
+    expect(webhooks()).toHaveLength(1);
+    expect(webhooks()[0].body.address).toBeNull();
+    expect(JSON.stringify(webhooks()[0].body)).not.toContain("||");
   });
 });

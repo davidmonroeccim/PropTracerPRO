@@ -199,6 +199,30 @@ describe("listTraces", () => {
     expect(out.traces[0]).not.toHaveProperty("contact_vendor");
   });
 
+  it("never emits the internal parcel key as the address (D38)", async () => {
+    // MUTATION: let `normalized_address` ride out on the `...rest` spread untouched and this
+    // goes red. The select must carry parcel_id_local and county too: projectRow drops a column
+    // the query never asked for, so narrowing the select turns this red as well.
+    const admin = adminStub({
+      profile: { id: "p1", wallet_balance: 0 },
+      traces: [
+        {
+          id: "t1",
+          normalized_address: "APN|0123-456|TRAVIS|TX",
+          city: null,
+          state: "TX",
+          parcel_id_local: "0123-456",
+          county: "Travis",
+        },
+      ],
+    });
+    const out = (await listTraces(admin, "sub-1", {})) as {
+      traces: Array<Record<string, unknown>>;
+    };
+    expect(out.traces[0].normalized_address).toBe("Parcel 0123-456, Travis County");
+    expect(JSON.stringify(out)).not.toContain("APN|");
+  });
+
   describe("limit clamp", () => {
     it("clamps 0 up to the floor of 1", async () => {
       const limitFn = vi.fn();
@@ -1051,6 +1075,35 @@ describe("bulk_status", () => {
     });
     // The no-op settle left the row 'processing', so the job is still in flight.
     expect(out).toMatchObject({ status: "processing", job_id: "job-1" });
+  });
+
+  it("never emits the internal parcel key as a record's address (D38)", async () => {
+    // MUTATION: put `address: row.normalized_address` back in buildPerRecordResult and this
+    // goes red. Its twin in app/api/v1/trace/bulk/status has the same test; payloadParity
+    // compares the two key sets, so the two surfaces stay one payload.
+    const { admin } = statusAdminStub({
+      profile,
+      job: { id: "job-1", user_id: "p1", status: "completed", records_submitted: 1, records_matched: 0 },
+      rows: [
+        {
+          id: "r1",
+          status: "no_match",
+          normalized_address: "APN|0123-456|TRAVIS|TX",
+          city: null,
+          state: "TX",
+          parcel_id_local: "0123-456",
+          county: "Travis",
+          is_successful: false,
+          charge: 0,
+          ai_research_status: null,
+        },
+      ],
+    });
+    const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(out.results[0].address).toBe("Parcel 0123-456, Travis County");
+    expect(JSON.stringify(out)).not.toContain("APN|");
   });
 
   // DEFECT 3 FENCE (2026-09-16): a finalized job's total_charge must SUM THE STORED per-row

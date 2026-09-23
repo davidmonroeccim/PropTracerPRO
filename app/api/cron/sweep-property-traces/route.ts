@@ -17,6 +17,7 @@ import {
   traceResultFor,
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
+import { isParcelKey } from '@/lib/trace/historyDisplay';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
 import { isTrackASource, pricePlanFor } from '@/lib/suite/pricing';
@@ -162,8 +163,14 @@ interface QueueRow {
  * city/state/zip.
  */
 export function parcelForRow(row: QueueRow): ParcelInput {
-  const streetAddress =
-    row.normalized_address.split('|')[0] || row.normalized_address;
+  // D38: a row keyed on a PARCEL carries `APN|<parcel>|<COUNTY>|<STATE>` here and has no street
+  // in it at all, so splitting on the pipe would hand the dossier the literal word "APN" as an
+  // address. Such a row cannot reach this queue today (every bulk upload carries a street), and
+  // the guard is here so it cannot start to without anyone noticing. No street is '', never a
+  // fabricated one: parcelForFullTrace then plans from the apn and county columns alone.
+  const streetAddress = isParcelKey(row.normalized_address)
+    ? ''
+    : row.normalized_address.split('|')[0] || row.normalized_address;
   return parcelForFullTrace({
     address: streetAddress,
     city: row.city || '',

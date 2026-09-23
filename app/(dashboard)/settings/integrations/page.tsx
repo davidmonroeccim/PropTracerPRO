@@ -19,11 +19,12 @@ import type { UserProfile } from '@/types';
 /**
  * The real `trace.completed` body, key for key.
  *
- * Tier 1 is sent by the two poll routes (app/api/trace/status,
- * app/api/v1/trace/status). Tier 2 is sent by lib/trace/traceCompletedWebhook.ts,
- * which is the poll payload plus `property_record`, `tier` and `owner_type`.
- * `charge` is always what the wallet actually collected, never a list price, so
- * the number below is an example and not a quote.
+ * New single traces of both tiers are sent inline by lib/trace/traceCompletedWebhook.ts, which is
+ * the poll payload plus `property_record`, `tier`, `owner_type`, `found_by`, `outcome_code` and
+ * `skip_reason`. The two poll routes (app/api/trace/status, app/api/v1/trace/status) and
+ * app/api/cron/sweep-stale-traces still send the older shape for rows already in flight before
+ * this change. `charge` is always what the wallet actually collected, never a list price, so the
+ * number below is an example and not a quote.
  */
 const WEBHOOK_PAYLOAD_EXAMPLE = `{
   "event": "trace.completed",
@@ -47,6 +48,9 @@ const WEBHOOK_PAYLOAD_EXAMPLE = `{
   "property_record": { "county": "Dallas", "apn": "00000123456789000" },
   "tier": 2,
   "owner_type": "individual",
+  "found_by": null,
+  "outcome_code": null,
+  "skip_reason": null,
   "timestamp": "2026-09-17T15:30:00Z"
 }`;
 
@@ -545,11 +549,16 @@ export default function IntegrationsPage() {
                 </pre>
                 <div className="mt-3 space-y-2 text-xs text-gray-600">
                   <p>
-                    The last three fields come with a Full Property Trace. A trace where you gave
-                    us the owner of record sends the same event without{' '}
-                    <code className="bg-gray-100 px-1 rounded">property_record</code>,{' '}
-                    <code className="bg-gray-100 px-1 rounded">tier</code> and{' '}
-                    <code className="bg-gray-100 px-1 rounded">owner_type</code>.
+                    Every trace sends the same keys. When you gave us the owner of record,{' '}
+                    <code className="bg-gray-100 px-1 rounded">tier</code> is 1 and{' '}
+                    <code className="bg-gray-100 px-1 rounded">property_record</code> is null.{' '}
+                    <code className="bg-gray-100 px-1 rounded">found_by</code> says which key found
+                    the owner (address, parcel_id or company_name),{' '}
+                    <code className="bg-gray-100 px-1 rounded">outcome_code</code> gives the outcome,
+                    and <code className="bg-gray-100 px-1 rounded">skip_reason</code> says in one
+                    sentence why nothing was found. On a Full Property Trace,{' '}
+                    <code className="bg-gray-100 px-1 rounded">tier</code> is 2 and those three are
+                    null.
                   </p>
                   <p>
                     <code className="bg-gray-100 px-1 rounded">charge</code> is what your wallet
@@ -560,9 +569,9 @@ export default function IntegrationsPage() {
                     pay as you go, and that charge stands whether or not contacts come back.
                   </p>
                   <p>
-                    A Full Property Trace fires this event even when it found no contacts, because
-                    that outcome was still charged and it is the one you most need to hear about.
-                    Nothing is sent, and nothing is charged, when a lookup fails on our side.
+                    This event fires for every finished trace, including one that found no
+                    contacts. Nothing is sent, and nothing is charged, when a lookup fails on our
+                    side or the system is busy.
                   </p>
                 </div>
               </>

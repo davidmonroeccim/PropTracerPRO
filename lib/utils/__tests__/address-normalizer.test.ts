@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeAddress,
   createAddressHash,
+  traceKeyFor,
   usableZip,
   validateAddressInput,
 } from '../address-normalizer';
@@ -162,5 +163,51 @@ describe('usableZip', () => {
       const accepted = validateAddressInput('123 Main St', 'Houston', 'TX', zip).valid;
       expect(usableZip(zip) !== '' || zip === '', zip).toBe(accepted);
     }
+  });
+});
+
+describe('traceKeyFor (spec 6.3, D9)', () => {
+  it('keys a record with a city exactly as before, whatever parcel id rides along', () => {
+    expect(traceKeyFor({ address: '123 Main St', city: 'Austin', state: 'TX', apn: '9', county: 'Travis' }))
+      .toBe(normalizeAddress('123 Main St', 'Austin', 'TX'));
+  });
+
+  it('keeps the stored shape for a record that has both a street and a city', () => {
+    // The exact string every row in trace_history already carries. It must not move: a key that
+    // moves is a row that re-buys itself.
+    expect(traceKeyFor({ address: '123 Main Street', city: 'Austin', state: 'TX' })).toBe('123 MAIN ST|AUSTIN|TX');
+  });
+
+  it('keys two street-less records in the same city on their own parcels (D36)', () => {
+    // MUTATION: put the city branch back first and this goes red: both records key to |AUSTIN|TX,
+    // so every parcel in the city shares one row, a paid result is overwritten and a resend inside
+    // 90 days is charged again.
+    const a = traceKeyFor({ city: 'Austin', state: 'TX', apn: '100', county: 'Travis' });
+    const b = traceKeyFor({ city: 'Austin', state: 'TX', apn: '200', county: 'Travis' });
+    expect(a).toBe('APN|100|TRAVIS|TX');
+    expect(b).toBe('APN|200|TRAVIS|TX');
+    expect(a).not.toBe(b);
+  });
+
+  it('keeps the street-and-state shape for a record with a city but no street and no parcel', () => {
+    expect(traceKeyFor({ city: 'Austin', state: 'TX' })).toBe('||TX');
+  });
+
+  it('keys a city-less record on parcel id, county and state: trimmed, upper case, leading # removed', () => {
+    // MUTATION: drop the leading-# strip in normalizeParcelId and this goes red.
+    expect(traceKeyFor({ state: 'oh', apn: ' #12-345 6 ', county: 'Placeholder' })).toBe('APN|12-345 6|PLACEHOLDER|OH');
+  });
+
+  it('keeps dashes and spaces, so two parcel numbers never collapse into one', () => {
+    expect(traceKeyFor({ state: 'OH', apn: '12-3456', county: 'X' })).not.toBe(traceKeyFor({ state: 'OH', apn: '123456', county: 'X' }));
+  });
+
+  it('does not let the same parcel number in two counties share a key', () => {
+    // MUTATION: drop the county from the key and this goes red.
+    expect(traceKeyFor({ state: 'OH', apn: '100', county: 'A' })).not.toBe(traceKeyFor({ state: 'OH', apn: '100', county: 'B' }));
+  });
+
+  it('falls back to street and state with neither a city nor a whole parcel key', () => {
+    expect(traceKeyFor({ address: '1 A St', state: 'OH', apn: '100' })).toBe('1 A ST||OH');
   });
 });

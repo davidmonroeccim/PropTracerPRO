@@ -431,6 +431,24 @@ describe("parcelForRow", () => {
     expect(parcel.parcelIdLocal ?? null).toBeNull();
     expect(parcel.county ?? null).toBeNull();
   });
+
+  it("never reads the literal APN out of a parcel-keyed row as the street (D38)", () => {
+    // A row keyed APN|<parcel>|<COUNTY>|<STATE> has no street at all. split('|')[0] on it is the
+    // word "APN", which would be sent to the dossier as an address. Not reachable from today's
+    // bulk uploads, which all carry a street; guarded so it cannot become reachable quietly.
+    // MUTATION: drop the isParcelKey() arm and this goes red with situsAddress "APN".
+    const parcel = parcelForRow({
+      ...baseRow,
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      city: null,
+      state: "TX",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    });
+    expect(parcel.situsAddress).toBe("");
+    const plan = planRoute(parcel, "pro");
+    expect(plan.steps.map((s) => s.kind)).toEqual(["DOSSIER_APN"]);
+  });
 });
 
 describe("auth", () => {
@@ -1337,5 +1355,52 @@ describe("the property-trace sweep never pushes to HighLevel", () => {
     expect(settle.status).toBe("success");
     expect(settle.is_successful).toBe(true);
     expect(settle.property_trace_status).toBe(PROPERTY_TRACE_SETTLED_STATUS);
+  });
+});
+
+describe("D21 (c) in the tier 2 cron: every owner, and D32, never the dossier's own contacts", () => {
+  const TWO_INDIVIDUALS = {
+    ...ENTITY_HIT,
+    owners: [
+      { first_name: "Testowner", last_name: "Placeholder", age: "00" },
+      { first_name: "Secondowner", last_name: "Placeholder", age: "00" },
+    ],
+    // A synthetic dossier contacts block. H.dossier is typed loosely (Record<string, unknown>),
+    // so production code never reads this field; it exists only so the D32 test below has real
+    // data to prove never leaks, rather than an absent field a reintroduced fallback would find
+    // nothing on either way.
+    contacts: {
+      ownerName: null,
+      phones: [{ number: "5550000901", type: "mobile" }],
+      emails: ["dossier-leak@example.invalid"],
+      mailingAddress: null,
+    },
+  };
+
+  beforeEach(() => {
+    H.dossier = TWO_INDIVIDUALS;
+  });
+
+  it("asks about the second owner when the first misses", async () => {
+    vi.mocked(lookupPersonTrace)
+      .mockResolvedValueOnce({ ...CONTACTS_MISS })
+      .mockResolvedValueOnce({ ...CONTACTS_HIT });
+    await run();
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(lookupPersonTrace).mock.calls[1][0]).toMatchObject({ first_name: "Secondowner" });
+    expect(finalWrite()).toMatchObject({ status: "success", is_successful: true, contact_vendor: "tracerfy" });
+  });
+
+  it("never returns the dossier's own contacts, in any phase (spec D32)", async () => {
+    // D32 (2026-09-22) withdraws the dossier-contacts fallback entirely: phones and emails come
+    // only from the separate Tracerfy or FastAppend call, and a miss there is a true null.
+    H.personContacts = { ...CONTACTS_MISS };
+    await run();
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    expect(finalWrite()).toMatchObject({ status: "no_match", is_successful: false, phone_count: 0 });
+    // TWO_INDIVIDUALS' synthetic dossier contacts block never reaches what the cron persists.
+    const written = JSON.stringify(finalWrite());
+    expect(written).not.toContain("5550000901");
+    expect(written).not.toContain("dossier-leak@example.invalid");
   });
 });

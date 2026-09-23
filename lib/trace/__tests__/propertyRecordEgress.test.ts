@@ -73,12 +73,6 @@ const RAW_SITES: Record<string, Record<string, { count: number; why: string }>> 
       why: 'THE BULK TIER 2 PERSIST. Storage stays raw: all 86 keys, verbatim. It is spread conditionally because a dossier MISS returns null and this row may be a reused row already holding a record the customer paid for -- writing that null would destroy the product and flip isBilledRow() to false. Nothing leaves PTP from this file: a cron has no response body and bulk has never dispatched trace.completed.',
     },
   },
-  'app/(dashboard)/trace/single/page.tsx': {
-    'property_record: statusData.property_record ?? null,': {
-      count: 1,
-      why: 'BROWSER STATE, not an egress. statusData is the response of /api/trace/status, which is filtered before it reaches the network.',
-    },
-  },
 };
 
 function sourceFiles(dir: string): string[] {
@@ -321,6 +315,7 @@ describe('the trace.completed webhook payload', () => {
       charge: 0.4,
       propertyRecord,
       ownerType: 'entity',
+      tier: 2,
     });
     return posts[0].body;
   }

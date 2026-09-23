@@ -86,6 +86,12 @@ describe("parcelForFullTrace", () => {
     expect(parcelForFullTrace({ address: "1 A St", city: "B", state: "UT" }).situsZip).toBeNull();
     expect(parcelForFullTrace({ address: "1 A St", city: "B", state: "UT", zip: "  " }).situsZip).toBeNull();
   });
+
+  it("tolerates a record with no street or city (API, spec D23 and D24)", () => {
+    expect(parcelForFullTrace({ state: "oh", apn: "12-3", county: "Placeholder" })).toMatchObject({
+      state: "OH", situsAddress: "", situsCity: "", parcelIdLocal: "12-3", county: "Placeholder", ownerName: null,
+    });
+  });
 });
 
 describe("traceResultFor", () => {
@@ -159,6 +165,12 @@ describe("traceResultFor", () => {
 
   it("is null only when there is genuinely nothing", () => {
     expect(traceResultFor(execution())).toBeNull();
+  });
+
+  it('never labels a SUPPLIED tier 1 owner as the owner of record (spec 7.2)', () => {
+    // MUTATION: drop the tier test in traceResultFor and this goes red.
+    expect(traceResultFor(execution({ tier: 1, ownerName: 'Acme Holdings Llc', contacts: null }))).toBeNull();
+    expect(traceResultFor(execution({ tier: 1, ownerName: 'Acme Holdings Llc', contacts: CONTACTS }))!.owner_name_2).toBeNull();
   });
 });
 

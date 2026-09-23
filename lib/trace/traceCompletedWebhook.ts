@@ -1,15 +1,19 @@
 /**
- * The `trace.completed` webhook for a TIER 2 trace.
+ * The `trace.completed` webhook for a trace that completes INLINE: every Tier 2 trace, and since
+ * Tier 1 Phase 1 every single Tier 1 trace.
  *
- * WHY THIS EXISTS. Tier 1 completes in the POLL route (app/api/trace/status,
- * app/api/v1/trace/status) and both poll routes fire `trace.completed` from there.
- * Tier 2 completes INLINE inside the submit request and never reaches a poll route,
- * so without this a customer with a webhook configured would silently stop receiving
- * events the moment their traces started arriving as tier 2. Silently is the problem:
- * a webhook that stops firing looks exactly like a customer with no traces.
+ * WHY THIS EXISTS. Both tiers now finish INSIDE the submit request and neither reaches a
+ * poll route, so every single trace fires `trace.completed` from HERE. The two poll
+ * routes (app/api/trace/status, app/api/v1/trace/status) still fire their own copy, but
+ * only for rows that were already in flight when Tier 1 Phase 1 shipped; no new trace
+ * arrives there. Without this function a customer with a webhook configured would
+ * silently stop receiving events. Silently is the problem: a webhook that stops firing
+ * looks exactly like a customer with no traces.
  *
- * THE PAYLOAD is the poll route's, key for key, plus the three things tier 2 has and
- * tier 1 does not: `property_record`, `tier`, `owner_type`. A webhook is a JSON POST to
+ * THE PAYLOAD is the poll route's, key for key, plus three the poll route never sent:
+ * `property_record`, `tier`, `owner_type`. All three are present on every trace, so the
+ * shape a consumer parses does not change with the tier: `property_record` is null on a
+ * Tier 1 trace, and `tier` and `owner_type` are real on both. A webhook is a JSON POST to
  * the customer's own URL, so extra keys need no pre-declaration anywhere -- that
  * constraint belongs to the HighLevel CRM push (phase 4b), not here.
  *
@@ -36,7 +40,6 @@
  * Nothing awaits it and every rejection is swallowed into console.error.
  */
 import type { TraceResult } from '@/types';
-import { TRACE_TIER } from './billedRows';
 import { toPublicPropertyRecord } from './publicPropertyRecord';
 
 export interface TraceCompletedWebhookInput {
@@ -60,6 +63,12 @@ export interface TraceCompletedWebhookInput {
    */
   propertyRecord: unknown;
   ownerType?: string | null;
+  /** 1 for a supplied-owner trace, 2 for a Full Property Trace. */
+  tier: 1 | 2;
+  /** Tier 1 only (spec 7.1). Null on a Full Property Trace. */
+  foundBy?: string | null;
+  outcomeCode?: string | null;
+  skipReason?: string | null;
 }
 
 /**
@@ -90,7 +99,7 @@ export function dispatchTraceCompleted(input: TraceCompletedWebhookInput): void 
       // make the key disappear from the JSON and change the shape a consumer parses.
       research: null,
       charge: input.charge,
-      // The three tier 2 additions.
+      // The three keys the poll route never sent. Present on every trace, whatever its tier.
       //
       // FILTERED HERE, AT THE ONE DOOR. This payload lands in the customer's own
       // system by definition, which is the case the whole rule was written for: a
@@ -100,8 +109,13 @@ export function dispatchTraceCompleted(input: TraceCompletedWebhookInput): void 
       // so there is exactly one place to get this wrong and it is this line.
       // 65 keys of the vendor's 86. See lib/trace/publicPropertyRecord.ts.
       property_record: toPublicPropertyRecord(input.propertyRecord),
-      tier: TRACE_TIER.PER_RECORD_SUBMITTED,
+      tier: input.tier,
       owner_type: input.ownerType ?? null,
+      // Tier 1 (spec 7.2). Always present, null on a Full Property Trace, so the shape a
+      // consumer parses does not change with the tier.
+      found_by: input.foundBy ?? null,
+      outcome_code: input.outcomeCode ?? null,
+      skip_reason: input.skipReason ?? null,
       timestamp: new Date().toISOString(),
     }),
   }).catch((err) => console.error('Webhook dispatch error:', err));
