@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isSuiteSignInEnabled } from "./config";
 import { type EntitlementProfile, fetchEntitlements, isSnapshotStale } from "./entitlements";
 
-interface RefreshRow extends EntitlementProfile { id: string }
+export interface RefreshRow extends EntitlementProfile { id: string }
 
 /** Schedule the TTL refresh AFTER the response flushes. after() throws outside a request scope,
  *  so degrade to fire-and-forget there. refreshSuiteSnapshot never rejects. */
@@ -28,4 +28,48 @@ async function refreshSuiteSnapshot(profile: RefreshRow): Promise<void> {
   } catch (e) {
     console.error("[suite-signin] entitlement refresh failed, keeping last snapshot:", e);
   }
+}
+
+type SnapshotFields = Pick<EntitlementProfile, "gateway_products" | "gateway_products_checked_at">;
+
+/**
+ * Blocking sibling of scheduleSuiteRefresh, for the one surface that has no session, no page
+ * render and so nothing else to ever call scheduleSuiteRefresh for it: the v1 API key gate
+ * (lib/api/auth.ts). AWAITS the TTL check and, when stale, the gateway call, so a revocation
+ * takes effect on the very request that would otherwise still admit it. A fresh snapshot (within
+ * TTL) returns immediately with no gateway call at all — the common case costs nothing.
+ *
+ * Same fail-open doctrine as refreshSuiteSnapshot: a gateway error keeps the last snapshot
+ * (never a lockout) and is logged, not thrown. A failed persist is logged and never fails the
+ * caller either, but — unlike a gateway error — does NOT roll back the refreshed values: the
+ * gateway already answered, so the caller gates on that answer even if writing it back failed.
+ *
+ * The caller MUST gate on the returned fields, not the ones it passed in: on success they are
+ * the freshly fetched values, not the stale row.
+ */
+export async function refreshSuiteSnapshotBlocking(profile: RefreshRow): Promise<SnapshotFields> {
+  const fallback: SnapshotFields = {
+    gateway_products: profile.gateway_products,
+    gateway_products_checked_at: profile.gateway_products_checked_at,
+  };
+  if (!isSuiteSignInEnabled()) return fallback; // Kill-switch: never a gateway call while disabled.
+  if (!profile.gateway_sub) return fallback; // Nothing to refresh against.
+  if (!isSnapshotStale(profile.gateway_products_checked_at)) return fallback; // Still fresh.
+
+  let refreshed: SnapshotFields;
+  try {
+    const ent = await fetchEntitlements(profile.gateway_sub);
+    refreshed = { gateway_products: ent.products, gateway_products_checked_at: new Date().toISOString() };
+  } catch (e) {
+    console.error("[suite-signin] blocking entitlement refresh failed, keeping last snapshot:", e);
+    return fallback;
+  }
+
+  try {
+    await (createAdminClient().from("user_profiles") as any).update(refreshed).eq("id", profile.id);
+  } catch (e) {
+    console.error("[suite-signin] blocking entitlement snapshot persist failed:", e);
+  }
+
+  return refreshed;
 }

@@ -19,6 +19,8 @@ import { vi } from "vitest";
 const H = vi.hoisted(() => ({
   profile: null as Record<string, unknown> | null,
   error: null as { code?: string; message?: string } | null,
+  lastUpdate: null as Record<string, unknown> | null,
+  updateError: null as Error | null,
 }));
 
 /**
@@ -41,6 +43,16 @@ function projectRow(row: Record<string, unknown> | null, select: unknown): Recor
   return out;
 }
 
+// fetchEntitlements: the gateway call made by refreshSuiteSnapshotBlocking (lib/suite/access.ts)
+// when a v1 caller's snapshot is stale. Mocked at the module lib/suite/access.ts itself imports
+// from (a relative "./entitlements" that resolves to the same file as this alias), same
+// technique as lib/suite/__tests__/access.test.ts.
+const fetchEntitlements = vi.fn();
+vi.mock("@/lib/suite/entitlements", async (orig) => ({
+  ...((await orig()) as object),
+  fetchEntitlements,
+}));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from: (table: string) => {
@@ -51,6 +63,14 @@ vi.mock("@/lib/supabase/admin", () => ({
               single: () =>
                 Promise.resolve({ data: projectRow(H.profile, columns), error: H.error }),
             }),
+          }),
+          // The snapshot persist made by refreshSuiteSnapshotBlocking on a successful refresh.
+          update: (fields: Record<string, unknown>) => ({
+            eq: () => {
+              if (H.updateError) return Promise.reject(H.updateError);
+              H.lastUpdate = fields;
+              return Promise.resolve({ data: null, error: null });
+            },
           }),
         };
       }
@@ -107,6 +127,9 @@ beforeEach(() => {
   ORIGINAL_FLAG = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   H.profile = null;
   H.error = null;
+  H.lastUpdate = null;
+  H.updateError = null;
+  fetchEntitlements.mockReset();
 });
 
 afterEach(() => {
@@ -237,6 +260,198 @@ describe("validateApiKey — key lookup", () => {
       expect(result.response.status).toBe(500);
       const body = await result.response.json();
       expect(body).toEqual({ success: false, error: "Internal server error" });
+    }
+  });
+});
+
+/**
+ * The v1 API is the ONLY surface that reads the gateway entitlement snapshot with nothing to
+ * refresh it: no session, no dashboard render, so scheduleSuiteRefresh (app/(dashboard)/layout.tsx)
+ * never runs for an API-key-only customer. Left alone, a revoked gateway grant would keep
+ * admitting v1 calls forever. validateApiKey now runs a blocking, TTL-checked refresh
+ * (lib/suite/access.ts refreshSuiteSnapshotBlocking) before gating, mirroring the MCP surface's
+ * live-per-call resolution (lib/suite/mcp-auth.ts).
+ */
+function minutesAgo(n: number): string {
+  return new Date(Date.now() - n * 60 * 1000).toISOString();
+}
+
+const TTL_MINUTES = 30;
+
+describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)", () => {
+  it("a fresh snapshot (within TTL) makes no gateway call and admits as before", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-fresh",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-fresh",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(1),
+    };
+
+    const result = await validateApiKey(req("Bearer key-fresh"));
+
+    expect(isAuthError(result)).toBe(false);
+    expect(fetchEntitlements).not.toHaveBeenCalled();
+    expect(H.lastUpdate).toBeNull();
+  });
+
+  it("a stale snapshot whose refresh still returns the grant: admits, and the row is updated", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-still-granted",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-stale-1",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+
+    const result = await validateApiKey(req("Bearer key-stale-1"));
+
+    expect(isAuthError(result)).toBe(false);
+    expect(fetchEntitlements).toHaveBeenCalledWith("gw-stale-1");
+    expect(H.lastUpdate).toMatchObject({ gateway_products: ["prop-tracer-pro"] });
+  });
+
+  it("a stale snapshot whose refresh returns NO grant: refused 403, and the profile no longer carries the stale grant (THE FIX)", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-revoked",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-stale-2",
+      gateway_products: ["prop-tracer-pro"], // stale row still shows the (now-revoked) grant
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: [], expires_hint: null });
+
+    const result = await validateApiKey(req("Bearer key-stale-2"));
+
+    expect(isAuthError(result)).toBe(true);
+    if (isAuthError(result)) {
+      expect(result.response.status).toBe(403);
+      const body = await result.response.json();
+      expect(body.error).toBe(DENIED_BODY);
+    }
+    // The gate must decide on the REFRESHED value, and no downstream code may read a grant
+    // that was just revoked — assert directly on the profile object the gate examined.
+    expect(H.profile?.gateway_products).toEqual([]);
+    expect(H.lastUpdate).toMatchObject({ gateway_products: [] });
+  });
+
+  it("a stale snapshot whose refresh THROWS: admitted on the last snapshot, nothing written, no exception escapes", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-throws",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-stale-3",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockRejectedValue(new Error("gateway timeout"));
+
+    const result = await validateApiKey(req("Bearer key-stale-3"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
+    }
+    expect(H.lastUpdate).toBeNull();
+  });
+
+  it("no gateway_sub: no gateway call", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-no-sub",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: null,
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+
+    const result = await validateApiKey(req("Bearer key-no-sub"));
+
+    expect(isAuthError(result)).toBe(false);
+    expect(fetchEntitlements).not.toHaveBeenCalled();
+  });
+
+  it("kill-switch off: no gateway call, and a gateway-granted caller still refused", async () => {
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    H.profile = {
+      id: "user-killswitch",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-killswitch",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+
+    const result = await validateApiKey(req("Bearer key-killswitch"));
+
+    expect(isAuthError(result)).toBe(true);
+    if (isAuthError(result)) {
+      expect(result.response.status).toBe(403);
+    }
+    expect(fetchEntitlements).not.toHaveBeenCalled();
+  });
+
+  it("a pro-tier caller is unaffected, and no gateway call is needed to admit them", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-pro-with-stale-gateway",
+      subscription_tier: "pro",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-pro",
+      gateway_products: [],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+
+    const result = await validateApiKey(req("Bearer key-pro-stale"));
+
+    expect(isAuthError(result)).toBe(false);
+    expect(fetchEntitlements).not.toHaveBeenCalled();
+  });
+
+  it("an AcquisitionPRO caller is unaffected, and no gateway call is needed to admit them", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-acqpro-with-stale-gateway",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: true,
+      gateway_sub: "gw-acqpro",
+      gateway_products: [],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+
+    const result = await validateApiKey(req("Bearer key-acqpro-stale"));
+
+    expect(isAuthError(result)).toBe(false);
+    expect(fetchEntitlements).not.toHaveBeenCalled();
+  });
+
+  it("the persist failing: request still succeeds", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-persist-fails",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-persist-fail",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+    H.updateError = new Error("db write failed");
+
+    const result = await validateApiKey(req("Bearer key-persist-fail"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
     }
   });
 });
