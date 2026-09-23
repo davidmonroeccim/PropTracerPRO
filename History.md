@@ -4,6 +4,32 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (i): Tier 1 Phase 2A, Task 3: the web upload enqueues, and a city-less row runs.
+
+- app/api/trace/bulk/route.ts no longer builds a Tracerfy person CSV. Every owned row is written
+  ai_research_status 'tier1_queued', status 'processing', no tracerfy_job_id, for the Tier 1 lane
+  of the cron. The half-failure branch is gone with the submit that could fail.
+- The bulk page stops dropping rows with no city (spec 3.1). A street and a state are still
+  required: a street-less row keys on ||STATE and thirty of them in one state would collapse onto
+  one row.
+- lib/utils/deduplication.ts keys on traceKeyFor, the derivation the single routes use (D36), and
+  exempts a busy_try_again row from the duplicate check (spec 5.2) so the sentence that tells the
+  customer to send it again is true. Its step log is kept on a resume, which is what stops the
+  resend buying answers this record already paid for.
+- The bulk submit clears outcome_code, found_by and trace_steps on every reused row except a busy
+  resume, which is D33's recorded Phase 2 half. DISCLOSED COST: that clear runs on every reused row,
+  so a row already holding paid contacts shows a BLANK found_by on the results CSV until this trace
+  writes its own. The contacts, the charge and the counts are untouched (D39).
+- insertHistoryRows now THROWS instead of console.erroring its upsert error, and the three enqueues
+  share one catch that writes the job failed with the reason and answers 500. The enqueue IS the
+  submit on this surface now, and the swallow it replaces would have answered success: true on a
+  failed write, after which bulk/status finalizes the job completed with records_matched 0 on its
+  first poll and its early return makes that permanent: the customer is told 500 rows were accepted
+  and downloads an empty CSV. Three tests, and the mutation that restores the swallow goes red on
+  all three.
+- NOTE FOR ANYONE READING THIS MID-PHASE: the queue has no worker until Task 8. This branch is not
+  to be deployed until then.
+
 ## 2026-09-23 (h): Tier 1 Phase 2A, Task 2: the Tier 1 ladder and two per-step hooks.
 
 - lib/trace/tier1Queue.ts adds the Tier 1 rungs to the EXISTING ai_research_status column, with

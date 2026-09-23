@@ -50,7 +50,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
       API bulk and the gateway MCP `skip_trace_bulk` are 2B and are NOT in it.
   - [x] Task 1: the queue index, widened
   - [x] Task 2: the Tier 1 ladder, the legacy ladder's missing test, the two per-step hooks
-  - [ ] Task 3: the web upload enqueues, and the page stops dropping city-less rows
+  - [x] Task 3: the web upload enqueues, and the page stops dropping city-less rows
   - [ ] Task 4: the four seams a queued Tier 1 row touches
   - [ ] Task 5: the D33 bulk half, found_by and outcome_code in the CSV and the bulk summary
   - [ ] Task 6: the shared vendor rate budget, and the Tier-1-only capacity gap

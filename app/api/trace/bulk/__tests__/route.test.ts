@@ -8,6 +8,7 @@ import {
   queuedStatusFor,
 } from "@/lib/trace/propertyTraceAttempts";
 import { TIER2_CAPACITY_REFUSAL } from "@/lib/trace/bulkPreflight";
+import { createAddressHash } from "@/lib/utils/address-normalizer";
 
 /**
  * Money fences for the DASHBOARD bulk-trace submit route (Track A).
@@ -36,9 +37,9 @@ const H = vi.hoisted(() => ({
   ops: [] as Array<{ table: string; op: string; payload?: unknown; opts?: unknown }>,
   profile: {} as Record<string, unknown>,
   job: { id: "job-1" } as Record<string, unknown> | null,
-  submit: { success: true, jobId: "tf-1" } as Record<string, unknown>,
   canRunTier2: true,
   inFlight: 0,
+  upsertError: null as { message: string } | null,
 }));
 
 function recordingClient() {
@@ -49,8 +50,15 @@ function recordingClient() {
       const add = () => () => node;
       for (const m of ["eq", "select"]) node[m] = add();
       node.single = async () => ({ data: H.job, error: null });
+      // `rec` is read at AWAIT time, not at definition time, so it is the op this chain ended up
+      // being. Scoped to the trace_history upsert because that is the only write whose failure this
+      // route has to survive differently from a thrown exception.
       node.then = (res: (v: unknown) => unknown) =>
-        Promise.resolve({ data: null, error: null }).then(res);
+        Promise.resolve(
+          rec?.op === "upsert" && rec.table === "trace_history"
+            ? { data: null, error: H.upsertError }
+            : { data: null, error: null }
+        ).then(res);
       return {
         insert: (payload: unknown) => {
           rec = { table, op: "insert", payload };
@@ -97,7 +105,11 @@ vi.mock("@/lib/utils/deduplication", async (importOriginal) => {
     })),
   };
 });
-vi.mock("@/lib/tracerfy/client", () => ({ submitBulkTrace: vi.fn(async () => H.submit) }));
+// There is no Tracerfy person submit on this route any more (Phase 2A). The mock stays only so
+// the tests below can assert it is NEVER called; what it would resolve with is irrelevant.
+vi.mock("@/lib/tracerfy/client", () => ({
+  submitBulkTrace: vi.fn(async () => ({ success: true, jobId: "tf-1" })),
+}));
 // The pre-flight module has its own unit tests (lib/trace/__tests__/bulkPreflight.test.ts).
 // Here it is a lever, so these tests can ask what the ROUTE does with each answer.
 // TIER2_CAPACITY_REFUSAL stays REAL, because the copy rules apply to the string
@@ -120,6 +132,7 @@ vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
 const { POST } = await import("@/app/api/trace/bulk/route");
 const { submitBulkTrace } = await import("@/lib/tracerfy/client");
 const { tracerfyCanRunTier2, inFlightUnbilledCost } = await import("@/lib/trace/bulkPreflight");
+const { checkDuplicates } = await import("@/lib/utils/deduplication");
 
 const TIER1 = PRICING.CHARGE_PER_SUCCESS_WALLET;
 const TIER2 = 0.4; // wallet column, per record submitted
@@ -171,19 +184,13 @@ const historyRows = () =>
     .filter((o) => o.table === "trace_history" && o.op === "upsert")
     .flatMap((o) => o.payload as Array<Record<string, unknown>>);
 
-/** The CSV body handed to Tracerfy, split into data lines. */
-const submittedCsvLines = () => {
-  const call = vi.mocked(submitBulkTrace).mock.calls[0];
-  return call ? String(call[0]).split("\n").slice(1) : [];
-};
-
 beforeEach(() => {
   vi.clearAllMocks();
   H.ops = [];
   H.job = { id: "job-1" };
-  H.submit = { success: true, jobId: "tf-1" };
   H.canRunTier2 = true;
   H.inFlight = 0;
+  H.upsertError = null;
   H.profile = {
     id: "user-1",
     subscription_tier: "wallet",
@@ -229,12 +236,20 @@ describe("a row with no owner name", () => {
     expect(historyRows()[0].ai_research_status).not.toBe(BLANK_OWNER_SKIP_STATUS);
   });
 
-  it("never reaches the Tracerfy person CSV", async () => {
-    // The old CSV carried a line with empty first_name and last_name for it.
-    // It has no owner to look up: the dossier is what discovers one.
+  it("goes on the TIER 2 queue only, never the Tier 1 one", async () => {
+    // It used to assert that this row stayed out of the Tracerfy person CSV. There is no such CSV
+    // from this surface any more (spec 3.3), and the question underneath it is still live and now
+    // sharper: the two queues share nothing, and a blank-owner row on the TIER 1 rung would be
+    // planned as a tier 2 record and refused by runTier1Record (NotATier1PlanError) after burning a
+    // claim, or worse, have a $0.20 dossier bought for it and billed at the tier 1 rate.
     await post([rec("John Smith", 1), rec(undefined, 2)]);
-    expect(submittedCsvLines()).toHaveLength(1);
-    expect(submittedCsvLines()[0]).toContain("John");
+    const byAddress = new Map(historyRows().map((r) => [r.normalized_address, r]));
+    const blankOwner = byAddress.get("2 MAIN ST|DALLAS|TX")!;
+    expect(blankOwner.property_trace_status).toBe("queued");
+    expect(blankOwner.ai_research_status).toBeNull();
+    const named = byAddress.get("1 MAIN ST|DALLAS|TX")!;
+    expect(named.ai_research_status).toBe("tier1_queued");
+    expect(named.property_trace_status).toBeNull();
   });
 
   it("carries no tracerfy_job_id, so no status route settles it", async () => {
@@ -598,8 +613,10 @@ describe("a job whose only rows are queued", () => {
     expect(closed).toBeUndefined();
   });
 
-  it("asks no person vendor, because there is no person to ask about", async () => {
-    await post([rec(undefined, 1)]);
+  it("asks no vendor at submit time at all, on either tier", async () => {
+    await post([rec(undefined), rec("Jane Smith", 2)]);
+    // Both tiers are queued now. A submit writes rows and returns; every vendor call belongs to a
+    // cron, which is what keeps this handler inside its 60 second maxDuration on 500 records.
     expect(submitBulkTrace).not.toHaveBeenCalled();
   });
 
@@ -618,102 +635,129 @@ describe("a job whose only rows are queued", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * A FAILED PERSON SUBMIT IS NOT A FAILED JOB ANY MORE.
- *
- * The tier 2 rows are written BEFORE the Tracerfy call, deliberately.
- * sweep-property-traces claims on property_trace_status alone and never
- * reads the parent job, so marking the job failed here stops nothing:
- * it works every one of those rows and bills each one. The customer
- * would get an HTTP 500, a job reading failed, and a charge for work
- * they were told did not happen -- and since the rows now exist, a
- * resubmit inside the 90-day window comes back as duplicates, so they
- * could not even re-run what they paid for.
+ * PHASE 2A: THE TIER 1 ENQUEUE.
  * ------------------------------------------------------------------ */
 
-describe("when the Tracerfy person submit fails", () => {
-  beforeEach(() => {
-    H.submit = { success: false, error: "Tracerfy 503" };
+describe("a row with an owner name", () => {
+  it("is ENQUEUED on the Tier 1 rung the cron claims", async () => {
+    await post([rec("Jane Smith")]);
+    const rows = historyRows();
+    expect(rows[0].ai_research_status).toBe("tier1_queued");
+    // The rung has to be attempt 1 of the TIER 1 ladder specifically. A bare 'queued' is the
+    // legacy entity ladder's attempt 1 and would be claimed by the wrong lane of the same cron.
+    expect(rows[0].ai_research_status).not.toBe("queued");
   });
 
-  it("does NOT mark the job failed while tier 2 rows are queued", async () => {
-    // MUTATION: fail the job unconditionally again and this goes red.
-    await post([rec("John Smith", 1), rec(undefined, 2)]);
-    const failed = H.ops.find(
-      (o) =>
-        o.table === "trace_jobs" &&
-        o.op === "update" &&
-        (o.payload as Record<string, unknown>)?.status === "failed"
-    );
-    expect(failed).toBeUndefined();
+  it("is accepted and queued when it has NO CITY, which is the whole point of this phase", async () => {
+    // Spec 3.1: "The page stops dropping city-less rows so the user sees why each one did or did
+    // not trace." A company owner with no city traces on name and state alone (D4); a person owner
+    // with no city and no parcel id ends no_lookup_key, free, with a sentence. Either way the
+    // customer is told, and before this phase the row never left the browser.
+    await post([
+      { owner_name: "Smith Holdings LLC", address: "1 Main St", city: "", state: "TX", zip: "" },
+    ]);
+    const rows = historyRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ai_research_status).toBe("tier1_queued");
+    expect(rows[0].city).toBe("");
+    expect(rows[0].normalized_address).toBe("1 MAIN ST||TX");
   });
 
-  it("does not hand back a 500 for a job that is still running and will be billed", async () => {
-    const res = await post([rec("John Smith", 1), rec(undefined, 2)]);
-    expect(res.status).not.toBe(500);
+  it("carries property_trace_status null, so no stale tier 2 value can answer for it", async () => {
+    await post([rec("Jane Smith")]);
+    expect(historyRows()[0].property_trace_status).toBeNull();
+  });
+
+  it("clears the stale Tier 1 answer a reused row was carrying (D33, carried item 5)", async () => {
+    // D33 chose "single-trace rows only" for the SENTENCE and recorded the other half as Phase 2
+    // code: "the bulk submit paths must clear outcome_code, found_by and trace_steps on a reused
+    // row". Without it a row a single trace left saying "You were not charged" answers for the new
+    // bulk trace, and Task 5 is about to let a bulk row show its own sentence.
+    await post([rec("Jane Smith")]);
+    const row = historyRows()[0];
+    expect(row.outcome_code).toBeNull();
+    expect(row.found_by).toBeNull();
+    expect(row.trace_steps).toBeNull();
+  });
+
+  it("does NOT clear the step log of a busy row it is resuming (spec 5.2)", async () => {
+    // The one exemption, and it is money. A busy row's step log is what stops the resend buying
+    // the answers this record already paid for. checkDuplicates lets the row through (it is not a
+    // duplicate); this keeps the log for executeRoute to replay.
+    vi.mocked(checkDuplicates).mockResolvedValueOnce({
+      newRecords: [rec("Jane Smith")],
+      duplicates: [],
+      cachedResults: [
+        {
+          address_hash: createAddressHash("1 MAIN ST|DALLAS|TX"),
+          outcome_code: "busy_try_again",
+        },
+      ],
+    } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
+    await post([rec("Jane Smith")]);
+    const row = historyRows()[0];
+    expect(row.outcome_code).toBeUndefined();
+    expect(row.found_by).toBeUndefined();
+    expect(row.trace_steps).toBeUndefined();
+    expect(row.ai_research_status).toBe("tier1_queued");
+  });
+
+  it("is counted as submitted work and quoted at the tier 1 rate", async () => {
+    const res = await post([rec("Jane Smith"), rec("John Smith", 2)]);
     const body = await res.json();
-    expect(body.success).toBe(true);
-    expect(body.records_queued).toBe(1);
-    expect(body.records_failed).toBe(1);
+    expect(body.records_submitted).toBe(2);
+    expect(body.estimated_cost).toBeCloseTo(2 * TIER1, 4);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * PHASE 2A: A FAILED ENQUEUE IS THE FAILED SUBMIT NOW.
+ *
+ * The enqueue IS the submit on this surface. Until Task 3, insertHistoryRows
+ * console.errored its upsert error and returned, so a failed enqueue answered
+ * success: true, and bulk/status then finalized the job `completed` with
+ * records_matched 0 on its first poll and made that permanent. These three
+ * tests are the fence on that path.
+ * ------------------------------------------------------------------ */
+
+describe("when the rows cannot be written", () => {
+  beforeEach(() => {
+    H.upsertError = { message: "deadlock detected" };
   });
 
-  it("quotes only the rows that are actually going to run", async () => {
-    // The tier 1 half was never submitted, so charging for it would be a
-    // statement about money that is not true.
-    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
-    expect(body.estimated_cost).toBeCloseTo(TIER2);
-  });
-
-  it("tells the customer which half failed and that it was free", async () => {
-    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
-    expect(body.message).toContain("not charged");
-    expect(body.message).not.toMatch(/[—–*]/);
-  });
-
-  it("writes the tier 1 rows terminal so every accepted record has one", async () => {
-    // records_submitted is the denominator of the match rate. A record with no
-    // row at all would leave the job permanently un-finishable.
-    await post([rec("John Smith", 1), rec(undefined, 2)]);
-    const errored = historyRows().filter((r) => r.status === "error");
-    expect(errored).toHaveLength(1);
-    expect(errored[0].input_owner_name).toBe("John Smith");
-  });
-
-  it("corrects the job's records_submitted, which is the match-rate denominator", async () => {
-    // Written before the failure, counting the tier 1 rows. Left alone, the
-    // payload and the job row disagree about one job, and the status route and
-    // the webhook report the job's version.
-    await post([rec("John Smith", 1), rec(undefined, 2)]);
-    const corrected = H.ops.filter(
-      (o) =>
-        o.table === "trace_jobs" &&
-        o.op === "update" &&
-        (o.payload as Record<string, unknown>)?.records_submitted !== undefined
-    );
-    expect(corrected).toHaveLength(1);
-    expect(corrected[0].payload).toMatchObject({ records_submitted: 1 });
-  });
-
-  it("gets BOTH charge statements right in the same breath", async () => {
-    // The errored records are NOT billed and the surviving tier 2 records WILL
-    // be. Saying only one is how a customer is surprised by the other.
-    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
-    expect(body.message).toContain("not charged");
-    expect(body.message).toContain("will be charged");
-  });
-
-  it("STILL fails the job when nothing survives the failure", async () => {
-    // The guard must not become a blanket refusal to ever fail a job. With no
-    // tier 2 rows there is nothing left running, and this branch is exactly what
-    // it was written for.
-    const res = await post([rec("John Smith", 1)]);
+  it("does NOT answer success, which is what hid this before", async () => {
+    // THE WHOLE DEFECT IN ONE ASSERTION. The customer uploaded rows, was told it worked, and got an
+    // empty CSV, because the only report of the failure was a console line on a server they cannot
+    // read.
+    const res = await post([rec("Jane Smith"), rec("John Smith", 2)]);
     expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.success).toBe(false);
+    expect(body.error).toBeTruthy();
+  });
+
+  it("writes the JOB failed with a reason, so the status route cannot finalize it as an empty success", async () => {
+    // A 500 alone is not enough. The page polls app/api/trace/bulk/status, which finalizes a job
+    // whose two queues hold nothing as `completed` with records_matched 0 and then answers every
+    // later poll from the stored stats. The job row has to carry the failure before this handler
+    // returns, or an empty CSV is the customer's only evidence.
+    await post([rec("Jane Smith")]);
     const failed = H.ops.find(
       (o) =>
         o.table === "trace_jobs" &&
         o.op === "update" &&
-        (o.payload as Record<string, unknown>)?.status === "failed"
+        (o.payload as Record<string, unknown>).status === "failed"
     );
     expect(failed).toBeDefined();
+    expect((failed!.payload as Record<string, unknown>).error_message).toContain("deadlock detected");
+  });
+
+  it("stops at the FIRST failed batch rather than reporting on rows it never tried", async () => {
+    // records_submitted is the denominator of the match rate. Carrying on after a failed batch and
+    // then answering with a count that includes it is the same lie in a smaller size.
+    await post([rec("Jane Smith"), rec(undefined, 2), noKeyRec(3)]);
+    const upserts = H.ops.filter((o) => o.table === "trace_history" && o.op === "upsert");
+    expect(upserts).toHaveLength(1);
   });
 });
 
@@ -722,20 +766,20 @@ describe("when the Tracerfy person submit fails", () => {
  * ------------------------------------------------------------------ */
 
 describe("the entity-queue column on every row this route writes", () => {
-  it("is written null rather than left alone", async () => {
-    // THE UPSERT ONLY TOUCHES THE KEYS IN THE PAYLOAD. A row is REUSED, not
-    // re-inserted, so an omitted key keeps its old value. A pre-5c blank-owner
-    // row carries 'skipped_no_owner' and 273 of them exist: left in place, the
-    // row is enqueued and billed while summarizeSkips() reads that stale value
-    // and tells the customer "you were not charged" on a row that was. A stale
-    // 'queued' is worse, putting one row on two queues to be settled twice.
-    // MUTATION: drop the ai_research_status key and this goes red.
-    await post([rec("John Smith", 1), rec(undefined, 2), noKeyRec(3)]);
-    expect(historyRows()).toHaveLength(3);
-    for (const row of historyRows()) {
-      expect(Object.keys(row)).toContain("ai_research_status");
-      expect(row.ai_research_status).toBeNull();
-    }
+  it("is written explicitly on every row: the Tier 1 rung, or null", async () => {
+    // WRITTEN ON EVERY ROW BECAUSE THE UPSERT ONLY TOUCHES THE KEYS IN THIS PAYLOAD. A row is
+    // REUSED rather than re-inserted (UNIQUE(user_id, address_hash)), so omitting the key leaves
+    // whatever the row already carried. 273 pre-5c rows carry 'skipped_no_owner' and would be
+    // enqueued and billed while summarizeSkips read that stale value and said "you were not
+    // charged" on a row that was.
+    await post([rec("Jane Smith"), rec(undefined, 2), noKeyRec(3)]);
+    const rows = historyRows();
+    const byAddress = new Map(rows.map((r) => [r.normalized_address, r]));
+    // Tier 1: the rung the Tier 1 lane of the cron claims.
+    expect(byAddress.get("1 MAIN ST|DALLAS|TX")!.ai_research_status).toBe("tier1_queued");
+    // Tier 2 and no-key: null, because neither belongs to this column's lanes at all.
+    expect(byAddress.get("2 MAIN ST|DALLAS|TX")!.ai_research_status).toBeNull();
+    expect(byAddress.get("3 MAIN ST||TX")!.ai_research_status).toBeNull();
   });
 });
 
@@ -794,15 +838,20 @@ describe("the source tag this job is written with", () => {
 });
 
 describe("a traced row", () => {
-  it("still goes to Tracerfy and is still linked to the bulk job", async () => {
-    const body = await (await post([rec("John Smith", 1)])).json();
-    expect(submitBulkTrace).toHaveBeenCalledTimes(1);
-    expect(body.records_submitted).toBe(1);
-    expect(historyRows()[0]).toMatchObject({
-      status: "processing",
-      tracerfy_job_id: "tf-1",
-      trace_job_id: "job-1",
-    });
+  it("goes on the TIER 1 QUEUE, not to Tracerfy, and stays linked to the bulk job", async () => {
+    await post([rec("Jane Smith")]);
+    // THE CHANGEOVER (spec 3.3). Nothing new is sent to the batch endpoint from this surface.
+    // Rows already in flight there keep settling through settleBulkJob until none remain; Phase 4
+    // deletes the path once they have drained.
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+    const rows = historyRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ai_research_status).toBe("tier1_queued");
+    expect(rows[0].status).toBe("processing");
+    expect(rows[0].trace_job_id).toBe("job-1");
+    // No tracerfy_job_id: it is the column every tier 1 CSV settle path finds its rows by, and a
+    // queued row settled there would be billed by the wrong engine.
+    expect(rows[0].tracerfy_job_id).toBeUndefined();
   });
 
   it("writes property_trace_status NULL, so no stale tier 2 value survives on it", async () => {

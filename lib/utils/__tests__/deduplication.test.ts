@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEDUPE, STALE_PROCESSING } from "@/lib/constants";
-import { normalizeAddress, createAddressHash } from "@/lib/utils/address-normalizer";
+import { normalizeAddress, createAddressHash, traceKeyFor } from "@/lib/utils/address-normalizer";
 
 /**
  * Cache / dedup fence for lib/utils/deduplication.ts.
@@ -96,6 +96,12 @@ const { checkDuplicates, checkSingleDuplicate, checkSingleDuplicateByHash, remov
 
 function filter(rec: Recorded, method: string, column: string): Filter | undefined {
   return rec.filters.find((f) => f[0] === method && f[1] === column);
+}
+
+/** Seeds the rows the next `.select().eq().in().gte()` chain resolves with. */
+function stubRows(rows: unknown[]): void {
+  H.results = [{ data: rows, error: null }];
+  H.resultIndex = 0;
 }
 
 beforeEach(() => {
@@ -413,3 +419,80 @@ describe("checkSingleDuplicateByHash (the API keys a city-less record on its par
     expect(filter(H.ops[0], "eq", "address_hash")).toEqual(["eq", "address_hash", "hash-apn"]);
   });
 });
+
+describe('the bulk duplicate key (spec 6.3, D36)', () => {
+  it('is traceKeyFor, so one record cannot land on two rows through two doors', () => {
+    // WHY THIS MATTERS EVEN THOUGH THE TWO AGREE ON EVERY WEB RECORD TODAY. The single routes key
+    // with traceKeyFor (app/api/v1/trace/single/route.ts) and the bulk routes keyed with plain
+    // normalizeAddress. On the web upload the two answers are identical for every record the page
+    // can send, because the page requires a street and a state and the web app has no parcel id
+    // column (D5). They diverge the moment a surface carries a parcel id, which is exactly what
+    // 2B wires up, and a divergence there is the same record stored twice: paid once, charged
+    // again inside the 90 days. One derivation now, proven, rather than two that happen to agree.
+    const withStreetAndCity = { address: '100 Main St', city: 'Dallas', state: 'TX' }
+    expect(traceKeyFor(withStreetAndCity)).toBe(normalizeAddress('100 Main St', 'Dallas', 'TX'))
+
+    const streetNoCity = { address: '100 Main St', city: '', state: 'TX' }
+    expect(traceKeyFor(streetNoCity)).toBe(normalizeAddress('100 Main St', '', 'TX'))
+
+    // The 2B shape, keyed on the parcel rather than on `|CITY|STATE` (D36).
+    expect(traceKeyFor({ city: 'Austin', state: 'TX', apn: '0123-456', county: 'Travis' })).toBe(
+      'APN|0123-456|TRAVIS|TX'
+    )
+  })
+
+  it('removeBatchDuplicates keys on traceKeyFor', async () => {
+    const { removeBatchDuplicates } = await import('@/lib/utils/deduplication')
+    const a = { address: '100 Main St', city: '', state: 'TX', apn: '0123-456', county: 'Travis' }
+    const b = { address: '200 Oak Ave', city: '', state: 'TX', apn: '0123-456', county: 'Travis' }
+    // Same parcel, two different street strings: under D36 that is ONE record, and under plain
+    // normalizeAddress it was two.
+    const { unique, internalDuplicates } = removeBatchDuplicates([a, b])
+    expect(unique).toHaveLength(1)
+    expect(internalDuplicates).toBe(1)
+  })
+})
+
+describe('the busy_try_again resend exemption (spec 5.2)', () => {
+  it('does NOT count a busy row as a duplicate', async () => {
+    // Spec 5.2: "A resend of a busy_try_again record is NOT a duplicate. It reuses the same row
+    // (same address hash) and goes back on the queue. This exemption is what makes 'try again in 5
+    // minutes' true." Without it the sentence is advice that fails when followed: the row is
+    // written status 'error', so the stale-processing escape below does not reach it either, and
+    // the resend lands in Duplicates Removed with no explanation.
+    const record = { address: '100 Main St', city: 'Dallas', state: 'TX' }
+    const hash = createAddressHash(traceKeyFor(record))
+    stubRows([
+      {
+        address_hash: hash,
+        status: 'error',
+        outcome_code: 'busy_try_again',
+        created_at: new Date().toISOString(),
+      },
+    ])
+    const result = await checkDuplicates('user-1', [record])
+    expect(result.newRecords).toHaveLength(1)
+    expect(result.duplicates).toHaveLength(0)
+  })
+
+  it('still counts every OTHER finished row as a duplicate, busy being the one exemption', async () => {
+    // Open task 17 is unchanged by this: a row that came back without contacts still blocks a
+    // resend for 90 days. Only busy is exempt, because only busy is the outcome whose own sentence
+    // tells the customer to send it again.
+    const record = { address: '100 Main St', city: 'Dallas', state: 'TX' }
+    const hash = createAddressHash(traceKeyFor(record))
+    for (const outcome of ['no_match', 'owner_name_not_matched', 'no_lookup_key', null]) {
+      stubRows([
+        {
+          address_hash: hash,
+          status: 'no_match',
+          outcome_code: outcome,
+          created_at: new Date().toISOString(),
+        },
+      ])
+      const result = await checkDuplicates('user-1', [record])
+      expect(result.newRecords, `outcome ${outcome}`).toHaveLength(0)
+      expect(result.duplicates, `outcome ${outcome}`).toHaveLength(1)
+    }
+  })
+})
