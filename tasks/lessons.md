@@ -4,6 +4,34 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-032: A subagent's account of its OWN work is a claim, not a finding (2026-09-23)
+
+**What happened, twice in one session.**
+1. A revocation-refresh implementer reported "19 tests". I repeated that to David. The reviewer reverted
+   the production half and found **17 of the 19 still passed** — only two actually required the new
+   behaviour. The number was true and the impression it gave was false.
+2. A plan writer reported that it had "conceded bounded unfairness" in the shared rate budget. I repeated
+   that to David as a point in the plan's favour. The plan asserts the **opposite**: "Tier 2 is not
+   starved and the vendor's 500 is not approached", a guarantee it does not provide. One grep would have
+   caught it; I ran it only after a reviewer contradicted the claim.
+
+**Why it keeps happening.** A well-written report reads like verified fact. The failure is not that
+subagents lie, it is that they describe intent, and intent and artifact drift. Both times the artifact
+was a few seconds away and I relayed the description instead.
+
+**The rules.**
+- Before repeating ANY claim a subagent makes about its own output, check the artifact. For a count, run
+  the count. For "the plan says X", grep the plan. For "the test fences this", apply the mutation. This
+  costs one tool call and is the difference between reporting and relaying.
+- Claims about the SHAPE of work ("N tests", "it concedes", "fully covered", "mutation-proven") are the
+  ones to check hardest, because they are summaries and summaries are where drift hides.
+- Quote the evidence, not the assurance. "1,346 combinations, 0 unapproved moves" survives scrutiny;
+  "verified the invariant holds" does not.
+- When a reviewer contradicts an implementer, the reviewer is not automatically right either. Verify the
+  contradiction yourself before acting on it, then say which one was wrong and how it was settled.
+
+---
+
 ## L-031: A spend cap does not stop an agent. A token it was never given does. (2026-09-23)
 
 **What happened.** A subagent was told, in bold, that it must make no live vendor call and that passing
