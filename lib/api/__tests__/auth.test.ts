@@ -21,14 +21,35 @@ const H = vi.hoisted(() => ({
   error: null as { code?: string; message?: string } | null,
 }));
 
+/**
+ * POSTGREST COLUMN PROJECTION, EMULATED, for the user_profiles select in lib/api/auth.ts.
+ *
+ * A column the query never asked for does not come back, and a stub that ignores
+ * `.select(...)` hides exactly that. `.select('*')` at lib/api/auth.ts:63 is what feeds
+ * `effectiveIsPro()` the `gateway_products` column the whole gate fix depends on; if that
+ * select is ever narrowed to a column list that drops `gateway_products`, the gate must
+ * stop seeing the grant, and a test here must go red. Same pattern as
+ * app/api/v1/trace/single/__tests__/route.test.ts.
+ */
+function projectRow(row: Record<string, unknown> | null, select: unknown): Record<string, unknown> | null {
+  if (!row || typeof select !== "string" || select.trim() === "*") return row;
+  const columns = new Set(select.split(",").map((c) => c.trim()));
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (columns.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from: (table: string) => {
       if (table === "user_profiles") {
         return {
-          select: () => ({
+          select: (columns?: string) => ({
             eq: () => ({
-              single: () => Promise.resolve({ data: H.profile, error: H.error }),
+              single: () =>
+                Promise.resolve({ data: projectRow(H.profile, columns), error: H.error }),
             }),
           }),
         };

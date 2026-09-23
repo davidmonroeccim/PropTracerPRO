@@ -155,9 +155,12 @@ export async function POST(request: Request) {
     // TRACK B PRICING, AND IT MAY NOT BORROW TRACK A'S HELPERS. This is the
     // /api/v1/* API-key surface: it derives RAW, from the profile's own columns,
     // and deliberately does not consult the Suite Gateway grant snapshot.
-    // Reusing chargePerTrace() / chargePerRecord() here would move an existing
-    // API caller's tier 2 bill from $0.40 to $0.25, in the direction nobody
-    // reports. See lib/api/pricing.ts.
+    // Track A and Track B agree on a pro-tier profile and on an AcquisitionPRO
+    // member profile (both price 'pro' / 'acqPro' either way). They disagree on
+    // a wallet-tier profile whose only entitlement is a Suite Gateway grant:
+    // Track A prices it 'pro', Track B prices it 'wallet'. Before the gate fix
+    // in lib/api/auth.ts that shape could not reach this route at all; now it
+    // can. See lib/api/pricing.ts.
     //
     // Tier 1 is per SUCCESSFUL trace and free on a miss, so one charge per owned
     // record is its worst case. Tier 2 is per RECORD SUBMITTED, so it is owed

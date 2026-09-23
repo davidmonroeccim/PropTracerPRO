@@ -852,12 +852,14 @@ const CONTACTS_HIT = {
 /**
  * PAY-AS-YOU-GO on Track B: no local pro tier, no AcquisitionPRO flag.
  *
- * validateApiKey() currently refuses this profile with a 403, so it cannot reach
- * the route in production today. It is tested anyway, deliberately: the route
- * must derive its own price from the caller's plan rather than lean on an access
- * gate two files away to guarantee everyone is a pro. FAILSAFE_PRICE_PLAN exists
- * because a hardcoded 'pro' billed pay-as-you-go customers 40% under rate and
- * nobody reported it.
+ * Since the gate fix (lib/api/auth.ts), validateApiKey() honours a Suite Gateway
+ * grant via effectiveIsPro(), so a wallet-tier profile like this one CAN now reach
+ * the route in production, provided it carries a gateway grant. validateApiKey()
+ * is mocked in this file regardless, so this test exercises the route's own
+ * pricing derivation independent of the gate: it must derive its own price from
+ * the caller's plan rather than lean on an access gate two files away to
+ * guarantee everyone is a pro. FAILSAFE_PRICE_PLAN exists because a hardcoded
+ * 'pro' billed pay-as-you-go customers 40% under rate and nobody reported it.
  */
 const PAYG_PROFILE = {
   id: "user-1",
