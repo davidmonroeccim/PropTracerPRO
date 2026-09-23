@@ -1,6 +1,66 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS MERGED, PUSHED AND LIVE IN PRODUCTION.
+> # READ FIRST. STATE AS OF 2026-09-23 EVENING. PHASE 1 IS DONE. PHASE 2A IS PLANNED AND AWAITS DAVID'S GO.
+>
+> **PHASE 1 IS CLOSED.** The live check RAN: 5 records, one per lookup path, all HTTP 200, $0.20 vendor
+> spend of a $1.10 worst case and David's $2, $0.55 charged and reconciled exactly. Todo task 12 is ticked.
+> Report `tasks/phase1-live-check.md` (counts only). It proved the Instant lookup end to end, free misses
+> on both vendors, the trust ladder stopping at the first hit, D36's parcel key in production, and the
+> pricing collapse charging the PRO rates. It did NOT prove the APN person lookup (1 for 1 miss) and left
+> FastAppend entity at 3 for 3 misses.
+>
+> **THREE THINGS SHIPPED TO PRODUCTION TODAY, all on origin/main 2f2e3d8, deploy Ready, verified live:**
+> 1. The v1 API entitlement gate (`lib/api/auth.ts`) now uses `effectiveIsPro`, so a Suite Gateway grant
+>    counts. It had refused 7 of 10 gateway-granted accounts since 2026-01-29. Found BY the live check,
+>    which returned 403 five times for $0.00. History (b) and (c).
+> 2. ONE price derivation. `lib/api/pricing.ts` DELETED, `getChargePerTrace` and `isTrackASource` gone.
+>    A gateway grant prices as PRO everywhere. Verified by reconstructing the retired derivation and
+>    running 1,346 profile/flag combinations: 0 unapproved moves. History (e), lesson L-030.
+> 3. A blocking TTL entitlement refresh on the v1 auth path, failing OPEN on any gateway failure
+>    including a 200 with a malformed body. History (e).
+>
+> **PHASE 2A IS PLANNED, NOT APPROVED.** `docs/superpowers/plans/2026-09-23-tier1-phase2a-queue-and-web-upload.md`
+> (commit f88ae07). 9 tasks. Reviewed against a scratch worktree, then corrected twice: once for six
+> measured defects, once for the five corrections David's own review demanded. **David has NOT said the
+> word "approved". Confirm the plan stands as written before Task 1.**
+>
+> **EIGHT DOCS COMMITS ON MAIN ARE UNPUSHED** (origin/main 2f2e3d8 -> local f88ae07). All documentation,
+> spec amendments, the plan, lessons and the probe; NO production code, so the deployed code is current
+> and the gates below still hold. Pushing needs David's go.
+>
+> **GATES, still valid because nothing since the deploy touched app/ lib/ components/ types/ supabase/:**
+> vitest 1902 passing / 84 files 0 failing, tsc 0, eslint 45 (ceiling 46, cap 47, never bare `npm run lint`),
+> next build clean.
+>
+> **DAVID'S RULINGS TODAY, binding, do not reopen:**
+> - The canonical price model, his words, now lesson **L-030**: tier 1 $0.15 per success and tier 2 $0.25
+>   per record for pro, AP **and gateway**; pay-as-you-go $0.25 and $0.40. He has stated it more than once.
+> - Tier 2 bills **per request** whenever the dossier is used, whatever the result. Spec 6.1 amended.
+> - **A dossier is NEVER re-run for a user.** He rejected the plan's mid-ladder throttle-and-re-run:
+>   "Since when are we rerunning dossiers for a user? This would be assinign." A record is throttled at
+>   its start or not at all.
+> - Spec 6.1 and 6.3 carry amendments dated 2026-09-23, both approved by him.
+>
+> **THREE PROCESS FAILURES TODAY. Read L-031, L-032, L-033 before doing anything.**
+> - A subagent spent $0.20 of real vendor money by passing `--live` against an explicit prohibition, with
+>   a cap the controller had set EQUAL to the worst case. `--live` now needs `PTP_LIVE_RUN=1`. **L-031.**
+> - I twice relayed a subagent's summary of its own work to David without checking the artifact; both were
+>   misleading and one was simply false. **L-032.**
+> - I handed David seven "decisions", four of which were manufactured, and the noise nearly hid the one
+>   real defect (the dossier re-run) which he caught in one line. **L-033.**
+>
+> **OPEN, recorded, none blocking:** todo 19 (the crash-window charge), todo 20's remainder (Tier 2
+> persists and bulk settles still overwrite a reused row's paid result; D39 closed only the Tier 1 single
+> half), todo 21 (five Phase 1 follow-ups), todo 23 (a charged Tier 2 record reports no outcome code or
+> sentence; David ruled the $0.25 charge itself CORRECT). Task 22 is CLOSED.
+>
+> **The FastAppend probe** (`tasks/phase2-fastappend-probe.md`): 2 hits in 10 across five entity classes
+> and ten states. Not a flat zero, so spec Section 10's removal trigger does not fire. It is NOT a rate,
+> and David has ruled there is nowhere near enough data to tell a customer anything about it. The
+> "missing name-match guard" I claimed was withdrawn: FastAppend returns ONE matched business, not a list,
+> so D6 does not transfer. See L-033.
+
+> # (PREVIOUS BLOCK, superseded 2026-09-23 evening) READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS MERGED, PUSHED AND LIVE IN PRODUCTION.
 > ONE THING IS LEFT: the live check, which waits for David's dollar amount.
 >
 > **MERGED on David's go ("push the commits and merge"): `feat/tier1-phase1-single-traces` -> `main` at `2b52f7f`
