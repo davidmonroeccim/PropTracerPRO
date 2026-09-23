@@ -4,6 +4,50 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-033: Four manufactured questions nearly hid the one real defect (2026-09-23)
+
+**What happened.** I handed David seven "decisions" on the Phase 2A plan. He answered with
+"This is beginning to piss me off. The same questions asked and answered several times, now asked again a
+different way, as if my answers are going to change!" Four of the seven were not decisions at all:
+
+1. **A FastAppend name-match guard, on a false analogy.** I argued the company lane was missing D6. D6
+   exists because a PERSON lookup returns a LIST of people at an address and the code must pick the right
+   one, which is why it forbids a `persons[0]` fallback. FastAppend returns ONE matched business. No list,
+   nothing structurally analogous. Worse, the guard I proposed would have been actively harmful: an exact
+   comparison rejects "DRAGON PROPERTY, LLC" against "DRAGON PROPERTY LLC". David: "What are you
+   comparing it with?" One question, and the whole finding fell over.
+2. **Customer copy about company yield, contradicting my own report.** The probe write-up says, in my
+   words, "It is not a rate. Two records per class finds a signal, not a size." I then asked him to
+   approve UI copy built on those same 13 attempts. David: "There is no where enough data to support
+   this claim."
+3. **A trivial copy imprecision**, escalated to a decision: a sentence mentioning a parcel ID field the
+   web app lacks, on a row whose actual fix is to add the city, which the same sentence says.
+4. **"Fairness" between two cron lanes**, which was a phrase in spec 5.3 that I treated as an unmet
+   requirement. David: "Fairness is subjective. Why are we talking about it?"
+
+**The cost, and it is the real lesson.** Buried in that list was a genuine design error: the plan
+throttled a Tier 2 record mid-ladder, after its dossier was bought, and recovered by RE-RUNNING the
+record, paying twice for the same dossier. David found it in one line ("Since when are we rerunning
+dossiers for a user? This would be assinign") despite my framing, not because of it. Four invented
+questions almost cost a real one its hearing, and it was the only item on the list that could reach a
+customer's invoice.
+
+**The rules.**
+- Before putting a question to David, check it against evidence I have ALREADY produced. If a report I
+  wrote says the sample proves no rate, I cannot ask him to approve a claim about the rate. L-027 says
+  derive the answer from the decisions; this adds: derive it from my own findings too.
+- An analogy is not a finding. Before claiming code is missing a guard another path has, establish that
+  the two paths have the same SHAPE. "A returns a list and picks one; B returns one thing" is a
+  different shape, and the guard does not transfer.
+- Count the questions before sending them. If more than one or two, the extras are almost certainly
+  observations I inflated, and each one lowers the odds he reads the one that matters.
+- A word in the spec is not a requirement. "Neither starves the other" was aspiration, not a promise a
+  shared counter was ever going to keep. Do not build a NOT MET row out of a phrase.
+- An observation belongs in the record, not in his inbox. The FastAppend fuzzy match is worth one line
+  in a report. It was never worth a decision.
+
+---
+
 ## L-032: A subagent's account of its OWN work is a claim, not a finding (2026-09-23)
 
 **What happened, twice in one session.**
