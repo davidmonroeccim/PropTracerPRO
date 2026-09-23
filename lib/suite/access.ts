@@ -5,6 +5,19 @@ import { type EntitlementProfile, fetchEntitlements, isSnapshotStale } from "./e
 
 export interface RefreshRow extends EntitlementProfile { id: string }
 
+type SnapshotFields = Pick<EntitlementProfile, "gateway_products" | "gateway_products_checked_at">;
+
+/**
+ * Single write path for the gateway entitlement snapshot on user_profiles, shared by both
+ * refreshers below. createAdminClient() (lib/supabase/admin.ts) builds its client with no
+ * Database generic, so every table/column on it already types as `any` — there is no `any` to
+ * cast away here. This throws on failure rather than swallowing it; each call site below keeps
+ * its own try/catch and its own fail-open behaviour around the call.
+ */
+async function persistSnapshot(userId: string, snapshot: SnapshotFields): Promise<void> {
+  await createAdminClient().from("user_profiles").update(snapshot).eq("id", userId);
+}
+
 /** Schedule the TTL refresh AFTER the response flushes. after() throws outside a request scope,
  *  so degrade to fire-and-forget there. refreshSuiteSnapshot never rejects. */
 export function scheduleSuiteRefresh(profile: RefreshRow): void {
@@ -22,15 +35,14 @@ async function refreshSuiteSnapshot(profile: RefreshRow): Promise<void> {
     if (!gatewaySub) return;
     if (!isSnapshotStale(profile.gateway_products_checked_at)) return;
     const ent = await fetchEntitlements(gatewaySub);
-    await (createAdminClient().from("user_profiles") as any)
-      .update({ gateway_products: ent.products, gateway_products_checked_at: new Date().toISOString() })
-      .eq("id", profile.id);
+    await persistSnapshot(profile.id, {
+      gateway_products: ent.products,
+      gateway_products_checked_at: new Date().toISOString(),
+    });
   } catch (e) {
     console.error("[suite-signin] entitlement refresh failed, keeping last snapshot:", e);
   }
 }
-
-type SnapshotFields = Pick<EntitlementProfile, "gateway_products" | "gateway_products_checked_at">;
 
 /**
  * Blocking sibling of scheduleSuiteRefresh, for the one surface that has no session, no page
@@ -66,7 +78,7 @@ export async function refreshSuiteSnapshotBlocking(profile: RefreshRow): Promise
   }
 
   try {
-    await (createAdminClient().from("user_profiles") as any).update(refreshed).eq("id", profile.id);
+    await persistSnapshot(profile.id, refreshed);
   } catch (e) {
     console.error("[suite-signin] blocking entitlement snapshot persist failed:", e);
   }
