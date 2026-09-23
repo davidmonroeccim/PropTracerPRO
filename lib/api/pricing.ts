@@ -13,8 +13,11 @@
  *            is_acquisition_pro_member) in lib/constants.ts and deliberately does NOT
  *            consult the gateway snapshot.
  *
- * Reusing the Track A helpers here would silently change what an existing API-key caller
- * is billed, in the direction nobody reports. The functions below are the RAW twins of
+ * Track A and Track B agree on a pro-tier profile and on an AcquisitionPRO member profile
+ * (both price 'pro' / 'acqPro' either way). They disagree on a wallet-tier profile whose only
+ * entitlement is a Suite Gateway grant: Track A prices it 'pro', Track B prices it 'wallet'.
+ * Before the gate fix in lib/api/auth.ts that shape could not reach the v1 API at all; now it
+ * can. The functions below are the RAW twins of
  * pricePlanFor() and chargePerRecord(), and they exist so the v1 route can name its plan
  * instead of guessing one.
  *

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { effectiveIsPro } from '@/lib/suite/entitlements';
 import type { UserProfile } from '@/types';
 
 interface AuthResult {
@@ -12,7 +13,8 @@ interface AuthError {
 
 /**
  * Validates an API key from the Authorization header.
- * Extracts Bearer token, looks up user_profiles, verifies Pro tier or AcquisitionPRO membership.
+ * Extracts Bearer token, looks up user_profiles, verifies Pro tier, AcquisitionPRO membership,
+ * or a Suite Gateway grant (effectiveIsPro).
  * Logs the request to api_logs. No rate limiting.
  *
  * Returns { profile } on success, or { response } with a 401/403 NextResponse on failure.
@@ -91,8 +93,12 @@ export async function validateApiKey(
     };
   }
 
-  // Verify Pro tier or AcquisitionPRO membership
-  const hasAccess = profile.subscription_tier === 'pro' || profile.is_acquisition_pro_member;
+  // Verify Pro tier, AcquisitionPRO membership, or a Suite Gateway grant (same
+  // rule the "Generate API Key" button in Settings uses — see
+  // app/api/user/generate-api-key/route.ts). hasSuiteAccess() inside
+  // effectiveIsPro() is itself gated by the NEXT_PUBLIC_SUITE_SIGNIN_ENABLED
+  // kill-switch, so this never admits a gateway grant while that flag is off.
+  const hasAccess = effectiveIsPro(profile);
 
   if (!hasAccess) {
     return {
