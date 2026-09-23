@@ -4,6 +4,39 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (b): The Phase 1 live check was refused by the v1 API's own entitlement gate. $0.00 spent. A live defect found instead.
+
+- The Phase 1 live check ran with the owner's approved $2 and the runner's computed worst case of
+  $1.10 (five records, one per lookup path, in five secondary and tertiary counties). It proved
+  nothing about the lookup paths: all five records came back HTTP 403 from
+  `POST /api/v1/trace/single` before any vendor was called.
+- Nothing was spent and nothing was written. Wallet balance unchanged, zero `trace_history` rows
+  created, zero `api_logs` rows. The refusal precedes every vendor client, the wallet and the
+  persist.
+- THE DEFECT, pre-existing and live in production. `lib/api/auth.ts:95` gates the whole v1 API on
+  `subscription_tier === 'pro' || is_acquisition_pro_member`. It never consults the gateway grant.
+  `app/api/user/generate-api-key/route.ts:26` gates the SAME access on `effectiveIsPro()`, which
+  does. So a customer whose PropTracerPRO entitlement comes from a Suite Gateway grant can
+  generate an API key in Settings and is then refused on every API call, with
+  "API access requires a Pro subscription or AcquisitionPRO membership".
+- Production really is in that state: `/api/auth/suite/start` answers 307, not the 404 it gives
+  when Suite sign-in is off, so `isSuiteSignInEnabled()` is true there and gateway grants are
+  live. The local `.env.local` has the flag false, which is a separate difference and not the
+  cause: the gate never reads the flag at all.
+- Measured against the live table, 53 accounts: 10 hold a `prop-tracer-pro` gateway grant, 7 of
+  those are refused by this gate, and 0 of those 7 currently hold an API key, so no customer has
+  hit it yet. Separately, 2 of the 8 accounts that do hold a key are also refused by it, having no
+  grant and no pro tier.
+- Not a Phase 1 regression. The line dates to `133830c`, 2026-01-29; Phase 1 never touched
+  `lib/api/auth.ts`.
+- Noted while measuring: the `api_logs` insert sits AFTER the gate, so a refused API call leaves no
+  record anywhere. The five refusals above produced zero log rows.
+- The account used for the check held no API key, so one was minted with the same generator the
+  app's own button uses, and revoked immediately after the run; the account ended exactly as it
+  started (no key, no `api_key_created_at`, same balance), verified by reading it back.
+- David's call, given the finding: record it, then fix the gate. "This more important than a test."
+  The live check waits on the fix.
+
 ## 2026-09-23 (a): Tier 1 Phase 1, the final review fix wave: parcel display, paid contacts kept, the county refusal.
 
 - One wave over the whole branch, eleven items, from the owner's answers to the final review

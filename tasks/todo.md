@@ -28,8 +28,11 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 10: API single route inline, D23 and D24, docs
   - [x] Task 11: result card, single page, History
   - [~] Task 12: gates green, runner built, sample chosen, dry `--plan` run ($1.10 worst case).
-        STOPPED at the owner's HARD STOP before any live vendor call. Live check, and re-ticking
-        this task, wait for the owner's dollar amount. Report: tasks/phase1-live-check.md.
+        **RUN 2026-09-23 with the owner's approved $2: BLOCKED, $0.00 spent.** All five records
+        answered HTTP 403 from the v1 API's entitlement gate before any vendor call; nothing was
+        written (no `trace_history` row, no `api_logs` row, wallet unchanged). Cause is task 22
+        below, not the runner. The live check re-runs once the gate is fixed.
+        Report: tasks/phase1-live-check.md (written after the re-run).
   - [x] Final review fix wave (2026-09-23): D38 parcel display, D39 keep the paid contacts, D40 the
         maxVendorCost floor, D41 the county refusal, plus the seven review findings (503 tier,
         live-work threshold, tier 2 warnings, the Tier 1 plan guard, TRS as a surname, the
@@ -3153,6 +3156,20 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
+- [ ] 22. **LIVE DEFECT, found 2026-09-23 by the Phase 1 live check, David's call to fix it ("This more
+      important than a test"). The v1 API refuses every gateway-granted customer.** `lib/api/auth.ts:95`
+      gates the whole API on `subscription_tier === 'pro' || is_acquisition_pro_member` and never consults
+      the Suite Gateway grant, while `app/api/user/generate-api-key/route.ts:26` gates the same access on
+      `effectiveIsPro()`, which does. A gateway-granted customer can therefore generate an API key in
+      Settings and is refused on every call with "API access requires a Pro subscription or AcquisitionPRO
+      membership". Production has Suite sign-in ON (`/api/auth/suite/start` answers 307, not 404), so this
+      is live. Measured on 53 accounts: 10 hold a `prop-tracer-pro` grant, 7 of those are refused, 0 of
+      those 7 hold a key yet, and 2 of the 8 existing key-holders are refused for the separate reason of
+      having no grant and no pro tier. Pre-existing since `133830c` (2026-01-29); Phase 1 never touched the
+      file. Fix: `effectiveIsPro(profile)`, test-first, with a mutation that goes RED when the grant arm is
+      deleted. Blocks the Phase 1 live check (task 12).
+      Follow-up found with it, NOT fixed here: the `api_logs` insert sits after the gate, so a refused API
+      call leaves no record anywhere.
 - [ ] 21. **FOLLOW-UPS from the Phase 1 final re-review, 2026-09-23. None blocks the merge.**
       (a) The web single route's and the HighLevel push route's test harnesses do not emulate PostgREST column
       projection, so their new select-column dependencies are unfenced: dropping `trace_job_id` from
