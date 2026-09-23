@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { refreshSuiteSnapshotBlocking } from '@/lib/suite/access';
 import { effectiveIsPro } from '@/lib/suite/entitlements';
 import type { UserProfile } from '@/types';
 
@@ -91,6 +92,19 @@ export async function validateApiKey(
         { status: 401 }
       ),
     };
+  }
+
+  // The v1 API has no session and never renders a dashboard page, so unlike every other
+  // surface it has nothing that ever calls scheduleSuiteRefresh for it — a revoked gateway
+  // grant would otherwise sit stale in this row forever for an API-key-only customer. Refresh
+  // it here, blocking, before gating, so a revocation takes effect on this very request. Skip
+  // the gateway entirely for an account already entitled locally (Pro tier or AcquisitionPRO):
+  // their admission does not depend on the grant, so there is nothing worth a round trip for.
+  const locallyEntitled = profile.subscription_tier === 'pro' || profile.is_acquisition_pro_member === true;
+  if (!locallyEntitled) {
+    const refreshed = await refreshSuiteSnapshotBlocking(profile);
+    profile.gateway_products = refreshed.gateway_products;
+    profile.gateway_products_checked_at = refreshed.gateway_products_checked_at;
   }
 
   // Verify Pro tier, AcquisitionPRO membership, or a Suite Gateway grant (same

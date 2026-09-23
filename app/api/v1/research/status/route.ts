@@ -24,6 +24,12 @@ import { validateApiKey, isAuthError } from '@/lib/api/auth';
  *   contacts: { owner_name, phones, emails, address } | null  (FastAppend payload)
  *   research: AIResearchResult | null  (merged trace_history.ai_research if linked)
  */
+// validateApiKey's blocking entitlement refresh (lib/suite/access.ts) can add up to 5s
+// (AbortSignal.timeout(5000)) plus an un-timeouted UPDATE in front of the two reads below, so
+// this needs the same headroom as its v1 siblings (trace/single, trace/bulk, trace/bulk/status),
+// all of which set 60 against the ~10s platform default.
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);

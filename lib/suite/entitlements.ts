@@ -19,7 +19,13 @@ export function hasSuiteAccess(p: EntitlementProfile): boolean {
 
 export function isSnapshotStale(checkedAt: string | null | undefined, now: Date = new Date()): boolean {
   if (!checkedAt) return true;
-  return now.getTime() - Date.parse(checkedAt) > TTL_MS;
+  const ageMs = now.getTime() - Date.parse(checkedAt);
+  // An unparseable value makes ageMs NaN, and a future timestamp makes it negative; both fail
+  // `> TTL_MS` below and would read as FRESH, which is the wrong direction here. This refresher
+  // is the ONLY revocation check an API-only customer gets, so treat either as STALE: stale
+  // means refresh, and a refresh failure already fails open (see refreshSuiteSnapshotBlocking).
+  if (Number.isNaN(ageMs) || ageMs < 0) return true;
+  return ageMs > TTL_MS;
 }
 
 /** Ask the gateway what this user is entitled to. Throws on failure; callers degrade, never lock out. */

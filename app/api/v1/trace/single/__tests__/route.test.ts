@@ -675,7 +675,7 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
     expect(body.tier).toBe(2);
   });
 
-  it("runs a body WITH an ownerName inline at the Track B tier 1 rate", async () => {
+  it("runs a body WITH an ownerName inline at the tier 1 rate", async () => {
     // WAS: submitted to the Tracerfy batch and returned a traceId to poll. Removed (spec D26).
     H.entity = CONTACTS_HIT;
     const { submitSingleTrace } = await import("@/lib/tracerfy/client");
@@ -695,7 +695,7 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
     // WAS: the raw tier 1 rate (0.15) for every shape of request, which
     // under-reserved a tier 2 request by $0.10 and let a wallet that cannot pay
     // reach the vendors.
-    // MUTATION: reserve getChargePerTrace here and this goes red.
+    // MUTATION: reserve the TIER 1 rate (chargePerTrace) here and this goes red.
     H.profile = { ...H.profile, wallet_balance: 0.15 };
     const { lookupDossier } = await import("@/lib/tracerfy/dossier");
 
@@ -774,7 +774,7 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
 });
 
 /* ==================================================================== *
- * TIER 2 — FULL PROPERTY TRACE on the PUBLIC API-KEY surface (Track B).
+ * TIER 2 — FULL PROPERTY TRACE on the PUBLIC API-KEY surface (/api/v1).
  *
  * A NEW BILLING PATH on a public API. Tier 2 bills per RECORD SUBMITTED,
  * which makes two things true that are false everywhere else:
@@ -850,7 +850,7 @@ const CONTACTS_HIT = {
 };
 
 /**
- * PAY-AS-YOU-GO on Track B: no local pro tier, no AcquisitionPRO flag.
+ * PAY-AS-YOU-GO on the /api/v1 surface: no local pro tier, no AcquisitionPRO flag.
  *
  * Since the gate fix (lib/api/auth.ts), validateApiKey() honours a Suite Gateway
  * grant via effectiveIsPro(), so a wallet-tier profile like this one CAN now reach
@@ -946,7 +946,7 @@ describe("v1 tier 2 — the trigger", () => {
 describe("v1 tier 2 — the pre-flight balance gate reserves the TIER 2 rate", () => {
   it("402s a pay-as-you-go wallet that cannot cover ONE record", async () => {
     // 0.39 covers the tier 1 wallet rate (0.25) and not the tier 2 one (0.40).
-    // MUTATION: reserve getChargePerTrace() here and this goes red -- the request
+    // MUTATION: reserve the TIER 1 rate (chargePerTrace) here and this goes red -- the request
     // reaches the vendors, we spend, and there is nothing to collect from.
     H.profile = { ...PAYG_PROFILE, wallet_balance: 0.39 };
     const { lookupDossier } = await v1Vendors();
@@ -1066,7 +1066,7 @@ describe("v1 tier 2 — a TOTAL MISS is still billed", () => {
   });
 });
 
-describe("v1 tier 2 — the caller's REAL plan is billed, on the RAW Track B rate", () => {
+describe("v1 tier 2 — the caller's REAL plan is billed, on the ONE grant-aware rate", () => {
   it("bills pay-as-you-go at the wallet column", async () => {
     // MUTATION: hardcode 'pro' as the plan and this goes red -- $0.25 collected
     // where $0.40 is owed, a 37.5% shortfall nobody reports.
@@ -1093,17 +1093,18 @@ describe("v1 tier 2 — the caller's REAL plan is billed, on the RAW Track B rat
     expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
   });
 
-  it("is blind to a gateway grant, because v1 is Track B", async () => {
-    // pricePlanFor() calls this caller a pro; rawPricePlanFor() must not. Reusing
-    // the grant-aware Track A helper here would silently move an existing API-key
-    // caller's bill from $0.40 to $0.25.
+  it("HONOURS a gateway grant: the pro column, the same as every other surface", async () => {
+    // SITES: route.ts planRoute(..., pricePlanFor(profile)) at the key check, at the tier 2
+    // execution, and at the tier 1 handoff; plus chargePerRecord(profile) in the balance gate.
+    // A Suite Gateway grant is a PRO entitlement for price as well as access (lessons.md L-030),
+    // so this caller pays $0.25 per record here exactly as they do on the dashboard. Before
+    // 2026-09-23 this route charged them $0.40 for the same work, which is the defect the collapse
+    // removed. It was unreachable until the gate fix, so no existing bill moved.
+    // MUTATION: swap in a grant-blind raw plan derivation and this goes red (0.40 for 0.25).
     //
-    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads.
-    // It is OFF in this environment, which makes Track A and Track B AGREE -- so
-    // without setting it this test passes under both implementations and proves
-    // nothing. Verified: with the flag left off, swapping in the Track A helpers
-    // turned ZERO tests red.
-    // MUTATION: swap in chargePerRecord/pricePlanFor and this goes red.
+    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. It is OFF in
+    // this environment, which makes a grant count for nothing -- so without setting it this test
+    // passes under both implementations and proves nothing (L-009).
     const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     try {
@@ -1116,31 +1117,59 @@ describe("v1 tier 2 — the caller's REAL plan is billed, on the RAW Track B rat
 
       await post(TIER2_BODY);
 
-      expect(deducts()[0].args).toMatchObject({ p_amount: 0.4 });
+      expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
+      expect(deducts()[0].args).not.toMatchObject({ p_amount: 0.4 });
     } finally {
       process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
     }
   });
 
-  it("gates the BALANCE on the Track B rate too, not the Track A one", async () => {
-    // The gate and the charge must derive from the same track. A gate on Track A
-    // would reserve $0.25 for a caller who owes $0.40 and let a wallet that
-    // cannot pay reach the vendors.
+  it("reverts that grant holder to the wallet column when the kill-switch is off", async () => {
+    // The flag is the rollback lever and it still works: with it off the grant counts for nothing
+    // and this caller is priced from their native plan. This is also what proves the test above is
+    // not passing for some reason other than the grant.
     const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
-    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
     try {
       H.profile = {
         ...PAYG_PROFILE,
-        wallet_balance: 0.39,
         gateway_products: ["prop-tracer-pro"],
         gateway_products_checked_at: new Date().toISOString(),
       };
+      H.dossier = DOSSIER_MISS;
+
+      await post(TIER2_BODY);
+
+      expect(deducts()[0].args).toMatchObject({ p_amount: 0.4 });
+    } finally {
+      if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+      else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("gates the TIER 2 BALANCE on the same rate it will charge, grant included", async () => {
+    // SITE: route.ts minBalance -> chargePerRecord(profile).
+    // The gate and the charge must derive from the SAME function or the reserve is the wrong
+    // number in one direction or the other. A grant holder owes $0.25 here, so $0.24 is short and
+    // $0.25 is enough -- and a gate left on the retired grant-blind rate would demand $0.40 and
+    // 402 a caller who can pay, refusing work nobody was told to refuse.
+    // MUTATION: gate on a grant-blind raw rate and the second half of this goes red.
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const GRANTED = {
+      ...PAYG_PROFILE,
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: new Date().toISOString(),
+    };
+    try {
+      H.profile = { ...GRANTED, wallet_balance: 0.24 };
       const { lookupDossier } = await v1Vendors();
 
-      const res = await post(TIER2_BODY);
-
-      expect(res.status).toBe(402);
+      expect((await post(TIER2_BODY)).status).toBe(402);
       expect(lookupDossier).not.toHaveBeenCalled();
+
+      H.profile = { ...GRANTED, wallet_balance: 0.25 };
+      expect((await post(TIER2_BODY)).status).not.toBe(402);
     } finally {
       process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
     }
@@ -2226,7 +2255,7 @@ describe("v1 tier 1: auto-rebill fires only when money moved or should have", ()
   });
 });
 
-describe("v1 tier 1: the Track B price", () => {
+describe("v1 tier 1: the ONE grant-aware price", () => {
   it("charges a pro profile the pro rate", async () => {
     H.profile = PRO_PROFILE;
     H.entity = CONTACTS_HIT;
@@ -2242,11 +2271,16 @@ describe("v1 tier 1: the Track B price", () => {
     expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
   });
 
-  it("is blind to a gateway grant, because v1 is Track B", async () => {
-    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. With it off,
-    // Track A and Track B agree and the two tests above pass under either derivation.
-    // MUTATION: swap getChargePerTrace(...) for Track A's chargePerTrace(profile) and this goes
-    // red (0.15 instead of 0.25).
+  it("HONOURS a gateway grant: $0.15 per success, the same as every other surface", async () => {
+    // SITES: route.ts chargeAmount -> chargePerTrace(profile) (the charge), and minBalance ->
+    // chargePerTrace(profile) (the gate). Before 2026-09-23 this route charged a gateway-grant
+    // holder $0.25 while the dashboard charged them $0.15 for the same work; the branch was
+    // unreachable until the gate fix, so no existing bill moved (lessons.md L-030).
+    // MUTATION: swap chargePerTrace(profile) for a grant-blind raw rate and this goes red
+    // (0.25 instead of 0.15).
+    //
+    // NEXT_PUBLIC_SUITE_SIGNIN_ENABLED is the kill-switch hasSuiteAccess() reads. With it off a
+    // grant counts for nothing and this test would pass under either derivation (L-009).
     const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     try {
@@ -2256,8 +2290,64 @@ describe("v1 tier 1: the Track B price", () => {
         gateway_products_checked_at: new Date().toISOString(),
       };
       H.entity = CONTACTS_HIT;
+      const body = await (await post()).json();
+      expect(deducts()[0].args).toMatchObject({ p_amount: 0.15 });
+      expect(deducts()[0].args).not.toMatchObject({ p_amount: 0.25 });
+      // The response body is the number an integrator reconciles their own books against, so it
+      // has to move with the deduct rather than being quoted from anywhere else.
+      expect(body.charge).toBe(0.15);
+    } finally {
+      process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("reverts that grant holder to the wallet rate when the kill-switch is off", async () => {
+    // The rollback lever, and the proof that the test above turns on the grant and nothing else.
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    try {
+      H.profile = {
+        ...PAYG_PROFILE,
+        gateway_products: ["prop-tracer-pro"],
+        gateway_products_checked_at: new Date().toISOString(),
+      };
+      H.entity = CONTACTS_HIT;
       await post();
       expect(deducts()[0].args).toMatchObject({ p_amount: 0.25 });
+    } finally {
+      if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+      else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("gates the TIER 1 balance on the same rate it will charge, grant included", async () => {
+    // SITE: route.ts minBalance -> chargePerTrace(profile), the TIER 1 arm (fullPropertyTrace is
+    // false whenever an ownerName is supplied, as it is in BODY). The sibling describe block above
+    // ("v1 tier 2 ...") covers the OTHER arm, minBalance -> chargePerRecord(profile); the two arms
+    // are reverted independently by a mutation, so each needs its own guard here.
+    //
+    // A grant holder owes $0.15 per success here, the same as every other surface, so $0.14 is
+    // short and $0.15 is enough. A gate left on the retired grant-blind rate would price this
+    // caller off their native subscription_tier ('wallet') instead of the grant, demand $0.25, and
+    // 402 a caller who can pay -- refusing work nobody was told to refuse.
+    // MUTATION: gate on a grant-blind raw rate for this arm and the first half of this goes red
+    // (402 at $0.14 is unchanged, but so is 402 at $0.15, which is wrong).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const GRANTED = {
+      ...PAYG_PROFILE,
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: new Date().toISOString(),
+    };
+    try {
+      H.profile = { ...GRANTED, wallet_balance: 0.14 };
+      const { lookupBusinessTrace } = await v1Vendors();
+
+      expect((await post(BODY)).status).toBe(402);
+      expect(lookupBusinessTrace).not.toHaveBeenCalled();
+
+      H.profile = { ...GRANTED, wallet_balance: 0.15 };
+      expect((await post(BODY)).status).not.toBe(402);
     } finally {
       process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
     }

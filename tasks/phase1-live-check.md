@@ -1,61 +1,87 @@
-# Phase 1 live check (Task 12)
+# Phase 1 live check, 2026-09-23. RUN. Counts only, no contact data.
 
-Date: 2026-09-22
-Status: **NOT RUN.** The owner's HARD STOP: gates, the runner, and the read-only sample selection
-are done; the runner's `--plan` (dry-run) mode ran and is reported below. No vendor was called, no
-wallet was touched. The owner names a dollar amount before any dispatch runs `--live`.
+Plan Task 12. Owner's approved spend $2. Runner's computed worst case $1.10.
+**Vendor spend: $0.20. Customer charge to the owner's own wallet: $0.55** (14.88 -> 14.33, reconciled exactly).
 
-Counts only below: no owner name, phone, email, street address or parcel id. County, state,
-property type and path labels only.
+One record per lookup path, five secondary and tertiary counties, none reused from Phase 0. Sent through
+the real `POST /api/v1/trace/single` on a local server pointed at production, on branch
+`fix/api-gate-gateway-grants` (not on main: main still prices a gateway grant as pay-as-you-go, so the
+check would have measured the bug the branch fixes). Raw request and response pairs are in
+`tasks/research-test/phase1/live.jsonl` (gitignored, real purchased contact data). Nothing below names a
+person, phone, email, street or parcel.
 
-## Sample (read-only, from the registry; secondary/tertiary markets only, none already tested)
+An earlier attempt on 2026-09-23 was refused five times with HTTP 403 by the v1 entitlement gate and spent
+$0.00; that defect, its fix, and its deploy are History 2026-09-23 (b) and (c). Those five blocked
+attempts are archived at `tasks/research-test/phase1/live-403-blocked.jsonl`.
 
-| Id | Path | State | County | Property type | Why (see tasks/research-test/phase1/records.json for the full reasoning, gitignored) |
-|---|---|---|---|---|---|
-| L1 | tier1_address_person | NY | Onondaga (Syracuse metro, secondary/tertiary to NYC) | residential | Full street/city/zip; individual owner; tests the D2/D13 address-keyed Instant lookup and the D22/4.3 name-order and stray-comma edge case |
-| L2 | tier1_apn_person | CO | Larimer (Fort Collins, secondary/tertiary to Denver) | residential | Parcel id and county only, no city; individual owner; tests D23's parcel-id-only path with no Instant fallback available |
-| L3 | tier1_company | NV | Washoe (Reno, secondary/tertiary to Las Vegas) | multifamily | Name and state only, no address; LLC owner; tests D4's FastAppend entity lane |
-| L4 | tier1_trust | OK | Tulsa (secondary/tertiary to Oklahoma City) | commercial | Full street/city/zip plus parcel id and county; trust name with a first name; tests the full trust ladder (D3): Instant, then parcel, then FastAppend fallback |
-| L5 | tier2_apn_no_city | AR | Benton (Bentonville/Rogers, secondary/tertiary to Little Rock) | land | Parcel id and county only, no owner, no city; registry shows one individual owner of record; tests D24's dossier-by-parcel-id and D21 arm (c)'s mailing-address search |
+## Results
 
-None of IN or FL. Five different states. Not all one property type. None of these counties or
-parcels appear anywhere under `tasks/research-test/` before this pick (checked against the phase0
-small-sample counties and every older research folder).
+| # | Path | County | Steps run | Outcome | found_by | Phones | Emails | Vendor | Charged |
+|---|---|---|---|---|---|---|---|---|---|
+| L1 | tier 1, person by address | NY Onondaga | `TRACERFY_INSTANT_NAMED:hit` | `found_by_address` | address | 6 | 3 | $0.10 | **$0.15** |
+| L2 | tier 1, person by APN | CO Larimer | `TRACERFY_PARCEL_APN:miss` | `no_match` | none | 0 | 0 | $0.00 | $0.00 |
+| L3 | tier 1, company | NV Washoe | `FASTAPPEND_ENTITY:miss` | `no_match` | none | 0 | 0 | $0.00 | $0.00 |
+| L4 | tier 1, trust | OK Tulsa | `INSTANT:hit -> PARCEL_APN:skipped -> FASTAPPEND:skipped` | `found_by_address` | address | 6 | 3 | $0.10 | **$0.15** |
+| L5 | tier 2, parcel, no city | AR Benton | `DOSSIER_APN:miss` | **none stored** | none | 0 | 0 | $0.00 | **$0.25** |
 
-## Worst case, computed via `planRoute(...).maxVendorCost` (resolution F-P11, never hard-coded)
+Latency: 4.4 s and 4.1 s on the two hits, 1.5 to 2.0 s on the three misses. All five HTTP 200.
 
-Ran: `npx tsx tasks/research-scripts/phase1/run-live.ts --plan`
+## What each path PROVED
 
-| Id | Path | Steps `planRoute` would ask | Worst case |
-|---|---|---|---|
-| L1 | tier1_address_person | TRACERFY_INSTANT_NAMED | $0.10 |
-| L2 | tier1_apn_person | TRACERFY_PARCEL_APN | $0.10 |
-| L3 | tier1_company | FASTAPPEND_ENTITY | $0.10 |
-| L4 | tier1_trust | TRACERFY_INSTANT_NAMED + TRACERFY_PARCEL_APN + FASTAPPEND_ENTITY | $0.30 |
-| L5 | tier2_apn_no_city | DOSSIER_APN, then 1 owner x worst-case single-owner ladder (Instant + parcel + FastAppend, D3, assuming a mailing address is found per D21 arm c) | $0.50 |
+- **L1, the D13 Instant lookup with a supplied owner name: works end to end.** One step, one hit, a
+  name-matched individual with contacts, `found_by` reported, `match_confidence` 80, charged once.
+- **L2 and L3: a miss is genuinely free, on both vendors.** $0.00 vendor and $0.00 customer on each, with
+  `no_match` and a `skipReason` sentence in the response. Spec 4.3 and D8 behave as written.
+- **L4: the trust ladder is planned whole and stops at the first hit.** All three rungs appear in the step
+  log, rungs 2 and 3 recorded `skipped` after rung 1 hit. A trust name that still has a usable first name
+  gets the person steps, so it is not being mistaken for D16's entity-only path.
+- **D36's parcel duplicate key fires in production.** L2 and L5 (parcel + county, no street) stored an
+  `APN|`-keyed row; L1 and L4 (street present) stored street-keyed rows; L3 (name and state only) stored
+  the documented state-only `||STATE` shape. Each of the five is a single-trace row (`trace_job_id` NULL),
+  so D33's sentence rule applies to them.
+- **The pricing collapse is live and correct.** The owner's account is tier `wallet` with a
+  `prop-tracer-pro` gateway grant, which is the one shape the collapse moves. It was charged the PRO rates
+  throughout: $0.15 per tier 1 success and $0.25 for the tier 2 record. Before the collapse the same five
+  records would have cost $0.25, $0.25 and $0.40, i.e. **$0.90 instead of $0.55.**
+- **No contact swapping.** L1 and L4 both returned 6 phones and 3 emails, which looked like the old batch
+  path's row-mixing defect (spec 1, item 4). Hash-compared: different phones, different emails, different
+  owners. Coincidence, not a swap.
 
-**Total worst case: $1.10.**
+## What each path did NOT prove, and one thing it left worse
 
-L5's per-owner figure assumes the worst plausible classification for the one owner the registry
-names on that parcel (a trust, which is the most expensive single-owner ladder), because the
-dossier has not run and its actual classification is unknown until it does. The registry itself
-names exactly one owner of record for this parcel (no joint-owner marker), which is why the
-multiplier is 1.
+- **The APN person lookup is still thinly proven.** L2 was the only test of it and it missed. That is
+  exactly spec Section 13's named risk ("7 of 12 California parcels returned a flagged owner ... Phase 0
+  decides whether the APN step earns its place"). One record cannot condemn it and did not vindicate it.
+  The step ran, sent the right shape and cost nothing, so the plumbing is proven; the yield is not.
+- **The FastAppend entity lane has now missed 3 for 3 across two live runs.** Phase 0 had two LLCs come
+  back "Company not found"; L3 is the third. Spec Section 10 anticipated exactly this ("Anything it
+  disproves comes out of this design before Phase 1, for example the FastAppend half of the trust ladder
+  if it never hits"). Three misses is not proof of nothing working, but it is the only evidence there is,
+  and it all points one way.
+- **The trust ladder's fallback rungs are unexercised.** L4 hit on rung 1, so `TRACERFY_PARCEL_APN` and
+  `FASTAPPEND_ENTITY` on a stripped trust name have still never run live.
+- **L5: a Tier 2 record was charged $0.25, cost us $0.00, returned nothing, and was given no reason.**
+  The stored row has `outcome_code` NULL, `found_by` NULL and `contact_vendor` NULL, and the API response
+  carries no `outcomeCode`, no `foundBy` and no `skipReason` at all. It says only `status: "no_match"`.
+  The two Tier 1 misses each carried a `skipReason` sentence; the paying Tier 2 miss carried none.
+  This was a known, recorded deferral, not a surprise (Phase 1 plan carried item 7, "Tier 2 single keeps
+  today's failure answer in Phase 1", and a Task 10 deferred minor recorded that the tier 2 branch omits
+  `foundBy`/`outcomeCode`). The live check turns it from a note into a measured fact with money on it:
+  spec **D10** says every record reports an outcome code and a sentence, and this record reports neither.
+  Also worth the owner's eye: the stated justification for billing Tier 2 per record submitted is that
+  "the county dossier lookup is spent on submission whether or not contacts follow" (lib/constants.ts).
+  On L5 it was not spent. The vendor charged $0.00 for the miss and the customer was charged $0.25.
+  That is the documented model working as designed, but the reason given for it does not hold on a miss.
+  **RULED BY DAVID, 2026-09-23: the billing is correct.** His words: "The L5 billing behavior was
+  accurate. It costs $0.25 no matter the result, per request, not per success, when the dossier is used."
+  So the $0.25 stands and is not a defect. What he did NOT rule on, and what stays open as todo task 23,
+  is the REPORTING half: a charged Tier 2 record still carries no outcome code and no sentence, while the
+  two free Tier 1 misses beside it each carried one.
 
-No vendor was called to produce this table: every figure comes from the production `planRoute()`
-function run against the five request bodies, offline, with no network call and no database
-access.
+## Housekeeping
 
-## What happens next
-
-The owner names a dollar amount. A later dispatch runs:
-
-```
-npx tsx tasks/research-scripts/phase1/run-live.ts --live --max-dollars <the amount> --email <owner email>
-```
-
-which will refuse to run if $1.10 (or whatever the worst case computes to at that time, since the
-runner recomputes it fresh from `planRoute` rather than reusing this number) exceeds the amount
-given. Raw request/response pairs would land in `tasks/research-test/phase1/live.jsonl`
-(gitignored); this report would then be extended with the actual HTTP status, outcome code,
-found_by, step log and charge per record, still counts only.
+The owner's account had no API key, so one was minted with the same generator the app's own Settings
+button uses, and revoked immediately after the run; before and after, `api_key` and `api_key_created_at`
+both read NULL. The local server was started with `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED=true` to match
+production, verified by `/api/auth/suite/start` answering 307 locally exactly as it does live, rather
+than by editing `.env.local`.

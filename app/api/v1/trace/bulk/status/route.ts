@@ -3,7 +3,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import { type TracerfyErrorReason } from '@/lib/tracerfy/client';
 import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
-import { STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
+import { STALE_PROCESSING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
@@ -122,10 +123,10 @@ export async function GET(request: Request) {
     }
 
     const traceJob = job as TraceJob;
-    const chargePerTrace = getChargePerTrace(
-      profile.subscription_tier,
-      profile.is_acquisition_pro_member
-    );
+    // The ONE derivation (lib/suite/pricing.ts), grant-aware. The entity rows of this same job
+    // are settled by sweep-entity-traces, which reads the same function, so one job can no longer
+    // carry two prices split by owner type (L-005).
+    const perTraceCharge = chargePerTrace(profile);
 
     // Pull all trace_history rows for this bulk job.
     const { data: rowsRaw } = await adminClient
@@ -184,8 +185,8 @@ export async function GET(request: Request) {
 
     // Per-row settlement now lives in the shared lib/trace/settleBulkJob.ts so
     // this v1 REST route and the Suite MCP tool can never diverge on money. We
-    // pass this surface's CURRENT person rate (getChargePerTrace tier-aware);
-    // the MCP passes its grant-aware rate. settleBulkJob mutates bucket rows in
+    // pass this caller's person rate from the one grant-aware derivation, which
+    // is the same rate the MCP passes. settleBulkJob mutates bucket rows in
     // place (same as the old closure) and returns any unhealthy Tracerfy
     // errorReason so we can still stall-detect below.
     for (let i = 0; i < pollEntries.length; i += POLL_CONCURRENCY) {
@@ -196,7 +197,7 @@ export async function GET(request: Request) {
             tracerfyJobId: entryJobId,
             bucketRows: bucket,
             userId: profile.id,
-            personRate: chargePerTrace,
+            personRate: perTraceCharge,
           })
         )
       );

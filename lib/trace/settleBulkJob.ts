@@ -6,8 +6,8 @@
 // path and can never diverge on money.
 //
 // The ONLY parameterized value is the TIER 1 per-successful-trace rate
-// (`personRate`): the v1 route passes its current getChargePerTrace(...) rate;
-// the MCP passes the grant-aware rate. Owner type selects the VENDOR, never the
+// (`personRate`), and both callers now derive it the same way, from
+// chargePerTrace(profile) in lib/suite/pricing.ts. Owner type selects the VENDOR, never the
 // price, so every settled success on this path bills that one rate, whether the
 // contacts came from Tracerfy or from FastAppend. The wallet owner (p_user_id)
 // is always the local user_profiles.id, supplied as `userId`, never derived
@@ -96,9 +96,9 @@ export type SettleBulkJobArgs = {
   bucketRows: TraceHistoryRow[];
   // Wallet owner: ALWAYS the local user_profiles.id, never tool/request input.
   userId: string;
-  // Tier 1 per-successful-trace charge for this caller's plan. Injected so the
-  // caller decides grant-awareness (v1 = getChargePerTrace(...); MCP =
-  // grant-aware chargePerTrace(...)). It prices EVERY success on this path,
+  // Tier 1 per-successful-trace charge for this caller's plan, from
+  // chargePerTrace(profile) (lib/suite/pricing.ts) on both callers. Injected rather than derived
+  // here so this module stays free of profile lookups. It prices EVERY success on this path,
   // including the FastAppend entity branch.
   personRate: number;
 };

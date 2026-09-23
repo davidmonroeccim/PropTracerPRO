@@ -258,14 +258,14 @@ export async function POST(request: Request) {
         records_submitted: tier1Records.length + tier2Records.length,
         records_matched: 0,
         status: 'processing',
-        // THE SOURCE TAG IS A PRICE DECISION, NOT A LABEL. This route settles
-        // through app/api/trace/bulk/status, which prices with the GRANT-AWARE
-        // chargePerTrace() -- Track A. The two cron sweeps pick their
-        // derivation from this tag and read an UNTAGGED row as Track B, the raw
-        // and dearer one, so an entity row from this job would be billed $0.25
-        // while its person siblings settled at $0.15 in the same batch. That is
-        // the owner-type price split L-005 rules out. Tagged the same way
-        // lib/suite/mcp-tools.ts tags its own job and rows.
+        // THE SOURCE TAG IS A LABEL: it says where a row came from and switches
+        // no price. It used to BE a price decision -- the crons chose between two
+        // derivations from it and read an UNTAGGED row as the raw, dearer one --
+        // and that is gone: every surface and every cron now price through the
+        // one grant-aware derivation in lib/suite/pricing.ts, so a row's rate
+        // depends on the CALLER's entitlements and never on which door it came
+        // in by. Tagged the same way lib/suite/mcp-tools.ts tags its own job and
+        // rows.
         source: TRACE_SOURCE.WEB,
       })
       .select()

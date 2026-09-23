@@ -4,8 +4,8 @@ import { getBusinessTraceStatus, downloadBusinessTraceResults } from '@/lib/trac
 import { traceCreditFromFastAppend } from '@/lib/ai-research/contacts';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargeFor } from '@/lib/wallet/collectedCharge';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
-import { chargePerTrace, isTrackASource } from '@/lib/suite/pricing';
+import { PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import { TRACE_TIER, foldBillingWrite, isCacheHitRow } from '@/lib/trace/billedRows';
 import type { AIResearchResult, BusinessTraceJob } from '@/types';
 
@@ -39,28 +39,22 @@ export async function GET(request: Request) {
   let stillPending = 0;
   let erroredStale = 0;
 
-  // Tier 1 per-successful-trace rate, resolved once per (user, track) per run.
+  // Tier 1 per-successful-trace rate, resolved once per user per run.
   // Owner type selects the VENDOR, not the price, so a FastAppend entity success
   // bills the same plan rate a Tracerfy person success does.
   //
-  // THE TRACK IS THE AXIS, not the user, and this is the same rule its twin
-  // sweep-entity-traces:178 follows. PTP has two price derivations
-  // (lib/suite/pricing.ts): Track A (session, MCP) is GRANT-AWARE, Track B (the
-  // /api/v1/* API-key surface) is RAW. This cron used the grant-aware rate for
-  // every row, so a gateway-grant holder on the wallet tier settling a v1 job
-  // paid $0.15 for the entity row this cron recovered and $0.25 for the person
-  // rows the v1 status route settled beside it. Same job, same work, two prices.
+  // THE CALLER IS THE AXIS, AND THERE IS ONLY ONE DERIVATION (lib/suite/pricing.ts). This used to
+  // branch on the row's `source` tag, pricing an /api/v1/* row through a raw helper that ignored
+  // the gateway snapshot, so a gateway-grant holder paid $0.15 for the entity row this cron
+  // recovered and $0.25 for the person rows the v1 status route settled beside it: same job, same
+  // work, two prices. Both halves now read chargePerTrace(), which is grant-aware, so they agree
+  // (David's decision, 2026-09-23; lessons.md L-030).
   //
-  // An untagged row is Track B, which is also the dearer derivation, so the
-  // fallback errs in the safe direction.
+  // The no-profile fallback stays the DEARER rate: an overcharge is visible on a statement and
+  // gets reported, an undercharge is invisible to both sides and compounds.
   const tier1RateCache = new Map<string, number>();
-  const tier1RateFor = async (
-    userId: string,
-    source: string | null | undefined
-  ): Promise<number> => {
-    const isTrackA = isTrackASource(source);
-    const key = `${userId}:${isTrackA ? 'A' : 'B'}`;
-    const cached = tier1RateCache.get(key);
+  const tier1RateFor = async (userId: string): Promise<number> => {
+    const cached = tier1RateCache.get(userId);
     if (cached !== undefined) return cached;
     const { data: rateProfile } = await adminClient
       .from('user_profiles')
@@ -69,13 +63,8 @@ export async function GET(request: Request) {
       .single();
     const rate = !rateProfile
       ? PRICING.CHARGE_PER_SUCCESS_WALLET
-      : isTrackA
-        ? chargePerTrace(rateProfile)
-        : getChargePerTrace(
-            rateProfile.subscription_tier,
-            rateProfile.is_acquisition_pro_member
-          );
-    tier1RateCache.set(key, rate);
+      : chargePerTrace(rateProfile);
+    tier1RateCache.set(userId, rate);
     return rate;
   };
 
@@ -249,7 +238,7 @@ export async function GET(request: Request) {
           // did not happen must not zero the fee it would have handed back.
           let collected: { charge: number; tier: number } | null = null;
           if (shouldBill) {
-            const tier1Rate = await tier1RateFor(job.user_id, historyRow.source);
+            const tier1Rate = await tier1RateFor(job.user_id);
             const priorResearchCharge = historyRow.ai_research_charge || 0;
             if (priorResearchCharge > 0) {
               await adminClient.rpc('credit_wallet_balance', {

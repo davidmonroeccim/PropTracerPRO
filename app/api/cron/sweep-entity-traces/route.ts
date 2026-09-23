@@ -14,8 +14,8 @@ import {
   nextAfterFailedAttempt,
   processingStatusFor,
 } from '@/lib/trace/entityTraceAttempts';
-import { PRICING, getChargePerTrace } from '@/lib/constants';
-import { chargePerTrace, isTrackASource } from '@/lib/suite/pricing';
+import { PRICING } from '@/lib/constants';
+import { chargePerTrace } from '@/lib/suite/pricing';
 import type { AIResearchResult } from '@/types';
 
 /**
@@ -162,27 +162,18 @@ export async function GET(request: Request) {
   // bills two different prices for the same work, split by owner type. That is
   // exactly the rule David restated three times.
   //
-  // THE TRACK IS THE AXIS, not the user. PTP has two price derivations and the
-  // split is deliberate (lib/suite/pricing.ts): Track A (session, MCP) is
-  // GRANT-AWARE, Track B (the /api/v1/* API-key surface) is RAW and does not
-  // consult the gateway snapshot. This cron used the grant-aware rate for
-  // everything, so on a v1 bulk job a gateway-grant holder on the wallet tier
-  // paid $0.25 for person rows (raw, from the v1 status route) and $0.15 for
-  // entity rows (grant-aware, from here). Same job, same work, two prices.
+  // THE CALLER IS THE AXIS, AND THERE IS ONLY ONE DERIVATION (lib/suite/pricing.ts). This used to
+  // branch on the row's `source` tag: an /api/v1/* row priced through a raw helper that ignored
+  // the gateway snapshot, so on a v1 bulk job a gateway-grant holder paid $0.25 for person rows
+  // (raw, from the v1 status route) and $0.15 for entity rows (grant-aware, from here). Same job,
+  // same work, two prices. Both halves now read chargePerTrace(), so they agree (David's decision,
+  // 2026-09-23; lessons.md L-030). The `source` tag is a label and switches no price.
   //
-  // Which track a row belongs to is read off its `source` tag, and the tags and
-  // their meaning live in lib/suite/pricing.ts so this cron, its twin
-  // sweep-business-traces, and the routes that WRITE the tag cannot drift. An
-  // untagged row is Track B, which is also the RAW and dearer derivation,
-  // making the fallback the safe direction.
+  // The no-profile fallback stays the DEARER rate, for the same reason FAILSAFE_PRICE_PLAN points
+  // at the dearest column.
   const tier1RateCache = new Map<string, number>();
-  const tier1RateFor = async (
-    userId: string,
-    source: string | null | undefined
-  ): Promise<number> => {
-    const isTrackA = isTrackASource(source);
-    const key = `${userId}:${isTrackA ? 'A' : 'B'}`;
-    const cached = tier1RateCache.get(key);
+  const tier1RateFor = async (userId: string): Promise<number> => {
+    const cached = tier1RateCache.get(userId);
     if (cached !== undefined) return cached;
     const { data: rateProfile } = await adminClient
       .from('user_profiles')
@@ -191,13 +182,8 @@ export async function GET(request: Request) {
       .single();
     const rate = !rateProfile
       ? PRICING.CHARGE_PER_SUCCESS_WALLET
-      : isTrackA
-        ? chargePerTrace(rateProfile)
-        : getChargePerTrace(
-            rateProfile.subscription_tier,
-            rateProfile.is_acquisition_pro_member
-          );
-    tier1RateCache.set(key, rate);
+      : chargePerTrace(rateProfile);
+    tier1RateCache.set(userId, rate);
     return rate;
   };
 
@@ -409,7 +395,7 @@ export async function GET(request: Request) {
               : // Deduct FIRST, then persist the amount that actually moved.
                 await deductOrZero(adminClient, {
                   p_user_id: row.user_id,
-                  p_amount: await tier1RateFor(row.user_id, row.source),
+                  p_amount: await tier1RateFor(row.user_id),
                   p_trace_history_id: row.id,
                   p_description: 'FastAppend business-trace contacts (successful trace)',
                 });

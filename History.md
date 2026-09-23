@@ -4,6 +4,47 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (d): Phase 1 Task 12, the live check RUN. $0.20 of vendor spend, five paths, one real gap found.
+
+- Ran on the owner's approved $2 against a computed worst case of $1.10. **Actual vendor spend $0.20.
+  Customer charge to the owner's own wallet $0.55, reconciled exactly (14.88 to 14.33).** Five records,
+  one per lookup path, five secondary and tertiary counties, none reused from Phase 0. All five HTTP 200.
+- Run on the branch, not on main, deliberately: main still prices a gateway grant as pay-as-you-go, so a
+  run there would have measured the bug the branch fixes. The local server was started with
+  NEXT_PUBLIC_SUITE_SIGNIN_ENABLED=true to match production, proven by /api/auth/suite/start answering
+  307 locally exactly as it does live, rather than by editing .env.local.
+- PROVED. The D13 Instant lookup with a supplied owner name works end to end: one step, one hit, a
+  name-matched individual with contacts, found_by reported, charged once. A miss is genuinely free on both
+  vendors, $0.00 vendor and $0.00 customer, with a skipReason sentence. The trust ladder is planned whole
+  and stops at the first hit, with rungs 2 and 3 logged as skipped. D36's parcel duplicate key fires in
+  production: the two street-less records stored APN-keyed rows, the two with streets stored street-keyed
+  rows, and the name-and-state-only company stored the documented ||STATE shape.
+- PROVED, and this is the branch's own work showing up live: the pricing collapse charged the PRO rates
+  throughout, $0.15 per tier 1 success and $0.25 for the tier 2 record. The owner's account is exactly the
+  one shape the collapse moves (tier wallet plus a prop-tracer-pro grant). Before it, these same five
+  records would have cost $0.90 instead of $0.55.
+- CHECKED BECAUSE IT LOOKED WRONG. Two records both returned 6 phones and 3 emails, which is the shape of
+  the old batch path's contact-swapping defect. Hash-compared: different phones, different emails,
+  different owners. Coincidence, not a swap.
+- NOT PROVED. The APN person lookup was tested once and missed, which is precisely the risk spec Section 13
+  names; the plumbing is proven, the yield is not. The FastAppend entity lane has now missed 3 for 3 across
+  two live runs, which is the only evidence there is and it all points one way. The trust ladder's fallback
+  rungs have still never run live, because the one trust record hit on rung 1.
+- THE GAP THE CHECK FOUND, now todo task 23. A Tier 2 single trace was charged $0.25, cost us $0.00,
+  returned no contacts and no property record, and was told NOTHING: outcome_code, found_by and
+  contact_vendor all NULL on the stored row, and no outcomeCode, foundBy or skipReason in the response,
+  only status "no_match". Both Tier 1 misses in the same run carried a skipReason sentence. Spec D10 says
+  every record reports an outcome code and a sentence. This was a known deferral (Phase 1 plan carried
+  item 7, plus a Task 10 deferred minor) and the live check turned it into a measured fact with money on
+  it. Recorded, not fixed, and put to David.
+- Separately put to David, a rationale question rather than a bug: lib/constants.ts justifies billing
+  Tier 2 per record submitted because "the county dossier lookup is spent on submission whether or not
+  contacts follow". On this record it was not spent. The vendor charged $0.00 for the miss; the customer
+  was charged $0.25.
+- The account had no API key, so one was minted with the same generator the Settings button uses and
+  revoked immediately after the run; api_key and api_key_created_at both read NULL before and after.
+- Report: tasks/phase1-live-check.md, counts only. Raw pairs in tasks/research-test/phase1/live.jsonl
+  (gitignored, real purchased contact data). The five earlier 403-blocked attempts are archived beside it.
 ## 2026-09-23 (c): The v1 API entitlement gate fix, MERGED and DEPLOYED on David's go. Gateway-granted customers can use the API again.
 
 - David's instruction: "merge and deploy the gate fix, it's a live customer fix." Merged `--no-ff`

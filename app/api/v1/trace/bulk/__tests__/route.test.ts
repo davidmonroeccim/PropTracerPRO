@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
-import { rawChargePerRecord } from "@/lib/api/pricing";
-import { chargePerRecord } from "@/lib/suite/pricing";
+import { chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import {
   isPropertyTracePending,
   queuedStatusFor,
@@ -22,11 +21,11 @@ import { TIER2_CAPACITY_REFUSAL } from "@/lib/trace/bulkPreflight";
  * billed per RECORD SUBMITTED. The tests that fenced it as free now fence the
  * opposite rule.
  *
- * THE OTHER THING THIS ROUTE MUST KEEP GETTING RIGHT IS ITS TRACK. This is the
- * API-key surface, which is Track B: it prices RAW, from the profile's own
- * columns, and deliberately does not consult the Suite Gateway grant. Reusing
- * the grant-aware helpers here would move an existing API caller's tier 2 bill
- * from $0.40 to $0.25, in the direction nobody reports.
+ * THE OTHER THING THIS ROUTE MUST KEEP GETTING RIGHT IS ITS PRICE, and as of 2026-09-23 there is
+ * only one. This route used to price RAW, from the profile's own columns, deliberately blind to a
+ * Suite Gateway grant, while every other surface priced grant-aware. David's decision -- "One
+ * price: make the API grant-aware" -- collapsed the two, so the reserve below now quotes
+ * chargePerTrace / chargePerRecord, the same functions the dashboard, the MCP and the crons use.
  */
 
 type Op = { table: string; op: string; payload?: unknown; opts?: unknown };
@@ -216,17 +215,17 @@ describe("the wallet reserve", () => {
 });
 
 /**
- * THIS SURFACE IS TRACK B, AND THE TEST FOR IT WILL LIE TO YOU.
+ * THE RATES AN API-KEY CALLER IS QUOTED, AND THE TEST FOR THEM WILL LIE TO YOU.
  *
  * hasSuiteAccess() is gated on NEXT_PUBLIC_SUITE_SIGNIN_ENABLED, false in tests
  * and TRUE in production. With the flag off a gateway grant counts for nothing,
- * both derivations collapse to the wallet column, and a test asserting that this
- * route prices RAW passes under the correct implementation and under a
- * grant-aware one alike. That is L-009, and this project has earned it twice.
- * Every test here sets the flag, and the last one proves the flag is what makes
+ * every shape collapses to the wallet column, and a test asserting anything
+ * about a grant holder passes under a grant-aware implementation and a
+ * grant-blind one alike. That is L-009, and this project has earned it twice.
+ * Every test here sets the flag, and one of them proves the flag is what makes
  * the difference visible.
  */
-describe("the tier 2 rate an API-key caller pays", () => {
+describe("the rates an API-key caller is quoted", () => {
   const GRANT_HOLDER = {
     id: "user-1",
     subscription_tier: "wallet",
@@ -235,30 +234,63 @@ describe("the tier 2 rate an API-key caller pays", () => {
     wallet_balance: 100,
   };
 
-  it("bills a grant holder the RAW rate, not the grant-aware one", async () => {
-    // The whole point: reusing the Track A helper would move an existing API
-    // caller's bill from $0.40 to $0.25, in the direction nobody reports.
+  it("quotes a grant holder the PRO tier 2 rate, the same as every other surface", async () => {
+    // SITE: route.ts tier2Rate -> chargePerRecord(profile).
+    // MUTATION: swap in a grant-blind raw rate and this goes red (0.40 quoted for 0.25 owed).
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = { ...GRANT_HOLDER };
     const body = await (await post([rec(undefined, 1)])).json();
-    expect(body.estimatedCost).toBeCloseTo(rawChargePerRecord(GRANT_HOLDER));
-    expect(body.estimatedCost).toBeCloseTo(TIER2);
-    expect(body.estimatedCost).not.toBeCloseTo(chargePerRecord(GRANT_HOLDER));
+    expect(body.estimatedCost).toBeCloseTo(chargePerRecord(GRANT_HOLDER));
+    expect(body.estimatedCost).toBeCloseTo(0.25);
+    expect(body.estimatedCost).not.toBeCloseTo(TIER2);
   });
 
-  it("proves the flag is load-bearing, so the pair above is not a tautology", async () => {
-    // With the flag OFF the two helpers agree, and the assertion above would
-    // hold under an implementation that used either one.
+  it("quotes a grant holder the PRO tier 1 rate too", async () => {
+    // SITE: route.ts tier1Rate -> chargePerTrace(profile). A named owner is a tier 1 record.
+    // MUTATION: swap in a grant-blind raw rate and this goes red (0.25 quoted for 0.15 owed).
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
-    expect(chargePerRecord(GRANT_HOLDER)).not.toBe(rawChargePerRecord(GRANT_HOLDER));
-    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
-    expect(chargePerRecord(GRANT_HOLDER)).toBe(rawChargePerRecord(GRANT_HOLDER));
+    H.profile = { ...GRANT_HOLDER };
+    const body = await (await post([rec("John Smith", 1)])).json();
+    expect(body.estimatedCost).toBeCloseTo(chargePerTrace(GRANT_HOLDER));
+    expect(body.estimatedCost).toBeCloseTo(0.15);
+    expect(body.estimatedCost).not.toBeCloseTo(TIER1);
   });
 
-  it("charges a genuine pro the pro rate, so RAW is not just 'always dearest'", async () => {
+  it("reserves in-flight work at those same two grant-aware rates", async () => {
+    // SITE: route.ts inFlightUnbilledCost({ tier1, tier2 }). The reserve and the quote must come
+    // from the same two functions, or a second job is sized against rates the first never used.
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = { ...GRANT_HOLDER };
+    await post([rec("John Smith", 1)]);
+    expect(inFlightUnbilledCost).toHaveBeenCalledWith(expect.anything(), "user-1", {
+      tier1: 0.15,
+      tier2: 0.25,
+    });
+  });
+
+  it("proves the flag is load-bearing, so the assertions above are not tautologies", async () => {
+    // With the flag OFF the grant counts for nothing and this caller is quoted their native
+    // pay-as-you-go rates, which is what the whole file would be measuring by default.
+    delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    H.profile = { ...GRANT_HOLDER };
+    const body = await (await post([rec(undefined, 1)])).json();
+    expect(body.estimatedCost).toBeCloseTo(TIER2);
+    expect(body.estimatedCost).not.toBeCloseTo(0.25);
+  });
+
+  it("charges a genuine pro the pro rate, so this is not just 'always cheapest'", async () => {
     H.profile = { ...GRANT_HOLDER, subscription_tier: "pro" };
     const body = await (await post([rec(undefined, 1)])).json();
     expect(body.estimatedCost).toBeCloseTo(0.25);
+  });
+
+  it("still charges a caller with NO entitlement the pay-as-you-go rates", async () => {
+    // The direction that matters for existing customers: the collapse must not have made
+    // everybody a pro. MUTATION: default either rate to the pro column and this goes red.
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = { ...GRANT_HOLDER, gateway_products: [] };
+    const body = await (await post([rec("John Smith", 1), rec(undefined, 2)])).json();
+    expect(body.estimatedCost).toBeCloseTo(TIER1 + TIER2);
   });
 });
 

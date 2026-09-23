@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
+import { chargePerTrace } from "@/lib/suite/pricing";
 import { BLANK_OWNER_SKIP_STATUS, skipReasonFor } from "@/lib/trace/blankOwnerSkip";
 import {
   ENTITY_TRACE_FAILED_STATUS,
@@ -438,18 +439,19 @@ describe("the vendor returned contacts", () => {
    * two prices for the same work, split by owner type -- the exact thing L-005
    * says is impossible, since owner type selects the vendor and never the price.
    *
-   * It used to use the grant-aware Track A rate for everything, so a gateway
-   * grant holder on the wallet tier running a v1 bulk job paid $0.25 for person
-   * rows (raw, Track B, from the v1 status route) and $0.15 for entity rows
-   * (grant-aware, from here). Same job, same work, two prices.
+   * It used to branch on the row's `source` tag and settle an untagged (/api/v1/*) row through a
+   * raw, grant-blind rate, so a gateway-grant holder on a v1 bulk job paid $0.25 for person rows
+   * and $0.15 for entity rows. Same job, same work, two prices. David's decision, 2026-09-23 --
+   * "One price: make the API grant-aware" -- removed the branch, and these tests now assert the
+   * tag makes NO difference.
    *
    * Both tests run with NEXT_PUBLIC_SUITE_SIGNIN_ENABLED set, because the ONLY
-   * thing separating the two tracks is hasSuiteAccess(), which is behind that
-   * flag. With the flag off both collapse to `wallet`, both assertions pass
-   * under either implementation, and the pair proves nothing. That is L-009,
-   * which this build earned twice.
+   * thing that makes a grant count is hasSuiteAccess(), which is behind that
+   * flag. With the flag off everything collapses to `wallet`, every assertion
+   * passes under either implementation, and the pair proves nothing. That is
+   * L-009, which this build earned twice.
    */
-  it("bills a grant holder the GRANT-AWARE rate on a Track A row", async () => {
+  it("bills a grant holder the GRANT-AWARE rate on a tagged row", async () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = {
       subscription_tier: "wallet",
@@ -463,20 +465,22 @@ describe("the vendor returned contacts", () => {
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 
-  it("bills that same grant holder the RAW rate on a Track B row, matching the v1 person rows", async () => {
+  it("bills that same grant holder the SAME grant-aware rate on an UNTAGGED v1 row", async () => {
+    // SITE: app/api/cron/sweep-entity-traces/route.ts tier1RateFor -> chargePerTrace.
+    // MUTATION: restore the source branch (untagged -> a raw, grant-blind rate) and this goes red.
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = {
       subscription_tier: "wallet",
       is_acquisition_pro_member: false,
       gateway_products: ["prop-tracer-pro"],
     };
-    // A v1 bulk row carries no source. Untagged is Track B, which is also the
-    // dearer derivation, so the fallback errs in the safe direction.
+    // A v1 bulk row carries no source, and under one price that changes nothing.
     await run();
-    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
-    // The whole point: the same profile, same vendor, two tracks, and the entity
-    // row is never cheaper than the person row sitting beside it in the job.
-    expect(deducts()[0].args.p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(deducts()[0].args.p_amount).toBe(PRICING.CHARGE_PER_SUCCESS);
+    expect(deducts()[0].args.p_amount).not.toBe(PRICING.CHARGE_PER_SUCCESS_WALLET);
+    // The entity rows this cron settles and the person rows the v1 status route settles now read
+    // the SAME function, so this compares against the route's own derivation, not a copied number.
+    expect(deducts()[0].args.p_amount).toBe(chargePerTrace(H.profile));
     delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
   });
 });

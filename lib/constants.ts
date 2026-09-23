@@ -44,7 +44,7 @@ export const PRICING = {
   // old model priced the FastAppend entity path separately from the Tracerfy
   // person path. Under the canonical model owner type selects the VENDOR, not
   // the price, so an entity trace on a known owner bills the plan's tier 1
-  // rate above (getChargePerTrace / chargePerTrace) exactly like a person
+  // rate above (chargePerTrace, lib/suite/pricing.ts) exactly like a person
   // trace. Do not reintroduce a separate entity constant.
 
   // Our cost from Tracerfy
@@ -187,16 +187,20 @@ export const AI_RESEARCH = {
 // ===================
 // Pricing Helper
 // ===================
-
-export function getChargePerTrace(
-  subscriptionTier: string,
-  isAcquisitionProMember: boolean
-): number {
-  if (subscriptionTier === 'pro' || isAcquisitionProMember) {
-    return PRICING.CHARGE_PER_SUCCESS;
-  }
-  return PRICING.CHARGE_PER_SUCCESS_WALLET;
-}
+//
+// REMOVED 2026-09-23: getChargePerTrace(subscriptionTier, isAcquisitionProMember).
+//
+// It was the RAW tier 1 derivation, and it took two scalars rather than a profile, so it could not
+// see a Suite Gateway grant even in principle. That made it contradict the canonical model
+// (lessons.md L-030: a gateway grant is a PRO entitlement for price as well as access) for exactly
+// one profile shape, and the /api/v1/* routes plus two crons priced on it. David's named decision,
+// 2026-09-23 -- "One price: make the API grant-aware" -- collapsed all of them onto
+// chargePerTrace(profile) in lib/suite/pricing.ts, which is now the ONE tier 1 derivation.
+//
+// Do not reintroduce a rate helper here. A price needs the whole profile, and a helper in this
+// file cannot import lib/suite/entitlements without a cycle, which is precisely how a second,
+// grant-blind derivation grew last time. The rate CONSTANTS above stay; the derivation lives in
+// lib/suite/pricing.ts.
 
 // ===================
 // US States

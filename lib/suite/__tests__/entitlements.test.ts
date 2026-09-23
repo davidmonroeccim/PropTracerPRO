@@ -76,4 +76,12 @@ describe("hasSuiteAccess / isSnapshotStale", () => {
     expect(isSnapshotStale("2026-07-17T11:45:00Z", now)).toBe(false);
     expect(isSnapshotStale("2026-07-17T11:20:00Z", now)).toBe(true);
   });
+  test("an unparseable timestamp is STALE, not fresh (Date.parse -> NaN must not read as fresh)", () => {
+    const now = new Date("2026-07-17T12:00:00Z");
+    expect(isSnapshotStale("garbage", now)).toBe(true);
+  });
+  test("a future timestamp is STALE, not fresh (a negative age must not read as fresh)", () => {
+    const now = new Date("2026-07-17T12:00:00Z");
+    expect(isSnapshotStale("2026-07-17T12:05:00Z", now)).toBe(true);
+  });
 });

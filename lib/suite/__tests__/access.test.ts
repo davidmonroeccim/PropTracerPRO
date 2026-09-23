@@ -44,6 +44,14 @@ test("stale snapshot + gateway_sub -> fetches and writes the refreshed snapshot"
   );
 });
 
+test("garbage gateway_products_checked_at -> treated as stale by the caller, still fetches (Fix 5)", async () => {
+  fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+  const { scheduleSuiteRefresh } = await import("@/lib/suite/access");
+  scheduleSuiteRefresh({ id: "U1", gateway_sub: "S1", gateway_products_checked_at: "garbage" });
+  await vi.waitFor(() => expect(update).toHaveBeenCalled());
+  expect(fetchEntitlements).toHaveBeenCalledWith("S1");
+});
+
 test("kill-switch: Suite disabled -> no refresh even with a stale snapshot", async () => {
   delete process.env[FLAG];
   fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });

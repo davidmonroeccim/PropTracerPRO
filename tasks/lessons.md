@@ -4,6 +4,40 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-030: The price model has TWO buckets and a gateway grant is in the PRO one (2026-09-23)
+
+**What happened.** Working the v1 API entitlement gate, I put the pricing divergence to David as a
+decision with three options. He answered "One price: make the API grant-aware" and then, unprompted,
+restated the whole model: "For clarification, because I have to this a lot because you don't read
+everything, Tier 1 is $0.15 per success and tier 2 is $0.25 per request for pro, AP, and gateway and
+pay-as-you-go is $0.25 per success and $0.40 per request." The numbers matched what I had proposed, but
+he should not have had to state them, and by his account he has stated them before.
+
+**The model, which is not negotiable and not to be re-derived:**
+
+| | Tier 1, per success | Tier 2, per record submitted |
+|---|---|---|
+| pro, AcquisitionPRO, **Suite Gateway grant** | $0.15 | $0.25 |
+| pay-as-you-go | $0.25 | $0.40 |
+
+Tier 1 is free on a miss; tier 2 is billed per record SUBMITTED. Owner type selects the vendor, never
+the price (L-005).
+
+**The rules.**
+- A Suite Gateway grant is a PRO entitlement for both access and price. Anywhere in the codebase that
+  prices a gateway holder as pay-as-you-go is a defect, not a design. `lib/suite/pricing.ts` already
+  gets this right; `lib/api/pricing.ts` and `getChargePerTrace` did not.
+- Read the rates from `lib/constants.ts` and the derivation from `lib/suite/pricing.ts` before quoting
+  or proposing any rate. Never derive a rate from a route, a docs page, a marketing string or memory.
+- When a file's own comment asserts that a divergence is deliberate, check whether the shape it
+  diverges on could actually reach that code. A "deliberate" split that was unreachable is not a
+  design decision, it is an untested branch, and saying "the comment says it is intended" is not
+  evidence.
+- When David restates something he has already settled, the artifact is missing, not his patience.
+  Write the model into a durable place the next session will actually read, and say where it went.
+
+---
+
 ## L-029: The dossier finds the OWNER. It never supplies contacts, not even as a labelled fallback (2026-09-22)
 
 **What happened.** Spec D21 recorded "c then b", and arm (b) fell back to the dossier's own contacts block, labelled
