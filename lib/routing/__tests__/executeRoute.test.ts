@@ -1376,4 +1376,28 @@ describe('canSpend, the per-call budget hook (spec 5.3)', () => {
     expect(asked).toEqual(['FASTAPPEND_ENTITY'])
     expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', reused: true })
   })
+
+  it('never asks the budget about a call the request deadline already refused', async () => {
+    // The fourth ordering boundary in this loop, and the only one left unfenced after Task 2's
+    // first round: a call the deadline check refuses (VENDOR_TIMEOUT.MIN_CALL_MS not available
+    // before deadlineMs) never reaches canSpend, so the reservation is never spent on a call that
+    // could not have been made anyway. MUTATION: hoisting the canSpend gate above the deadline
+    // branch asks the budget about this call regardless, and this goes red.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const asked: string[] = []
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      {
+        deadlineMs: Date.now() - 1,
+        canSpend: (step) => {
+          asked.push(step.kind)
+          return true
+        },
+      }
+    )
+    expect(asked).toEqual([])
+    expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'failed' })
+    expect(execution.steps[0].error).toMatch(/ran out of time/)
+  })
 })

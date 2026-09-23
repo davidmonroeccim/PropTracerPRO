@@ -532,10 +532,11 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
   /**
    * Record one report, and hand it to the caller's hook before the next step runs.
    *
-   * ONE FUNNEL, SIX CALL SITES. This stage pushes a report from six places (skipped after a hit
-   * or a failure, a reused answer, a call the budget could not start, our own refused request, a
-   * vendor failure, and an answer). A hook wired into five of them is a step log missing whichever
-   * one the next reader forgets, which for a queue means a resumed row re-buying that step.
+   * ONE FUNNEL, SEVEN CALL SITES. This stage pushes a report from seven places (skipped after a
+   * hit or a failure, a reused answer, a call the request deadline refused, a call the per-minute
+   * vendor budget refused, our own refused request, a vendor failure, and an answer). A hook wired
+   * into six of them is a step log missing whichever one the next reader forgets, which for a
+   * queue means a resumed row re-buying that step.
    */
   const record = async (report: StepReport): Promise<void> => {
     reports.push(report)
