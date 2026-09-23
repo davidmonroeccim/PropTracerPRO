@@ -1,7 +1,12 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS BUILT AND REVIEWED on branch `feat/tier1-phase1-single-traces`.
-> ONE THING IS LEFT: the live check, which waits for David's dollar amount. NOTHING IS PUSHED OR MERGED.
+> # READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS MERGED, PUSHED AND LIVE IN PRODUCTION.
+> ONE THING IS LEFT: the live check, which waits for David's dollar amount.
+>
+> **MERGED on David's go ("push the commits and merge"): `feat/tier1-phase1-single-traces` -> `main` at `2b52f7f`
+> (--no-ff), pushed (origin/main 5c2b0ee..2b52f7f). Gates re-run ON MAIN before the push: vitest 1837 / 83 files,
+> tsc 0, eslint 46 (cap 47), next build clean. Vercel production deploy dpl_4rWR5Pt READY for 2b52f7f;
+> proptracerpro.com 200, /login 200. The branch still exists locally and on origin.**
 >
 > **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0), head `bddb9a3`, 38 commits, unpushed. All 12 tasks
 > built, each task-reviewed, then a whole-branch review (verdict: fix before merge), its ONE fix wave, and a clean
