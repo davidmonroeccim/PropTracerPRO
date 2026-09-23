@@ -4,6 +4,53 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (e): One price per customer, and a revoked gateway grant is now caught. Branch merged.
+
+- Merged `fix/api-gate-gateway-grants` into main at 7e4dafa on David's go ("push and merge to main").
+  Two pieces of work beyond the gate fix that shipped separately as 1beca0c.
+- THE REVOCATION REFRESH. The v1 API was the only surface that read the Suite Gateway entitlement
+  snapshot with nothing to refresh it: `scheduleSuiteRefresh` runs only on a dashboard page render and
+  MCP resolves entitlements live per call, so a revoked grant kept API access for as long as that
+  customer never loaded the dashboard, which for a machine-driven integrator is indefinitely.
+  `validateApiKey` now refreshes before deciding, blocking only when the snapshot is stale, and the gate
+  and all five v1 handlers read the refreshed values rather than the stored row.
+- It FAILS OPEN, which is the whole point, and the first cut got that wrong in a way no test caught.
+  `fetchEntitlements` throws only on a transport failure or a non-2xx, so a gateway 200 carrying a
+  malformed body failed CLOSED: a `{}` body served an intermittent 403 to a validly paying customer once
+  per TTL window, and a `{products: null}` body was worse, because the NOT NULL column rejected the write
+  whole so the timestamp never advanced and every subsequent request re-fetched and 403'd again, a
+  permanent lockout loop with nothing in the logs. Only a genuine array is believed now. A well-formed
+  empty array still revokes, because an explicit "no grants" answer has to be honoured or the feature
+  cannot work; the implementer proved that constraint by deliberately over-fixing it and confirming the
+  revocation test went red.
+- Found with it and fixed: a failed snapshot write was silently discarded with no log at all, because
+  awaiting a supabase-js builder without `.throwOnError()` never rejects, and two doc comments claimed
+  the opposite. `isSnapshotStale` read an unparseable or future timestamp as FRESH, which would have
+  disabled revocation permanently for the one surface that now depends on it.
+- ONE PRICE DERIVATION. A Suite Gateway grant is a pro entitlement for price as well as access, so a
+  gateway customer pays $0.15 per tier 1 success and $0.25 per tier 2 record on the API exactly as on the
+  dashboard. David's words, which are now lesson L-030: "Tier 1 is $0.15 per success and tier 2 is $0.25
+  per request for pro, AP, and gateway and pay-as-you-go is $0.25 per success and $0.40 per request."
+- `lib/api/pricing.ts` is DELETED, `getChargePerTrace` and `isTrackASource` are gone, and the three cron
+  sweeps lose their pricing branch. `sweep-stale-traces` needed no change at all and now AGREES with the
+  status routes, where before it was the one settler that priced the same row differently, which is
+  exactly the "one batch bills two prices for the same work" failure lib/suite/pricing.ts warns against.
+- Exactly ONE profile shape changes price: tier not pro, not AcquisitionPRO, holding a `prop-tracer-pro`
+  grant, kill-switch on. That was verified by reconstructing the RETIRED derivation from the previous
+  commit, including its truthy rather than strict test on the AcquisitionPRO flag, and running 1,346
+  profile and flag combinations against the live one: 0 unapproved moves, 42 moved, every one wallet to
+  pro. Seven such accounts existed and none held an API key, so no existing bill moved.
+- The review caught what the implementer's own report claimed was covered: one of the ten approved money
+  sites, the tier 1 arm of the balance gate, could be reverted with all 1901 tests still green, because
+  the test that read like its guard covered the tier 2 arm beside it. It also caught a comment in the
+  matrix test asserting a guard the file cannot provide, which is the same shape as the L-030 lesson the
+  commit was built on. Both fixed; the gate's fence was then re-proven by hand.
+- Copy, approved by David word for word and changed nowhere else: the API docs pricing column header and
+  the webhook `charge` explainer now read "Pro, AcquisitionPRO and Suite Gateway". No number moved, and
+  no new row or column was needed, because with one price the existing two columns are correct again.
+- Gates on merged main: vitest 1902 passing / 84 files 0 failing, tsc 0 errors, eslint 45 problems (below
+  the 46 ceiling this branch set and the 47 cap), next build clean.
+
 ## 2026-09-23 (d): Phase 1 Task 12, the live check RUN. $0.20 of vendor spend, five paths, one real gap found.
 
 - Ran on the owner's approved $2 against a computed worst case of $1.10. **Actual vendor spend $0.20.
