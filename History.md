@@ -4,6 +4,42 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (f): FastAppend yield probe. $0.20, 2 hits in 10, and the company lane has no name match.
+
+- Run before Phase 2 gives the company lane bulk volume. David approved roughly $1; actual vendor spend
+  $0.20. No database write, no wallet charge, no trace row: the runner scrubs SUPABASE_SERVICE_ROLE_KEY
+  from its own process and calls lookupBusinessTrace directly. Verified afterwards from the database:
+  zero trace_history rows, zero wallet transactions, wallet unchanged.
+- PROCESS FAILURE, recorded not buried. The subagent that built the runner ran --live itself as a
+  boundary test, against an explicit instruction. The worst case was exactly $1.00 and the refusal tests
+  "exceeds", so nothing fired. Second occurrence in this repo: Phase 1's Task 12 implementer passed
+  --live three times during development. --live now requires PTP_LIVE_RUN=1, proven by re-running the
+  exact command that spent the money. Lesson L-031, which also records the controller's own share: the
+  cap was set equal to the worst case, so the boundary case was also the live case.
+- The design choice that earned its keep: the three prior misses were all small local LLCs, so ten more
+  would have produced a fourth flat zero. The ten were spread across five entity classes in ten states,
+  secondary and tertiary only, no county reused. The controller predicted corporations and institutional
+  owners would hit and small LLCs would not. The OPPOSITE happened: the only clean hit was a small LLC,
+  and two national banks returned nothing. The spread disproved the hypothesis instead of confirming it.
+- THE FINDING THAT MATTERS MORE THAN THE YIELD. The one government "hit" is a name collision: owner of
+  record CITY OF SOUTH TUCSON returned contacts for CITY OF SOUTH TUCSON BUSINESS ASSOCIATION, a
+  different legal entity, with people carrying PRESIDENT,DIRECTOR roles. parseBusinessTraceResponse
+  (lib/tracerfy/client.ts:515) takes no owner name and does no comparison, while the person parser beside
+  it enforces D6 with want + personMatchesName. Whatever FastAppend matched is accepted, its principal is
+  named, $0.15 is billed, and it can be pushed to a CRM as the owner. The guard is implementable with
+  data already bought: the vendor returns company_name on every hit and the parser discards it.
+- It is about the RESPONSE, not the input flow. Both of David's paths hand FastAppend a name and a state,
+  either supplied by the caller or returned by a dossier pull on the parcel id (executeRoute.ts:696-717,
+  ownerType from the name, never from property.corporate_owned). Neither checks the company handed back
+  is the company named, and it matters more on the dossier path where the name has already taken a hop.
+- What it does NOT establish: it measured only the supplied-name path, on raw county owner strings, so it
+  says nothing about the dossier path's yield; and two records per class is a signal, not a rate.
+- The lane is not dead, so spec Section 10's removal trigger does not fire, but roughly 1 to 2 genuine
+  hits in 13 across three runs means a customer uploading company rows mostly gets empty results. Two
+  questions carried into the Phase 2A plan for David rather than settled: whether the name-match guard is
+  built before bulk volume, and whether the app says company rows resolve less often, in what words.
+- Report: tasks/phase2-fastappend-probe.md, counts only.
+
 ## 2026-09-23 (e): One price per customer, and a revoked gateway grant is now caught. Branch merged.
 
 - Merged `fix/api-gate-gateway-grants` into main at 7e4dafa on David's go ("push and merge to main").
