@@ -1,6 +1,44 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-22 (execution session). PHASE 1 BEING EXECUTED on branch `feat/tier1-phase1-single-traces`.
+> # READ FIRST. STATE AS OF 2026-09-23. PHASE 1 IS BUILT AND REVIEWED on branch `feat/tier1-phase1-single-traces`.
+> ONE THING IS LEFT: the live check, which waits for David's dollar amount. NOTHING IS PUSHED OR MERGED.
+>
+> **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0), head `bddb9a3`, 38 commits, unpushed. All 12 tasks
+> built, each task-reviewed, then a whole-branch review (verdict: fix before merge), its ONE fix wave, and a clean
+> scoped re-review ("all findings addressed, no new Critical or Important breakage"). Gates at head: vitest 1837
+> passing / 83 files, tsc 0, eslint 46 (cap 47), next build clean. 176 mutation kills recorded across the phase.
+>
+> **THE HARD STOP:** `tasks/research-scripts/phase1/run-live.ts` is built and has NEVER been run live. Its `--plan`
+> worst case for the 5 chosen records is **$1.10** (counties NY Onondaga, CO Larimer, NV Washoe, OK Tulsa, AR Benton;
+> the records are in the gitignored tasks/research-test/phase1/records.json). It refuses `--live` without
+> `--max-dollars`, refuses when the computed worst case exceeds it, and refuses a record with no owner count, all
+> before it loads any credential, opens the database or calls a vendor. David names the amount; then run it,
+> write the report (counts only) and finish Task 12. Its todo line is `[~]`, not ticked.
+>
+> **Decisions David made during execution (spec rows, in his words): D27-D41.** The load-bearing ones: **D32** the
+> dossier's own contacts are NEVER used (D21 arm b withdrawn and its code removed); **D30** a trailing TRS stays a
+> company; **D29** the step log stores a count, never names; **D33** a single-trace sentence shows only on a
+> single-trace row; **D34/D35** two billing edges accepted as known gaps (todo 19); **D36** the parcel key when a
+> record has no street; **D31/D37** the approved docs copy; **D38** a parcel row shows "Parcel <id>, <County>
+> County", never the internal key; **D39** a trace that finds nothing never erases a stored result that has
+> contacts; **D40** no cap on owners tried; **D41** a fourth no_lookup_key sentence naming the county.
+>
+> **Open for David, recorded as todo tasks:** 19 (the crash-window charge), 20 (Tier 2 single persists and bulk
+> settles still overwrite a reused row's result; D39 closed the Tier 1 half), 21 (five follow-ups from the final
+> re-review, none blocking).
+>
+> **Process notes David should hear once:** `--live` was passed three times during Task 12 development to test the
+> refusals (each refused before any credential, database or vendor; nothing spent); one implementer dispatched a
+> subagent against its contract and that subagent committed files and made a false claim in its commit message,
+> which the implementer caught and corrected; commit trailers name the model that wrote each commit; and
+> `trace_history` grants anon/authenticated TRUNCATE-class privileges (pre-existing, not reachable via PostgREST,
+> untouched here).
+>
+> **The SDD ledger is the recovery map and is NOT deleted:** `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/`
+> (gitignored) holds progress.md (every ruling and deferred minor), the 12 task briefs, resolutions and reports,
+> global-constraints.md and every review package. Keep it until the live check is done and the branch is finished.
+
+> # (PREVIOUS BLOCK, superseded 2026-09-23) READ FIRST. STATE AS OF 2026-09-22 (execution session). PHASE 1 BEING EXECUTED on branch `feat/tier1-phase1-single-traces`.
 >
 > **Branch** `feat/tier1-phase1-single-traces` (from main aea2ce0; NOT pushed, NOT merged). Subagent-driven execution of
 > `docs/superpowers/plans/2026-09-21-tier1-phase1-single-traces.md`. **Ledger (gitignored, the recovery map):**

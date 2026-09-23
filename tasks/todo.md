@@ -3153,6 +3153,20 @@ wrong, a FastAppend outage returning 5xx with a valid miss envelope gets retried
       F2 named making it real as one of the two available bets. The money half of F2 was fixed
       in the cron instead, so the dedup half stays entirely inside this task rather than being half
       done somewhere else.
+- [ ] 21. **FOLLOW-UPS from the Phase 1 final re-review, 2026-09-23. None blocks the merge.**
+      (a) The web single route's and the HighLevel push route's test harnesses do not emulate PostgREST column
+      projection, so their new select-column dependencies are unfenced: dropping `trace_job_id` from
+      app/api/trace/single/route.ts's existing-row select, or `parcel_id_local, county` from
+      app/api/integrations/highlevel/push/route.ts's two selects, leaves every test green. The v1 twin was fixed
+      with a `projectRow` helper; copy it to both. Trimming that column would silently make every bulk-owned
+      processing row reusable after 2 minutes, racing the cron.
+      (b) The new Tier 2 warnings comment in both single routes says the routing notes go to the step log and the
+      server log; they are simply dropped. Correct the comment.
+      (c) lib/trace/tier1Outcome.ts hard-codes `startsWith('APN|')` instead of the exported `isParcelKey`.
+      (d) History and the dashboard render ", TX" as the subtitle under a parcel label, because such a row has no
+      city. Customer-visible, not false.
+      (e) The inline trace.completed sends `address: null` for a parcel-keyed record rather than the new
+      "Parcel <id>, <County> County" label; the label exists and could be used.
 - [ ] 19. **KNOWN GAP, logged by David's choice 2026-09-22 (spec D35). A crashed single trace can charge once for
       nothing.** A Tier 1 single trace finds contacts, `deductWallet` succeeds, then the process dies before the
       persist, so the customer never sees the result. A resend within 24 hours that now finds nothing never runs
