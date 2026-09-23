@@ -166,6 +166,42 @@ export interface ExecuteOptions {
   priorSteps?: StepReport[] | null
   /** The clock, injectable for tests. */
   now?: () => number
+  /**
+   * Called with each step report AS IT IS PRODUCED, before the next vendor call starts.
+   *
+   * WHAT IT IS FOR, AND WHY ONLY A QUEUE USES IT (spec 5.2). A single trace writes trace_steps
+   * ONCE, after the ladder finishes: its request is bounded by SINGLE_ROUTE_BUDGET_MS and is
+   * guaranteed to reach its own persist. A cron worker is not: the run can be killed between two
+   * vendor calls, and the row is then re-claimed one rung up the ladder. Without the answers
+   * already on the row, that second attempt asks the same questions again and BUYS THEM AGAIN.
+   *
+   * Awaited, so the worker's write lands before the next call is made rather than racing it.
+   * A hook that throws is logged and swallowed: this module never throws (see the header), and a
+   * failed bookkeeping write must not take the vendor work with it.
+   */
+  onStep?: (step: StepReport) => void | Promise<void>
+  /**
+   * Asked immediately BEFORE each vendor call this ladder is about to make. False refuses the call.
+   *
+   * WHAT IT IS FOR (spec 5.3). It is where the shared per-minute vendor budget is drawn, ONE CALL
+   * AT A TIME, at the moment the call is about to happen. A budget reserved per RECORD is a guess at
+   * that record's worst case, and lib/routing/ownerRoute.ts says of its own tier 2 figure "A FLOOR,
+   * NOT A CEILING": under D21(c) and D40 a tier 2 record tries every owner the dossier names with no
+   * cap, so the guess can be exceeded and the budget bounds nothing. Asked here it cannot be.
+   *
+   * IT IS NOT ASKED ABOUT A CALL THAT WAS NEVER GOING TO HAPPEN: not for a step skipped behind an
+   * earlier hit or failure, not for an answer replayed from the step log, and not for a call the
+   * request deadline already refused. Reserving for those would spend budget on calls nobody makes
+   * and throttle records that could have run.
+   *
+   * A REFUSAL IS NOT A FAILURE (spec 5.1). Nothing was asked of a vendor, so `success` stays true
+   * and `error` stays unset; the step is recorded `skipped` with a note, THE LADDER STOPS, and
+   * `throttled` is set on the result so the caller can put its row back on the rung it came from
+   * with no attempt spent and nothing said to the customer.
+   *
+   * Awaited, because the budget lives in the database.
+   */
+  canSpend?: (step: RouteStep) => boolean | Promise<boolean>
 }
 
 /** A logged answer older than this is never reused; the record runs fresh instead (spec 5.2). */
@@ -207,6 +243,21 @@ export interface ExecutionResult {
   warnings: string[]
   /** Set only on a FAILURE. Never set for a miss. */
   error?: string
+  /**
+   * `canSpend` refused a call this ladder was about to make (spec 5.3).
+   *
+   * OPTIONAL, so that the two test files which build an ExecutionResult literal
+   * (lib/trace/__tests__/fullPropertyTrace.test.ts:30, lib/trace/__tests__/tier1Outcome.test.ts:24)
+   * keep typechecking. Absent means false, and it can only ever be true for a caller that passed
+   * `canSpend`, which is the TIER 1 cron lane and nothing else. The tier 2 cron reserves once before
+   * a record's first vendor call and passes no canSpend, so a tier 2 record cannot be refused
+   * part-way through a ladder whose dossier it has already bought.
+   *
+   * EVERY STEP BEFORE THE REFUSED ONE REALLY HAPPENED and is in `steps` with its own cost and
+   * timestamp. Nothing about this record is settled: the caller releases it, and the answers already
+   * bought are replayed from the step log next time (spec 5.2) rather than bought again.
+   */
+  throttled?: boolean
 }
 
 /** The contact vendors. The dossier is not one of them: it finds the OWNER, and which
@@ -429,12 +480,16 @@ interface StageResult {
   /** The call that hit, if one did. */
   hit: VendorCall | null
   failure: string | null
+  /** canSpend refused a call. The stage stopped there; nothing after it was attempted. */
+  throttled: boolean
 }
 
 interface StageContext {
   deadlineMs?: number
   prior: StepReport[]
   now: () => number
+  onStep?: (step: StepReport) => void | Promise<void>
+  canSpend?: (step: RouteStep) => boolean | Promise<boolean>
 }
 
 const isContactStep = (kind: StepKind): boolean => CONTACT_VENDOR_BY_STEP[kind] !== null
@@ -472,10 +527,30 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
   let spend = 0
   let hit: VendorCall | null = null
   let failure: string | null = null
+  let throttled = false
+
+  /**
+   * Record one report, and hand it to the caller's hook before the next step runs.
+   *
+   * ONE FUNNEL, SIX CALL SITES. This stage pushes a report from six places (skipped after a hit
+   * or a failure, a reused answer, a call the budget could not start, our own refused request, a
+   * vendor failure, and an answer). A hook wired into five of them is a step log missing whichever
+   * one the next reader forgets, which for a queue means a resumed row re-buying that step.
+   */
+  const record = async (report: StepReport): Promise<void> => {
+    reports.push(report)
+    if (!ctx.onStep) return
+    try {
+      await ctx.onStep(report)
+    } catch (err) {
+      // NEVER THROWS is this module's contract. The console is the only operator channel PTP has.
+      console.error('[executeRoute] onStep failed, the ladder continued:', err)
+    }
+  }
 
   for (const step of steps) {
     if (hit || failure) {
-      reports.push({
+      await record({
         kind: step.kind,
         outcome: 'skipped',
         cost: 0,
@@ -491,7 +566,7 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
     // It keeps its own time and cost, and adds nothing to this run's spend.
     const prior = reusableAnswer(ctx, requestKey)
     if (prior) {
-      reports.push({ ...prior, reused: true })
+      await record({ ...prior, reused: true })
       continue
     }
 
@@ -500,11 +575,37 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
     const left = ctx.deadlineMs === undefined ? undefined : ctx.deadlineMs - ctx.now()
     if (left !== undefined && left < VENDOR_TIMEOUT.MIN_CALL_MS) {
       failure = 'The request ran out of time before this lookup could start.'
-      reports.push({
+      await record({
         kind: step.kind, outcome: 'failed', cost: 0, error: failure,
         at: new Date(ctx.now()).toISOString(), requestKey,
       })
       continue
+    }
+
+    // THE SHARED PER-MINUTE VENDOR BUDGET (spec 5.3), asked for THIS call, one call at a time, at
+    // the last moment before it is made. A record cannot exceed a reservation it takes here, which
+    // is the difference between a budget that bounds the vendor's rate limit and one that describes
+    // a hoped-for average.
+    //
+    // OPTIONAL, AND ONLY THE TIER 1 CRON LANE PASSES IT. A caller whose ladder cannot be rewound
+    // must reserve before the record starts instead, because a refusal here stops a ladder that may
+    // already have been paid for: see the tier 2 cron, which passes no canSpend for that reason.
+    //
+    // A REFUSAL IS NOT A FAILURE (spec 5.1): `failure` is deliberately NOT set, so the record does
+    // not end busy_try_again and the customer is told nothing, because nothing happened to their
+    // record. BREAK, not continue: the budget said this minute has no room for this record, not "ask
+    // the other vendor instead", and a `skipped` report for every remaining step would claim they
+    // were considered when they were not reached.
+    if (ctx.canSpend && !(await ctx.canSpend(step))) {
+      throttled = true
+      await record({
+        kind: step.kind,
+        outcome: 'skipped',
+        cost: 0,
+        note: 'the per-minute vendor budget could not cover this call; not attempted',
+        requestKey,
+      })
+      break
     }
 
     const call = await callVendor(step, deps, left === undefined ? undefined : { timeoutMs: left })
@@ -513,7 +614,7 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
     if (call.inputError) {
       // OUR request, refused before spending (no name, no city, no state). Not a vendor failure, so
       // never busy_try_again (spec 5.1): recorded as not asked, and the next step runs.
-      reports.push({
+      await record({
         kind: step.kind, outcome: 'skipped', cost: 0,
         note: `not sent: ${call.error ?? 'refused'}`, at, requestKey,
       })
@@ -522,13 +623,13 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
 
     if (!call.success) {
       failure = call.error ?? `${step.kind} failed`
-      reports.push({ kind: step.kind, outcome: 'failed', cost: 0, error: failure, at, requestKey })
+      await record({ kind: step.kind, outcome: 'failed', cost: 0, error: failure, at, requestKey })
       continue
     }
 
     spend = round2(spend + call.cost)
     const delivered = !isContactStep(step.kind) || hasPhoneOrEmail(call.contacts)
-    reports.push({
+    await record({
       kind: step.kind,
       outcome: call.nameNotMatched ? 'name_not_matched' : call.hit ? 'hit' : 'miss',
       cost: call.cost,
@@ -544,7 +645,7 @@ async function runStage(steps: RouteStep[], deps: RouteDeps, ctx: StageContext):
     if (call.hit && delivered) hit = call
   }
 
-  return { reports, spend, hit, failure }
+  return { reports, spend, hit, failure, throttled }
 }
 
 /**
@@ -631,6 +732,8 @@ export async function executeRoute(
     // and D29 requires that no name ever reaches the log, no matter how a caller got here.
     prior: stepLogFrom(options.priorSteps),
     now: options.now ?? Date.now,
+    onStep: options.onStep,
+    canSpend: options.canSpend,
   }
   const warnings = [...plan.warnings]
   const result: ExecutionResult = {
@@ -655,6 +758,16 @@ export async function executeRoute(
   const pass1 = await runStage(plan.steps, deps, ctx)
   result.steps = pass1.reports
   result.vendorSpend = pass1.spend
+
+  // THROTTLED BEFORE THE LADDER COULD FINISH (spec 5.3). Nothing is judged here: on a tier 1 plan
+  // pass 1 IS the contact call, so a throttle means the question was never put, and returning
+  // `contactsFound: false` without this flag would let a caller file "we looked and found nothing"
+  // on a lookup that never happened (CLAUDE.md rule 7). The tier 2 re-plan below is not entered
+  // either: there is no owner to discover when the dossier was never asked.
+  if (pass1.throttled) {
+    result.throttled = true
+    return result
+  }
 
   if (pass1.failure) {
     result.success = false
@@ -724,6 +837,14 @@ export async function executeRoute(
     const stage = await runStage(contactPlan.steps, deps, ctx)
     result.steps = [...result.steps, ...stage.reports]
     result.vendorSpend = round2(result.vendorSpend + stage.spend)
+
+    // The dossier above was bought and its record stands. This owner's contact lookup was refused
+    // by the budget, and so is every owner after it, so the caller releases the record rather than
+    // settling it as "no contacts found" for owners nobody asked about.
+    if (stage.throttled) {
+      result.throttled = true
+      return result
+    }
 
     if (stage.failure) {
       // The dossier spend above stands and the record is good. Only the contact call is unknown.

@@ -4,6 +4,39 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (h): Tier 1 Phase 2A, Task 2: the Tier 1 ladder and two per-step hooks.
+
+- lib/trace/tier1Queue.ts adds the Tier 1 rungs to the EXISTING ai_research_status column, with
+  every value prefixed tier1_ so the set is disjoint from the legacy entity ladder's. One cron
+  will run both lanes and the disjointness is what makes that safe; a test asserts it directly,
+  and the mutation that reverts attempt 1 to a bare 'queued' goes red.
+- Two terminals rather than four: tier1_done and tier1_failed. The Tier 1 reason lives in
+  outcome_code, not in the status column, which is the difference from the tier 2 ladder.
+- The ladder's rungs are for a DEAD CLAIM only. D7 and spec 5.1 say a vendor failure is never
+  retried: the record ends busy_try_again at once, free.
+- lib/trace/__tests__/entityTraceAttempts.test.ts is new: that ladder had no test file at all.
+- executeRoute gains ExecuteOptions.onStep, awaited, called from all SEVEN report sites through one
+  recorder. Each of the seven was mutated separately (L-018), each driven by its own case, and each
+  went red. A hook that throws is logged and swallowed, because this module never throws.
+- executeRoute also gains ExecuteOptions.canSpend, asked immediately before each vendor call, and
+  ExecutionResult.throttled (optional, so the two files that build an ExecutionResult literal keep
+  typechecking). It is where Task 6's shared per-minute budget is drawn ONE CALL AT A TIME by the
+  TIER 1 cron lane, which is its only caller: a reservation taken per record is a guess at a worst
+  case that D21(c) and D40 let a tier 2 record exceed, and ownerRoute.ts calls its own figure "A
+  FLOOR, NOT A CEILING". The tier 2 cron passes no canSpend, because a refusal here stops a ladder
+  whose dossier is already bought. A refusal is not a
+  failure (spec 5.1): the ladder stops, nothing is charged, nothing is said, and every answer
+  already bought stays in the log so the released row replays it instead of buying it again.
+- The two hook test blocks use John Smith Revocable Trust, not Smith Family Trust. Measured:
+  D16 strips the trust words of the second one down to SMITH, which leaves no first name, so it
+  plans ONE step and cannot fence a per-step hook.
+- ONE TEST BEYOND THE BRIEF'S 32, added deliberately. Moving the canSpend gate above the reuse
+  branch (a mutation) survived every one of the 32 prescribed tests, including the one named to
+  catch it ("never asks the budget about a step it was not going to call anyway"), because that
+  test only covers a step skipped behind an earlier HIT, never a REUSED step. Added a 33rd test
+  pairing priorSteps with canSpend to close the gap; it goes red under that mutation. Suite is
+  1935 passing, not the predicted 1934.
+
 ## 2026-09-23 (g): Tier 1 Phase 2A, Task 1: both ai_research_status indexes widened.
 
 - Migration 20260923_tier1_queue_index.sql rebuilds idx_trace_history_research_queue as
