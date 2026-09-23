@@ -4,7 +4,7 @@
 
 **Goal:** A web bulk upload stops building a Tracerfy person CSV and puts every owned row on a Tier 1 queue that a cron works through `planRoute()` + `executeRoute()`, one record at a time, billed through the same function a single trace bills through. A row with no city is accepted and traced instead of being dropped in the browser, and every row reports its own outcome and, when found, which key found the owner.
 
-**Architecture:** One new ladder module (`lib/trace/tier1Queue.ts`) adds Tier 1 rungs and terminals to the EXISTING `ai_research_status` / `ai_research_claimed_at` columns, with status values disjoint from the legacy entity ladder's, so one cron file can run two lanes and no row can be claimed by both. `app/api/cron/sweep-entity-traces` becomes that cron: it keeps its legacy entity lane untouched for rows the API and MCP surfaces still enqueue, and gains a Tier 1 lane copied from the live Tier 2 cron's claim protocol (atomic compare-and-swap, shared cursor across `Promise.all` workers, per-rung stale-claim revert). The money is not reimplemented: `lib/trace/singleTier1.ts` exports a new `runTier1Record` that both single routes and the cron call, so plan, execute, judge, charge and persist happen in exactly one place. A new `lib/trace/vendorRateBudget.ts` plus one table and one RPC give the Tier 1 and Tier 2 crons ONE shared vendor budget over a SLIDING 60-second window, drawn one call at a time. `executeRoute` gains two per-step hooks: `onStep`, so a queue worker can write the step log as each answer arrives, which is what lets a dead claim resume instead of re-buying answered steps; and `canSpend`, asked immediately before each vendor call, which is what makes the budget a ceiling rather than an estimate.
+**Architecture:** One new ladder module (`lib/trace/tier1Queue.ts`) adds Tier 1 rungs and terminals to the EXISTING `ai_research_status` / `ai_research_claimed_at` columns, with status values disjoint from the legacy entity ladder's, so one cron file can run two lanes and no row can be claimed by both. `app/api/cron/sweep-entity-traces` becomes that cron: it keeps its legacy entity lane untouched for rows the API and MCP surfaces still enqueue, and gains a Tier 1 lane copied from the live Tier 2 cron's claim protocol (atomic compare-and-swap, shared cursor across `Promise.all` workers, per-rung stale-claim revert). The money is not reimplemented: `lib/trace/singleTier1.ts` exports a new `runTier1Record` that both single routes and the cron call, so plan, execute, judge, charge and persist happen in exactly one place. A new `lib/trace/vendorRateBudget.ts` plus one table and one RPC give the Tier 1 and Tier 2 crons ONE shared vendor budget over a SLIDING 60-second window, drawn one call at a time. `executeRoute` gains two per-step hooks: `onStep`, so a queue worker can write the step log as each answer arrives, which is what lets a dead claim resume instead of re-buying answered steps; and `canSpend`, asked immediately before each vendor call, which the TIER 1 lane passes so that lane draws the budget one call at a time. The TIER 2 cron passes no `canSpend`: it reserves ONCE, before a record's first vendor call, and a record whose dossier has been bought then runs its ladder to completion. No record is refused mid-ladder and no dossier is ever bought twice.
 
 **Tech Stack:** Next.js 16 route handlers, Supabase (service-role client for every write, one new SECURITY DEFINER RPC), TypeScript strict, vitest 4.1 (node environment; components rendered with `react-dom/server` `renderToStaticMarkup`).
 
@@ -57,50 +57,34 @@ The dependency graph allows the customer-visible work early, and this order puts
 
 ## Hard stops
 
-1. **Before Task 1:** David approves this plan and answers, or explicitly defers, the four open decisions below. A deferral is an answer: it means 2A ships today's behaviour on that point.
+1. **Before Task 1:** David approves this plan. Nothing else in it waits on an answer from him: the section below records two open todos and two disclosed costs, and 2A builds and changes none of them.
 2. **Before the live check in Task 9:** David names a dollar amount, and the CONTROLLER runs the spend, not the executor. The runner also refuses to spend unless `PTP_LIVE_RUN=1` is in the environment (lesson L-031). The executor builds it and proves the refusals; it never passes `--live`.
 
 Nothing else stops the executor except a genuine plan defect: a step that cannot work as written, or a finding that changes what is charged, reported or measured. That goes to David as a QUESTION with where it came from (lesson L-021), before Task 1 where possible, never as a silent ruling in a ledger (lesson L-028).
 
 ---
 
-## Open decisions for David: SURFACED, NOT SETTLED. Build none of them.
+## Open items recorded for David. Build none of them.
 
-Each carries the exact current behaviour and the exact proposed change, per lesson L-028. **If David does not answer one, 2A ships the "today" column and nothing in this plan changes.**
+Two open todos and two disclosed costs. **Neither todo is a question this plan is waiting on, and neither disclosure asks him for anything: 2A ships today's behaviour on all four.** Each carries the exact current behaviour, per lesson L-028.
 
-### Decision A. The FastAppend company name-match guard.
-
-- **Today:** `parseBusinessTraceResponse` (`lib/tracerfy/client.ts:515`) takes ONE argument, the response body, and performs no name comparison at all. The person parser directly below it, `parsePersonTraceResponse` (`lib/tracerfy/client.ts:637`), takes a second `want` argument and enforces D6 through `personMatchesName` (`:422`), with an explicit "NO persons[0] FALLBACK" comment. Whatever company FastAppend decides matched, we accept, we name its principal, we bill the Tier 1 rate, and the contact can be pushed to a CRM as the property owner.
-- **Measured, 2026-09-23** (`tasks/phase2-fastappend-probe.md`): owner of record `CITY OF SOUTH TUCSON` returned contacts for `CITY OF SOUTH TUCSON BUSINESS ASSOCIATION`, a different legal entity, with people carrying `PRESIDENT,DIRECTOR` roles. Billable at $0.15 to the customer, $0.10 of vendor spend.
-- **Proposed change:** `parseBusinessTraceResponse(body, want?: { company_name?: string })` compares the `company_name` the vendor returns on every hit (confirmed present on both hits in the probe's raw responses) against the name asked for, and a mismatch returns the same shape a person non-match returns: `hit: true`, `contacts: null`, `nameNotMatched: true`, credits recorded in the step log, nothing charged, the ladder moves on. `executeRoute`'s `entityRequest(step)` already carries `company_name`, so the caller has the name in hand.
-- **Why it is David's:** it changes what a customer is charged for. 2A gives this lane the company rows of every web upload, which is bulk volume it has never had.
-
-### Decision B. Whether the app tells a customer that company rows resolve far less often.
-
-- **Today:** nothing on the bulk page, in the CSV or in the API says anything about the company lane's yield. A company row that misses shows `no_match` with the sentence "We looked this owner up by company name and found no match. You were not charged."
-- **Measured:** 2 hits in 10 across five entity classes and ten states (`tasks/phase2-fastappend-probe.md`), and one of those two is Decision A's name collision. With the 3 prior misses from Phase 0 and the Phase 1 live check, that is roughly 1 to 2 genuine hits in 13. The lane is not dead, so spec Section 10's removal trigger does not fire.
-- **Proposed change:** none is written here. If David wants one, he names the words. Any sentence would have to pass the spec 7.3 copy rules (states the charge, no price, no dash, no asterisk, no emoji) and would be a new customer-facing string, which is his to approve and not the implementer's to invent.
-
-### Decision C. Todo task 23, the Tier 2 reporting gap.
+### Item 1. Todo task 23, the Tier 2 reporting gap.
 
 - **Today:** a charged Tier 2 record carries `outcome_code` NULL, `found_by` NULL and no sentence, while the free Tier 1 misses beside it each carry one. Measured on L5 of the Phase 1 live check (AR Benton, parcel with no city): charged $0.25, vendor cost $0.00, no contacts, no property record, no reason. Spec D10 says every record reports an outcome code and a sentence.
 - **Already ruled:** David, 2026-09-23: "The L5 billing behavior was accurate. It costs $0.25 no matter the result, per request, not per success, when the dossier is used." The $0.25 stands and is not to be revisited.
-- **Proposed change:** none in 2A. The reporting half is what stays open, and it is a Tier 2 change, so it is outside this phase's scope as well as outside its decisions. Recorded here because 2A touches the same reporting machinery and this is the moment he can fold it in if he wants it.
+- **Proposed change:** none in 2A. The reporting half is what stays open, and it is a Tier 2 change, so it is outside this phase's scope. Recorded here because 2A touches the same reporting machinery and this is the moment he can fold it in if he wants it.
 
-### Decision D. Todo task 20's remainder: the Tier 2 persists and the bulk settles still overwrite a reused row's paid result.
+### Item 2. Todo task 20's remainder: the Tier 2 persists and the bulk settles still overwrite a reused row's paid result.
 
 - **Today:** D39 closed the Tier 1 SINGLE half only (`lib/trace/singleTier1.ts` keeps the paid contacts). The two Tier 2 single persists (`app/api/trace/single/route.ts`, `app/api/v1/trace/single/route.ts`) and the bulk settles still write `trace_result`, `phone_count`, `email_count` and `is_successful` over a row that already carries paid contacts, so a customer who paid for contacts on an address and later traced it again, finding nothing, loses the earlier contacts from History and the CSV.
 - **Proposed change:** none in 2A. The new Tier 1 cron inherits D39 for free, because it bills and persists through the same `runTier1Record` the single routes use (Task 7), so the WEB BULK Tier 1 path is covered from the day it ships. What stays open is the two Tier 2 single persists and `settleBulkJob`. It changes stored customer data, so it is David's.
 
-### Decision E. The `no_lookup_key` sentence names a field the web upload has no column for.
+### Items 3 and 4. The two disclosed costs.
 
-Found while writing this plan, and surfaced rather than fixed, because it is customer-facing copy (L-028).
+Disclosures, not questions. They are stated here so nobody reads them as oversights, and in the customer's words in Task 9's hand-off; no copy, column or charge changes anywhere in 2A because of them.
 
-- **Today:** a Tier 1 record with a street, a state and no city gets `no_lookup_key`, and `noLookupKeyReason('city_and_parcel')` (`lib/trace/tier1Outcome.ts:102`) renders exactly: `This record is missing the city and the parcel ID, so it could not be looked up. You were not charged. Send it again with the city or the parcel ID.` On the API that advice is fully actionable (D23: the API takes a parcel id). On the WEB upload it is half actionable: D5 keeps the web app address-only, so there is no parcel ID column in the template and no way for the customer to supply one.
-- **Why it now matters:** before 2A the page dropped city-less rows in the browser, so no web customer ever saw this sentence. Task 3 stops the dropping, so from 2A every city-less web row shows it.
-- **It is not false.** It names two ways to fix the record and the web customer can use one of them. The cost is that half the advice points at a field their upload has no column for.
-- **Proposed change, if David wants one:** a second pair in `MISSING_WORDS`, used only when the record carries no parcel id AND no county, reading `This record is missing the city, so it could not be looked up. You were not charged. Send it again with the city.` Nothing else about the outcome, the charge or the routing changes.
-- **Default if he says nothing:** the sentence above ships unchanged.
+- **A reused row that already holds contacts the customer PAID for shows a BLANK `found_by`** on the results CSV from submit until this trace writes its own (Task 3's clear-on-reuse). Contacts, charge and counts are untouched. Marked `DISCLOSED COST 1 OF 2` at the line that does it.
+- **On the D39 path a row settles `tier1_done` with BOTH new CSV columns and `skip_reason` blank** while `is_successful` stays true and `records_matched` counts it, because its contacts and charge belong to an earlier trace and labelling them with this trace's key would be wrong. So the row a customer is most likely to ask about is the one row whose new columns say nothing. Blank rather than wrong, and changing either is a D33 or D39 change to stored customer data. Marked `DISCLOSED COST 2 OF 2` at the line that does it.
 
 ---
 ## Global Constraints
@@ -126,7 +110,7 @@ Every task's requirements include this whole section.
 
 **ONE billing path.** `runSingleTier1` already does plan, execute, judge, bill and persist for a single row, which is exactly what a queue worker needs per record. **The cron must not reimplement any of it.** Task 7 extracts the shared core and Task 8's cron calls it. Two money derivations drift, and that is the Track A / Track B defect deleted on 2026-09-23 (History 2026-09-23 (e), lesson L-030).
 
-**Throttling is not a failure (spec 5.1).** A record the vendor rate budget cannot cover this minute is released to the SAME rung with its claim cleared, spends nothing, tells the customer nothing, and does not consume an attempt. It waits for the next minute.
+**Throttling is not a failure (spec 5.1), and it spends nothing. Literally nothing, on both lanes.** A record the vendor rate budget cannot cover this minute is released to the SAME rung with its claim cleared, tells the customer nothing, and does not consume an attempt. It waits for the next minute. **Nothing had been bought when it was refused, because neither lane can refuse a record part-way through its ladder:** the Tier 1 lane's steps are independent, so a refusal there precedes the call it was asked about; and the Tier 2 lane reserves ONCE, before the record's first vendor call, so a Tier 2 record is either refused before it begins or runs to completion. **No record is ever released after a dossier has been bought, and no dossier is ever bought twice.**
 
 **Status values must fit `ai_research_status` VARCHAR(20)** (spec 3.2, migration `20260130_add_ai_research.sql:3`). Every value this phase introduces, with its character count:
 
@@ -148,7 +132,7 @@ The longest is `tier1_processing_5` at 18, two characters inside the column. A w
 - 120 rows a minute clears a 500-record job in **4.2 minutes**, inside spec 3.2's 2-to-5-minute target.
 - Vendor calls per record on the WEB path specifically: the page sends no parcel id (D5), so `planRoute` can emit at most ONE Tracerfy step per record (`TRACERFY_INSTANT_NAMED`; `TRACERFY_PARCEL_APN` requires an apn and a county, which the web upload never supplies) and at most one FastAppend step. So the Tier 1 lane's worst case is **120 Tracerfy calls and 120 FastAppend calls a minute**, not the 180 the brief estimated from a 1.5-calls-per-record average. Measured demand is lower still: of the four Tier 1 records in the Phase 1 live check, three made one Tracerfy call and one made none (the company went to FastAppend), so ~0.75 Tracerfy calls per record.
 - **THESE NUMBERS ARE A THROUGHPUT ESTIMATE AND NOT THE VENDOR RATE CEILING, and nothing in this plan may be written as if they were.** The tier 2 cron's usual 240 Tracerfy calls a minute is a **FLOOR**: `lib/routing/ownerRoute.ts` says so about that very figure, in capitals, and D21(c) with D40 put no cap on how many owners a dossier record tries, which the Phase 1 plan's carried item 2 puts at 2 + 2N calls for N individual owners, 8 for three. At three owners a record the tier 2 lane alone wants 960 a minute, and the 50-call gap between 450 and the vendor's 500 does not absorb that. So **120 + 240 = 360 of 450 describes the ordinary case and proves nothing.**
-- **What holds the limit is `lib/trace/vendorRateBudget.ts`, per CALL, over a SLIDING 60-second window** (Task 6, spec 5.3). Task 6's header states the guarantee in full and states what it does not give: **there is no fairness guarantee between the two lanes**, because one shared counter cannot provide one, and that is a recorded divergence from spec 5.3's "neither starves the other" rather than something this plan claims to have solved.
+- **What holds the limit is `lib/trace/vendorRateBudget.ts`, over a SLIDING 60-second window** (Task 6, spec 5.3), drawn per CALL on the Tier 1 lane and ONCE PER RECORD, before the record's first vendor call, on the Tier 2 lane. Task 6's header states what each of those bounds and states the overshoot the Tier 2 shape allows, with the arithmetic.
 
 **Every money or matching guard gets a test that FAILS when the guard is deleted, proven by deleting it** (lesson L-015), and **every call site is mutated, not one representative** (lesson L-018). A mutation caught only by `tsc` is reported as "tsc only" and not counted as a kill (lesson L-020). An equivalent mutant is reported as equivalent with its evidence (lesson L-018).
 
@@ -199,7 +183,7 @@ The longest is `tier1_processing_5` at 18, two characters inside the column. A w
 | `app/api/trace/single/download/__tests__/route.test.ts` | Modify (T5) | The THIRD `toHaveLength(103)`, at `:98`, plus its prose |
 | `app/api/trace/bulk/download/route.ts`, `app/api/trace/single/download/route.ts`, `app/api/trace/bulk/download/__tests__/route.test.ts` | Modify (T5) | Prose only: the stale column count in a comment |
 | `supabase/migrations/20260923_vendor_rate_budget.sql` | Create (T6) | `vendor_rate_windows` table, `claim_vendor_rate` RPC, grants |
-| `lib/trace/vendorRateBudget.ts` | Create (T6) | The one shared budget both crons draw from, per call, over a sliding 60 seconds; plus `reservationForSteps` |
+| `lib/trace/vendorRateBudget.ts` | Create (T6) | The one shared budget both crons draw from over a sliding 60 seconds, per call on the Tier 1 lane and once per record on the Tier 2 lane; plus `reservationForSteps` |
 | `app/api/cron/sweep-property-traces/route.ts` | Modify (T6) | Reserve from the shared budget; correct the sizing comment |
 | `app/api/v1/trace/bulk/route.ts` | Modify (T6) | One argument: `tier1: 0` |
 | `lib/suite/mcp-tools.ts` | Modify (T6) | One argument: `tier1: 0` |
@@ -407,7 +391,7 @@ EOF
 - Produces from `lib/trace/tier1Queue.ts`: `TIER1_MAX_ATTEMPTS: 5`, `TIER1_SETTLED_STATUS: 'tier1_done'`, `TIER1_FAILED_STATUS: 'tier1_failed'`, `tier1QueuedStatusFor(attempt: number): string`, `tier1ProcessingStatusFor(attempt: number): string`, `TIER1_ATTEMPTS: number[]`, `TIER1_QUEUED_STATUSES: string[]`, `TIER1_PROCESSING_STATUSES: string[]`, `TIER1_PENDING_STATUSES: string[]`, `tier1AttemptOf(status): number`, `isTier1QueuePending(status): boolean`, `isTier1QueueRow(status): boolean`, `tier1NextAfterFailedAttempt(attempt): { status: string; exhausted: boolean }`.
 - Produces from `lib/routing/executeRoute.ts`: `ExecuteOptions.onStep?: (step: StepReport) => void | Promise<void>` and `ExecuteOptions.canSpend?: (step: RouteStep) => boolean | Promise<boolean>`, plus `ExecutionResult.throttled?: boolean`.
 
-**Why both hooks land in this one task.** They are the same funnel in the same function, three lines apart: `onStep` fires after a step report is produced, `canSpend` fires immediately before a vendor call is dispatched. Splitting them across two tasks would mean editing `runStage`'s loop twice and mutating the same six report sites twice. `canSpend` is what makes the shared vendor budget bound anything (Task 6, spec 5.3): a reservation taken per CALL at the point the call is about to be made cannot be exceeded, whereas a per-record constant can.
+**Why both hooks land in this one task.** They are the same funnel in the same function, three lines apart: `onStep` fires after a step report is produced, `canSpend` fires immediately before a vendor call is dispatched. Splitting them across two tasks would mean editing `runStage`'s loop twice and mutating the same six report sites twice. `canSpend` is how the TIER 1 lane draws the shared vendor budget (Task 6, spec 5.3): a reservation taken per CALL at the point the call is about to be made cannot be exceeded, whereas a per-record constant can. **The Tier 2 cron passes no `canSpend`** and reserves once before a record starts, because a refusal mid-ladder there would mean re-running a record whose dossier is already bought; the hook is built here all the same, because the Tier 1 lane is its caller in Task 8.
 
 **`throttled` is OPTIONAL on `ExecutionResult`, deliberately.** `lib/trace/__tests__/fullPropertyTrace.test.ts:30` and `lib/trace/__tests__/tier1Outcome.test.ts:24` both build an `ExecutionResult` literal; a required field would make both a `tsc` error for no behavioural gain. Absent means false, and `executeRoute` sets it only when a hook actually refused.
 
@@ -1018,11 +1002,14 @@ describe('onStep, the per-arrival step-log hook (spec 5.2)', () => {
 
 describe('canSpend, the per-call budget hook (spec 5.3)', () => {
   it('is asked once per call, with the step about to be made, BEFORE the vendor', async () => {
-    // WHY PER CALL AND NOT PER RECORD. A per-record reservation is a GUESS at the worst case, and
-    // lib/routing/ownerRoute.ts says of its own tier 2 figure "A FLOOR, NOT A CEILING": under D21(c)
-    // and D40 a tier 2 record tries every owner the dossier names, with no cap, so the guess can be
-    // exceeded and the budget bounds nothing. A reservation taken here, one call at a time, at the
-    // moment the call is about to be made, cannot be exceeded.
+    // WHY THE HOOK IS PER CALL. A reservation taken here, one call at a time, at the moment the call
+    // is about to be made, cannot be exceeded; a per-record figure can, because lib/routing/
+    // ownerRoute.ts says of its own tier 2 figure "A FLOOR, NOT A CEILING" and D21(c) with D40 let a
+    // tier 2 record try every owner the dossier names, with no cap. THE TIER 1 LANE IS THE ONLY
+    // CALLER THAT PASSES THIS HOOK, because its steps are independent and a refusal costs it nothing.
+    // The tier 2 cron reserves once before a record starts and accepts a stated overshoot instead
+    // (Task 6): refusing it here, mid-ladder, would mean re-running the record and re-buying its
+    // dossier, and that is out.
     const order: string[] = []
     const plan = planRoute(TWO_STEP_TRUST, 'pro')
     const asked: string[] = []
@@ -1200,7 +1187,9 @@ In the same file, in `ExecutionResult`, after `needsManualReview`, add:
    * OPTIONAL, so that the two test files which build an ExecutionResult literal
    * (lib/trace/__tests__/fullPropertyTrace.test.ts:30, lib/trace/__tests__/tier1Outcome.test.ts:24)
    * keep typechecking. Absent means false, and it can only ever be true for a caller that passed
-   * `canSpend`, which is the two crons and nothing else.
+   * `canSpend`, which is the TIER 1 cron lane and nothing else. The tier 2 cron reserves once before
+   * a record's first vendor call and passes no canSpend, so a tier 2 record cannot be refused
+   * part-way through a ladder whose dossier it has already bought.
    *
    * EVERY STEP BEFORE THE REFUSED ONE REALLY HAPPENED and is in `steps` with its own cost and
    * timestamp. Nothing about this record is settled: the caller releases it, and the answers already
@@ -1269,6 +1258,10 @@ Then add the budget gate. It goes AFTER the request-deadline branch (the `left <
     // the last moment before it is made. A record cannot exceed a reservation it takes here, which
     // is the difference between a budget that bounds the vendor's rate limit and one that describes
     // a hoped-for average.
+    //
+    // OPTIONAL, AND ONLY THE TIER 1 CRON LANE PASSES IT. A caller whose ladder cannot be rewound
+    // must reserve before the record starts instead, because a refusal here stops a ladder that may
+    // already have been paid for: see the tier 2 cron, which passes no canSpend for that reason.
     //
     // A REFUSAL IS NOT A FAILURE (spec 5.1): `failure` is deliberately NOT set, so the record does
     // not end busy_try_again and the customer is told nothing, because nothing happened to their
@@ -1470,9 +1463,11 @@ Tick Task 2 in `tasks/todo.md` and add at the top of `History.md`:
   went red. A hook that throws is logged and swallowed, because this module never throws.
 - executeRoute also gains ExecuteOptions.canSpend, asked immediately before each vendor call, and
   ExecutionResult.throttled (optional, so the two files that build an ExecutionResult literal keep
-  typechecking). It is where Task 6's shared per-minute budget is drawn, ONE CALL AT A TIME: a
-  reservation taken per record is a guess at a worst case that D21(c) and D40 let a tier 2 record
-  exceed, and ownerRoute.ts calls its own figure "A FLOOR, NOT A CEILING". A refusal is not a
+  typechecking). It is where Task 6's shared per-minute budget is drawn ONE CALL AT A TIME by the
+  TIER 1 cron lane, which is its only caller: a reservation taken per record is a guess at a worst
+  case that D21(c) and D40 let a tier 2 record exceed, and ownerRoute.ts calls its own figure "A
+  FLOOR, NOT A CEILING". The tier 2 cron passes no canSpend, because a refusal here stops a ladder
+  whose dossier is already bought. A refusal is not a
   failure (spec 5.1): the ladder stops, nothing is charged, nothing is said, and every answer
   already bought stays in the log so the released row replays it instead of buying it again.
 - The two hook test blocks use John Smith Revocable Trust, not Smith Family Trust. Measured:
@@ -3613,19 +3608,29 @@ Spec 5.3: ONE budget of 450 Tracerfy calls and 450 FastAppend calls a minute, sh
 
 #### What the shared budget guarantees, and what it does not
 
-**It guarantees: no more than 450 calls to either vendor in any 60-second span.** Three things together are what make that a ceiling rather than an estimate.
+**THE RULE THAT SHAPES BOTH LANES: A RECORD IS THROTTLED AT ITS START OR NOT AT ALL.** Nothing in this phase refuses a record part-way through a ladder it has already spent money on, and nothing re-runs a record whose dossier has been bought. A dossier is bought once, for one record, ever. The two lanes draw the same budget in the two different ways that rule allows.
 
-1. **Every call is reserved individually, immediately before it is made**, through `ExecuteOptions.canSpend` (Task 2). There is no per-record constant anywhere. That matters because a per-record figure is a guess: `lib/routing/ownerRoute.ts` says of its own tier 2 number, in capitals, "**A FLOOR, NOT A CEILING** ... the real cost of a tier 2 record is the dossier plus up to $0.30 for each owner named, and the owner count is unknowable here", D21(c) and D40 put no cap on how many owners a dossier record tries, and the Phase 1 plan's carried item 2 puts the worst case at "2 + 2N Tracerfy calls per record for N individual owners (8 for three)". A record that reserved 2 and made 8 could not be refused. A record that reserves each call as it reaches it cannot exceed its reservation, because there is nothing to exceed.
+**The Tier 1 lane draws per CALL**, through `ExecuteOptions.canSpend` (Task 2), and that is safe there because **a Tier 1 record's steps are independent**: the instant lookup and the FastAppend lookup each answer on their own, a refusal arrives BEFORE the call it was asked about, and any answer already in hand is in the per-arrival step log and is replayed rather than bought again (spec 5.2). A Tier 1 refusal costs nothing, at any rung. On that lane the reservation is exact: a record cannot exceed a reservation it takes one call at a time, because there is nothing to exceed.
+
+**The Tier 2 lane reserves ONCE, before the record's first vendor call, and passes no `canSpend` at all.** It reserves what `planRoute` planned (`reservationForSteps(plan.steps)`, the dossier calls) and then the record runs to completion: every owner the dossier names is asked, the customer is billed once, and nothing is re-bought. A tier 2 ladder cannot be refused half-way because its second half only exists once the first half has been paid for: the dossier is what names the owners the contact lookups are for.
+
+**It guarantees: no more than 450 RESERVED calls to either vendor in any 60-second span.** Three things make that a ceiling on the reserved figure rather than an estimate of it.
+
+1. **Nothing is spent before it is granted.** On the Tier 1 lane each call is reserved immediately before it is made; on the Tier 2 lane the whole record is reserved immediately before its first call, and a refused record makes none.
 2. **The window is the trailing 60 seconds, not the current calendar minute.** A fixed `date_trunc('minute')` bucket permits 450 calls at :59 and 450 more at the next :00: 900 calls inside one 60-second span, against a vendor limit of 500. The sliding window is what closes that.
 3. **An unreadable budget refuses.** A budget nobody can read is not a budget of plenty.
 
-Single traces run inside a customer request and reserve nothing at all, which is what the 50-call gap under each vendor's own 500 is for.
+**AND HERE IS WHAT THE TIER 2 SHAPE COSTS, SAID PLAINLY, BECAUSE IT IS THE PRICE OF THE RULE ABOVE.** On that lane the budget bounds **how many records BEGIN** in a window, not every call inside them. A tier 2 record's pass-2 owner lookups are NOT reserved, so an in-flight ladder can overshoot the reserved figure. **The per-call ceiling is therefore claimed for the Tier 1 lane only, and this plan does not claim it for Tier 2 anywhere.**
 
-**It also guarantees that no row starves forever.** A refused call spends no attempt and both claim queries are oldest-first, so a throttled row is the next run's oldest row.
+**The overshoot is bounded, and the arithmetic is this.** It is the tier 2 cron's concurrency multiplied by a record's worst-case REMAINING ladder, because only the records actually in flight can be past their reservation.
 
-**It does NOT guarantee fairness between the two lanes, and spec 5.3 asks for that.** The spec says "neither starves the other". One shared counter with no per-lane share cannot deliver it: in a minute where both lanes are saturated, the calls go to whichever worker asks first. A real fairness guarantee needs a per-lane floor, and the spec's own wording ("ONE budget") rules that out. **This plan implements the spec's words and records the divergence here rather than inventing floors on the implementer's initiative.** If David wants fairness it is a per-lane reservation, and it is a change to spec 5.3, not an implementation detail. **DIVERGENCE FROM THE SPEC, RECORDED. It also appears in the spec-coverage table at the end of this plan, so it cannot be read as an oversight.**
+- `CONCURRENCY = 5` on that cron (`app/api/cron/sweep-property-traces/route.ts:94`), so at most 5 records are ever past their reservation at one time.
+- A record's worst case is "2 + 2N Tracerfy calls per record for N individual owners (8 for three)" (the Phase 1 plan's carried item 2, under D21(c) and D40, which cap nothing). The reservation covers the planned dossier calls, at most 2, so the **unreserved remainder is at most 2N**, spread across the two pools.
+- **5 x 2N.** At three owners a record that is 5 x 6 = **30 unreserved calls**, so a 60-second span can carry at most **450 + 30 = 480** to one vendor.
+- **The gap under each vendor's own 500 is what absorbs it: 50 per vendor, and 480 leaves 20 of it.** That same gap also carries the single traces, which run inside a customer's request and reserve nothing at all.
+- **Where the arithmetic runs out, named rather than hidden:** 5 x 2N exceeds 50 once N exceeds 5, which needs all five in-flight records to name five or more individual owners at the same moment. If the throttled count and the vendor's own 429s ever say that is happening, the lever is `CONCURRENCY`, which multiplies the overshoot directly.
 
-**One thing is bounded rather than free, and it is new with this design.** A tier 2 record whose dossier names several owners can now be refused part-way through, after its dossier has been bought. When that happens the record is released to the rung it was claimed from and runs again next minute, so the customer is billed once and every owner is asked: PTP pays for one extra dossier in that rare case. That is the honest cost of bounding the rate, and it is the conservative direction. Before this design that record could not be refused at all and simply exceeded its reservation, which is the "trips the limit" half of spec 13's risk.
+**WHAT THE BUDGET DOES, IN FULL.** It holds a per-vendor ceiling of 450 inside any 60-second span on the Tier 1 lane, where every call is reserved before it is made. It bounds record STARTS on the Tier 2 lane, with the overshoot above. And no row waits forever, because a refusal spends no attempt and both claim queries are oldest-first, so a throttled row is the next run's oldest row. That is the whole of it.
 
 **What is deliberately NOT claimed anywhere in this plan:** that the arithmetic of 120 + 240 against 450 is a guarantee. It is not. It is a sizing estimate that says the two lanes should not normally reach the ceiling, and the budget is what holds when the estimate is wrong.
 
@@ -3686,22 +3691,28 @@ Create `supabase/migrations/20260923_vendor_rate_budget.sql`:
 -- the limit. So the call is reserved before it is made, and a refused reservation means the call is
 -- not made at all.
 --
--- ONE CALL AT A TIME, NOT ONE RECORD AT A TIME, AND THAT IS THE WHOLE POINT. A per-record
--- reservation is a GUESS at that record's worst case. lib/routing/ownerRoute.ts says of its own
+-- A RECORD IS THROTTLED AT ITS START OR NOT AT ALL, AND THAT IS THE WHOLE POINT. Nothing draws from
+-- this budget in a way that can refuse a record part-way through a ladder it has already paid for,
+-- because releasing such a record means re-running it and re-buying its dossier. So:
+--   the TIER 1 lane draws ONE CALL AT A TIME, from executeRoute's canSpend hook, which is safe
+--   because that ladder's steps are independent and a refusal lands before the call it refused;
+--   the TIER 2 cron draws ONCE PER RECORD, immediately before the record's first vendor call, for
+--   the steps planRoute planned, and then that record runs to completion.
+-- The cost of the tier 2 shape is that the pass-2 owner lookups are not reserved, so an in-flight
+-- ladder can overshoot: D21(c) and D40 cap nothing, and lib/routing/ownerRoute.ts says of its own
 -- tier 2 figure, in capitals, "A FLOOR, NOT A CEILING ... the real cost of a tier 2 record is the
--- dossier plus up to $0.30 for each owner named, and the owner count is unknowable here"; D21(c) and
--- D40 put no cap on how many owners a dossier record tries. A record that reserved 2 and then made 8
--- calls could not be refused, so the budget would bound nothing. Every caller therefore draws
--- through lib/trace/vendorRateBudget.ts from executeRoute's canSpend hook, which is asked
--- immediately before each individual call.
+-- dossier plus up to $0.30 for each owner named, and the owner count is unknowable here". The
+-- overshoot is bounded by that cron's CONCURRENCY (5) times a record's worst-case remaining ladder
+-- (2N calls for N owners, so 30 at three owners), and the gap below each vendor's own 500 absorbs
+-- it. The plan's Task 6 header carries the arithmetic and says where it runs out.
 --
--- WHY 450 AND NOT 500. Spec 5.3: 50 under the limit. That gap is for the callers that cannot reserve
--- at all: single traces, which run inside a customer's request.
+-- WHY 450 AND NOT 500. Spec 5.3: 50 under the limit. That gap carries what cannot be reserved: the
+-- single traces, which run inside a customer's request, and the tier 2 overshoot above.
 --
--- THROTTLING IS NOT A FAILURE (spec 5.1). A refused call means the record is not completed: its row
--- goes back to the rung it was claimed from with its claim cleared, no attempt is spent, and the
--- customer is told nothing. Any answer the record HAD already bought is in its step log and is
--- replayed rather than bought again (spec 5.2). Nothing here is on the billing path.
+-- THROTTLING IS NOT A FAILURE, AND IT SPENDS NOTHING (spec 5.1). A refused record has bought
+-- nothing, because it was refused before it began (tier 2) or before the call it was asked about
+-- (tier 1). Its row goes back to the rung it was claimed from with its claim cleared, no attempt is
+-- spent, and the customer is told nothing. Nothing here is on the billing path.
 --
 -- THE WINDOW SLIDES, AND A FIXED MINUTE WOULD NOT BE A LIMIT AT ALL. With
 -- date_trunc('minute', now()) as the bucket, 450 calls at :59.9 and 450 more at :00.1 are two legal
@@ -3967,9 +3978,10 @@ describe('reservationForSteps', () => {
   })
 
   it('asks ONE call of ONE vendor for a single step, which is how canSpend uses it', () => {
-    // THE HOT PATH. The canSpend hook in both crons calls this with exactly one step, because a
-    // reservation is taken per CALL. The list form above is kept because it is the same map and it is
-    // where the pool assignment is actually asserted.
+    // THE HOT PATH ON THE TIER 1 LANE. Its canSpend hook calls this with exactly one step, because
+    // that lane reserves per CALL. The TIER 2 cron passes a whole plan's steps instead, once per
+    // record, which is the multi-step form above. The list form is kept because it is the same map
+    // and it is where the pool assignment is actually asserted.
     expect(reservationForSteps([{ kind: 'FASTAPPEND_ENTITY' }])).toEqual({
       tracerfy: 0,
       fastappend: 1,
@@ -3994,10 +4006,10 @@ Create `lib/trace/vendorRateBudget.ts`:
 /**
  * ONE shared vendor call budget over a SLIDING 60-second window, drawn by BOTH crons (spec 5.3).
  *
- * THE GUARANTEE, AND ITS LIMITS, ARE WRITTEN OUT IN FULL in the plan's Task 6 header, because spec
- * Section 13 names this module as the phase's own risk. In short: no more than 450 calls to either
- * vendor in any 60-second span, and no row starves forever. NOT fairness between the two lanes,
- * which one shared counter cannot give and which spec 5.3's "ONE budget" wording rules out.
+ * THE GUARANTEE, AND WHAT IT COSTS, ARE WRITTEN OUT IN FULL in the plan's Task 6 header, because spec
+ * Section 13 names this module as the phase's own risk. In short: a per-vendor ceiling of 450 inside
+ * any 60-second span on the Tier 1 lane, which reserves every call; a bound on how many records BEGIN
+ * on the Tier 2 lane, which reserves once per record; and no row starves forever.
  *
  * WHY IT IS IN THE DATABASE. Tracerfy allows 500 lookups a minute per account, shared across its
  * instant, APN and dossier endpoints (docs :661, :1332). FastAppend has its own 500
@@ -4005,11 +4017,21 @@ Create `lib/trace/vendorRateBudget.ts`:
  * app/api/cron/sweep-property-traces are separate function invocations on the same one-minute
  * schedule, so a counter in either process would give each of them a private 450 and the vendor 900.
  *
- * ONE CALL AT A TIME. Every claim is for a SINGLE call and is taken immediately before that call is
- * made, from executeRoute's canSpend hook. A per-record reservation is a guess at a worst case, and
- * lib/routing/ownerRoute.ts says of its own tier 2 figure "A FLOOR, NOT A CEILING": D21(c) and D40
- * let one record try every owner the dossier names, with no cap, so a record could reserve 2 and make
- * 8 and the budget would refuse nothing. There is no per-record constant anywhere in this phase.
+ * A RECORD IS THROTTLED AT ITS START OR NOT AT ALL. No caller may draw from this budget in a way
+ * that can refuse a record part-way through a ladder it has already paid for, because releasing such
+ * a record means re-running it and re-buying its dossier.
+ *   TIER 1 claims ONE CALL AT A TIME, from executeRoute's canSpend hook, which is exact there: that
+ *   ladder's steps are independent, a refusal lands before the call it refused, and an answer already
+ *   in hand is replayed from the per-arrival step log rather than bought again (spec 5.2).
+ *   TIER 2 claims ONCE PER RECORD, for reservationForSteps(plan.steps), immediately before the
+ *   record's first vendor call, and then that record runs to completion.
+ * WHAT THE TIER 2 SHAPE COSTS: its pass-2 owner lookups are not reserved, so the budget bounds record
+ * STARTS there rather than every call, and an in-flight ladder can overshoot. D21(c) and D40 cap
+ * nothing and lib/routing/ownerRoute.ts calls its own tier 2 figure "A FLOOR, NOT A CEILING", so the
+ * bound is that cron's CONCURRENCY (5) times a record's worst-case remaining ladder (2N calls for N
+ * owners: 30 at three owners, against a 50-call gap below the vendor's own 500). There is no
+ * hard-coded per-record reservation constant anywhere in this phase; tier 2's figure comes from the
+ * plan it is about to run. Never claim the per-call ceiling for the tier 2 lane.
  *
  * THE WINDOW SLIDES. `vendor_rate_windows` holds one bucket per vendor per wall-clock SECOND and a
  * claim sums the trailing 60. A fixed calendar minute would permit 450 calls at :59 and 450 at the
@@ -4017,20 +4039,21 @@ Create `lib/trace/vendorRateBudget.ts`:
  * pg_advisory_xact_lock inside claim_vendor_rate, which covers the count and the write together; the
  * row-lock-on-conflict trick a fixed window could use cannot serialise a sum across other rows.
  *
- * 450, NOT 500, because spec 5.3 says 50 under the limit. With per-call claiming that gap is no
- * longer absorbing a bad guess; it is there for the caller that cannot claim at all, which is a
- * SINGLE trace running inside a customer's request.
+ * 450, NOT 500, because spec 5.3 says 50 under the limit. That gap carries what cannot be reserved:
+ * a SINGLE trace, which runs inside a customer's request and claims nothing, and the tier 2 overshoot
+ * above.
  *
- * THROTTLING IS NOT A FAILURE (spec 5.1). A refused call means the record is not completed: its row
- * goes back to the rung it was claimed from with its claim cleared, no attempt is consumed, and the
- * customer is told nothing because nothing was asked about their record. Answers it HAD already
- * bought are in its step log and are replayed rather than bought again (spec 5.2). NOTHING in this
- * module is on the billing path.
+ * THROTTLING IS NOT A FAILURE, AND IT SPENDS NOTHING (spec 5.1). A refused record has bought nothing,
+ * because it was refused before it began (tier 2) or before the call it was asked about (tier 1). Its
+ * row goes back to the rung it was claimed from with its claim cleared, no attempt is consumed, and
+ * the customer is told nothing because nothing was asked about their record. NOTHING in this module is
+ * on the billing path, and no record is ever released after a dossier has been bought for it.
  *
- * NO HAND-BACK, AND WITH PER-CALL CLAIMING THERE IS NOTHING TO HAND BACK. A claim is taken for a call
- * that is about to happen, so it is spent within milliseconds. The one leftover case is a claim
- * granted for a call the vendor client then refuses before sending (an inputError), which is at most
- * one call in the conservative direction.
+ * NO HAND-BACK. A tier 1 claim is taken for a call that is about to happen, so it is spent within
+ * milliseconds. A tier 2 claim covers the dossier steps the plan carries, and a plan whose first step
+ * HITS leaves the second one unmade: that claim is spent in the conservative direction, as is a claim
+ * granted for a call the vendor client then refuses before sending (an inputError). At most one or two
+ * calls each, always over-reserving rather than under-reserving.
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { StepKind } from '@/lib/routing/ownerRoute'
@@ -4089,8 +4112,9 @@ const POOL_BY_STEP: Record<StepKind, VendorName> = {
 /**
  * What these steps would spend, per vendor.
  *
- * Called with ONE step by both crons' canSpend hooks, which is the hot path. The list form is kept
- * because the pool assignment is what the tests assert and a list is how you read it.
+ * Called with ONE step by the Tier 1 lane's canSpend hook, which is the hot path, and with a whole
+ * plan's steps once per record by the tier 2 cron. The list form is what the tests assert the pool
+ * assignment on, because a list is how you read it.
  */
 export function reservationForSteps(
   steps: ReadonlyArray<{ kind: StepKind }>
@@ -4103,9 +4127,10 @@ export function reservationForSteps(
 /**
  * Reserve these calls against the trailing 60 seconds. TRUE when every vendor granted.
  *
- * All or nothing across vendors. In practice the crons ask for one call of one vendor, because
- * `reservationForSteps([step])` is what they pass; the multi-vendor form is what makes that a special
- * case of one rule rather than a second rule.
+ * All or nothing across vendors. The Tier 1 lane asks for one call of one vendor, because
+ * `reservationForSteps([step])` is what it passes; the tier 2 cron asks once per record for
+ * `reservationForSteps(plan.steps)`. The multi-vendor form is what makes both a special case of one
+ * rule rather than two rules.
  */
 export async function reserveVendorCalls(
   adminClient: SupabaseClient,
@@ -4177,7 +4202,7 @@ In `app/api/cron/sweep-property-traces/route.ts`:
 import { pruneVendorRateWindows, reserveVendorCalls } from '@/lib/trace/vendorRateBudget';
 ```
 
-**(a2)** Add `reservationForSteps` to that same import, and `type RouteStep` to the existing `@/lib/routing/ownerRoute` import:
+**(a2)** Add `reservationForSteps` to that same import. **Nothing is added to the `@/lib/routing/ownerRoute` import:** this lane passes no `canSpend`, so it needs no `RouteStep` type, and an unused import is an eslint problem against a baseline of 45.
 
 ```ts
 import {
@@ -4229,83 +4254,69 @@ with
  * worst case is 2 + 2N Tracerfy calls for N individual owners, which is 8 for
  * three. At three owners a record this lane alone would want 960 a minute.
  *
- * WHICH IS WHY THE CEILING IS NOT HERE AND IS NOT ARITHMETIC.
- * lib/trace/vendorRateBudget.ts holds it, and every call this cron makes is
- * reserved individually, immediately before it is made, through executeRoute's
- * canSpend hook. A call the budget cannot cover is not made; the record is
- * released to its own rung, no attempt spent, and waits for the next minute.
- * See the plan's Task 6 header for what that does and does not guarantee.
+ * WHICH IS WHY THE BOUND IS NOT HERE AND IS NOT ARITHMETIC.
+ * lib/trace/vendorRateBudget.ts holds it. This cron reserves ONCE PER RECORD,
+ * immediately before that record's first vendor call, and then the record runs
+ * to completion: a record whose dossier has been bought is never refused
+ * part-way and never re-run, so no dossier is ever bought twice. A record the
+ * budget cannot cover is released to its own rung before it asks any vendor
+ * anything, no attempt spent, and waits for the next minute.
+ *
+ * SO THE BUDGET BOUNDS RECORD STARTS ON THIS LANE, NOT EVERY CALL INSIDE THEM,
+ * and the pass-2 owner lookups are unreserved. The overshoot is CONCURRENCY (5)
+ * times a record's worst-case remaining ladder (2N calls for N owners), which is
+ * 30 at three owners: 450 + 30 = 480 against the vendor's 500. The 50-call gap
+ * absorbs it and also carries the single traces. Do not claim a per-call ceiling
+ * for this lane; that one belongs to the Tier 1 lane, which reserves per call.
+ * The plan's Task 6 header carries the arithmetic and says where it runs out.
 ```
 
-**(c) THE RESERVATION, PER CALL.** This is the change the whole task turns on, so read the reason before the code.
+**(c) THE RESERVATION, ONCE, BEFORE THE RECORD'S FIRST VENDOR CALL.** This is the change the whole task turns on, so read the reason before the code.
 
-The obvious shape, and the one an earlier draft of this plan carried, is one reservation per record taken before the `try`: `reserveVendorCalls(adminClient, { tracerfy: 2, fastappend: 1 })`. **That does not bound anything, and the codebase says so in as many words.** `lib/routing/ownerRoute.ts` calls that very figure "**A FLOOR, NOT A CEILING** ... the real cost of a tier 2 record is the dossier plus up to $0.30 for each owner named, and the owner count is unknowable here". Under D21(c) and D40 one record makes 1 or 2 dossier calls plus one Tracerfy person lookup per individual owner, with no cap; the Phase 1 plan's carried item 2 puts it at "2 + 2N Tracerfy calls per record for N individual owners (8 for three)". A record that reserved 2 and then made 8 would not be refused by anything, and spec Section 13's "trips the limit" would be exactly what shipped.
+**A tier 2 record is throttled at its start or not at all, and the reason is money, not tidiness.** A tier 2 ladder's second half only exists because its first half was paid for: the dossier is what names the owners the contact lookups are then made for. So a record refused part-way through has already bought its dossier, and the only way to finish it is to release it and run it again next minute, which buys the SAME dossier a second time. **Re-running a record's dossier is out. PTP does not pay twice for one record, and a customer's record is not partially executed and rewound.** An earlier draft of this plan passed `canSpend` into `executeRoute` here and released such records; that design is rejected.
 
-So the reservation is taken **per call**, from `executeRoute`'s `canSpend` hook (Task 2), which is asked immediately before each individual vendor call and nowhere else.
+The other rejected shape is a hard-coded per-record constant taken before the `try`: `reserveVendorCalls(adminClient, { tracerfy: 2, fastappend: 1 })`. `lib/routing/ownerRoute.ts` calls that very figure "**A FLOOR, NOT A CEILING** ... the real cost of a tier 2 record is the dossier plus up to $0.30 for each owner named, and the owner count is unknowable here", so it is a guess written as a constant.
 
-Inside `processRow`, after the claim and `processed++`, replace nothing and ADD the hook above the `executeRoute` call:
+**What lands instead:** ONE reservation, for the steps `planRoute` actually planned, taken immediately before the `executeRoute` call and nowhere else, and **no `canSpend` passed into `executeRoute` on this lane at all**. Granted, the record runs to completion. Refused, it never asks a vendor anything.
+
+Inside `processRow`, **after the `plan.steps.length === 0` block and immediately above the `executeRoute` call**, add:
 
 ```ts
       /**
-       * THE SHARED BUDGET (spec 5.3), ONE CALL AT A TIME.
+       * THE SHARED BUDGET (spec 5.3), ONCE, BEFORE THIS RECORD'S FIRST VENDOR CALL.
        *
-       * Asked immediately before each vendor call executeRoute is about to make, including each
-       * owner's contact lookup in the pass-2 loop, which is the half no per-record figure can size:
-       * D21(c) and D40 put no cap on how many owners a dossier names. A record cannot exceed a
-       * reservation it takes here, because there is nothing to exceed.
+       * ONCE, AND NOT PER CALL, BECAUSE A TIER 2 RECORD CANNOT BE REWOUND. Its pass-2 contact
+       * lookups exist only because the dossier was bought and named the owners they are for. A
+       * refusal after that point could only be handled by releasing the record and running it again
+       * next minute, which buys the same dossier twice. So this lane asks once: refused, the record
+       * has spent nothing and asks no vendor anything; granted, it finishes. Every owner the dossier
+       * names is asked, the customer is billed once, and nothing is re-bought.
        *
-       * NOT AWAITED IN A LOOP OF OUR OWN: executeRoute awaits it, once per call, in the one place
-       * that knows which calls are actually going to be made. A step skipped behind an earlier hit,
-       * an answer replayed from the step log and a call the request deadline refused all reserve
-       * nothing, because none of them reaches a vendor.
+       * NO canSpend IS PASSED TO executeRoute HERE, deliberately. The Tier 1 lane passes one because
+       * its steps are independent and a refusal there costs nothing. This one would be a refusal
+       * mid-ladder, which is the thing that must not happen.
+       *
+       * WHAT IT RESERVES: the steps the plan carries, which on this lane are the dossier calls.
+       * reservationForSteps reads them off the plan rather than restating a constant, so a routing
+       * change cannot leave a stale number here. A plan whose FIRST dossier step hits leaves the
+       * second unmade, so the claim over-reserves by one, which is the conservative direction.
+       *
+       * WHAT IT DOES NOT RESERVE, SAID PLAINLY: the pass-2 owner lookups. On this lane the budget
+       * bounds how many records BEGIN in a window, not every call inside them, and an in-flight
+       * ladder can overshoot the reserved figure. Bounded by CONCURRENCY (5) times a record's
+       * worst-case remaining ladder (2N calls for N owners, 30 at three), which the 50-call gap
+       * below the vendor's own 500 absorbs. The plan's Task 6 header has the arithmetic.
        */
-      const canSpend = (step: RouteStep) =>
-        reserveVendorCalls(adminClient, reservationForSteps([step]));
-```
-
-Then give `executeRoute` its third argument. The call at `:395` currently reads
-
-```ts
-      const execution = await executeRoute(plan, {
-        lookupDossier,
-        traceEntity: lookupBusinessTrace,
-        tracePerson: lookupPersonTrace,
-      });
-```
-
-and becomes
-
-```ts
-      const execution = await executeRoute(
-        plan,
-        {
-          lookupDossier,
-          traceEntity: lookupBusinessTrace,
-          tracePerson: lookupPersonTrace,
-        },
-        { canSpend }
-      );
-```
-
-Then handle the refusal, immediately after the `executeRoute` call returns and **before any judging, billing or persisting**:
-
-```ts
-      // THROTTLED (spec 5.1, spec 5.3). A call this record needed could not be covered this minute.
-      //
-      // RELEASED TO THE RUNG IT WAS CLAIMED FROM, WITH NO ATTEMPT SPENT. A throttle is not a
-      // failure: giving up an attempt for it would burn a customer's row through five rungs on a busy
-      // minute and then write it terminal.
-      //
-      // AND NOTHING IS BILLED OR JUDGED. This is the part that is not free and it is stated rather
-      // than hidden: if the dossier had already answered before the refusal, that $0.20 is spent and
-      // this run throws the answer away, because tier 2 keeps no per-arrival step log and a delivered
-      // dossier hit is not a reusable answer (executeRoute's isReusableAnswer covers a miss, a
-      // name non-match and a contactless hit, not a hit that delivered). So PTP pays for one extra
-      // dossier in that case. The alternative is settling the record as "no contacts" for owners
-      // nobody asked about, and billing the customer $0.25 for it. Paying twice for our own rate
-      // limit is the conservative direction; charging a customer for a lookup we never made is not.
-      // It happens only when the budget is exhausted mid-record, which per-call claiming makes rare.
-      if (execution.throttled) {
+      if (!(await reserveVendorCalls(adminClient, reservationForSteps(plan.steps)))) {
+        // THROTTLED (spec 5.1, spec 5.3), AND IT SPENT NOTHING. No vendor was asked about this
+        // record, nothing was judged, nothing was billed, and the customer is told nothing.
+        //
+        // RELEASED TO THE RUNG IT WAS CLAIMED FROM, WITH NO ATTEMPT SPENT. A throttle is not a
+        // failure: giving up an attempt for it would burn a customer's row through five rungs on a
+        // busy minute and then write it terminal.
+        //
+        // A rising `throttled` in the response means the budget is the binding constraint and
+        // MAX_ROWS_PER_RUN or CONCURRENCY should come down, not that anything is broken.
         await adminClient
           .from('trace_history')
           .update({
@@ -4315,17 +4326,21 @@ Then handle the refusal, immediately after the `executeRoute` call returns and *
           .eq('id', row.id);
         processed--;
         throttled++;
-        if (execution.vendorSpend > 0) {
-          // The one line an operator can see it by. A rising count here means the budget is the
-          // binding constraint and MAX_ROWS_PER_RUN or CONCURRENCY should come down, not that
-          // anything is broken.
-          console.error(
-            `[sweep-property-traces] throttled row ${row.id} AFTER spending ${execution.vendorSpend}; it will run again next minute`
-          );
-        }
         return;
       }
 ```
+
+The `executeRoute` call at `:395` is **left exactly as it is**, with two arguments and no options object:
+
+```ts
+      const execution = await executeRoute(plan, {
+        lookupDossier,
+        traceEntity: lookupBusinessTrace,
+        tracePerson: lookupPersonTrace,
+      });
+```
+
+There is no `if (execution.throttled)` branch on this lane, and `execution.throttled` can never be true here, because nothing on this path passes `canSpend`. **Do not add one, and do not import `type RouteStep` into this file:** an unused import is an eslint problem against a baseline of 45.
 
 Declare `let throttled = 0;` beside the other counters at the top of `GET`, and add `throttled` to BOTH `NextResponse.json` result objects (the empty-queue one and the full one).
 
@@ -4340,7 +4355,7 @@ Add to `app/api/cron/sweep-property-traces/__tests__/route.test.ts`:
 
 ```ts
 describe('the shared vendor rate budget (spec 5.3)', () => {
-  it('releases a record whose FIRST call is refused back to its OWN rung, unspent', async () => {
+  it('releases a record refused BEFORE IT STARTS back to its OWN rung, unspent', async () => {
     reserveVendorCallsMock.mockResolvedValue(false);
     seedRows([{ id: 'row-1', property_trace_status: 'queued_3', user_id: 'user-1' }]);
     const body = await runCron();
@@ -4370,44 +4385,47 @@ describe('the shared vendor rate budget (spec 5.3)', () => {
     expect(order[0]).toBe('reserve');
   });
 
-  it('asks the budget ONCE PER CALL, not once per record', async () => {
-    // THE DEFECT THIS SHAPE EXISTS TO CLOSE. A per-record reservation of { tracerfy: 2 } is a GUESS,
-    // and ownerRoute.ts calls that very figure "A FLOOR, NOT A CEILING": under D21(c) and D40 a
-    // record makes one dossier call plus one lookup per owner the dossier names, uncapped. Two owners
-    // is three calls, three owners is four, and a record that reserved 2 could not be refused.
+  it('asks the budget ONCE PER RECORD, for the steps the plan carries', async () => {
+    // ONCE, NOT PER CALL, AND NOT FROM A HARD-CODED CONSTANT EITHER. A tier 2 record cannot be
+    // rewound: its pass-2 lookups exist only because the dossier was bought and named the owners.
+    // So the whole record is reserved before it starts, from the plan's own steps, and never asked
+    // again. Two individual owners is three vendor calls and still ONE reservation.
     reserveVendorCallsMock.mockResolvedValue(true);
     lookupDossierMock.mockResolvedValue(dossierHitNamingTwoIndividuals());
     seedRows([{ id: 'row-1', property_trace_status: 'queued', user_id: 'user-1' }]);
     await runCron();
-    // One dossier call plus one person lookup per owner, each with its own reservation.
-    expect(reserveVendorCallsMock).toHaveBeenCalledTimes(3);
-    for (const call of reserveVendorCallsMock.mock.calls) {
-      const want = call[1] as { tracerfy: number; fastappend: number };
-      expect(want.tracerfy + want.fastappend).toBe(1);
-    }
+    expect(reserveVendorCallsMock).toHaveBeenCalledTimes(1);
+    // The dossier steps planRoute planned, read off the plan, not a literal. The tier 2 plan is
+    // dossier-first, so the reservation is Tracerfy only.
+    const want = reserveVendorCallsMock.mock.calls[0][1] as {
+      tracerfy: number;
+      fastappend: number;
+    };
+    expect(want.fastappend).toBe(0);
+    expect(want.tracerfy).toBeGreaterThan(0);
   });
 
-  it('releases a record refused MID-LADDER and does not bill it for the owners nobody asked about', async () => {
-    // The dossier answered and its $0.20 is spent. The second owner's lookup is refused. The record
-    // goes back on its own rung and runs again next minute: the customer is billed ONCE, for a record
-    // every owner of which was asked. PTP pays for the extra dossier. Settling here instead would
-    // charge the customer $0.25 for a lookup we chose not to make.
+  it('lets a record that WAS granted finish its ladder even after the budget runs out', async () => {
+    // THE DESIGN, FENCED. The record's dossier has been bought, so it finishes: every owner the
+    // dossier names is asked, the customer is billed ONCE, and nothing is released and re-run, which
+    // would buy the same dossier a second time. A budget that ran dry after the reservation was
+    // granted changes nothing about this record.
     let asks = 0;
-    reserveVendorCallsMock.mockImplementation(async () => ++asks <= 2);
+    reserveVendorCallsMock.mockImplementation(async () => ++asks <= 1);
     lookupDossierMock.mockResolvedValue(dossierHitNamingTwoIndividuals());
     seedRows([{ id: 'row-1', property_trace_status: 'queued_2', user_id: 'user-1' }]);
     const body = await runCron();
-    expect(body.throttled).toBe(1);
-    expect(body.processed).toBe(0);
-    expect(deductOrZeroMock).not.toHaveBeenCalled();
-    expect(rowUpdates('row-1').at(-1)).toMatchObject({
+    expect(body.throttled).toBe(0);
+    expect(body.processed).toBe(1);
+    expect(reserveVendorCallsMock).toHaveBeenCalledTimes(1);
+    // NOT released: the row is settled, not back on queued_2 with a cleared claim.
+    expect(rowUpdates('row-1').at(-1)).not.toMatchObject({
       property_trace_status: 'queued_2',
       property_trace_claimed_at: null,
     });
-    // No settle: no charge, no tier, no trace_result, no terminal status.
-    for (const column of ['charge', 'tier', 'trace_result', 'is_successful']) {
-      expect(rowUpdates('row-1').at(-1), column).not.toHaveProperty(column);
-    }
+    // BILLED ONCE. Assert it the way this file already asserts a billed tier 2 record (its existing
+    // hit tests do), rather than inventing a shape: the claim is one charge for one record, and a
+    // second charge would be the re-run this design exists to prevent.
   });
 
   it('prunes the bucket table once per run, not once per claim', async () => {
@@ -4418,14 +4436,14 @@ describe('the shared vendor rate budget (spec 5.3)', () => {
 });
 ```
 
-Mock `@/lib/trace/vendorRateBudget` in that file the way it already mocks `@/lib/tracerfy/dossier`: `reserveVendorCalls` defaulting to `async () => true` so every existing test keeps passing unchanged, `pruneVendorRateWindows` as `async () => {}`, and **`reservationForSteps` REAL via `importOriginal`**, because the per-call test asserts what it returns and a stub would assert the stub. `dossierHitNamingTwoIndividuals()` stands in for whatever this file already uses to build a dossier answer with two individual owners; read the file and use its own builder, and if it has none, build one from the shape `lookupDossier` returns there.
+Mock `@/lib/trace/vendorRateBudget` in that file the way it already mocks `@/lib/tracerfy/dossier`: `reserveVendorCalls` defaulting to `async () => true` so every existing test keeps passing unchanged, `pruneVendorRateWindows` as `async () => {}`, and **`reservationForSteps` REAL via `importOriginal`**, because the once-per-record test asserts what it returns and a stub would assert the stub. `dossierHitNamingTwoIndividuals()` stands in for whatever this file already uses to build a dossier answer with two individual owners; read the file and use its own builder, and if it has none, build one from the shape `lookupDossier` returns there.
 
 **MUTATIONS:**
 
-1. Replace the hook with the old per-record reservation before the `try` (`reserveVendorCalls(adminClient, { tracerfy: 2, fastappend: 1 })`) and drop `canSpend`. Expected: RED on `asks the budget ONCE PER CALL, not once per record` (one call, asking for three) and on `releases a record refused MID-LADDER`. **This is the mutation that matters in this task: the mutant is the shape that cannot bound a multi-owner record at all.**
-2. Move the `canSpend` reservation inside the hook to AFTER the vendor call (wrap `lookupDossier` instead of preceding it). Expected: RED on `asks the budget BEFORE the dossier call, never after it`.
-3. Change the release to `property_trace_status: nextAfterFailedAttempt(attempt).status`. Expected: RED on `releases a record whose FIRST call is refused back to its OWN rung, unspent`. That mutation is the one that would quietly burn a customer's row through five rungs on a busy minute and then write it terminal.
-4. Delete the `if (execution.throttled) { ... }` block so a throttled execution falls through to the judge and the persist. Expected: RED on `releases a record refused MID-LADDER and does not bill it for the owners nobody asked about` (a charge and a terminal status appear). This is the money half.
+1. **Turn the once-per-record reservation into a per-call hook**: delete the `if (!(await reserveVendorCalls(...)))` block and pass `{ canSpend: (step: RouteStep) => reserveVendorCalls(adminClient, reservationForSteps([step])) }` as `executeRoute`'s third argument instead. Expected: RED on `asks the budget ONCE PER RECORD, for the steps the plan carries` (three asks, not one) and RED on `lets a record that WAS granted finish its ladder even after the budget runs out` (the second owner's lookup is refused, `execution.throttled` is set, and with no handler for it the record settles for owners nobody asked about). **This is the mutation that matters in this task: the mutant is the rejected design, the one that can refuse a record after its dossier is bought.**
+2. **Move the reservation to AFTER the `executeRoute` call.** Expected: RED on `asks the budget BEFORE the dossier call, never after it`. A budget asked after the money is spent bounds nothing.
+3. Change the release to `property_trace_status: nextAfterFailedAttempt(attempt).status`. Expected: RED on `releases a record refused BEFORE IT STARTS back to its OWN rung, unspent`. That mutation is the one that would quietly burn a customer's row through five rungs on a busy minute and then write it terminal.
+4. **Invert the guard** to `if (await reserveVendorCalls(adminClient, reservationForSteps(plan.steps)))` so a refused record runs anyway. Expected: RED on `releases a record refused BEFORE IT STARTS back to its OWN rung, unspent` (`lookupDossier` is called and the row is settled rather than released). This is the money half: it spends a dossier the budget said no to.
 5. Move `await pruneVendorRateWindows(adminClient)` inside `processRow`. Expected: RED on `prunes the bucket table once per run, not once per claim` for a multi-row seed; with the single-row seed above it is GREEN, so seed two rows for this one and say which shape killed it (L-020).
 
 Restore each.
@@ -4753,16 +4771,17 @@ npx tsc --noEmit; echo "tsc exit $?"
 npx eslint app lib components 2>&1 | tail -3
 grep -rn "tracerfyCanRunTier2" app lib | grep -v node_modules
 grep -rn "tracerfy: 2" app/api/cron | grep -v node_modules
+grep -n "canSpend" app/api/cron/sweep-property-traces/route.ts
 ```
 
-Expected: 0 failed; `tsc exit 0`; eslint at most 46; the first grep prints nothing, and so does the second, which is the proof that no per-record reservation constant survives in either cron.
+Expected: 0 failed; `tsc exit 0`; eslint at most 46; and all three greps print nothing. The second is the proof that no hard-coded per-record reservation constant survives in either cron. **The third is the proof that the Tier 2 lane cannot refuse a record mid-ladder**: a `canSpend` in that file is the rejected design, and it is what would release a record whose dossier has already been bought and buy that dossier again on the next run.
 
 **If the suite is not 0 failed, check the four mock and import rewrites in Step 7 BEFORE looking anywhere else.** Measured on `main` at `d5fe6c9`: renaming the production symbol with no test file touched gives **38 failures across four files** (`lib/trace/__tests__/bulkPreflight.test.ts` 9, `app/api/v1/trace/bulk/__tests__/route.test.ts` 23, `lib/suite/__tests__/mcp-tools.test.ts` 6, `app/api/trace/bulk/__tests__/route.test.ts` 28 on top of Task 3's own) plus 3 `tsc` errors, and 29 of the 38 are nothing but a `vi.mock` factory exporting a name the route no longer imports. **Do not start improvising against 38 unexplained failures.**
 
 Tick Task 6 and add at the top of `History.md`:
 
 ```markdown
-## <date> (<letter>): Tier 1 Phase 2A, Task 6: one shared vendor budget, per call, sliding.
+## <date> (<letter>): Tier 1 Phase 2A, Task 6: one shared vendor budget, sliding, claimed before the spend.
 
 - Migration 20260923_vendor_rate_budget.sql adds vendor_rate_windows (one row per vendor per
   wall-clock SECOND) and the claim_vendor_rate RPC, which sums the trailing 60 seconds under a
@@ -4774,22 +4793,26 @@ Tick Task 6 and add at the top of `History.md`:
 - WHY SLIDING. A fixed date_trunc('minute') bucket permits 450 calls at :59 and 450 at the next
   :00, which is 900 in one 60-second span against a vendor limit of 500. Both crons being scheduled
   on the minute does not save it: a run takes about 45 seconds, so its calls straddle by design.
-- WHY PER CALL. Every call is reserved individually through executeRoute's canSpend hook. A
-  per-record constant is a guess: ownerRoute.ts calls its own tier 2 figure "A FLOOR, NOT A
-  CEILING", and D21(c) with D40 let one record make 2 + 2N calls for N owners (8 for three). A
-  record that reserved 2 and made 8 could not be refused, which is spec 13's "trips the limit".
-- WHAT IS AND IS NOT GUARANTEED, written out in the plan's Task 6 header and in its spec-coverage
-  table: no more than 450 calls to either vendor in any 60-second span, and no row starves forever.
-  NOT fairness between the two lanes. Spec 5.3 asks for "neither starves the other" and one shared
-  counter cannot give it; a real one needs per-lane floors, which the spec's own "ONE budget"
-  wording rules out. DIVERGENCE FROM THE SPEC, recorded rather than papered over with invented
-  floors. David's call if he wants it.
-- sweep-property-traces draws through the hook and releases a throttled record to the rung it was
-  claimed FROM with no attempt spent (spec 5.1). A record refused AFTER its dossier answered is
-  also released rather than settled: PTP pays for one extra dossier next minute, and the customer is
-  billed once for a record every owner of which was asked. Its sizing comment said tier 1 posts to a
-  different bucket and does not compete, which Phase 2A made false; corrected, and it now says
-  plainly that 240 is a FLOOR and that the ceiling is the budget, not the arithmetic.
+- A RECORD IS THROTTLED AT ITS START OR NOT AT ALL, on both lanes, and no dossier is ever bought
+  twice. Tier 1 reserves per CALL through executeRoute's canSpend hook, which is exact there because
+  that ladder's steps are independent and a refusal lands before the call it refused. Tier 2 reserves
+  ONCE, for reservationForSteps(plan.steps), immediately before the record's first vendor call, and
+  passes no canSpend at all: its pass-2 lookups exist only because the dossier was bought and named
+  the owners, so a mid-ladder refusal could only be handled by re-running the record and re-buying
+  that dossier.
+- WHAT IS GUARANTEED, written out in the plan's Task 6 header: a per-vendor ceiling of 450 inside any
+  60-second span on the Tier 1 lane; a bound on how many records BEGIN on the Tier 2 lane; and no row
+  starving forever, because a refusal spends no attempt and both claim queries are oldest-first.
+- WHAT THE TIER 2 SHAPE COSTS, with the arithmetic. Its pass-2 owner lookups are unreserved, so an
+  in-flight ladder can overshoot the reserved figure. The overshoot is that cron's CONCURRENCY (5)
+  times a record's worst-case remaining ladder (2N calls for N owners), which is 30 at three owners:
+  450 + 30 = 480 against the vendor's 500, absorbed by the 50-call gap that also carries the single
+  traces. The per-call ceiling is claimed for the Tier 1 lane only, and nowhere for Tier 2.
+- sweep-property-traces reserves once and releases a refused record to the rung it was claimed FROM
+  with no attempt spent and nothing bought (spec 5.1). No hard-coded reservation constant: the figure
+  comes from the plan it is about to run. Its sizing comment said tier 1 posts to a different bucket
+  and does not compete, which Phase 2A made false; corrected, and it now says plainly that 240 is a
+  FLOOR and that the bound is the budget, not the arithmetic.
 - bulkPreflight's tracerfyCanRunTier2 becomes tracerfyCanRun({ tier1, tier2 }), closing the gap
   where a 500-record all-tier-1 batch never read the Tracerfy balance at all, and counting BOTH
   queues. The v1 route and the MCP tool pass tier1: 0, which is true for them until 2B. The rename
@@ -4800,10 +4823,11 @@ Tick Task 6 and add at the top of `History.md`:
 ```bash
 git add supabase/migrations/20260923_vendor_rate_budget.sql lib/trace/vendorRateBudget.ts lib/trace/__tests__/vendorRateBudget.test.ts lib/trace/bulkPreflight.ts lib/trace/__tests__/bulkPreflight.test.ts app/api/cron/sweep-property-traces/route.ts app/api/cron/sweep-property-traces/__tests__/route.test.ts app/api/trace/bulk/route.ts app/api/trace/bulk/__tests__/route.test.ts app/api/v1/trace/bulk/route.ts app/api/v1/trace/bulk/__tests__/route.test.ts lib/suite/mcp-tools.ts lib/suite/__tests__/mcp-tools.test.ts tasks/todo.md History.md
 git commit -m "$(cat <<'EOF'
-feat(rate): one shared vendor budget, reserved per call over a sliding minute
+feat(rate): one shared vendor budget over a sliding minute, claimed before the spend
 
-Tier 1 Phase 2A, Task 6. 450 Tracerfy and 450 FastAppend calls in any 60-second span, claimed one
-call at a time under a per-vendor advisory lock; and tracerfyCanRun now sizes the tier 1 leg it
+Tier 1 Phase 2A, Task 6. 450 Tracerfy and 450 FastAppend calls in any 60-second span under a
+per-vendor advisory lock, claimed per call on the Tier 1 lane and once per record on the Tier 2 lane,
+so no record is refused after its dossier is bought; and tracerfyCanRun now sizes the tier 1 leg it
 used to skip.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
@@ -4994,10 +5018,11 @@ In `lib/trace/singleTier1.ts`:
  *                       recovered one rung up and the answers it already bought are on the row.
  *   onStep              per-arrival step-log writes, which a queue needs and an inline request does
  *                       not: a killed run would otherwise re-buy every answered step.
- *   canSpend            the shared per-minute vendor budget (spec 5.3), asked once per call. A cron
- *                       passes one; a single trace passes NONE, because refusing its call would
+ *   canSpend            the shared per-minute vendor budget (spec 5.3), asked once per call. The
+ *                       TIER 1 cron lane passes one; a single trace passes NONE, because refusing its call would
  *                       answer a live customer with a busy it did not have to have, and the 50-call
- *                       gap under each vendor's own 500 is there for exactly that caller. So a
+ *                       gap under each vendor's own 500 is what carries that caller, along with the
+ *                       tier 2 lane's unreserved pass-2 lookups (Task 6's header sizes both). So a
  *                       throttle is structurally impossible on a single trace, which is why the
  *                       throttle branch below cannot change what one does.
  *
@@ -5101,7 +5126,9 @@ Add the error class beside the existing `NotATier1PlanError`:
  * no outcome, no skip reason and no deduction to report, so every field of that type would be a lie.
  *
  * UNREACHABLE FROM A SINGLE TRACE. runSingleTier1 passes no canSpend, so executeRoute never sets
- * `throttled` on that path. Only the two crons can see this.
+ * `throttled` on that path. Only the TIER 1 cron lane can see this: it is the one caller that passes
+ * canSpend, because a Tier 1 record's steps are independent and a refusal costs it nothing. The tier 2
+ * cron reserves once before a record starts and never gets here.
  */
 export class VendorBudgetThrottledError extends Error {
   constructor() {
@@ -5237,7 +5264,8 @@ Tick Task 7 and add at the top of `History.md`:
   persist, so a lookup nobody made can never be filed as "we looked and found no match" (CLAUDE.md
   rule 7). A THROW rather than a result field, because a field would change Tier1RecordResult's key
   set and the characterization tests below assert it in full. Unreachable from either single route:
-  neither passes canSpend, which is what keeps a single trace identical.
+  neither passes canSpend, which is what keeps a single trace identical. Unreachable from the tier 2
+  cron too, which passes none either and reserves once before a record starts.
 - The billing gate, the crash probe, the fold and both persist shapes are UNCHANGED and are not
   duplicated anywhere. Two money derivations drift, and PTP has already paid for that once
   (lessons L-030).
@@ -5276,7 +5304,7 @@ EOF
 - Consumes: `runTier1Record` and `VendorBudgetThrottledError` (Task 7), the Tier 1 ladder (Task 2), `reserveVendorCalls` and `reservationForSteps` (Task 6), `planRoute`, `chargePerTrace`, `pricePlanFor`, `FAILSAFE_PRICE_PLAN`.
 - Produces: `parcelForTier1Row(row: Tier1QueueRow): ParcelInput`, exported from the route file; the cron's response gains a `tier1` object.
 
-**Sizing, and it is pinned by a test below.** `TIER1_MAX_ROWS_PER_RUN = 120`, `TIER1_CONCURRENCY = 8`. **They are an ESTIMATE of throughput, not the vendor rate ceiling.** The ceiling is `lib/trace/vendorRateBudget.ts` and it holds per call; these two numbers say how much work a run takes on and how long it takes, and the test below pins them so a change to either is deliberate.
+**Sizing, and it is pinned by a test below.** `TIER1_MAX_ROWS_PER_RUN = 120`, `TIER1_CONCURRENCY = 8`. **They are an ESTIMATE of throughput, not the vendor rate ceiling.** The bound is `lib/trace/vendorRateBudget.ts`, which this lane draws per call; these two numbers say how much work a run takes on and how long it takes, and the test below pins them so a change to either is deliberate.
 
 - [ ] **Step 1: Nothing to build here, and one thing to check**
 
@@ -5636,7 +5664,8 @@ describe('the Tier 1 lane s sizing, pinned', () => {
     // (lib/routing/ownerRoute.ts says so about its own figure, in capitals, and D21(c) with D40 put
     // no cap on the owner count), so the inequality holds on paper while the real demand is 960.
     // Pinning arithmetic that cannot hold is worse than pinning nothing, because the next reader
-    // trusts it. The ceiling is lib/trace/vendorRateBudget.ts and it is enforced per CALL.
+    // trusts it. The bound is lib/trace/vendorRateBudget.ts, drawn per CALL on this lane and once per
+    // record on the tier 2 lane, whose unreserved remainder the plan's Task 6 header sizes.
     expect(TIER1_MAX_ROWS_PER_RUN).toBe(120);
     expect(TIER1_CONCURRENCY).toBe(8);
     // 15 rounds at ~3 s is ~45 s, which has to leave room for the entity lane inside maxDuration.
@@ -5760,10 +5789,11 @@ const ENTITY_MAX_ROWS_PER_RUN = 5;
  * which is 2 + 2N calls for N individual owners. So "360 of 450" describes the ordinary case and
  * nothing more.
  *
- * WHAT ACTUALLY HOLDS THE LIMIT is lib/trace/vendorRateBudget.ts, per CALL, over a sliding 60 seconds
- * (spec 5.3). This comment does not enforce anything and must not be read as if it did. The plan's
- * Task 6 header states the guarantee in full, including what it does NOT give: there is no fairness
- * guarantee between this lane and the tier 2 cron, because one shared counter cannot provide one.
+ * WHAT ACTUALLY HOLDS THE LIMIT is lib/trace/vendorRateBudget.ts, over a sliding 60 seconds (spec
+ * 5.3), drawn per CALL on THIS lane, whose steps are independent so a refusal costs nothing. This
+ * comment does not enforce anything and must not be read as if it did. The plan's Task 6 header
+ * states what the budget holds on each lane, and what the tier 2 lane's once-per-record reservation
+ * costs, since that lane must never be refused after its dossier is bought.
  */
 export const TIER1_MAX_ROWS_PER_RUN = 120;
 export const TIER1_CONCURRENCY = 8;
@@ -6050,10 +6080,14 @@ async function runTier1Lane(
        * make and never for a step it was not going to call (one skipped behind an earlier hit, one
        * replayed from the step log, one the request deadline already refused).
        *
-       * IT IS ONE CALL AT A TIME AND NOT ONE RECORD AT A TIME, even though THIS lane's plan is
-       * bounded and a per-record figure would be correct here. Two reasons. The tier 2 lane's plan is
-       * NOT bounded, so it needs per-call claiming; and one shape shared by both lanes is one shape to
-       * get right, whereas two would be the Track A / Track B defect in a new place (L-030).
+       * IT IS ONE CALL AT A TIME HERE, AND THAT IS SAFE ON THIS LANE ONLY. A Tier 1 record's steps
+       * are independent: nothing has been bought when a later step is refused, and an answer already
+       * in hand is replayed from the step log rather than bought again (spec 5.2), so a refusal costs
+       * nothing at any rung. The TIER 2 cron cannot use this shape and does not: its pass-2 lookups
+       * exist only because the dossier was bought, so a refusal there would mean re-running the
+       * record and re-buying that dossier. It reserves once, before the record's first vendor call.
+       * Two call shapes over ONE budget module, not two budgets: the money and the window stay in
+       * lib/trace/vendorRateBudget.ts, which is what L-030 is about.
        *
        * A REFUSAL COMES BACK AS A THROWN VendorBudgetThrottledError from runTier1Record, handled in
        * the catch below. It is not a result field, because that would change Tier1RecordResult's key
@@ -6406,6 +6440,8 @@ One record per lookup path (L-024), each chosen to find a defect rather than to 
 | B4 | tier 1 trust | street, city, state, a trust name WITH a first name | Both lanes in one record: the instant lookup then FastAppend, and two vendor pools in one reservation |
 | B5 | tier 2, blank owner | street, city, state, no owner name | The other queue, unchanged, proving 2A did not disturb it: the job must wait for BOTH |
 
+**One factual note on B3, recorded as an observation and nothing more:** FastAppend fuzzy-matches the company name it is given, and one record in the 2026-09-23 probe (`tasks/phase2-fastappend-probe.md`) matched a differently-named entity. So a company hit here may name a similar rather than identical business. No change is proposed and nothing in this phase acts on it.
+
 Rules for picking:
 - Candidates come from `/Users/davidmonroe/property-registry/docs/registry-inventory/county-searchable-coverage.csv` (L-023); never a county that is not in it.
 - Secondary or tertiary markets only. Never a primary metro county, never Indiana, never Florida.
@@ -6704,7 +6740,7 @@ Check, record by record:
 - B4: `tier1_done`, its step log showing the instant lookup and then FastAppend (or FastAppend `skipped` after a hit), `contact_vendor` naming whichever DELIVERED.
 - B5: `property_trace_status` `property_trace_done` or `property_trace_no_reach`, `charge` the Tier 2 rate, and `ai_research_status` NULL: 2A must not have put a blank-owner row on the Tier 1 queue.
 - The job: `completed`, `records_submitted` 5, `records_matched` matching the rows that delivered, `completed_at` set. **It must NOT have completed before the cron ran.**
-- `vendor_rate_windows`: a `tracerfy` group and, if B3 or B4 reached FastAppend, a `fastappend` group. **`calls` must EQUAL the number of vendor calls the step logs show for that pool, not exceed it**, because claiming is per call now rather than per record: a `calls` higher than the step count means something reserved for a call it did not make. One bucket per second in which a call happened, so a handful of buckets across a few seconds is the expected shape.
+- `vendor_rate_windows`: a `tracerfy` group and, if B3 or B4 reached FastAppend, a `fastappend` group. **The four Tier 1 records claim per call, so their share of `calls` must EQUAL the vendor calls their step logs show, never exceed it**: a higher figure means something reserved for a call it did not make. **B5, the tier 2 record, claims once for the dossier steps its plan carried, so its share may be one HIGHER than its step log** when the first dossier step hit and the second was never made. That is the conservative direction and it is expected; a figure LOWER than the step count is not, on either lane. One bucket per second in which a call happened, so a handful of buckets across a few seconds is the expected shape.
 - Every debit is one row per charged record, at the rate the price model says for this account, and the wallet moved by exactly their sum.
 
 Then open the job's results CSV from the History page and check the last two columns are `found_by` and `outcome_code`, that B2's `skip_reason` reads the no-lookup-key sentence, and that no Address cell contains `APN|`.
@@ -6751,8 +6787,8 @@ EOF
 Expected: `git status --short tasks/research-test` prints nothing (the folder is gitignored). Then stop and hand David, in one message:
 
 1. The live report and the mutation table.
-2. The five open decisions if he has not answered them.
-3. **The divergence from spec 5.3.** The shared budget holds a ceiling of 450 calls to either vendor in any 60-second span and guarantees no row starves forever, but it is NOT a fairness guarantee between the two lanes: in a saturated minute the calls go to whichever cron asks first. Spec 5.3 says "neither starves the other" and one shared counter cannot deliver that; a real one needs per-lane floors, which the spec's own "ONE budget" wording rules out. Nothing was invented to cover the gap. **Ask whether he wants per-lane floors, which is a spec change.**
+2. The two open todos recorded at the top of this plan, which 2A did not build: the Tier 2 reporting gap (todo 23) and todo 20's remainder.
+3. **What the shared budget does.** It holds a per-vendor ceiling of 450 inside any 60-second span on the Tier 1 lane, where every call is reserved before it is made. On the Tier 2 lane it bounds how many records BEGIN, because that lane reserves once before a record's first vendor call and then lets the record finish: no record is refused after its dossier is bought, and no dossier is bought twice. The unreserved pass-2 lookups can overshoot the reserved figure by at most CONCURRENCY (5) times a record's remaining ladder (30 at three owners), which the 50-call gap below each vendor's 500 absorbs. And no row waits forever: a refusal spends no attempt and both claim queries are oldest-first. That is the whole of it.
 4. **The two disclosed costs, in the words a customer would use.**
    - A reused row that already holds contacts they PAID for shows a BLANK `found_by` on the results CSV from submit until this trace writes its own (Task 3's clear-on-reuse). Contacts, charge and counts are untouched.
    - On the D39 path, a trace that finds nothing on such a row, BOTH new CSV columns and `skip_reason` stay blank while `is_successful` is true and `records_matched` counts it. So the row a customer is most likely to ask about is the one row whose new columns say nothing. Blank rather than wrong, and changing either is a D33 or D39 change to stored customer data, which is his.
@@ -6776,11 +6812,9 @@ Recorded so nobody reads their absence as an oversight.
 8. **Renaming `lib/trace/singleTier1.ts`** to something that does not say "single", now that the cron calls it. Phase 4, with the `ai_research*` column rename (`docs/superpowers/plans/2026-09-20-entity-trace-rename-and-vendor-label.md`), because `lib/trace/__tests__/chargeReceipt.test.ts` pins the path and moving it is an edit to a load-bearing fence.
 9. **Deleting the legacy entity lane** from `app/api/cron/sweep-entity-traces`, and with it `ENTITY_MAX_ROWS_PER_RUN`, `storedEntityTrace`, `traceCreditFromFastAppend` on that path and the `business_trace_jobs` recovery sweep. Phase 4, once 2B has moved the two surfaces that still enqueue onto it.
 10. **The Tier 1 lane's run-budget line is unfenced** (Task 8, mutation 15): no test can see it without making 120 records take four minutes. Recorded rather than papered over with a test that casts its way into an impossible state.
-10a. **Per-lane fairness in the shared vendor budget.** 2A delivers spec 5.3's ONE budget, per call, over a sliding 60 seconds, and it does NOT deliver spec 5.3's "neither starves the other": one shared counter cannot, and per-lane floors are ruled out by the spec's own wording. The gap is documented in Task 6's header and in the spec-coverage table, and it is DAVID'S to close or accept, not an implementer's. If he wants it, the shape is a per-lane reservation (each lane granted a floor it can always draw and a shared surplus above it) and it is a change to spec 5.3 first.
-10b. **A tier 2 record throttled after its dossier answered costs PTP one extra dossier.** It is released and re-run rather than settled, so the customer is billed once and every owner is asked. Bounded, conservative, logged by a distinct `console.error`, and cheaper than the alternative (charging $0.25 for owners nobody looked up). If the throttled count is ever non-trivial in production the answer is to lower `MAX_ROWS_PER_RUN` or `CONCURRENCY`, not to settle the record.
 11. **Open task 16** (the wallet reserve is a reserve, not a lock: the sub-second window inside one submit needs a hold taken in the same transaction as the insert) and **open task 19** (a crashed single trace can charge once for nothing; the ledger probe sits inside `if (billable)`) are unchanged by this phase. 2A's per-arrival step log narrows task 19's window for BULK rows but does not close it.
 12. **Open task 17** (no in-product path to re-run a bulk row that came back without the contacts it was submitted for, inside the 90-day window) is unchanged. 2A adds the busy exemption, which is the one resend spec 5.2 requires, and nothing else.
-13. **Todo task 20's remainder and todo task 23** are Decisions C and D above: surfaced for David, not built.
+13. **Todo task 20's remainder and todo task 23** are Items 1 and 2 at the top of this plan: recorded for David, not built.
 
 ---
 ## Self-review
@@ -6799,12 +6833,12 @@ Recorded so nobody reads their absence as an oversight.
 | Spec 4.2, 4.3: the ladders, the name match, hit/miss/failure | 8 (through `planRoute` and `executeRoute`, unchanged from Phase 1) | Nothing about routing is re-implemented in this phase |
 | Spec 5.1: a vendor failure ends the record `busy_try_again` at once, free, and is NOT retried | 8 | The ladder's rungs are for a dead claim only, and the file says so |
 | Spec 5.1: a crash on our side is recovered automatically and continues from the step log | 2, 8 | `onStep` writes it; `resumeFromStepLog: true` reads it |
-| Spec 5.1: throttling is not a failure and uses nothing | 6 (tier 2), 8 (tier 1) | Released to the SAME rung, no attempt spent, mutation-tested in both crons |
+| Spec 5.1: throttling is not a failure and uses nothing | 6 (tier 2), 8 (tier 1) | Released to the SAME rung, no attempt spent, mutation-tested in both crons. **Literally nothing on both lanes:** a record is throttled at its START or not at all, so a refused record has bought nothing and no dossier is ever bought twice |
 | Spec 5.2: per-arrival step log | 2 (the hook), 8 (the writer) | Carried item 3 |
 | Spec 5.2: the 24-hour resume window | 7 | `resumeFromStepLog` + `executeRoute`'s per-entry `at` judgement, unchanged |
 | Spec 5.2: a resend of a busy row is NOT a duplicate | 3 | `checkDuplicates`, mutation-tested both ways |
-| Spec 5.3: ONE shared budget, 450 Tracerfy and 450 FastAppend | 6, 8 | **MET.** Database-backed, serialised per vendor by an advisory transaction lock, claimed ONE CALL AT A TIME through `executeRoute.canSpend`, over a SLIDING 60-second window. An unreadable budget refuses |
-| Spec 5.3: "neither cron starving the other" | 6 | **NOT MET, AND RECORDED AS A DIVERGENCE.** One shared counter with no per-lane share cannot give a fairness guarantee: in a saturated minute the calls go to whichever worker asks first. What IS guaranteed is that no row starves FOREVER, because a throttle spends no attempt and both claim queries are oldest-first. A real fairness guarantee needs per-lane floors, which the spec's own "ONE budget" wording rules out, so this plan implements the words and does not invent floors. Stated in full in Task 6's header. **David's call whether to change the spec** |
+| Spec 5.3: ONE shared budget, 450 Tracerfy and 450 FastAppend | 6, 8 | **MET.** One database-backed budget, serialised per vendor by an advisory transaction lock, over a SLIDING 60-second window, drawn by both crons. An unreadable budget refuses. Claimed ONE CALL AT A TIME through `executeRoute.canSpend` on the Tier 1 lane, whose steps are independent; claimed ONCE PER RECORD before its first vendor call on the Tier 2 lane, which therefore bounds record STARTS rather than every call there. Task 6's header carries the overshoot arithmetic, and the per-call ceiling is not claimed for Tier 2 |
+| Spec 5.3: no row waits forever | 6, 8 | **MET.** A refusal spends no attempt and both claim queries are oldest-first, so a throttled row is the next run's oldest row |
 | Spec 6.1: charged once, on `hasContactData`, at the one rate derivation, with the ledger probe and the fold; `contact_vendor` written | 7, 8 | Not re-derived anywhere: the cron calls `runTier1Record` |
 | Spec 6.2: the wallet reserve counts queued Tier 1 records | 4 | Un-age-bounded, else-if ordered, three mutations |
 | Spec 6.3 + D36: the bulk surfaces align on `traceKeyFor` | 3 | A no-op on every record this surface can send, and the plan says so rather than claiming a fix |
@@ -6816,7 +6850,7 @@ Recorded so nobody reads their absence as an oversight.
 | Spec 8: widen the partial index on `ai_research_status` | 1 | Both indexes, and the older one was already wrong for the entity ladder's own rungs |
 | Spec 8: nothing granted to `anon` or `authenticated` beyond SELECT | 1, 6 | The new table and function grant them NOTHING, and both ACLs are read back |
 | Spec 11: tests first; every money or matching guard mutation-tested; every call site; no live vendor; request shapes pinned | 2 to 9 | Each task carries its own mutation step; Task 9 collects the table |
-| Spec 13: the rate budget is the phase's named risk ("a bug in it either starves Tier 2 or trips the limit") | 6 | Its own task, its own module, its own tests, an unreadable budget REFUSES, and **both halves of the risk answered explicitly**: "trips the limit" by per-call claiming plus a sliding window; "starves Tier 2" only as far as one shared counter can, which is the divergence two rows above. The section is written to be honest before it is reassuring |
+| Spec 13: the rate budget is the phase's named risk ("a bug in it either starves Tier 2 or trips the limit") | 6 | Its own task, its own module, its own tests, an unreadable budget REFUSES, and **both halves of the risk answered explicitly**: "trips the limit" by claiming before the spend plus a sliding window, with the tier 2 overshoot bounded and its arithmetic stated; "starves Tier 2" by a refusal spending no attempt against an oldest-first claim query, and by never refusing a tier 2 record part-way through a ladder it has paid for. The section is written to be honest before it is reassuring |
 | Spec 10, Phase 2: "New submits stop going to the batch CSV" | 3 | The WEB submit. The other two are 2B by David's split |
 | Carried item 1: bulk surfaces onto the queue, per-record judging, whole-batch rejection removed | 3, 8 (web); **2B** (API bulk, MCP) | The whole-batch rejection lives only on those two surfaces; the web route never had one |
 | Carried item 2: the shared rate budget, and the Tier 2 cron re-sized against it | 6 | Including the correction of that cron's now-false sizing comment |
@@ -6840,20 +6874,30 @@ Recorded so nobody reads their absence as an oversight.
 9. **The CSV's dossier-tail assertion would have gone red.** `EXPORT_COLUMNS.slice(38)` equalled `DOSSIER_EXPORT_COLUMNS` only while the dossier block was the tail. Task 5 names the exact edit, `slice(38, 103)`, and every `103` that becomes `105`.
 10. **`reservationForSteps` could not reuse `executeRoute`'s vendor map.** `CONTACT_VENDOR_BY_STEP` maps `DOSSIER_*` to null, correctly, because a dossier is not a contact vendor; reusing it would have reserved nothing for the two most expensive calls in the product. Task 8 defines a separate, exhaustive pool map and says why.
 11. **The live check cannot be driven by a script.** The web bulk route authenticates by session cookie. Task 9 splits it: the runner renders the CSV and drains the queue, David uploads, the controller runs the spend.
-12. **A fifth open decision.** The `no_lookup_key` sentence tells a web customer to send the record again with "the city or the parcel ID", and the web app has no parcel ID column (D5). Before this phase no web customer could see that sentence, because the page dropped the row. Surfaced as Decision E, not fixed (L-028).
+12. **WITHDRAWN at the third pass, see item 22.** This slot used to raise the `no_lookup_key` sentence as a fifth open decision. It was not worth a decision and it is gone.
 
 **Gaps a SECOND review pass found, in this plan's own text rather than in the code, and fixed inline (2026-09-23):**
 
 13. **A failed enqueue would have answered `success: true` and lost every row.** Task 3 deletes the Tracerfy person submit, which was the only thing on this route that reported a tier 1 submit failure, and `insertHistoryRows` `console.error`s its upsert error and returns. The handler would have answered success with `records_submitted` counting rows that were never written, `bulk/status` would have finalized the job `completed` with `records_matched: 0` on the first poll, and its early return would have made that permanent: a customer told their 500-row upload worked, downloading an empty CSV. **This was the one shape in the phase that silently loses customer rows.** Closed in Task 3, Step 5(d.1) and (d.2), with three tests and a mutation that restores the swallow.
-14. **The rate budget's justification rested on a number the codebase calls a floor, and the plan asserted the STRONG guarantee.** The tier 2 reservation was a literal `{ tracerfy: 2, fastappend: 1 }` per record while `lib/routing/ownerRoute.ts` says of that figure "A FLOOR, NOT A CEILING" and D21(c) with D40 let one record make 2 + 2N calls; there was no per-lane share; and the window was a fixed `date_trunc('minute')`, so a straddling 60-second span could carry 900 calls against a limit of 500. The plan nonetheless said "Tier 2 is not starved and the vendor's 500 is not approached", twice. Closed three ways: the reservation is now taken per CALL through `executeRoute.canSpend` (Tasks 2, 6, 7, 8), the window slides, and **the two unsupported sentences are deleted** and replaced by an explicit statement of what holds and what does not, including a recorded DIVERGENCE from spec 5.3's fairness clause.
+14. **The rate budget's justification rested on a number the codebase calls a floor, and the plan asserted the STRONG guarantee.** The tier 2 reservation was a literal `{ tracerfy: 2, fastappend: 1 }` per record while `lib/routing/ownerRoute.ts` says of that figure "A FLOOR, NOT A CEILING" and D21(c) with D40 let one record make 2 + 2N calls; there was no per-lane share; and the window was a fixed `date_trunc('minute')`, so a straddling 60-second span could carry 900 calls against a limit of 500. The plan nonetheless said "Tier 2 is not starved and the vendor's 500 is not approached", twice. Closed three ways: the reservation stopped being a hard-coded constant (per CALL on the Tier 1 lane through `executeRoute.canSpend`, and once per record from the plan's own steps on the Tier 2 lane, see item 19), the window slides, and **the two unsupported sentences are deleted** and replaced by an explicit statement of what holds, what it costs and the arithmetic of the overshoot.
 15. **Task 4's new live-work test did not fence its guard, and the plan recorded its mutation as RED.** It seeded a FRESH `processing` row, which `processingIsLive` already catches, so it passed with and without the clause. Measured: the mutant survived. Closed in Task 4, Step 7, by seeding `created_at: hoursAgo(3)` with a `trace_job_id`, which is also the realistic shape because the upsert never rewrites `created_at`, and by an extra instruction to prove the seed is load-bearing.
 16. **`Smith Family Trust` plans ONE step, not two.** Measured: D16 strips its trust words down to `SMITH`, which leaves no first name, so it is routed as an entity. Task 2's ordering test asserted `seen.length > 1` and Task 8's asserted a `{ tracerfy: 1, fastappend: 1 }` reservation, neither of which that name can produce. Replaced throughout with `John Smith Revocable Trust`, which measures as `["TRACERFY_INSTANT_NAMED","FASTAPPEND_ENTITY"]`, and every dependent expectation re-derived. Task 2's L-018 guidance also said a trust ladder reaches the hit-skip site, which needs a HIT on step 1; Step 8 now carries a seven-case table naming the exact deps each site needs.
 17. **Task 6's rename would have left 38 failing tests, two of whose files the plan never named.** Measured: `lib/trace/__tests__/bulkPreflight.test.ts` 9 (its existing block, ten calls), `app/api/v1/trace/bulk/__tests__/route.test.ts` 23 (absent from the Files list), `lib/suite/__tests__/mcp-tools.test.ts` 6 (absent), `app/api/trace/bulk/__tests__/route.test.ts` +28, plus 3 `tsc` errors, against a Step 8 that said "everything passes". Closed: all four are in the Files list with their exact edits, the `fakeClient()` extension the two-count version needs is spelled out, and the expectation names the 38 so an executor who sees them knows where to look.
 18. **Task 5 missed a third `toHaveLength(103)`.** `app/api/trace/single/download/__tests__/route.test.ts:98`, one measured failure, plus nine stale prose mentions across six files. Closed with an enumerated table and a closing grep that expects exactly two survivors, both of which are correct.
 
+**What DAVID'S OWN REVIEW of this plan corrected, 2026-09-23, and WHY each earlier item was wrong. Recorded so no future session re-raises any of them:**
+
+19. **The Tier 2 lane must never be throttled mid-ladder, and a dossier must never be re-run. REJECTED OUTRIGHT by David:** "Since when are we rerunning dossiers for a user? This would be assinign." The plan passed the per-call `canSpend` hook into the Tier 2 cron's `executeRoute`, so a record could be refused AFTER its dossier had been bought, and it then "recovered" by releasing the row and running the record again next minute, **buying the same dossier twice**. Two things were wrong with it. It spends PTP's money twice for one customer record, which no rate limit is worth. And it was presented as a bounded, conservative cost (old carried item 10b) when the simpler design has no such cost at all. **Closed:** the Tier 2 cron now reserves ONCE, for `reservationForSteps(plan.steps)`, immediately before the record's first vendor call, and passes NO `canSpend`; a record that starts finishes. The Tier 1 lane keeps its per-call hook, because its steps are independent, a refusal there lands before the call it refused, and the per-arrival step log replays what was already answered, so a Tier 1 refusal costs nothing at any rung. The honest cost of the new Tier 2 shape is stated instead of the old one: the budget bounds record STARTS there, not every call, so an in-flight ladder can overshoot by at most `CONCURRENCY` (5) times a record's worst-case remaining ladder (2N calls for N owners, 30 at three), which the 50-call gap below each vendor's 500 absorbs, and **the per-call ceiling is no longer claimed for that lane anywhere**. Carried items 10a and 10b, the mid-ladder release block, its `console.error`, its `execution.throttled` branch and its two tests are deleted, and the two surviving budget tests are re-derived: one asks that the budget is asked ONCE for a two-owner record, the other that a record already granted finishes its ladder after the budget runs dry. `VendorBudgetThrottledError` stays: it is Task 7's and Task 8's, it carries the TIER 1 refusal, and it never carried the mid-ladder case. **Spec 5.1's "throttling spends nothing" is now literally true on both lanes**, and the caveat that admitted it held only for a first-call refusal is gone.
+20. **The FastAppend company name-match guard (old Decision A) was raised on a false analogy, and the guard would have been actively wrong.** D6 forbids a `persons[0]` fallback because a PERSON lookup returns a LIST of people at an address and the code has to choose the right one. FastAppend returns ONE matched business: there is no list, so there is nothing structurally analogous to guard. Worse, the proposed exact-name comparison would reject `DRAGON PROPERTY, LLC` against `DRAGON PROPERTY LLC` and most legitimate matches, turning paid-for correct answers into non-matches. What the probe saw was a vendor fuzzy-match artifact on a single record, not a defect in our code. **Closed:** the decision, its proposed `parseBusinessTraceResponse(body, want)` signature change and every cross-reference are deleted. `lib/tracerfy/client.ts` is untouched by this phase, as it already was. The factual observation survives as one line under Task 9's record table, with no proposed change and no question.
+21. **The company-yield disclosure (old Decision B) asked David to approve a claim the data cannot support.** David: "There is no where enough data to support this claim." The probe report says the same thing about itself ("It is not a rate. Two records per class finds a signal, not a size"). Thirteen attempts supports no customer-facing sentence about how often company rows resolve. **Closed:** the decision and its copy proposal are deleted. Spec Section 10's removal trigger still does not fire, and nothing on the bulk page, in the CSV or in the API says anything about the lane's yield.
+22. **The `no_lookup_key` sentence (old Decision E) was not worth a decision.** David: "What are you talking about?" A city-less web row is told to add the city, which is actionable on that surface; the parcel-ID half of the sentence simply does not apply there. Raising it as a copy decision made a non-problem look like one. **Closed:** the decision is deleted and no copy changes. Changelog item 12, which recorded its discovery as a gap, is withdrawn.
+23. **Spec 5.3 was framed as an unmet fairness requirement, which was editorialising about the spec rather than describing the build.** David: "Fairness is subjective. Why are we talking about it?" The plan carried a "DIVERGENCE FROM THE SPEC, RECORDED" passage, a spec-coverage row reading NOT MET, a carried item (10a) and a hand-off bullet inviting him to change spec 5.3. **Closed:** all of it is replaced by what the budget actually does, stated plainly and asking nothing: a per-vendor ceiling of 450 inside any 60-second span on the Tier 1 lane, a bound on record starts on the Tier 2 lane, and no row waiting forever because a refusal spends no attempt and both claim queries are oldest-first. The spec-coverage table now carries a MET row for "no row waits forever" in place of the NOT MET row, and nothing anywhere speculates about what the spec's wording can deliver.
+
 ### Placeholder scan
 
 There is no "TBD", no "add error handling", no "similar to Task N" and no cross-reference standing in for code. Every code step carries complete code, and where two tasks need the same thing the code is repeated.
+
+**Re-run over the third pass's edits (items 19 to 23).** The rewritten Task 6 Step 6 carries the whole guard verbatim, including its release write and its two counters; the two rewritten tests carry their full bodies; and the five mutations each name the exact edit and the exact test title they turn red. The one thing stated rather than written is the billing assertion inside `lets a record that WAS granted finish its ladder even after the budget runs out`, which says to assert it the way that file's existing hit tests already do, for the same reason the three entries below give: an invented assertion in a harness this plan has not read in full would be wrong and would have to be reconciled anyway.
 
 The only angle-bracket fills are RESULTS the executor measures before writing them down, each defined where it is used: the `<date>` and `<letter>` of each History entry (defined in Global Constraints, CLAUDE.md rule 9), the baseline counts in Task 1's History entry, the vitest and eslint counts in Task 9's, David's approved amount, the bulk `<the job id>` from the submit response, and the outcome per record in the Task 9 report. A step that cannot be written without a measurement says which command produces it.
 
@@ -6877,14 +6921,15 @@ Three further judgement calls are stated rather than hidden: Task 3's `traceKeyF
 
 - `TIER1_MAX_ATTEMPTS`, `TIER1_SETTLED_STATUS`, `TIER1_FAILED_STATUS`, `TIER1_ATTEMPTS`, `TIER1_QUEUED_STATUSES`, `TIER1_PROCESSING_STATUSES`, `TIER1_PENDING_STATUSES`, `tier1QueuedStatusFor`, `tier1ProcessingStatusFor`, `tier1AttemptOf`, `isTier1QueuePending`, `isTier1QueueRow`, `tier1NextAfterFailedAttempt` are all defined in Task 2 (`lib/trace/tier1Queue.ts`) and consumed as: `tier1QueuedStatusFor` in Task 3; `isTier1QueuePending` and `isTier1QueueRow` in Task 4 (four files) and Task 5; `TIER1_PENDING_STATUSES` in Task 4 and Task 6; the rest in Task 8. Every consumer imports from that one module; nothing re-declares a status string.
 - `ExecuteOptions.onStep?: (step: StepReport) => void | Promise<void>` is defined in Task 2, threaded through `StageContext` in the same task, passed by `runTier1Record` in Task 7 and supplied by the cron in Task 8. Its parameter type is `StepReport`, already exported from `lib/routing/executeRoute`, and the cron's local accumulator is typed `StepReport[]`.
-- `ExecuteOptions.canSpend?: (step: RouteStep) => boolean | Promise<boolean>` is defined in Task 2 in the same three places, passed by `runTier1Record` in Task 7, and supplied by the TIER 2 cron in Task 6 and the Tier 1 lane in Task 8. Its parameter is `RouteStep`, already exported from `lib/routing/ownerRoute`, which is what `reservationForSteps([step])` takes. **`ExecutionResult.throttled` is OPTIONAL**, so the two test files that build an `ExecutionResult` literal (`lib/trace/__tests__/fullPropertyTrace.test.ts:30`, `lib/trace/__tests__/tier1Outcome.test.ts:24`) keep typechecking with no edit.
+- `ExecuteOptions.canSpend?: (step: RouteStep) => boolean | Promise<boolean>` is defined in Task 2 in the same three places, passed by `runTier1Record` in Task 7, and supplied by **the Tier 1 lane in Task 8 and nothing else**. Its parameter is `RouteStep`, already exported from `lib/routing/ownerRoute`, which is what `reservationForSteps([step])` takes. **The TIER 2 cron in Task 6 supplies no `canSpend`:** it reserves once per record, so it imports `reservationForSteps` but no `RouteStep` type, and `execution.throttled` is unreachable on that path. **`ExecutionResult.throttled` is OPTIONAL**, so the two test files that build an `ExecutionResult` literal (`lib/trace/__tests__/fullPropertyTrace.test.ts:30`, `lib/trace/__tests__/tier1Outcome.test.ts:24`) keep typechecking with no edit.
 - `Tier1RecordInput` is defined in Task 7 with `ledgerSince: string | null`, `queueWrite: { ai_research_status: string | null; property_trace_status: string | null }`, `resumeFromStepLog: boolean`, `onStep?`, `canSpend?` and `deadlineMs?: number`. `SingleTier1Input` is derived from it by `Omit` of those five in the same task, so a field added to one cannot drift from the other. Task 8 passes every required field, including `deadlineMs` as a number. **`Tier1RecordResult` keeps every field of today's `SingleTier1Result` and gains NONE**, which is what lets Task 7's characterization tests assert its full key set unedited against the old code and the new; a throttle is signalled by a thrown `VendorBudgetThrottledError` for exactly that reason. The old name stays as an alias, so the two single routes' imports are untouched.
 - `VendorBudgetThrottledError` is defined in Task 7 beside `NotATier1PlanError`, thrown in Task 7 and matched with `instanceof` in Task 8's lane catch. Task 8's test file must mock `@/lib/trace/singleTier1` through `importOriginal` and keep BOTH error classes real, or `instanceof` silently fails and a throttle walks the retry ladder.
 - `SingleTier1Row` is unchanged in Task 7, and Task 8 constructs one from its `Tier1QueueRow` with `id`, `charge`, `tier`, `trace_result`, `trace_steps` and `outcome_code`. `charge` and `tier` are `number | string | null` on both sides, which is what `foldBillingWrite`'s `CacheHitRow` already accepts.
-- `VENDOR_RATE_LIMIT`, `VendorName`, `VendorCallReservation`, `reserveVendorCalls`, `pruneVendorRateWindows`, `POOL_BY_STEP` and `reservationForSteps` are ALL defined in Task 6, because Task 6's tier 2 cron is `reservationForSteps`'s first caller (L-020: name the first caller in the same sitting). Task 8 consumes it unchanged. Its parameter is `ReadonlyArray<{ kind: StepKind }>`, which both a one-element `[step]` and `RoutePlan.steps` (`RouteStep[]`) satisfy structurally, and `POOL_BY_STEP` is an exhaustive `Record<StepKind, VendorName>` so a new step kind is a compile error rather than a silent zero reservation.
+- `VENDOR_RATE_LIMIT`, `VendorName`, `VendorCallReservation`, `reserveVendorCalls`, `pruneVendorRateWindows`, `POOL_BY_STEP` and `reservationForSteps` are ALL defined in Task 6, because Task 6's tier 2 cron is `reservationForSteps`'s first caller (L-020: name the first caller in the same sitting). Task 8 consumes it unchanged. Its parameter is `ReadonlyArray<{ kind: StepKind }>`, which both a one-element `[step]` (the Tier 1 lane, per call) and a whole `RoutePlan.steps` (`RouteStep[]`, the tier 2 cron, once per record) satisfy structurally, and `POOL_BY_STEP` is an exhaustive `Record<StepKind, VendorName>` so a new step kind is a compile error rather than a silent zero reservation.
 - `tracerfyCanRun(admin, { tier1: number; tier2: number })` replaces `tracerfyCanRunTier2(admin, number)` in Task 6, and **all three call sites plus all FOUR affected test files** change in the same task: `lib/trace/__tests__/bulkPreflight.test.ts` (its existing block and its `fakeClient()`), `app/api/trace/bulk/__tests__/route.test.ts`, `app/api/v1/trace/bulk/__tests__/route.test.ts` and `lib/suite/__tests__/mcp-tools.test.ts`. Measured: 38 failing tests and 3 `tsc` errors if any is left out. Task 9's gate greps for the old name to prove none is left.
 - `UnsettledRow` in `lib/trace/bulkPreflight.ts` gains `ai_research_status: string | null` in Task 4, and Task 6's `tracerfyCanRun` reads no row shape at all (it uses `count`), so the two changes to that file do not touch each other.
 - `SkipReasonRow` already extends `Tier1OutcomeRow` and already carries `ai_research_status` and `trace_job_id`, so Task 5's gate needs no type change; Task 4's widened selects are what make the fields present at runtime, and Task 4's `JobRow` is `SkipRow & { charge; is_successful; property_trace_status? }`, which both widened selects satisfy.
 - `Tier1QueueRow` and `parcelForTier1Row` are defined and used in Task 8 only. `parcelForTier1Row` returns `ParcelInput`, which `planRoute(parcel, pricePlan)` takes, and sets `ownerName` where `parcelForFullTrace` sets null, which is the whole tier 1 versus tier 2 difference.
 - `TIER1_OUTCOME` (`lib/trace/tier1Outcome.ts`) is read in Tasks 3, 7 and 8 and is never re-declared; `TIER1_OUTCOME.BUSY_TRY_AGAIN` is the one outcome string this phase writes outside `runTier1Record`, in the cron's two exhaustion payloads, and it is imported rather than typed as a literal.
 - `EXPORT_COLUMNS` grows by two entries in Task 5 and `toExportValues` grows by two values in the same step, in the same order, which is the invariant `toExportCells` depends on (it zips the two by index).
+- **Re-checked over the third pass's edits (items 19 to 23).** The tier 2 cron's one reservation is `reserveVendorCalls(adminClient, reservationForSteps(plan.steps))`: `plan` is the `RoutePlan` already in scope from `planRoute(parcelForRow(row), pricePlan)`, `RoutePlan.steps` is `RouteStep[]` and satisfies `reservationForSteps`'s `ReadonlyArray<{ kind: StepKind }>` structurally, and its `VendorCallReservation` return is exactly what `reserveVendorCalls` takes, so the call typechecks with no new type and no cast. It sits AFTER the `plan.steps.length === 0` branch, so the reservation is never for zero steps. That file's only new import is `reservationForSteps`, beside `reserveVendorCalls` and `pruneVendorRateWindows`; it imports no `RouteStep` and declares no `canSpend`, which is what keeps eslint at its baseline and makes `execution.throttled` unreachable there.
