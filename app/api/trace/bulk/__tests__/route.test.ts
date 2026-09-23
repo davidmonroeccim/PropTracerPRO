@@ -413,15 +413,16 @@ describe("the submit estimate", () => {
 });
 
 /**
- * TRACK A PRICES GRANT-AWARE, AND THE ONLY THING SEPARATING IT FROM TRACK B IS
- * A FEATURE FLAG THAT IS OFF IN TESTS.
+ * THIS ROUTE PRICES GRANT-AWARE, AND THE ONLY THING THAT CAN HIDE THAT IS A
+ * FEATURE FLAG THAT IS OFF IN TESTS.
  *
  * hasSuiteAccess() is gated on NEXT_PUBLIC_SUITE_SIGNIN_ENABLED, which is false
  * here and TRUE in production. With the flag off a gateway grant counts for
- * nothing, both derivations collapse to the wallet column, and a test asserting
- * that this route prices grant-aware passes under the correct implementation and
- * under a raw one alike. That is L-009, and this project has earned it twice.
- * The probe at the end proves the flag is what makes the difference possible.
+ * nothing, the derivation collapses to the wallet column regardless, and a test
+ * asserting that this route prices grant-aware passes under the correct
+ * implementation and under a grant-blind one alike. That is L-009, and this
+ * project has earned it twice. The probe at the end proves the flag is what
+ * makes the difference possible.
  */
 describe("the tier 2 rate this route quotes", () => {
   const GRANT_HOLDER = {

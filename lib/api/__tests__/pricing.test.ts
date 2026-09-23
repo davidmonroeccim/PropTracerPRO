@@ -243,8 +243,17 @@ describe("there is no second derivation left to disagree with", () => {
   it("prices the gateway-grant-only shape the SAME as a native pro, everywhere", () => {
     // The replacement for the retired "is a DIFFERENT answer from Track A for the same profile".
     // lib/suite/pricing.ts:8-15 states the rule this pins: two prices for one piece of work is
-    // the thing that must never happen. If a v1 route or a cron is ever re-pointed at a raw,
-    // grant-blind rate, the numbers below stop matching and this is what says so.
+    // the thing that must never happen.
+    //
+    // WHAT THIS FILE PINS, AND WHAT IT DOES NOT. This file imports only the three derivation
+    // functions -- it never calls a route or a cron, so it cannot notice one being re-pointed at a
+    // raw, grant-blind rate. What it pins is the derivation's NUMBERS: every profile shape answers
+    // exactly what it answered before the collapse, and the gateway-grant-only shape matches native
+    // pro. The WIRING -- that each call site actually reads chargePerTrace / chargePerRecord /
+    // pricePlanFor rather than some other rate -- is pinned by the per-site tests that mock a route
+    // or cron and assert on the dollar amount it bills: the route test files under
+    // app/api/v1/trace/*/__tests__ and app/api/trace/*/__tests__, and the cron test files under
+    // app/api/cron/sweep-*/__tests__.
     const GRANT_ONLY = {
       subscription_tier: "wallet",
       is_acquisition_pro_member: false,

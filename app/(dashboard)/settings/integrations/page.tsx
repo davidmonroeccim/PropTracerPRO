@@ -564,9 +564,10 @@ export default function IntegrationsPage() {
                     <code className="bg-gray-100 px-1 rounded">charge</code> is what your wallet
                     actually paid for that trace, not a list price. When you give us the owner of
                     record you are charged only if contacts come back, at $0.15 per successful
-                    trace on Pro and AcquisitionPRO or $0.25 pay as you go. A Full Property Trace
-                    is charged per record submitted, at $0.25 on Pro and AcquisitionPRO or $0.40
-                    pay as you go, and that charge stands whether or not contacts come back.
+                    trace on Pro, AcquisitionPRO and Suite Gateway or $0.25 pay as you go. A Full
+                    Property Trace is charged per record submitted, at $0.25 on Pro, AcquisitionPRO
+                    and Suite Gateway or $0.40 pay as you go, and that charge stands whether or not
+                    contacts come back.
                   </p>
                   <p>
                     This event fires for every finished trace, including one that found no

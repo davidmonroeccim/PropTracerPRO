@@ -98,7 +98,7 @@ export default function ApiDocsPage() {
                 <tr className="border-b">
                   <th className="text-left py-2 pr-4">You send</th>
                   <th className="text-left py-2 pr-4">Charged</th>
-                  <th className="text-left py-2 pr-4">Pro and AcquisitionPRO</th>
+                  <th className="text-left py-2 pr-4">Pro, AcquisitionPRO and Suite Gateway</th>
                   <th className="text-left py-2">Pay as you go</th>
                 </tr>
               </thead>

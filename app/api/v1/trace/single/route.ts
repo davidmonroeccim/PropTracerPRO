@@ -145,6 +145,9 @@ export async function POST(request: Request) {
     // nothing is written and nothing is charged.
     const parcel = parcelForFullTrace({ address, city, state, zip, apn, county });
     const tier1Owner = fullPropertyTrace ? null : String(ownerName).trim();
+    // PRICE-INERT, no test needed: this plan is consulted only for keyPlan.steps.length below, to
+    // learn whether ANY lookup key exists. Nothing here reads a rate off it, so a plan derived from
+    // the wrong price column would still answer this question correctly.
     const keyPlan = planRoute({ ...parcel, ownerName: tier1Owner }, pricePlanFor(profile));
     if (keyPlan.steps.length === 0) {
       // INVARIANT: planRoute emits no step exactly when missingLookupKey names what is missing. The
@@ -725,6 +728,9 @@ export async function POST(request: Request) {
       userId: profile.id,
       row: traceRecord,
       parcel: { ...parcel, ownerName: tier1Owner },
+      // PRICE-INERT, no test needed: runSingleTier1 reads only plan.tier off the plan it builds
+      // from this (lib/trace/singleTier1.ts:107,113), to enforce that this is a tier 1 record. The
+      // charge itself arrives separately, below, as chargeAmount.
       pricePlan: pricePlanFor(profile),
       chargeAmount: chargePerTrace(profile),
       deadlineMs: startedAt + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS,

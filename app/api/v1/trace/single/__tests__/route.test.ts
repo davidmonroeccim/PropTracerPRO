@@ -675,7 +675,7 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
     expect(body.tier).toBe(2);
   });
 
-  it("runs a body WITH an ownerName inline at the Track B tier 1 rate", async () => {
+  it("runs a body WITH an ownerName inline at the tier 1 rate", async () => {
     // WAS: submitted to the Tracerfy batch and returned a traceId to poll. Removed (spec D26).
     H.entity = CONTACTS_HIT;
     const { submitSingleTrace } = await import("@/lib/tracerfy/client");
@@ -774,7 +774,7 @@ describe("POST /api/v1/trace/single — what phase 4 changed", () => {
 });
 
 /* ==================================================================== *
- * TIER 2 — FULL PROPERTY TRACE on the PUBLIC API-KEY surface (Track B).
+ * TIER 2 — FULL PROPERTY TRACE on the PUBLIC API-KEY surface (/api/v1).
  *
  * A NEW BILLING PATH on a public API. Tier 2 bills per RECORD SUBMITTED,
  * which makes two things true that are false everywhere else:
@@ -850,7 +850,7 @@ const CONTACTS_HIT = {
 };
 
 /**
- * PAY-AS-YOU-GO on Track B: no local pro tier, no AcquisitionPRO flag.
+ * PAY-AS-YOU-GO on the /api/v1 surface: no local pro tier, no AcquisitionPRO flag.
  *
  * Since the gate fix (lib/api/auth.ts), validateApiKey() honours a Suite Gateway
  * grant via effectiveIsPro(), so a wallet-tier profile like this one CAN now reach
@@ -1147,7 +1147,7 @@ describe("v1 tier 2 — the caller's REAL plan is billed, on the ONE grant-aware
     }
   });
 
-  it("gates the BALANCE on the same rate it will charge, grant included", async () => {
+  it("gates the TIER 2 BALANCE on the same rate it will charge, grant included", async () => {
     // SITE: route.ts minBalance -> chargePerRecord(profile).
     // The gate and the charge must derive from the SAME function or the reserve is the wrong
     // number in one direction or the other. A grant holder owes $0.25 here, so $0.24 is short and
@@ -2317,6 +2317,39 @@ describe("v1 tier 1: the ONE grant-aware price", () => {
     } finally {
       if (prev === undefined) delete process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
       else process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
+    }
+  });
+
+  it("gates the TIER 1 balance on the same rate it will charge, grant included", async () => {
+    // SITE: route.ts minBalance -> chargePerTrace(profile), the TIER 1 arm (fullPropertyTrace is
+    // false whenever an ownerName is supplied, as it is in BODY). The sibling describe block above
+    // ("v1 tier 2 ...") covers the OTHER arm, minBalance -> chargePerRecord(profile); the two arms
+    // are reverted independently by a mutation, so each needs its own guard here.
+    //
+    // A grant holder owes $0.15 per success here, the same as every other surface, so $0.14 is
+    // short and $0.15 is enough. A gate left on the retired grant-blind rate would price this
+    // caller off their native subscription_tier ('wallet') instead of the grant, demand $0.25, and
+    // 402 a caller who can pay -- refusing work nobody was told to refuse.
+    // MUTATION: gate on a grant-blind raw rate for this arm and the first half of this goes red
+    // (402 at $0.14 is unchanged, but so is 402 at $0.15, which is wrong).
+    const prev = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const GRANTED = {
+      ...PAYG_PROFILE,
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: new Date().toISOString(),
+    };
+    try {
+      H.profile = { ...GRANTED, wallet_balance: 0.14 };
+      const { lookupBusinessTrace } = await v1Vendors();
+
+      expect((await post(BODY)).status).toBe(402);
+      expect(lookupBusinessTrace).not.toHaveBeenCalled();
+
+      H.profile = { ...GRANTED, wallet_balance: 0.15 };
+      expect((await post(BODY)).status).not.toBe(402);
+    } finally {
+      process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = prev;
     }
   });
 });
