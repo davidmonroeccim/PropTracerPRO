@@ -10,6 +10,12 @@ import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { PRICING, STALE_PROCESSING, getChargePerTrace } from '@/lib/constants';
 import type { TraceResult } from '@/types';
 
+// validateApiKey's blocking entitlement refresh (lib/suite/access.ts) can add up to 5s
+// (AbortSignal.timeout(5000)) plus an un-timeouted UPDATE in front of the Tracerfy poll and
+// wallet settle below, so this needs the same headroom as its siblings (trace/single,
+// trace/bulk, trace/bulk/status), all of which set 60 against the ~10s platform default.
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);

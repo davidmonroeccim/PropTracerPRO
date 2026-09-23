@@ -21,6 +21,11 @@ const H = vi.hoisted(() => ({
   error: null as { code?: string; message?: string } | null,
   lastUpdate: null as Record<string, unknown> | null,
   updateError: null as Error | null,
+  // A DB-level write failure, e.g. a missing GRANT (42501): supabase-js RESOLVES the query with
+  // this shape rather than rejecting (see lib/suite/access.ts persistSnapshot). Distinct from
+  // `updateError` above, which models a rejection — a mode a real supabase-js query builder
+  // cannot produce without `.throwOnError()`, which persistSnapshot does not chain.
+  updateResolvedError: null as { code?: string; message?: string } | null,
 }));
 
 /**
@@ -69,6 +74,9 @@ vi.mock("@/lib/supabase/admin", () => ({
             eq: () => {
               if (H.updateError) return Promise.reject(H.updateError);
               H.lastUpdate = fields;
+              if (H.updateResolvedError) {
+                return Promise.resolve({ data: null, error: H.updateResolvedError });
+              }
               return Promise.resolve({ data: null, error: null });
             },
           }),
@@ -122,6 +130,7 @@ const NO_ENTITLEMENT_PROFILE = {
 };
 
 let ORIGINAL_FLAG: string | undefined;
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   ORIGINAL_FLAG = process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED;
@@ -129,7 +138,9 @@ beforeEach(() => {
   H.error = null;
   H.lastUpdate = null;
   H.updateError = null;
+  H.updateResolvedError = null;
   fetchEntitlements.mockReset();
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -138,6 +149,7 @@ afterEach(() => {
   } else {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = ORIGINAL_FLAG;
   }
+  consoleErrorSpy.mockRestore();
 });
 
 describe("validateApiKey — entitlement gate", () => {
@@ -299,13 +311,14 @@ describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)
 
   it("a stale snapshot whose refresh still returns the grant: admits, and the row is updated", async () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    const staleCheckedAt = minutesAgo(TTL_MINUTES + 1);
     H.profile = {
       id: "user-stale-still-granted",
       subscription_tier: "wallet",
       is_acquisition_pro_member: false,
       gateway_sub: "gw-stale-1",
       gateway_products: ["prop-tracer-pro"],
-      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+      gateway_products_checked_at: staleCheckedAt,
     };
     fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
 
@@ -314,6 +327,34 @@ describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)
     expect(isAuthError(result)).toBe(false);
     expect(fetchEntitlements).toHaveBeenCalledWith("gw-stale-1");
     expect(H.lastUpdate).toMatchObject({ gateway_products: ["prop-tracer-pro"] });
+    // Not just gateway_products: the TTL clock itself must move forward on a successful
+    // refresh, or every subsequent request re-fetches the gateway forever even though nothing
+    // changed.
+    const advancedCheckedAt = H.lastUpdate?.gateway_products_checked_at;
+    expect(typeof advancedCheckedAt).toBe("string");
+    expect(Date.parse(advancedCheckedAt as string)).toBeGreaterThan(Date.parse(staleCheckedAt));
+  });
+
+  it("an admitted refresh where the values differ from the stale row: the RETURNED profile carries the new value, not the stale one", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-newly-granted",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-newly-granted",
+      gateway_products: [], // stale row shows no grant yet
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+
+    const result = await validateApiKey(req("Bearer key-newly-granted"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual([
+        "prop-tracer-pro",
+      ]);
+    }
   });
 
   it("a stale snapshot whose refresh returns NO grant: refused 403, and the profile no longer carries the stale grant (THE FIX)", async () => {
@@ -361,6 +402,56 @@ describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)
       expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
     }
     expect(H.lastUpdate).toBeNull();
+  });
+
+  /**
+   * FIX 1: the gateway has a documented habit of answering 200 with a malformed body. Both
+   * shapes below parse fine but carry no usable `products` array, and must be treated as a
+   * FAILURE (fail open on the last snapshot), never as an implicit revocation — a well-formed
+   * `{ products: [] }` is the only shape allowed to actually revoke (covered above).
+   */
+  it("a stale snapshot whose refresh returns a 200 with {} (malformed body): admitted on the last snapshot, nothing persisted, logged", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-empty-body",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-empty-body",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({});
+
+    const result = await validateApiKey(req("Bearer key-empty-body"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
+    }
+    expect(H.lastUpdate).toBeNull();
+    expect(consoleErrorSpy).toHaveBeenCalled();
+  });
+
+  it("a stale snapshot whose refresh returns { products: null }: admitted on the last snapshot, nothing persisted, logged", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-stale-null-products",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-null-products",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: null, expires_hint: null });
+
+    const result = await validateApiKey(req("Bearer key-null-products"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
+    }
+    expect(H.lastUpdate).toBeNull();
+    expect(consoleErrorSpy).toHaveBeenCalled();
   });
 
   it("no gateway_sub: no gateway call", async () => {
@@ -434,7 +525,12 @@ describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)
     expect(fetchEntitlements).not.toHaveBeenCalled();
   });
 
-  it("the persist failing: request still succeeds", async () => {
+  // Defensive: models persistSnapshot's write REJECTING outright. A real supabase-js query
+  // builder without `.throwOnError()` cannot actually do this (see the resolved-error test
+  // below for the mode production can produce) — kept because the only thing that can reject
+  // here is createAdminClient() itself throwing (e.g. a missing env var), which this still
+  // exercises end-to-end.
+  it("the persist rejecting outright: request still succeeds", async () => {
     process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
     H.profile = {
       id: "user-persist-fails",
@@ -453,5 +549,35 @@ describe("validateApiKey — entitlement TTL refresh (v1 has no other refresher)
     if (!isAuthError(result)) {
       expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
     }
+  });
+
+  /**
+   * FIX 2, the reachable mode: a supabase-js query without `.throwOnError()` never rejects for a
+   * DB-level failure (e.g. the 42501 grant-class error this repo's CLAUDE.md documents at
+   * length) — it RESOLVES with `{ error }`. Before Fix 2 that error was discarded with no log at
+   * all, so a persistently failing write called the gateway forever with nothing to see it by.
+   */
+  it("the persist RESOLVING with { error } (the mode production can actually produce): request still succeeds AND the error is logged", async () => {
+    process.env.NEXT_PUBLIC_SUITE_SIGNIN_ENABLED = "true";
+    H.profile = {
+      id: "user-persist-resolves-error",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      gateway_sub: "gw-persist-resolved-error",
+      gateway_products: ["prop-tracer-pro"],
+      gateway_products_checked_at: minutesAgo(TTL_MINUTES + 1),
+    };
+    fetchEntitlements.mockResolvedValue({ products: ["prop-tracer-pro"], expires_hint: null });
+    H.updateResolvedError = { code: "42501", message: "permission denied for table user_profiles" };
+
+    const result = await validateApiKey(req("Bearer key-persist-resolved-error"));
+
+    expect(isAuthError(result)).toBe(false);
+    if (!isAuthError(result)) {
+      // The gateway already answered, so the caller gates on that answer even though writing
+      // it back failed.
+      expect((result.profile as unknown as { gateway_products: string[] }).gateway_products).toEqual(["prop-tracer-pro"]);
+    }
+    expect(consoleErrorSpy).toHaveBeenCalled();
   });
 });

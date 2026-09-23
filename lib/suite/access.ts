@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isSuiteSignInEnabled } from "./config";
 import { type EntitlementProfile, fetchEntitlements, isSnapshotStale } from "./entitlements";
 
-export interface RefreshRow extends EntitlementProfile { id: string }
+interface RefreshRow extends EntitlementProfile { id: string }
 
 type SnapshotFields = Pick<EntitlementProfile, "gateway_products" | "gateway_products_checked_at">;
 
@@ -11,12 +11,36 @@ type SnapshotFields = Pick<EntitlementProfile, "gateway_products" | "gateway_pro
  * Single write path for the gateway entitlement snapshot on user_profiles, shared by both
  * refreshers below. createAdminClient() (lib/supabase/admin.ts) builds its client with no
  * Database generic, so every table/column on it already types as `any` — there is no `any` to
- * cast away here. This throws on failure rather than swallowing it; each call site below keeps
- * its own try/catch and its own fail-open behaviour around the call.
+ * cast away here. A supabase-js query without `.throwOnError()` never rejects for a DB-level
+ * failure (e.g. a missing GRANT) — it resolves with `{ error }` — so that case is inspected and
+ * logged right here rather than swallowed. Only createAdminClient() itself throwing (e.g. a
+ * missing env var) escapes this function as a rejection; each call site below keeps its own
+ * try/catch and its own fail-open behaviour around that.
  */
 async function persistSnapshot(userId: string, snapshot: SnapshotFields): Promise<void> {
-  await createAdminClient().from("user_profiles").update(snapshot).eq("id", userId);
+  const { error } = await createAdminClient().from("user_profiles").update(snapshot).eq("id", userId);
+  if (error) {
+    console.error("[suite-signin] entitlement snapshot persist failed:", error);
+  }
 }
+
+/** A malformed entitlements response is a FAILURE, not a revocation: only a genuine array of
+ *  product slugs is believed, including a well-formed empty one (`[]`), which IS a real
+ *  revocation and must still be honoured. Anything else (`undefined`, `null`, a non-array) throws
+ *  so the caller's existing fail-open catch handles it uniformly: admitted on the last snapshot,
+ *  nothing persisted, logged. */
+function assertValidProducts(products: unknown): asserts products is string[] {
+  if (!Array.isArray(products)) {
+    throw new Error("entitlements response malformed: products is not an array");
+  }
+}
+
+// No in-flight coalescing for concurrent stale-snapshot refreshes: two simultaneous requests for
+// the same stale user both call the gateway. Left this way on purpose rather than by omission —
+// the first successful persist advances gateway_products_checked_at (so it self-heals within one
+// request's TTL window), and Fix 1 above removes the unbounded case (a malfunctioning gateway can
+// no longer wedge the row into permanent staleness, which was the scenario that made repeated
+// concurrent calls unbounded rather than just a brief burst).
 
 /** Schedule the TTL refresh AFTER the response flushes. after() throws outside a request scope,
  *  so degrade to fire-and-forget there. refreshSuiteSnapshot never rejects. */
@@ -35,6 +59,7 @@ async function refreshSuiteSnapshot(profile: RefreshRow): Promise<void> {
     if (!gatewaySub) return;
     if (!isSnapshotStale(profile.gateway_products_checked_at)) return;
     const ent = await fetchEntitlements(gatewaySub);
+    assertValidProducts(ent.products);
     await persistSnapshot(profile.id, {
       gateway_products: ent.products,
       gateway_products_checked_at: new Date().toISOString(),
@@ -71,6 +96,7 @@ export async function refreshSuiteSnapshotBlocking(profile: RefreshRow): Promise
   let refreshed: SnapshotFields;
   try {
     const ent = await fetchEntitlements(profile.gateway_sub);
+    assertValidProducts(ent.products);
     refreshed = { gateway_products: ent.products, gateway_products_checked_at: new Date().toISOString() };
   } catch (e) {
     console.error("[suite-signin] blocking entitlement refresh failed, keeping last snapshot:", e);
