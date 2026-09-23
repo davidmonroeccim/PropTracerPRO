@@ -45,7 +45,19 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
         live-work threshold, tier 2 warnings, the Tier 1 plan guard, TRS as a surname, the
         trace.completed header, the de-polling dead code). Report:
         `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md`.
-- [ ] Phase 2: bulk queue (plan written after Phase 1)
+- [ ] Phase 2A: the Tier 1 queue, the cron, the shared rate budget and the WEB upload.
+      Plan: `docs/superpowers/plans/2026-09-23-tier1-phase2a-queue-and-web-upload.md`.
+      API bulk and the gateway MCP `skip_trace_bulk` are 2B and are NOT in it.
+  - [x] Task 1: the queue index, widened
+  - [ ] Task 2: the Tier 1 ladder, the legacy ladder's missing test, the two per-step hooks
+  - [ ] Task 3: the web upload enqueues, and the page stops dropping city-less rows
+  - [ ] Task 4: the four seams a queued Tier 1 row touches
+  - [ ] Task 5: the D33 bulk half, found_by and outcome_code in the CSV and the bulk summary
+  - [ ] Task 6: the shared vendor rate budget, and the Tier-1-only capacity gap
+  - [ ] Task 7: the one billing path, extracted
+  - [ ] Task 8: the Tier 1 cron
+  - [ ] Task 9: suite gates, then the live check
+- [ ] Phase 2B: API bulk and the gateway MCP onto the queue (plan written after 2A)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 

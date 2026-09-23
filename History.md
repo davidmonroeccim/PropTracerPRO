@@ -4,6 +4,27 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-23 (g): Tier 1 Phase 2A, Task 1: both ai_research_status indexes widened.
+
+- Migration 20260923_tier1_queue_index.sql rebuilds idx_trace_history_research_queue as
+  (ai_research_status, created_at) WHERE ai_research_status IS NOT NULL, and
+  idx_trace_history_research_stale_claim as (ai_research_status, ai_research_claimed_at) with the
+  same predicate. Applied with supabase db query and read back.
+- The old predicates were = 'queued' and = 'processing', so nine of the entity ladder's ten claim
+  and sweep statements have been sequential-scanning since that ladder landed. The Tier 1 queue
+  adds ten more values, so both predicates are now IS NOT NULL, the shape the tier 2 queue's own
+  index already uses.
+- Two column comments record which values belong to which lane, and that the two sets are
+  disjoint. No grants changed: anon and authenticated are still SELECT only for DML.
+- ACL read back before and after the migration and found byte-identical; the migration itself
+  contains zero GRANT/REVOKE statements. anon and authenticated also carry pre-existing
+  TRUNCATE-class privileges (TRUNCATE, REFERENCES, TRIGGER, MAINTAIN) on trace_history, left in
+  place by 20260918_lock_trace_history_writes.sql, which only ever revoked INSERT/UPDATE/DELETE.
+  Not reachable via PostgREST, not new, and not widened by this migration; logged here rather than
+  left only in the task report.
+- Baseline for this phase, measured on the branch point: vitest 1902 passing / 84 files,
+  tsc 0 errors, eslint 45 problems.
+
 ## 2026-09-23 (f): FastAppend yield probe. $0.20, 2 hits in 10, and the company lane has no name match.
 
 - Run before Phase 2 gives the company lane bulk volume. David approved roughly $1; actual vendor spend
