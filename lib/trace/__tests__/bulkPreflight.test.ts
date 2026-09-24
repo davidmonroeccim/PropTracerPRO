@@ -285,3 +285,107 @@ describe("in-flight unbilled work", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * THE TIER 1 QUEUE (spec 6.2). A web bulk job's rows are queued on
+ * ai_research_status rather than submitted to Tracerfy, so this column has to
+ * reserve too, or two batches sent back to back can both pass on the same
+ * dollars.
+ * ------------------------------------------------------------------ */
+
+describe("inFlightUnbilledCost and the Tier 1 queue (spec 6.2)", () => {
+  const RATES = { tier1: 0.15, tier2: 0.25 };
+
+  it("reserves the tier 1 rate for a QUEUED Tier 1 bulk row", async () => {
+    // Spec 6.2: "inFlightUnbilledCost counts queued Tier 1 records as well as processing ones, so
+    // two batches sent back to back cannot both pass on the same dollars."
+    H.inFlightRows = [
+      { status: "processing", property_trace_status: null, ai_research_status: "tier1_queued" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("keeps reserving for a Tier 1 queue row OLDER than the stale-processing bound", async () => {
+    // THE ASYMMETRY IS THE POINT, and it is the tier 2 argument arriving on the tier 1 column. The
+    // age bound exists for an ORPHANED single-trace row that nothing will ever resolve. A queued
+    // bulk row is not orphaned: the ladder and the stale-claim sweep guarantee it reaches a
+    // terminal, so it WILL be billed, and under-reserving certain money is the wrong direction to
+    // fail in. MUTATION: delete the isTier1QueuePending arm and this goes red -- the bare
+    // status === 'processing' arm cannot age-bound-exclude this row from the DATABASE query (the
+    // fake client returns whatever H.inFlightRows holds regardless of the `or` clause), but with the
+    // arm gone the row still falls to the bare-processing arm and reserves tier1 anyway UNLESS the
+    // row is old -- so this test is written against the REAL query's age-bounded tier 1 arm, which
+    // the fake client does not filter. The row below is old enough that a real `or` clause would
+    // exclude it from a bare-processing match, so only the Tier 1 queue arm can be the reason it is
+    // still reserved.
+    H.inFlightRows = [
+      {
+        status: "processing",
+        property_trace_status: null,
+        ai_research_status: "tier1_processing_2",
+        created_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("prices a Tier 1 queue row ONCE, at the tier 1 rate, never at both rates", async () => {
+    // A queued row is ALSO status 'processing', so two ifs instead of an else-if chain would
+    // reserve the two rates added together for a row that can only ever cost one of them and 402
+    // a wallet that can afford the batch. MUTATION: turn the else-if chain into three plain ifs and
+    // this goes red.
+    H.inFlightRows = [
+      { status: "processing", property_trace_status: null, ai_research_status: "tier1_queued" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("reserves the TIER 2 rate when a row is somehow on both columns", async () => {
+    // Tier 2 outranks, exactly as rowSkipReason orders the two queues, because tier 2 is certain
+    // money: the cron will bill it whatever it finds. MUTATION: move the Tier 1 arm above the tier 2
+    // arm and this goes red.
+    H.inFlightRows = [
+      {
+        status: "processing",
+        property_trace_status: "queued",
+        ai_research_status: "tier1_queued",
+      },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.25, 4);
+  });
+
+  it("reserves nothing for a SETTLED Tier 1 queue row", async () => {
+    H.inFlightRows = [
+      { status: "success", property_trace_status: null, ai_research_status: "tier1_done" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBe(0);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * THE ACTUAL "NOT AGE-BOUNDED" GUARANTEE LIVES IN THE SQL CLAUSE, NOT THE LOOP.
+   *
+   * A Tier 1 queued row always carries status: 'processing' (Task 3), so the loop's bare
+   * `else if (row.status === 'processing') total += rates.tier1` arm reserves the SAME rate for it
+   * as the isTier1QueuePending arm does -- the two tests above pass whether or not that loop arm
+   * exists, because fakeClient() returns whatever stubRows() holds regardless of the `.or()`
+   * string, exactly as a real Postgres query WOULD exclude an old row that only the loop, not the
+   * query, tries to rescue. What actually keeps an old queued row IN the result set at all is the
+   * query's own ai_research_status.in.(...) clause carrying no created_at wrapper. These two tests
+   * fence THAT, the same way the sibling tier 2 test above fences its own arm.
+   * ------------------------------------------------------------------ */
+  it("puts the Tier 1 queue statuses in the OR clause", async () => {
+    // MUTATION: drop the ai_research_status.in.(...) branch from the query and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    expect(clause).toContain("ai_research_status.in.(");
+  });
+
+  it("does NOT bound the Tier 1 queue arm by age either", async () => {
+    // MUTATION: wrap ai_research_status.in.(...) in an and(...) with created_at, the way the bare
+    // processing arm is wrapped, and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    const tier1QueuePart = clause.slice(clause.indexOf("ai_research_status.in."));
+    expect(tier1QueuePart).not.toContain("created_at");
+  });
+});

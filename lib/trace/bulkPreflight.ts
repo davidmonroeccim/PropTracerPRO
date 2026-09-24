@@ -37,6 +37,7 @@ import {
   PROPERTY_TRACE_PENDING_STATUSES,
   isPropertyTracePending,
 } from '@/lib/trace/propertyTraceAttempts';
+import { TIER1_PENDING_STATUSES, isTier1QueuePending } from '@/lib/trace/tier1Queue';
 
 /**
  * What one queued tier 2 record costs the SHARED Tracerfy pool, in credits.
@@ -98,6 +99,7 @@ export const TIER2_CAPACITY_REFUSAL =
 interface UnsettledRow {
   status: string | null;
   property_trace_status: string | null;
+  ai_research_status: string | null;
 }
 
 /**
@@ -181,6 +183,13 @@ export async function tracerfyCanRunTier2(
  *                          Reserved in full because the worst case is what a
  *                          reserve is for, and because a wallet sized for the
  *                          best case is the one that comes up short.
+ *   a queued tier 1 row    the Tier 1 cron WILL work it and MAY bill it, per successful trace.
+ *                          Reserved in full and NOT age-bounded, unlike the bare processing row
+ *                          above: that bound exists for an ORPHANED single-trace row nothing can
+ *                          resolve, and a queued bulk row is not orphaned. Its ladder and the
+ *                          cron's stale-claim sweep guarantee it reaches a terminal, so it is the
+ *                          same kind of certainty a pending tier 2 row has, and under-reserving
+ *                          certain money is the wrong direction to fail in.
  *
  * A settled row is excluded because it has already been billed; reserving for
  * it twice would refuse a wallet that has already paid.
@@ -232,10 +241,10 @@ export async function inFlightUnbilledCost(
 
   const { data, error } = await admin
     .from('trace_history')
-    .select('status, property_trace_status')
+    .select('status, property_trace_status, ai_research_status')
     .eq('user_id', userId)
     .or(
-      `and(status.eq.processing,created_at.gte.${tier1Cutoff}),property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')})`
+      `and(status.eq.processing,created_at.gte.${tier1Cutoff}),property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')}),ai_research_status.in.(${TIER1_PENDING_STATUSES.join(',')})`
     );
 
   if (error) {
@@ -247,11 +256,14 @@ export async function inFlightUnbilledCost(
 
   let total = 0;
   for (const row of (data || []) as UnsettledRow[]) {
-    // ELSE-IF, NOT TWO IFS. A queued tier 2 row is ALSO `status: 'processing'`,
-    // so counting both columns would reserve the two rates added together for a
-    // row that can only ever cost one of them, and 402 a wallet that can afford
-    // the batch.
+    // ELSE-IF, NOT THREE IFS. A queued row of EITHER tier is also `status: 'processing'`, so
+    // counting more than one column would reserve two rates added together for a row that can
+    // only ever cost one of them, and 402 a wallet that can afford the batch.
+    //
+    // TIER 2 FIRST, for the reason lib/trace/rowSkipReason.ts orders the two queues the same way:
+    // it is certain money, billed per record submitted whatever the result.
     if (isPropertyTracePending(row.property_trace_status)) total += rates.tier2;
+    else if (isTier1QueuePending(row.ai_research_status)) total += rates.tier1;
     else if (row.status === 'processing') total += rates.tier1;
   }
   return total;

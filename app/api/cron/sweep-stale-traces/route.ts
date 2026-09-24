@@ -7,6 +7,7 @@ import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/bil
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isTier1QueuePending, isTier1QueueRow } from '@/lib/trace/tier1Queue';
 import type { TraceResult, TracerfyResult } from '@/types';
 
 /**
@@ -230,18 +231,28 @@ export async function GET(request: Request) {
         //
         // Hoisting the question above the branch is also what stops the next
         // person adding a fifth verdict below it and missing the guard.
+        // BOTH QUEUES, and the second one is new. Since Phase 2A the web upload enqueues its TIER 1
+        // rows into ai_research_status, so a web job reaches this cutoff with no tier 2 rows at all
+        // and no tracerfy_job_id: it fell into the 'No Tracerfy job ID' branch below and was
+        // written FAILED while its rows were still being worked and billed, and the status route's
+        // early return made that verdict permanent.
         const { data: jobRows } = await adminClient
           .from('trace_history')
-          .select('property_trace_status, is_successful')
+          .select('property_trace_status, ai_research_status, is_successful')
           .eq('user_id', job.user_id)
           .eq('trace_job_id', job.id);
         const rows = (jobRows || []) as Array<{
           property_trace_status: string | null;
+          ai_research_status: string | null;
           is_successful: boolean | null;
         }>;
         const tier2Rows = rows.filter((r) => r.property_trace_status);
+        const tier1QueueRows = rows.filter((r) => isTier1QueueRow(r.ai_research_status));
 
-        if (tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status))) {
+        if (
+          tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status)) ||
+          tier1QueueRows.some((r) => isTier1QueuePending(r.ai_research_status))
+        ) {
           // Still real work in flight, whatever the Tracerfy half is doing. Not
           // stale, so leave the job entirely alone.
           //
@@ -254,14 +265,14 @@ export async function GET(request: Request) {
         }
 
         if (!job.tracerfy_job_id) {
-          // A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS
-          // TWO. Until phase 5c it could only be a submit that failed silently,
-          // so failing it after the timeout was the honest answer. Now it is
-          // also the normal shape of a job whose rows are ALL tier 2: there is
-          // no person CSV, sweep-property-traces owns every row, and the job
-          // legitimately outlives this cutoff whenever the queue is under
-          // contention.
-          if (tier2Rows.length > 0) {
+          // A JOB WITH NO TRACERFY JOB ID USED TO MEAN ONE THING AND NOW MEANS THREE. Until phase
+          // 5c it could only be a submit that failed silently, so failing it after the timeout was
+          // the honest answer. Then it became also the normal shape of a job whose rows are ALL
+          // tier 2: there is no person CSV, sweep-property-traces owns every row, and the job
+          // legitimately outlives this cutoff whenever the queue is under contention. And since
+          // Phase 2A it is the normal shape of EVERY web job, whose Tier 1 rows are queued on
+          // ai_research_status.
+          if (tier2Rows.length > 0 || tier1QueueRows.length > 0) {
             // The queue has drained and the status route was never polled to
             // notice. Finish it the way that route would: COMPLETED, not failed.
             // The rows already carry their own results and their own receipts.

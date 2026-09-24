@@ -509,7 +509,17 @@ export default function BulkUploadPage() {
         }
 
         if (statusData.status === 'processing') {
-          if (statusData.results_so_far && statusData.records_submitted) {
+          // `results_so_far` was only ever sent by the Tracerfy batch poll, which this surface no
+          // longer uses, so the line never appeared for a queued job. `records_pending` comes from
+          // both queues, so a 500-record upload now shows movement every 5 seconds instead of a
+          // silent spinner for four minutes.
+          if (
+            typeof statusData.records_pending === 'number' &&
+            typeof statusData.records_submitted === 'number'
+          ) {
+            const done = Math.max(statusData.records_submitted - statusData.records_pending, 0);
+            setPollProgress(`${done} of ${statusData.records_submitted} records processed`);
+          } else if (statusData.results_so_far && statusData.records_submitted) {
             setPollProgress(`${statusData.results_so_far} of ${statusData.records_submitted} records processed`);
           }
           continue;

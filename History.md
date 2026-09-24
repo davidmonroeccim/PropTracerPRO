@@ -4,6 +4,22 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (a): Tier 1 Phase 2A, Task 4: the four seams a queued Tier 1 row touches.
+
+- app/api/trace/bulk/status: job completion and the match count now ask BOTH queue columns. A web
+  job has no tracerfy_job_id at all since Task 3, so the branch that used to mean "nothing was
+  submitted" was finalizing live jobs seconds after submit, and every Tier 1 bulk match read as 0.
+  Both selects widened to the columns rowSkipReason reads.
+- The processing responses carry records_pending, and the bulk page turns it into a progress line,
+  so a 500-record upload shows movement instead of a silent spinner.
+- sweep-stale-traces stage 2 no longer writes a web job failed with "No Tracerfy job ID" while its
+  Tier 1 rows are draining; it defers while they are pending and COMPLETES the job when they are
+  not.
+- Both single routes' live-work guard recognises a Tier 1 queue row, so a single trace cannot
+  delete or reuse a row the cron is about to claim. Mutated in both files, not one.
+- inFlightUnbilledCost reserves the tier 1 rate for a queued Tier 1 row, with NO age bound: the
+  ladder guarantees the row reaches a terminal, so the money is certain (spec 6.2).
+
 ## 2026-09-23 (i): Tier 1 Phase 2A, Task 3: the web upload enqueues, and a city-less row runs.
 
 - app/api/trace/bulk/route.ts no longer builds a Tracerfy person CSV. Every owned row is written

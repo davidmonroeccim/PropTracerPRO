@@ -390,6 +390,52 @@ describe("a stale bulk job carrying tier 2 rows", () => {
 });
 
 /**
+ * A STALE BULK JOB WHOSE TIER 1 QUEUE ROWS ARE STILL DRAINING.
+ *
+ * Stage 2's queue guard used to ask only tier2Rows. Since Task 3 the web upload
+ * enqueues its Tier 1 rows into ai_research_status instead of submitting a
+ * Tracerfy CSV, so a web job now reaches this 60-minute cutoff with NO tier 2
+ * rows and no tracerfy_job_id: it fell straight into the 'No Tracerfy job ID'
+ * branch and was written FAILED while its Tier 1 rows were still being worked
+ * and billed. The status route's top-of-handler early return then makes that
+ * verdict permanent.
+ */
+describe("a stale bulk job whose Tier 1 queue rows are still draining", () => {
+  const jobWrites = () =>
+    H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+
+  beforeEach(() => {
+    H.staleJobs = [
+      { id: "job-1", user_id: "user-1", tracerfy_job_id: null, records_submitted: 1 },
+    ];
+  });
+
+  it("is left entirely alone, not failed", async () => {
+    // MUTATION: delete the `|| tier1QueueRows.some(...)` clause and this goes
+    // red -- the job is failed out from under the cron that is still working
+    // it.
+    H.historyRows = [
+      { property_trace_status: null, ai_research_status: "tier1_queued", is_successful: null },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(0);
+  });
+
+  it("COMPLETES such a job once the queue has drained, rather than failing it", async () => {
+    // MUTATION: delete the `|| tier1QueueRows.length > 0` clause and this goes
+    // red -- the job falls into the 'No Tracerfy job ID' failure instead.
+    H.historyRows = [
+      { property_trace_status: null, ai_research_status: "tier1_done", is_successful: true },
+      { property_trace_status: null, ai_research_status: "tier1_done", is_successful: false },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(1);
+    expect(jobWrites()[0].payload).toMatchObject({ status: "completed", records_matched: 1 });
+    expect(jobWrites()[0].payload?.error_message).toBeUndefined();
+  });
+});
+
+/**
  * THE SAME GUARD, ON THE BRANCH THAT ALREADY HAD A TRACERFY JOB.
  *
  * The loop writes a terminal trace_jobs.status in four places, and all four are

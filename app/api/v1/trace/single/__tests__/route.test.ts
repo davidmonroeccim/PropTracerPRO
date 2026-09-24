@@ -572,6 +572,42 @@ describe("POST /api/v1/trace/single — the deletes", () => {
   });
 });
 
+describe("POST /api/v1/trace/single — the Tier 1 bulk queue is live work too", () => {
+  it("refuses to touch a row the Tier 1 bulk queue is working", async () => {
+    // A single trace of an address whose bulk row is queued must answer busy and write NOTHING:
+    // no delete, no reuse, no vendor call, no deduct, no webhook. Anything else races the cron.
+    //
+    // THE SEED VALUES ARE THE TEST. Do not "simplify" created_at to now(), and do not drop
+    // trace_job_id: a FRESH processing row is already liveWork through processingIsLive
+    // (app/api/trace/single/route.ts:189-192, mirrored here), so the test would pass with AND
+    // without the clause it is written to fence. That is exactly the class lesson L-015 exists to
+    // stop.
+    //
+    // The values below are also the REALISTIC ones, which is why this shape is not a contrivance.
+    // insertHistoryRows upserts on (user_id, address_hash) and never rewrites created_at, so a
+    // REUSED bulk row carries its original creation date. With trace_job_id set the processing
+    // timeout is STALE_PROCESSING.CRON_TIMEOUT_MINUTES (60, lib/constants.ts:110), so three hours
+    // ago is stale, processingIsLive is false, and only isTier1QueuePending can answer.
+    H.survivingRow = {
+      id: "row-1",
+      ai_research_status: "tier1_queued",
+      status: "processing",
+      trace_job_id: "job-1",
+      created_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const res = await post({ ...BODY, ownerName: "Jane Smith" });
+
+    expect(res.status).toBe(503);
+    expect(deletes()).toEqual([]);
+    expect(H.ops.filter((o) => o.op === "update")).toEqual([]);
+    const { lookupBusinessTrace, lookupPersonTrace } = await v1Vendors();
+    expect(lookupBusinessTrace).not.toHaveBeenCalled();
+    expect(lookupPersonTrace).not.toHaveBeenCalled();
+    expect(deducts()).toEqual([]);
+  });
+});
+
 describe("POST /api/v1/trace/single: row creation, then the inline tier 1 settle", () => {
   it("inserts a processing row and settles it in the same request", async () => {
     const res = await post();
