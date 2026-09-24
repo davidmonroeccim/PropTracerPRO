@@ -310,14 +310,21 @@ describe("inFlightUnbilledCost and the Tier 1 queue (spec 6.2)", () => {
     // age bound exists for an ORPHANED single-trace row that nothing will ever resolve. A queued
     // bulk row is not orphaned: the ladder and the stale-claim sweep guarantee it reaches a
     // terminal, so it WILL be billed, and under-reserving certain money is the wrong direction to
-    // fail in. MUTATION: delete the isTier1QueuePending arm and this goes red -- the bare
-    // status === 'processing' arm cannot age-bound-exclude this row from the DATABASE query (the
-    // fake client returns whatever H.inFlightRows holds regardless of the `or` clause), but with the
-    // arm gone the row still falls to the bare-processing arm and reserves tier1 anyway UNLESS the
-    // row is old -- so this test is written against the REAL query's age-bounded tier 1 arm, which
-    // the fake client does not filter. The row below is old enough that a real `or` clause would
-    // exclude it from a bare-processing match, so only the Tier 1 queue arm can be the reason it is
-    // still reserved.
+    // fail in.
+    //
+    // WHAT THIS TEST ACTUALLY FENCES, AND WHAT IT DOES NOT. It proves that an old, still-queued
+    // Tier 1 row is PRESENT in the reserved total at all (0.15, not silently 0) -- the shape that
+    // matters is a row this old reaching the customer's reserve rather than falling out of it.
+    // It does NOT fence the isTier1QueuePending loop arm's own presence: deleting that arm alone
+    // is an EQUIVALENT MUTANT at this level (confirmed by running it) -- a Tier 1 queued row always
+    // carries status: 'processing' (Task 3), so the loop's bare `else if (row.status ===
+    // 'processing') total += rates.tier1` arm reserves the identical rate for the identical row
+    // whether or not the isTier1QueuePending arm exists, and fakeClient() returns whatever
+    // H.inFlightRows holds regardless of the `.or()` clause content, so this test cannot see the
+    // difference either way. The real "not age-bounded" guarantee lives in the SQL clause, not the
+    // loop, and the two tests below (`puts the Tier 1 queue statuses in the OR clause`, `does NOT
+    // bound the Tier 1 queue arm by age either`) are what actually fence it -- they inspect the
+    // `.or()` string itself and go red when the clause is dropped or age-wrapped.
     H.inFlightRows = [
       {
         status: "processing",

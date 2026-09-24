@@ -488,6 +488,25 @@ describe("a Tracerfy stall on a job with tier 2 rows", () => {
     expect(jobStatusWrites()).toHaveLength(1);
     expect(jobStatusWrites()[0].payload.status).toBe("failed");
   });
+
+  it("does NOT fail the job while a Tier 1 row is still queued, with no tier 2 rows at all", async () => {
+    // L-018: stillWorking has THREE call sites (the no-tracerfy-job-id branch, this stall branch,
+    // and the mixed-job completion gate), and every test above this one in the file seeds only a
+    // property_trace_status value, so a narrowing of stillWorking to isPropertyTracePending alone
+    // AT THIS CALL SITE specifically would still pass every test above it. This is the fence for
+    // this site.
+    // MUTATION: narrow `stallRows.filter(stillWorking)` to
+    // `stallRows.filter((r) => isPropertyTracePending(r.property_trace_status))` and this goes red.
+    H.jobRows = [{ charge: null, ai_research_status: "tier1_queued", property_trace_status: null }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(jobStatusWrites()).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -1056,6 +1075,36 @@ describe("a job whose Tier 1 rows are on the queue", () => {
     expect(body.status).toBe("processing");
     expect(body.records_pending).toBe(2);
     expect(body.records_submitted).toBe(3);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE MIXED-JOB COMPLETION GATE ALSO HAS TO RECOGNISE A QUEUED TIER 1 ROW.
+ *
+ * L-018: stillWorking has THREE call sites, and every test above this point in the file that
+ * reaches this specific gate (the one just below the Tracerfy result loop, after tracerfy_job_id
+ * is truthy and Tracerfy has answered) seeds only a property_trace_status value. A narrowing of
+ * stillWorking to isPropertyTracePending alone AT THIS CALL SITE would still pass every one of
+ * them. This is the fence for this site.
+ * ------------------------------------------------------------------ */
+describe("the mixed-job completion gate, on a job whose Tracerfy half already answered", () => {
+  it("stays processing over a queued Tier 1 row, even with no tier 2 rows at all", async () => {
+    // MUTATION: narrow `jobRows.some(stillWorking)` (and the `records_pending` filter beside it)
+    // to `isPropertyTracePending` alone and this goes red.
+    H.jobRows = [{ charge: null, ai_research_status: "tier1_queued", property_trace_status: null }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const res = await GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+    const body = await res.json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending).toBe(1);
+    const completed = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(completed).toHaveLength(0);
   });
 });
 

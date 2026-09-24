@@ -927,18 +927,19 @@ export default function BulkUploadPage() {
 
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto" />
             <p className="text-gray-700 font-medium">Processing your upload...</p>
-            {pollProgress ? (
-              <p className="text-gray-500 text-sm">{pollProgress}</p>
-            ) : (
-              // IT NO LONGER ASKS THEM TO KEEP THE PAGE OPEN, because that was
-              // never true and is now the opposite of the advice one card over.
-              // The rows are on a queue a cron works, so closing this tab costs
-              // the customer nothing.
-              <p className="text-gray-500 text-sm">
-                This can take a few minutes on a big upload. You can leave this page if you want,
-                the work carries on without it and the results show up in your history.
-              </p>
-            )}
+            {/* BOTH LINES, ALWAYS. Before Task 4, `records_pending` was never present on a
+                queued job, so pollProgress was always empty and the reassurance below always
+                showed. Task 4 made records_pending present on every processing poll of a web
+                job, which is every job now, so the ternary this used to be silently suppressed
+                the reassurance on every single upload. It is still true: the rows are on a
+                queue a cron works, so closing this tab costs the customer nothing. Text
+                unchanged from the sentence it replaced the untrue "keep this page open"
+                instruction with. */}
+            {pollProgress && <p className="text-gray-500 text-sm">{pollProgress}</p>}
+            <p className="text-gray-500 text-sm">
+              This can take a few minutes on a big upload. You can leave this page if you want,
+              the work carries on without it and the results show up in your history.
+            </p>
 
             {error && (
               <p className="text-sm text-red-600 mt-4">{error}</p>

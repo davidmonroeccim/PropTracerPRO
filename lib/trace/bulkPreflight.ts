@@ -231,10 +231,13 @@ export async function inFlightUnbilledCost(
   userId: string,
   rates: { tier1: number; tier2: number }
 ): Promise<number> {
-  // The tier 1 arm carries the age bound, the tier 2 arm deliberately does not.
-  // Written as one `or` with a nested `and` so the database does the filtering:
-  // a tier 1 row older than the cutoff is never returned at all, while a tier 2
-  // row on any rung of the ladder is returned however old it is.
+  // THREE ARMS NOW, NOT TWO, AND ONLY ONE OF THEM CARRIES AN AGE BOUND. The bare `status.eq.processing`
+  // arm (an orphaned SINGLE-trace row, never a bulk one) is wrapped in `and(...,created_at.gte...)`,
+  // so the database excludes an old one at the query itself. The tier 2 arm
+  // (`property_trace_status.in.(...)`) and the Tier 1 QUEUE arm (`ai_research_status.in.(...)`,
+  // added for spec 6.2) both carry NO age wrapper and are returned however old they are: a queued
+  // bulk row of either tier is not orphaned, so under-reserving it by age would be the wrong
+  // direction to fail in.
   const tier1Cutoff = new Date(
     Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
   ).toISOString();
