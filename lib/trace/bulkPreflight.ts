@@ -5,7 +5,7 @@
  * | check                    | question                | on failure                       |
  * |--------------------------|-------------------------|----------------------------------|
  * | the customer's wallet    | can the CUSTOMER pay?   | 402, and tell them to add funds  |
- * | PTP's Tracerfy credits   | can PTP EXECUTE?        | refuse, and NEVER mention funds  |
+ * | PTP's Tracerfy credits   | can PTP EXECUTE, on either tier? | refuse, and NEVER mention funds |
  *
  * THEY MUST NEVER BE MERGED. Billing a customer for a job we cannot run is the
  * outcome the second one exists to prevent, and the two fail for opposite
@@ -76,6 +76,29 @@ import { TIER1_PENDING_STATUSES, isTier1QueuePending } from '@/lib/trace/tier1Qu
 export const TRACERFY_DOSSIER_CREDITS = 10;
 
 /**
+ * What one TIER 1 record costs the shared Tracerfy pool, in credits.
+ *
+ * FIVE, which is one person lookup: the instant named lookup and the APN lookup each cost 5 credits
+ * on a hit and nothing on a miss (spec 4.2, and the Phase 1 live check measured $0.10 per hit).
+ *
+ * IT IS NEITHER A FLOOR NOR A CEILING, and saying which it is would be wrong in one direction or
+ * the other, so here is the shape instead. An ENTITY record costs this pool NOTHING: its lane is
+ * FastAppend, a different vendor with a separate pool. A trust can cost 10, because it may run the
+ * instant lookup and then the APN lookup before falling through to FastAppend. A person record on
+ * the web upload costs at most 5, because that surface sends no parcel id so only one person step
+ * can be planned. At submit time the owner TYPE is known but classifying it here would be a second
+ * classifier (spec 4.1 has exactly one, classifyOwnerName, and it lives in planRoute), so this
+ * check sizes every tier 1 record at one person lookup.
+ *
+ * What makes that safe is the same thing that makes TRACERFY_DOSSIER_CREDITS safe: running short
+ * mid-job is not a billing event. A vendor we could not ask is our outage, not the customer's miss
+ * (L-007), so the record settles free. The per-minute budget in lib/trace/vendorRateBudget.ts is a
+ * different guard answering a different question: this one is about the ACCOUNT BALANCE over a
+ * whole job, that one is about calls per minute.
+ */
+export const TRACERFY_TIER1_CREDITS = 5;
+
+/**
  * The sentence a customer reads when PTP's own credit pool cannot cover their
  * job.
  *
@@ -103,58 +126,68 @@ interface UnsettledRow {
 }
 
 /**
- * Can PTP's shared Tracerfy pool cover `newRecords` more tier 2 records?
+ * Can PTP's shared Tracerfy pool cover this batch, on both tiers?
  *
- * SIZED AGAINST WHAT IS ALREADY QUEUED, NOT THE RAW BALANCE. The pool is shared
- * across every customer's jobs, so a check that looks only at the balance
- * passes for two jobs that cannot both run: each sees the same credits and
- * neither sees the other. The queued term is what makes the second one wait.
- * Every rung of the retry ladder counts, claimed rows included, because a row
- * mid-retry still owes the pool a dossier.
+ * RENAMED FROM tracerfyCanRunTier2, AND THE NAME WAS THE BUG. It took a tier 2 record count and
+ * short-circuited on `newRecords <= 0`, so a 500-record all-tier-1 batch never read the balance at
+ * all. Its own docstring recorded that as deliberate and scoped out, which was true while tier 1
+ * posted to the BATCH endpoint, a different bucket. Since Phase 2A the web upload's tier 1 rows are
+ * worked per record against this very pool, so the gap is live and both legs are sized here.
  *
- * Returns false rather than throwing on a capacity answer, and throws on OUR
- * failure. See the file header for why those are different.
+ * SIZED AGAINST WHAT IS ALREADY QUEUED, NOT THE RAW BALANCE. The pool is shared across every
+ * customer's jobs, so a check that looks only at the balance passes for two jobs that cannot both
+ * run: each sees the same credits and neither sees the other. Every rung of both retry ladders
+ * counts, claimed rows included, because a row mid-retry still owes the pool its lookup.
+ *
+ * Returns false rather than throwing on a capacity answer, and throws on OUR failure. See the file
+ * header for why those are different.
  */
-export async function tracerfyCanRunTier2(
+export async function tracerfyCanRun(
   admin: SupabaseClient,
-  newRecords: number
+  records: { tier1: number; tier2: number }
 ): Promise<boolean> {
-  // A tier 1 only batch draws no dossier credits at all, so there is no
-  // question to ask and no reason to spend a vendor round trip asking it.
-  if (newRecords <= 0) return true;
+  // A batch with nothing in it draws no credits, so there is no question to ask and no reason to
+  // spend a vendor round trip asking it.
+  if (records.tier1 <= 0 && records.tier2 <= 0) return true;
 
   const analytics = await getAnalytics();
   const balance = analytics.data?.balance;
   if (!analytics.success || typeof balance !== 'number') {
-    // AN UNREADABLE BALANCE IS NOT A BALANCE OF PLENTY. Assuming one here would
-    // invent the answer to the only question this check exists to ask, which is
-    // the one thing this project is least allowed to do. Refusing costs a
-    // customer a retry; assuming costs them a job we take payment for and
-    // cannot run.
+    // AN UNREADABLE BALANCE IS NOT A BALANCE OF PLENTY. Assuming one here would invent the answer
+    // to the only question this check exists to ask, which is the one thing this project is least
+    // allowed to do. Refusing costs a customer a retry; assuming costs them a job we take payment
+    // for and cannot run.
     console.error(
-      `[bulk-preflight] refusing ${newRecords} tier 2 record(s): could not read the Tracerfy balance (${analytics.error || 'no balance in the analytics response'})`
+      `[bulk-preflight] refusing ${records.tier1} tier 1 and ${records.tier2} tier 2 record(s): could not read the Tracerfy balance (${analytics.error || 'no balance in the analytics response'})`
     );
     return false;
   }
 
-  const { count, error } = await admin
+  const { count: queuedTier2, error: tier2Error } = await admin
     .from('trace_history')
     .select('id', { count: 'exact', head: true })
     .in('property_trace_status', PROPERTY_TRACE_PENDING_STATUSES);
-
-  if (error) {
-    throw new Error(`could not size the Tracerfy queue: ${error.message}`);
+  if (tier2Error) {
+    throw new Error(`could not size the Tracerfy queue: ${tier2Error.message}`);
   }
 
-  const queued = count ?? 0;
-  const needed = (newRecords + queued) * TRACERFY_DOSSIER_CREDITS;
+  const { count: queuedTier1, error: tier1Error } = await admin
+    .from('trace_history')
+    .select('id', { count: 'exact', head: true })
+    .in('ai_research_status', TIER1_PENDING_STATUSES);
+  if (tier1Error) {
+    throw new Error(`could not size the Tier 1 queue: ${tier1Error.message}`);
+  }
+
+  const needed =
+    (records.tier2 + (queuedTier2 ?? 0)) * TRACERFY_DOSSIER_CREDITS +
+    (records.tier1 + (queuedTier1 ?? 0)) * TRACERFY_TIER1_CREDITS;
 
   if (needed > balance) {
-    // THE ONLY SURFACE THIS EVER REACHES AN OPERATOR THROUGH. There is no
-    // alerting channel to raise instead, so a pool running dry is invisible
-    // without this line.
+    // THE ONLY SURFACE THIS EVER REACHES AN OPERATOR THROUGH. There is no alerting channel to raise
+    // instead, so a pool running dry is invisible without this line.
     console.error(
-      `[bulk-preflight] refusing ${newRecords} tier 2 record(s): needs ${needed} Tracerfy credit(s) against a balance of ${balance}, with ${queued} record(s) already queued`
+      `[bulk-preflight] refusing ${records.tier1} tier 1 and ${records.tier2} tier 2 record(s): needs ${needed} Tracerfy credit(s) against a balance of ${balance}, with ${queuedTier1 ?? 0} tier 1 and ${queuedTier2 ?? 0} tier 2 record(s) already queued`
     );
     return false;
   }

@@ -48,10 +48,12 @@ vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/trace/bulkPreflight")>();
   return {
     ...actual,
-    // Faithful to the real contract: a batch with no tier 2 records asks no vendor and can
-    // never be refused. Without that short circuit a submit passing the wrong count would
-    // still look correct.
-    tracerfyCanRunTier2: vi.fn(async (_admin: unknown, n: number) => (n <= 0 ? true : H.canRunTier2)),
+    // Faithful to the real contract: a batch empty on BOTH tiers asks no vendor and can never be
+    // refused. This surface always passes tier1: 0 until 2B. Without that short circuit a submit
+    // passing the wrong count would still look correct.
+    tracerfyCanRun: vi.fn(async (_admin: unknown, n: { tier1: number; tier2: number }) =>
+      n.tier1 <= 0 && n.tier2 <= 0 ? true : H.canRunTier2,
+    ),
     inFlightUnbilledCost: vi.fn(async () => H.inFlight),
   };
 });

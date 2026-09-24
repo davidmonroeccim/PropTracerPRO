@@ -97,19 +97,19 @@ vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/trace/bulkPreflight")>();
   return {
     ...actual,
-    // Faithful to the real contract: a batch with no tier 2 records asks no
-    // vendor and can never be refused. Without that short circuit here, a route
-    // that passed records.length instead of the tier 2 count would still look
-    // correct, because every batch would reach the pool question.
-    tracerfyCanRunTier2: vi.fn(async (_admin: unknown, n: number) =>
-      n <= 0 ? true : H.canRunTier2,
+    // Faithful to the real contract: a batch empty on BOTH tiers asks no vendor and can never be
+    // refused. This surface always passes tier1: 0 until 2B, because its tier 1 records go to the
+    // Tracerfy BATCH endpoint, a different credit bucket from the per-record lookups this check
+    // sizes. Without the short circuit a route passing the wrong count would still look correct.
+    tracerfyCanRun: vi.fn(async (_admin: unknown, n: { tier1: number; tier2: number }) =>
+      n.tier1 <= 0 && n.tier2 <= 0 ? true : H.canRunTier2,
     ),
     inFlightUnbilledCost: vi.fn(async () => H.inFlight),
   };
 });
 
 const { POST } = await import("@/app/api/v1/trace/bulk/route");
-const { tracerfyCanRunTier2, inFlightUnbilledCost } = await import("@/lib/trace/bulkPreflight");
+const { tracerfyCanRun, inFlightUnbilledCost } = await import("@/lib/trace/bulkPreflight");
 
 const TIER1 = PRICING.CHARGE_PER_SUCCESS_WALLET;
 const TIER2 = 0.4; // wallet column, per record submitted
@@ -385,14 +385,14 @@ describe("when PTP's own credit pool cannot cover the job", () => {
 
   it("is asked about the tier 2 records only", async () => {
     await post([rec("John Smith", 1), rec("Acme Holdings Llc", 2), rec(undefined, 3)]);
-    expect(tracerfyCanRunTier2).toHaveBeenCalledWith(expect.anything(), 1);
+    expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 0, tier2: 1 });
   });
 
   it("does not block a batch with no blank-owner records", async () => {
     H.canRunTier2 = false;
     const res = await post([rec("John Smith", 1)]);
     expect(res.status).not.toBe(503);
-    expect(tracerfyCanRunTier2).toHaveBeenCalledWith(expect.anything(), 0);
+    expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 0, tier2: 0 });
   });
 });
 

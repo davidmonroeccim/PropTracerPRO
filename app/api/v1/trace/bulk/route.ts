@@ -9,7 +9,7 @@ import { queuedStatusFor } from '@/lib/trace/propertyTraceAttempts';
 import {
   TIER2_CAPACITY_REFUSAL,
   inFlightUnbilledCost,
-  tracerfyCanRunTier2,
+  tracerfyCanRun,
 } from '@/lib/trace/bulkPreflight';
 import { chargePerRecord, chargePerTrace } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
@@ -176,7 +176,11 @@ export async function POST(request: Request) {
     // against what is already queued as well as what is being asked for. Silent
     // by David's decision, 2026-09-18: no string here claims anyone was told,
     // because PTP has no alerting channel and he chose no alert over a fake one.
-    if (!(await tracerfyCanRunTier2(adminClient, tier2Records.length))) {
+    // tier1: 0, and it is the TRUE value here rather than a placeholder. This surface still posts
+    // its tier 1 records to the Tracerfy BATCH endpoint, a different credit bucket from the
+    // per-record instant lookups this check sizes. Phase 2B moves them onto the queue and this
+    // becomes the tier 1 record count.
+    if (!(await tracerfyCanRun(adminClient, { tier1: 0, tier2: tier2Records.length }))) {
       return NextResponse.json(
         { success: false, error: TIER2_CAPACITY_REFUSAL },
         { status: 503 }

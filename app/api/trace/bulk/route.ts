@@ -18,7 +18,7 @@ import {
 import {
   TIER2_CAPACITY_REFUSAL,
   inFlightUnbilledCost,
-  tracerfyCanRunTier2,
+  tracerfyCanRun,
 } from '@/lib/trace/bulkPreflight';
 import { chargePerRecord, chargePerTrace, TRACE_SOURCE } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
@@ -215,7 +215,12 @@ export async function POST(request: Request) {
     // has no alerting channel and he chose no alert over a fake one, so nothing
     // here claims anyone was told. lib/trace/bulkPreflight.ts logs for the
     // operator, which is the only surface that exists.
-    if (!(await tracerfyCanRunTier2(adminClient, tier2Records.length))) {
+    if (
+      !(await tracerfyCanRun(adminClient, {
+        tier1: tier1Records.length,
+        tier2: tier2Records.length,
+      }))
+    ) {
       return NextResponse.json(
         { success: false, error: TIER2_CAPACITY_REFUSAL },
         { status: 503 }

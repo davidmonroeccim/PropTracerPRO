@@ -4,6 +4,60 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (c): Tier 1 Phase 2A, Task 6: one shared vendor budget, sliding, claimed before the spend.
+
+- Migration 20260923_vendor_rate_budget.sql adds vendor_rate_windows (one row per vendor per
+  wall-clock SECOND) and the claim_vendor_rate RPC, which sums the trailing 60 seconds under a
+  per-vendor pg_advisory_xact_lock. The lock is explicit because the rows being COUNTED are not the
+  row being WRITTEN, so the ON CONFLICT row lock a fixed-minute window could lean on cannot
+  serialise this one. Applied, both ACLs read back (nothing for anon or authenticated on either the
+  table or the function, service_role only, RLS on), and the arithmetic AND the slide both proved
+  against the live database: 450 granted, one more refused, granted again 61 seconds later.
+- ONE UNPREDICTED ACL VALUE, FOUND BY READING IT BACK, AND IT IS THE 2026-09-17 LESSON ONE OBJECT
+  TYPE OVER. The migration grants anon and authenticated nothing, and the table ACL still came back
+  `anon=rm/postgres | authenticated=rm/postgres`. Supabase ships ALTER DEFAULT PRIVILEGES for
+  TABLES in public, not only for functions: pg_default_acl carries exactly that pair for objtype
+  'r', landing as EXPLICIT grants to named roles at CREATE time. So granting nothing is not the
+  same as having nothing, for a table as much as for a function. r = SELECT and m = MAINTAIN, with
+  no a/w/d, so no role could ever write and the SELECT was already dead through the Data API (RLS
+  on, zero policies); it is revoked by name anyway, and the table now reads postgres and
+  service_role only. trace_history's own pre-existing anon=rDxtm was verified unchanged.
+- WHY SLIDING. A fixed one-minute bucket permits 450 calls at :59 and 450 at the next
+  :00, which is 900 in one 60-second span against a vendor limit of 500. Both crons being scheduled
+  on the minute does not save it: a run takes about 45 seconds, so its calls straddle by design.
+- A RECORD IS THROTTLED AT ITS START OR NOT AT ALL, on both lanes, and no dossier is ever bought
+  twice. Tier 1 reserves per CALL through executeRoute's canSpend hook, which is exact there because
+  that ladder's steps are independent and a refusal lands before the call it refused. Tier 2 reserves
+  ONCE, for reservationForSteps(plan.steps), immediately before the record's first vendor call, and
+  passes no canSpend at all: its pass-2 lookups exist only because the dossier was bought and named
+  the owners, so a mid-ladder refusal could only be handled by re-running the record and re-buying
+  that dossier.
+- WHAT IS GUARANTEED, written out in the plan's Task 6 header: a per-vendor ceiling of 450 inside any
+  60-second span on the Tier 1 lane; a bound on how many records BEGIN on the Tier 2 lane; and no row
+  starving forever, because a refusal spends no attempt and both claim queries are oldest-first.
+- WHAT THE TIER 2 SHAPE COSTS, with the arithmetic. Its pass-2 owner lookups are unreserved, so an
+  in-flight ladder can overshoot the reserved figure. The overshoot is that cron's CONCURRENCY (5)
+  times a record's worst-case remaining ladder (2N calls for N owners), which is 30 at three owners:
+  450 + 30 = 480 against the vendor's 500, absorbed by the 50-call gap that also carries the single
+  traces. The per-call ceiling is claimed for the Tier 1 lane only, and nowhere for Tier 2.
+- sweep-property-traces reserves once and releases a refused record to the rung it was claimed FROM
+  with no attempt spent and nothing bought (spec 5.1). No hard-coded reservation constant: the figure
+  comes from the plan it is about to run. Its sizing comment said tier 1 posts to a different bucket
+  and does not compete, which Phase 2A made false; corrected, and it now says plainly that 240 is a
+  FLOOR and that the bound is the budget, not the arithmetic.
+- bulkPreflight's tracerfyCanRunTier2 becomes tracerfyCanRun({ tier1, tier2 }), closing the gap
+  where a 500-record all-tier-1 batch never read the Tracerfy balance at all, and counting BOTH
+  queues. The v1 route and the MCP tool pass tier1: 0, which is true for them until 2B. The rename
+  touched four test files, two of which were missing from this plan's first draft: 78 failing tests
+  measured before the mock rewrites (bulkPreflight 9, v1 bulk 23, mcp-tools 6, web bulk 40) plus the
+  3 predicted tsc errors, and 0 after.
+- MUTATIONS: 20 run, 19 RED, 1 SURVIVED as UNFENCED and recorded rather than papered over. The two
+  that matter both went RED: turning the once-per-record reservation into a per-call canSpend hook
+  (the rejected design, the one that can refuse a record after its dossier is bought) and inverting
+  the guard so a refused record runs anyway. The survivor is the MCP tool's tier1: 0 argument, which
+  lib/suite/__tests__/mcp-tools.test.ts fences nowhere: that file references the symbol only in its
+  vi.mock factory and asserts the capacity call's arguments in no test.
+
 ## 2026-09-24 (b): Tier 1 Phase 2A, Task 5: a bulk row says why, and the CSV says which key.
 
 - rowSkipReason lets a TIER 1 QUEUE row serve its own outcome sentence. That is D33's recorded

@@ -206,6 +206,25 @@ vi.mock("@/lib/tracerfy/client", () => ({
 vi.mock("@/lib/highlevel/client", () => ({
   pushTraceToHighLevel: vi.fn(async () => H.pushResult),
 }));
+/**
+ * The shared vendor budget is a LEVER here, the way @/lib/tracerfy/dossier is: its own arithmetic and
+ * its sliding window are covered in lib/trace/__tests__/vendorRateBudget.test.ts and against the live
+ * database in the migration's read-back, so what this file asks is what the CRON does with each answer.
+ *
+ * reserveVendorCalls defaults to granting, so every existing test in this file keeps passing unchanged.
+ *
+ * reservationForSteps STAYS REAL, through importOriginal, and that is load-bearing. The once-per-record
+ * test below asserts what it RETURNS -- that the reservation is read off the plan rather than restated
+ * as a constant -- and a stubbed version would only assert the stub.
+ */
+vi.mock("@/lib/trace/vendorRateBudget", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/trace/vendorRateBudget")>();
+  return {
+    ...actual,
+    reserveVendorCalls: vi.fn(async () => true),
+    pruneVendorRateWindows: vi.fn(async () => {}),
+  };
+});
 
 /**
  * `after()` is captured rather than executed, and the tests run it themselves.
@@ -228,6 +247,9 @@ const { GET, parcelForRow } = await import("@/app/api/cron/sweep-property-traces
 const { lookupDossier } = await import("@/lib/tracerfy/dossier");
 const { lookupBusinessTrace, lookupPersonTrace } = await import("@/lib/tracerfy/client");
 const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+const { pruneVendorRateWindows, reserveVendorCalls } = await import(
+  "@/lib/trace/vendorRateBudget"
+);
 
 /** Drain everything `after()` was handed, in order. */
 async function flushDeferred(): Promise<void> {
@@ -378,6 +400,13 @@ beforeEach(() => {
   vi.mocked(lookupDossier).mockClear();
   vi.mocked(lookupBusinessTrace).mockClear();
   vi.mocked(lookupPersonTrace).mockClear();
+  // mockReset, not mockClear, and then the implementation set explicitly. Several tests below hand
+  // these a per-test implementation (a refusal, a counter), and mockClear would leave it in place for
+  // every test after it -- which would silently throttle the whole rest of the file.
+  vi.mocked(reserveVendorCalls).mockReset();
+  vi.mocked(reserveVendorCalls).mockResolvedValue(true);
+  vi.mocked(pruneVendorRateWindows).mockReset();
+  vi.mocked(pruneVendorRateWindows).mockResolvedValue(undefined);
   // mockClear AFTER the spy, not instead of it: vi.spyOn returns the SAME spy on
   // a second call, so without this the log assertions below read every previous
   // test's output as well as their own.
@@ -1429,5 +1458,137 @@ describe("D21 (c) in the tier 2 cron: every owner, and D32, never the dossier's 
     const written = JSON.stringify(finalWrite());
     expect(written).not.toContain("5550000901");
     expect(written).not.toContain("dossier-leak@example.invalid");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE SHARED VENDOR RATE BUDGET (spec 5.3).
+ *
+ * A TIER 2 RECORD IS THROTTLED AT ITS START OR NOT AT ALL, and that is the whole shape of these
+ * tests. Its pass-2 contact lookups exist ONLY because the dossier was bought and named the owners
+ * they are for, so a refusal part-way through could only be handled by releasing the record and
+ * running it again next minute -- which buys the same dossier a second time. PTP does not pay twice
+ * for one record. So this lane reserves ONCE, before the record's first vendor call, passes no
+ * canSpend into executeRoute at all, and a granted record runs to completion.
+ * ------------------------------------------------------------------ */
+
+describe("the shared vendor rate budget (spec 5.3)", () => {
+  /** A dossier hit naming TWO individual owners: three vendor calls, and still ONE reservation. */
+  const TWO_INDIVIDUALS = {
+    ...ENTITY_HIT,
+    owners: [
+      { first_name: "Testowner", last_name: "Placeholder", age: "00" },
+      { first_name: "Secondowner", last_name: "Placeholder", age: "00" },
+    ],
+  };
+
+  it("releases a record refused BEFORE IT STARTS back to its OWN rung, unspent", async () => {
+    vi.mocked(reserveVendorCalls).mockResolvedValue(false);
+    H.queuedRows = [{ ...ROW, property_trace_status: "queued_3" }];
+    const body = await (await run()).json();
+
+    expect(body.throttled).toBe(1);
+    expect(body.processed).toBe(0);
+    // NOTHING WAS BOUGHT. No vendor was asked and no money moved, which is what makes releasing the
+    // row honest rather than a rewind.
+    expect(lookupDossier).not.toHaveBeenCalled();
+    expect(deducts()).toHaveLength(0);
+    // The SAME rung, not the next one: a throttle spends no attempt, because no vendor was asked.
+    // MUTATION: release to nextAfterFailedAttempt(attempt).status and this goes red -- that write
+    // would burn a customer's row through five rungs on a busy minute and then write it terminal.
+    expect(finalWrite()).toMatchObject({
+      property_trace_status: "queued_3",
+      property_trace_claimed_at: null,
+    });
+    // ...and nothing money-shaped rides along on the way back to the queue.
+    for (const paid of ["charge", "tier", "status", "is_successful"]) {
+      expect(Object.keys(finalWrite())).not.toContain(paid);
+    }
+  });
+
+  it("asks the budget BEFORE the dossier call, never after it", async () => {
+    // A budget asked AFTER the money is spent bounds nothing at all.
+    // MUTATION: move the reservation below the executeRoute call and this goes red.
+    const order: string[] = [];
+    vi.mocked(reserveVendorCalls).mockImplementation(async () => {
+      order.push("reserve");
+      return true;
+    });
+    vi.mocked(lookupDossier).mockImplementationOnce(async () => {
+      order.push("dossier");
+      // H.dossier is typed loosely (Record<string, unknown>) for the whole file, exactly as the base
+      // mock above treats it; the cast is what lets a per-test implementation reuse it.
+      return H.dossier as unknown as Awaited<ReturnType<typeof lookupDossier>>;
+    });
+    await run();
+
+    // Both really happened, so the ordering assertion is not vacuous.
+    expect(order).toContain("dossier");
+    expect(order[0]).toBe("reserve");
+  });
+
+  it("asks the budget ONCE PER RECORD, for the steps the plan carries", async () => {
+    // ONCE, NOT PER CALL, AND NOT FROM A HARD-CODED CONSTANT EITHER. A tier 2 record cannot be
+    // rewound: its pass-2 lookups exist only because the dossier was bought and named the owners.
+    // So the whole record is reserved before it starts, from the plan's own steps, and never asked
+    // again. Two individual owners is three vendor calls and still ONE reservation.
+    H.dossier = TWO_INDIVIDUALS;
+    H.personContacts = { ...CONTACTS_MISS };
+    H.queuedRows = [{ ...ROW }];
+    await run();
+
+    // THE PRECONDITION THAT MAKES THIS A REAL ASSERTION: three vendor calls actually happened (one
+    // dossier plus one person lookup per owner). Without it, "one reservation" would also be true of
+    // a record that made one call.
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    expect(reserveVendorCalls).toHaveBeenCalledTimes(1);
+    // The dossier steps planRoute planned, read off the plan, not a literal. The tier 2 plan is
+    // dossier-first, so the reservation is Tracerfy only.
+    const want = vi.mocked(reserveVendorCalls).mock.calls[0][1] as {
+      tracerfy: number;
+      fastappend: number;
+    };
+    expect(want.fastappend).toBe(0);
+    expect(want.tracerfy).toBeGreaterThan(0);
+  });
+
+  it("lets a record that WAS granted finish its ladder even after the budget runs out", async () => {
+    // THE DESIGN, FENCED. The record's dossier has been bought, so it finishes: every owner the
+    // dossier names is asked, the customer is billed ONCE, and nothing is released and re-run, which
+    // would buy the same dossier a second time. A budget that ran dry after the reservation was
+    // granted changes nothing about this record.
+    //
+    // MUTATION: turn the once-per-record reservation into a per-call canSpend hook -- the rejected
+    // design -- and this goes red: the second owner's lookup is refused, execution.throttled is set,
+    // and with no handler for it the record settles for owners nobody asked about.
+    let asks = 0;
+    vi.mocked(reserveVendorCalls).mockImplementation(async () => ++asks <= 1);
+    H.dossier = TWO_INDIVIDUALS;
+    H.personContacts = { ...CONTACTS_MISS };
+    H.queuedRows = [{ ...ROW, property_trace_status: "queued_2" }];
+    const body = await (await run()).json();
+
+    expect(body.throttled).toBe(0);
+    expect(body.processed).toBe(1);
+    expect(reserveVendorCalls).toHaveBeenCalledTimes(1);
+    // Every owner the dossier named was asked, after the budget had already run dry.
+    expect(lookupPersonTrace).toHaveBeenCalledTimes(2);
+    // NOT released: the row is settled, not back on queued_2 with a cleared claim.
+    expect(finalWrite()).not.toMatchObject({
+      property_trace_status: "queued_2",
+      property_trace_claimed_at: null,
+    });
+    // BILLED ONCE, at the tier 2 per-record rate. A second charge would be the re-run this design
+    // exists to prevent.
+    expect(deducts()).toHaveLength(1);
+    expect(deducts()[0].args.p_amount).toBe(TIER2_WALLET);
+  });
+
+  it("prunes the bucket table once per run, not once per claim", async () => {
+    // TWO rows, deliberately. With a single-row seed this assertion is GREEN under a prune moved
+    // inside processRow, so it would fence nothing (L-020).
+    H.queuedRows = [{ ...ROW }, { ...ROW, id: "row-2" }];
+    await run();
+    expect(pruneVendorRateWindows).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,7 +8,7 @@ import { propertyAddressLabel } from "@/lib/trace/historyDisplay";
 import { rowSkipReason } from "@/lib/trace/rowSkipReason";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import { isPropertyTracePending, queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
-import { TIER2_CAPACITY_REFUSAL, inFlightUnbilledCost, tracerfyCanRunTier2 } from "@/lib/trace/bulkPreflight";
+import { TIER2_CAPACITY_REFUSAL, inFlightUnbilledCost, tracerfyCanRun } from "@/lib/trace/bulkPreflight";
 import { toPublicPropertyRecord } from "@/lib/trace/publicPropertyRecord";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
 import { removeBatchDuplicates, checkDuplicates } from "@/lib/utils/deduplication";
@@ -325,7 +325,11 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
   // could not have run: their wallet is fine, ours is what is short. Silent by David's decision
   // of 2026-09-18 -- PTP has no alerting channel and he chose no alert over a fake one -- so
   // nothing here claims anyone was told.
-  if (!(await tracerfyCanRunTier2(admin, tier2Records.length))) {
+  // tier1: 0, and it is the TRUE value here rather than a placeholder. This surface still posts
+  // its tier 1 records to the Tracerfy BATCH endpoint, a different credit bucket from the
+  // per-record instant lookups this check sizes. Phase 2B moves them onto the queue and this
+  // becomes the tier 1 record count.
+  if (!(await tracerfyCanRun(admin, { tier1: 0, tier2: tier2Records.length }))) {
     return { error: "capacity_unavailable", message: TIER2_CAPACITY_REFUSAL };
   }
 
