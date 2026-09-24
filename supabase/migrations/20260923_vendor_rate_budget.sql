@@ -177,5 +177,11 @@ REVOKE ALL ON FUNCTION public.claim_vendor_rate(text, integer, integer) FROM ano
 REVOKE ALL ON FUNCTION public.claim_vendor_rate(text, integer, integer) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_vendor_rate(text, integer, integer) TO service_role;
 
+-- THE COMMENT COVERS BOTH LANES, because the two draw from this function DIFFERENTLY and an operator
+-- running \df+ in psql sees only this sentence, not the header fifty lines above it. The text that
+-- used to be here described the Tier 1 lane alone ("from executeRoute's canSpend hook, one call at a
+-- time"), which contradicted the once-per-record design documented above and was wrong about the
+-- RPC's first and currently only caller: the tier 2 cron, which asks once per record with p_calls up
+-- to 2 and passes no canSpend at all.
 COMMENT ON FUNCTION public.claim_vendor_rate(text, integer, integer) IS
-  'Reserve p_calls against the TRAILING 60 SECONDS for p_vendor, all or nothing. TRUE when granted. Serialised per vendor by pg_advisory_xact_lock, which covers the count and the write together. Called only by the two crons through lib/trace/vendorRateBudget.ts, from executeRoute''s canSpend hook, one call at a time (spec 5.3).';
+  'Reserve p_calls against the TRAILING 60 SECONDS for p_vendor, all or nothing. TRUE when granted. Serialised per vendor by pg_advisory_xact_lock, which covers the count and the write together. Called only by the two crons through lib/trace/vendorRateBudget.ts, and the two lanes draw differently: the TIER 1 lane claims one call at a time from executeRoute''s canSpend hook, and the TIER 2 cron claims ONCE PER RECORD, for the steps planRoute planned, immediately before that record''s first vendor call and with no canSpend at all, so a record whose dossier has been bought is never refused part-way and no dossier is ever bought twice (spec 5.3).';

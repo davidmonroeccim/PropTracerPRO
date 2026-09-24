@@ -51,12 +51,24 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   touched four test files, two of which were missing from this plan's first draft: 78 failing tests
   measured before the mock rewrites (bulkPreflight 9, v1 bulk 23, mcp-tools 6, web bulk 40) plus the
   3 predicted tsc errors, and 0 after.
-- MUTATIONS: 20 run, 19 RED, 1 SURVIVED as UNFENCED and recorded rather than papered over. The two
+- A STATED BEHAVIOUR CONSEQUENCE ON TWO SURFACES THE PHASE SCOPED AS UNCHANGED. The v1 bulk route
+  and the MCP tool pass tier1: 0, which is inert as an argument, but tracerfyCanRun also adds
+  queuedTier1 x TRACERFY_TIER1_CREDITS to `needed`. So those two surfaces now size against rows
+  already queued on the TIER 1 ladder and can return 503 where they previously accepted the batch,
+  when the Tier 1 queue is deep enough that the shared pool cannot cover both ladders. This is
+  correct -- one shared Tracerfy pool, a queued Tier 1 row really does owe it a lookup, and the
+  function commits to counting every rung of both ladders -- but it couples the three submit surfaces
+  through the Tier 1 queue for the first time, and the refusal is silent to operators by the
+  2026-09-18 decision. Named here rather than passing as a no-op.
+- MUTATIONS: 22 applied, 21 RED, 1 SURVIVED as UNFENCED and recorded rather than papered over. The two
   that matter both went RED: turning the once-per-record reservation into a per-call canSpend hook
   (the rejected design, the one that can refuse a record after its dossier is bought) and inverting
   the guard so a refused record runs anyway. The survivor is the MCP tool's tier1: 0 argument, which
   lib/suite/__tests__/mcp-tools.test.ts fences nowhere: that file references the symbol only in its
-  vi.mock factory and asserts the capacity call's arguments in no test.
+  vi.mock factory and asserts the capacity call's arguments in no test. One mutation was misclassified
+  as equivalent in the first report and re-run properly in fix round 2: moving the reservation below
+  the executeRoute call compiles clean and is RED on two tests, so the claim that it could not compile
+  was wrong and untested.
 
 ## 2026-09-24 (b): Tier 1 Phase 2A, Task 5: a bulk row says why, and the CSV says which key.
 

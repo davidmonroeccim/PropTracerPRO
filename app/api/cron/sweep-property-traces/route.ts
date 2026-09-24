@@ -222,7 +222,10 @@ export async function GET(request: Request) {
   }
 
   const adminClient = createAdminClient();
-  // Housekeeping, once per run rather than once per claim: two rows a minute is 2,880 a day.
+  // Housekeeping, once per run rather than once per claim. Buckets are one wall-clock SECOND wide, so
+  // a saturated vendor writes up to 60 rows a minute and up to 86,400 a day; the prune is what keeps
+  // the table at hundreds of rows rather than tens of thousands. It never bounds the RATE, which the
+  // claim's own trailing-60-second predicate does, so it logs and swallows rather than failing a run.
   await pruneVendorRateWindows(adminClient);
   let processed = 0;
   let billed = 0;
