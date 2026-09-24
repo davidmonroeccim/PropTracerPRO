@@ -24,8 +24,20 @@
 > 7. `e066863` the ONE billing path extracted as `runTier1Record`; `runSingleTier1` is now its wrapper
 > Also on the branch: `9217293` and `d180943`, lessons L-034 and L-035. No code.
 >
-> **TASK 8 (the Tier 1 cron) WAS IN FLIGHT when this block was written. Check `git log` and the ledger for its
-> commit before assuming anything.** Task 9 (suite gates, then the live check) has not started.
+> 8. `98f3b19` the Tier 1 cron: a second lane beside the untouched legacy entity lane, one file, one column
+>
+> **EIGHT OF NINE COMPLETE. Gates at `98f3b19`: vitest 2040 passing / 87 files / 0 failed, tsc 0, eslint 45.**
+> The no-worker window is CLOSED, so the branch is coherent for the first time and the eventual deploy is
+> load-bearing. **Task 9 (suite gates, then the live check) has not started and stops for David twice: a
+> dollar amount, and whether to pick its parcels through the gateway or straight from the registry.**
+>
+> Task 8's Critical is worth knowing because it is the phase's sharpest near-miss: `parcelForTier1Row` was
+> exported specifically so it could be fenced, its own docblock cited L-020 for why, and it had zero tests.
+> Deleting one line of it left tsc clean and all 2029 tests green while making every Tier 1 record plan as
+> ownerless, return a TIER 2 plan, throw, and settle `tier1_done`/`no_match` free — the lane delivering
+> nothing to every customer with a green suite. Now fenced: the same deletion reddens four tests, and the new
+> block asserts the PLAN TIER rather than the field. The implementer's own diagnosis: "The same mock that
+> keeps these tests honest about the cron is what made the worst mutant in the phase invisible."
 >
 > **GATES at `e066863`, measured by the controller, not relayed: vitest 2006 passing / 87 files / 0 failed;
 > `npx tsc --noEmit` exit 0; `npx eslint app lib components` 45 problems.** Never bare `npm run lint`. The
