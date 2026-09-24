@@ -1,14 +1,45 @@
 /**
- * A supplied-owner (Tier 1) single trace, run INLINE (spec D1, D26): plan, execute, judge,
- * charge, persist.
+ * THE ONE TIER 1 SETTLE. Plan, execute, judge, charge, persist, for ONE record.
  *
- * Shared by app/api/trace/single and app/api/v1/trace/single, so the billing gate, the ledger
- * probe and the fold live in ONE place and one set of tests fences both routes. The routes keep
- * what differs: auth, the response casing, the webhook. Both now pass the SAME price, from the one
- * derivation in lib/suite/pricing.ts.
+ * Three callers, one implementation: app/api/trace/single (web, inline), app/api/v1/trace/single
+ * (API, inline) and the Tier 1 lane of app/api/cron/sweep-entity-traces (bulk, one claimed row at a
+ * time). The billing gate, the ledger probe, the fold and the persist live here and nowhere else.
+ *
+ * WHY THE CRON DOES NOT HAVE ITS OWN COPY. Two money derivations drift. PTP has already paid for
+ * that once: until 2026-09-23 the /api/v1 surface priced through a second, raw derivation that
+ * ignored the Suite Gateway snapshot, so the same customer would have been billed the Pro rate on
+ * the dashboard and the Pay-As-You-Go rate on the API for the same work. David's ruling: "One
+ * price." Both raw helpers were deleted rather than re-pointed, so no new call site could reach for
+ * one by accident (lessons L-030). A cron that re-derived the gate, the probe or the fold would be
+ * the same defect in a different file, against bulk volume.
+ *
+ * WHAT DIFFERS BETWEEN A SINGLE TRACE AND A QUEUED RECORD, and it is all in the input:
+ *
+ *   deadlineMs          the single routes bound the whole ladder to 50 s inside their 60 s
+ *                       maxDuration. The cron gives each record its own budget instead.
+ *   ledgerSince         the window the crash probe asks about. A single trace asks about the last
+ *                       24 hours (the resend window). A queued record asks about ITS OWN BULK JOB,
+ *                       because the row is REUSED and a debit from an earlier submit is not an
+ *                       answer about this one, which is the bound
+ *                       app/api/cron/sweep-property-traces already takes for tier 2.
+ *   queueWrite          what the persist writes into the two queue columns. A single trace nulls
+ *                       both. A queued record writes its own terminal status, which is what
+ *                       releases the parent bulk job.
+ *   resumeFromStepLog   a single trace resumes only a busy_try_again row (spec 5.2). A claimed queue
+ *                       row always resumes from whatever its log holds, because a dead claim is
+ *                       recovered one rung up and the answers it already bought are on the row.
+ *   onStep              per-arrival step-log writes, which a queue needs and an inline request does
+ *                       not: a killed run would otherwise re-buy every answered step.
+ *   canSpend            the shared per-minute vendor budget (spec 5.3), asked once per call. The
+ *                       TIER 1 cron lane passes one; a single trace passes NONE, because refusing its call would
+ *                       answer a live customer with a busy it did not have to have, and the 50-call
+ *                       gap under each vendor's own 500 is what carries that caller, along with the
+ *                       tier 2 lane's unreserved pass-2 lookups (Task 6's header sizes both). So a
+ *                       throttle is structurally impossible on a single trace, which is why the
+ *                       throttle branch below cannot change what one does.
  *
  * `execution.steps` is the step log. It is written to trace_steps and read back only by the next
- * resend of a busy_try_again row. It never goes into a response or a webhook.
+ * attempt at the same record. It never goes into a response or a webhook.
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
@@ -18,8 +49,9 @@ import {
   STEP_REUSE_WINDOW_MS,
   type ExecutionResult,
   type RouteDeps,
+  type StepReport,
 } from '@/lib/routing/executeRoute'
-import { planRoute, type ParcelInput, type PricePlan } from '@/lib/routing/ownerRoute'
+import { planRoute, type ParcelInput, type PricePlan, type RouteStep } from '@/lib/routing/ownerRoute'
 import { foldBillingWrite, TRACE_TIER, type CacheHitRow } from '@/lib/trace/billedRows'
 import { hasContactData, traceResultFor } from '@/lib/trace/fullPropertyTrace'
 import {
@@ -48,6 +80,32 @@ export class NotATier1PlanError extends Error {
   }
 }
 
+/**
+ * The shared vendor rate budget refused a call this record needed (spec 5.1, 5.3).
+ *
+ * NOT A FAILURE AND NOT AN OUTCOME. Nothing was settled, nothing was charged, and the customer is
+ * told nothing, because nothing happened to their record. The caller puts its row back on the rung it
+ * was claimed from, with no attempt spent, and the answers the record had already bought stay in its
+ * step log to be replayed rather than bought again.
+ *
+ * WHY A THROW AND NOT A FIELD ON Tier1RecordResult. Two reasons, and the first is the binding one.
+ * A field would change that type's key set, and lib/trace/__tests__/singleTier1.test.ts asserts it in
+ * full precisely so this task can prove a single trace is unchanged; the test has to pass unedited
+ * against the old code and the new. And on its own terms a throttled record HAS no result: there is
+ * no outcome, no skip reason and no deduction to report, so every field of that type would be a lie.
+ *
+ * UNREACHABLE FROM A SINGLE TRACE. runSingleTier1 passes no canSpend, so executeRoute never sets
+ * `throttled` on that path. Only the TIER 1 cron lane can see this: it is the one caller that passes
+ * canSpend, because a Tier 1 record's steps are independent and a refusal costs it nothing. The tier 2
+ * cron reserves once before a record starts and never gets here.
+ */
+export class VendorBudgetThrottledError extends Error {
+  constructor() {
+    super('the shared vendor rate budget could not cover a call this record needed')
+    this.name = 'VendorBudgetThrottledError'
+  }
+}
+
 /** The row this request reused or inserted, as it stood BEFORE this attempt. */
 export interface SingleTier1Row extends CacheHitRow {
   id: string
@@ -60,7 +118,7 @@ export interface SingleTier1Row extends CacheHitRow {
   trace_result?: unknown
 }
 
-export interface SingleTier1Input {
+export interface Tier1RecordInput {
   adminClient: SupabaseClient
   userId: string
   row: SingleTier1Row
@@ -69,8 +127,12 @@ export interface SingleTier1Input {
   pricePlan: PricePlan
   /** chargePerTrace(profile) on every surface. One derivation (lib/suite/pricing.ts). */
   chargeAmount: number
-  /** Request start + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS. */
-  deadlineMs: number
+  /**
+   * Epoch ms after which no vendor call may start, or undefined for no bound. The single routes
+   * pass request start + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS; the cron passes its own per-record
+   * budget. Undefined leaves only the 25 s per-call ceiling in the vendor clients.
+   */
+  deadlineMs?: number
   deps: RouteDeps
   /**
    * The supplied owner name, exactly as the caller sent it, or null. Written into the SAME
@@ -79,11 +141,59 @@ export interface SingleTier1Input {
    * owner ahead of that owner's own result.
    */
   inputOwnerName: string | null
+  /**
+   * ISO time bounding the crash probe, or null for unbounded.
+   *
+   * A single trace passes 24 hours back, the resend window. A queued record passes its own bulk
+   * job's created_at, because the row is REUSED: a debit booked for an earlier submit predates this
+   * piece of work and cannot be the answer to whether THIS one has been collected. NULL MEANS
+   * UNBOUNDED, WHICH IS THE SAFE DIRECTION: an unreadable bound can only cause a charge to be
+   * skipped, while a wrong bound charges a customer twice.
+   */
+  ledgerSince: string | null
+  /**
+   * What the persist writes into the two queue columns.
+   *
+   * A single trace writes null into both: a reused row can carry a stale value from a bulk job and
+   * it must not answer rowSkipReason for this trace. A queued record writes its own terminal status
+   * into `ai_research_status`, which is what stops it being claimed again and what lets the parent
+   * bulk job settle, and null into the other.
+   */
+  queueWrite: { ai_research_status: string | null; property_trace_status: string | null }
+  /**
+   * Reuse the answers already on this row instead of buying them again (spec 5.2).
+   *
+   * A single trace passes this only for a busy_try_again row. The cron passes true for every claimed
+   * row: a dead claim is re-claimed one rung up, and the per-arrival writes mean the answers it
+   * already paid for are on the row. Either way executeRoute judges each entry by its OWN
+   * timestamp, so nothing older than 24 hours is reused.
+   */
+  resumeFromStepLog: boolean
+  /** Per-arrival step-log write. See the file header. */
+  onStep?: (step: StepReport) => void | Promise<void>
+  /**
+   * The shared per-minute vendor budget, asked once per call (spec 5.3, Task 6).
+   *
+   * Passed straight through to executeRoute. A cron passes one; the two single routes pass NONE, and
+   * that is deliberate rather than an omission: a single trace runs inside a customer's request, so
+   * refusing its call would mean answering a live customer with a busy it did not have to have. The
+   * 50-call gap between the budget's 450 and each vendor's own 500 exists for exactly those callers.
+   *
+   * Without it `execution.throttled` is always falsy and the throttle branch below is unreachable,
+   * which is what keeps a single trace's behaviour identical to before Phase 2A.
+   */
+  canSpend?: (step: RouteStep) => boolean | Promise<boolean>
 }
+
+/** The single-trace input: the shared one without the five fields only a queue needs. */
+export type SingleTier1Input = Omit<
+  Tier1RecordInput,
+  'ledgerSince' | 'queueWrite' | 'resumeFromStepLog' | 'onStep' | 'canSpend' | 'deadlineMs'
+> & { deadlineMs: number }
 
 export type Tier1Deduction = 'not_attempted' | 'already_collected' | 'charged' | 'insufficient_balance' | 'error'
 
-export interface SingleTier1Result {
+export interface Tier1RecordResult {
   execution: ExecutionResult
   outcome: Tier1OutcomeCode
   foundBy: FoundBy | null
@@ -97,13 +207,16 @@ export interface SingleTier1Result {
   persistError: string | null
 }
 
+/** The single-trace result: the same object, under the name the two routes already import. */
+export type SingleTier1Result = Tier1RecordResult
+
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
 /** The result already on the row, read the way a JSONB column has to be: never cast blindly. */
 const storedResultOf = (value: unknown): TraceResult | null =>
   value !== null && typeof value === 'object' ? (value as TraceResult) : null
 
-export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTier1Result> {
+export async function runTier1Record(input: Tier1RecordInput): Promise<Tier1RecordResult> {
   const plan = planRoute(input.parcel, input.pricePlan)
 
   // A TIER 1 SETTLE, AND ONLY A TIER 1 SETTLE. planRoute returns a tier 2 plan for a record with
@@ -116,13 +229,31 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
     )
   }
 
-  // Only a busy_try_again row RESUMES (spec 5.2). Any other finished row runs fresh, and an answer
-  // older than 24 hours is never reused either way: executeRoute judges each entry by its own time,
-  // because a reused row keeps its original created_at.
-  const priorSteps =
-    input.row.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN ? stepLogFrom(input.row.trace_steps) : []
+  // Only a busy_try_again row RESUMES on a single trace (spec 5.2); a claimed queue row always
+  // resumes from what it already bought. Any answer older than 24 hours is never reused either way:
+  // executeRoute judges each entry by its own time, because a reused row keeps its created_at.
+  const priorSteps = input.resumeFromStepLog ? stepLogFrom(input.row.trace_steps) : []
 
-  const execution = await executeRoute(plan, input.deps, { deadlineMs: input.deadlineMs, priorSteps })
+  const execution = await executeRoute(plan, input.deps, {
+    deadlineMs: input.deadlineMs,
+    priorSteps,
+    onStep: input.onStep,
+    canSpend: input.canSpend,
+  })
+
+  // THROTTLED, AND IT STOPS HERE: BEFORE THE JUDGE, BEFORE THE LEDGER, BEFORE THE PERSIST.
+  //
+  // A call this record needed could not be covered this minute (spec 5.1, 5.3). Judging it would
+  // file a "we looked this owner up and found no match" on a question no vendor was ever asked, and
+  // that sentence would then answer for the row in History and in the results CSV. Fabricating the
+  // result of a lookup we chose not to make is precisely CLAUDE.md rule 7.
+  //
+  // Nothing needs unwinding: no money is written above this line, and any answer the record DID buy
+  // is already in trace_steps through onStep, so the re-claim replays it instead of re-buying it.
+  //
+  // UNREACHABLE FROM A SINGLE TRACE: runSingleTier1 passes no canSpend.
+  if (execution.throttled) throw new VendorBudgetThrottledError()
+
   const { outcome, foundBy } = tier1OutcomeFor(execution)
   const result = traceResultFor(execution)
 
@@ -144,7 +275,7 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
     const { total, inWindow } = await collectedChargesFor(
       input.adminClient,
       input.row.id,
-      new Date(Date.now() - STEP_REUSE_WINDOW_MS).toISOString(),
+      input.ledgerSince,
     )
     const recorded = Number(input.row.charge ?? 0) || 0
     const unrecorded =
@@ -198,14 +329,14 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
   // row keeps its stored result; see `preservedStatus` and `preservedOutcome` below.
   const keepsPaidContacts = !billable && hasContactData(storedResultOf(input.row.trace_result))
 
-  // The queue columns. A reused row can carry a stale value from a bulk job; it must not answer
-  // rowSkipReason for this single trace.
+  // The queue columns. A single trace nulls both, because a reused row can carry a stale value from
+  // a bulk job and it must not answer rowSkipReason for this trace. A queued record writes its own
+  // terminal status here, which is what releases the parent bulk job.
   const internalWrite = {
     contact_vendor: contactVendorFrom(execution.steps),
     trace_steps: execution.steps,
     tracerfy_job_id: null,
-    ai_research_status: null,
-    property_trace_status: null,
+    ...input.queueWrite,
   }
 
   // TWO STATEMENTS, NOT ONE WITH A TERNARY PAYLOAD. lib/trace/__tests__/chargeReceipt.test.ts
@@ -264,4 +395,24 @@ export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTie
     deduction,
     persistError: error ? error.message : null,
   }
+}
+
+/**
+ * A SINGLE Tier 1 trace: runTier1Record with the four queue fields the routes do not have.
+ *
+ * Kept as its own export so the two single routes read unchanged and so this file has one obvious
+ * place where "what a single trace does differently" is written down. Every value below was
+ * inlined in this function before Phase 2A, and lib/trace/__tests__/singleTier1.test.ts asserts
+ * the full persist payload and the full result to prove that moving them changed nothing.
+ */
+export async function runSingleTier1(input: SingleTier1Input): Promise<SingleTier1Result> {
+  return runTier1Record({
+    ...input,
+    // The resend window (spec 5.2). Bounded, because an OLDER surplus is not this request's money.
+    ledgerSince: new Date(Date.now() - STEP_REUSE_WINDOW_MS).toISOString(),
+    // Both queue columns cleared: a reused row must not answer with a bulk job's stale value.
+    queueWrite: { ai_research_status: null, property_trace_status: null },
+    // Only a busy row resumes on this surface (spec 5.2).
+    resumeFromStepLog: input.row.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN,
+  })
 }

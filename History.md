@@ -4,6 +4,27 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (d): Tier 1 Phase 2A, Task 7: one Tier 1 settle for the routes and the cron.
+
+- lib/trace/singleTier1.ts exports runTier1Record. runSingleTier1 is now a wrapper that supplies
+  the five things only a queue needs: the ledger probe's window, the queue columns the persist
+  writes, whether to resume from the step log, the per-arrival step hook, and the shared vendor
+  budget's canSpend hook.
+- A record the budget refuses throws VendorBudgetThrottledError BEFORE the judge, the ledger and the
+  persist, so a lookup nobody made can never be filed as "we looked and found no match" (CLAUDE.md
+  rule 7). A THROW rather than a result field, because a field would change Tier1RecordResult's key
+  set and the characterization tests below assert it in full. Unreachable from either single route:
+  neither passes canSpend, which is what keeps a single trace identical. Unreachable from the tier 2
+  cron too, which passes none either and reserves once before a record starts.
+- The billing gate, the crash probe, the fold and both persist shapes are UNCHANGED and are not
+  duplicated anywhere. Two money derivations drift, and PTP has already paid for that once
+  (lessons L-030).
+- Proved byte-identical for a single trace by three characterization tests asserting the FULL
+  persist payload key set and the FULL result key set, written and passing against the old code
+  first, then run unchanged against the new. chargeReceipt.test.ts needed no edit, which is what
+  proves the charge write is still folded and still in this file.
+- The file keeps its name: chargeReceipt.test.ts pins it by path. The rename goes on Phase 4's list.
+
 ## 2026-09-24 (c): Tier 1 Phase 2A, Task 6: one shared vendor budget, sliding, claimed before the spend.
 
 - Migration 20260923_vendor_rate_budget.sql adds vendor_rate_windows (one row per vendor per

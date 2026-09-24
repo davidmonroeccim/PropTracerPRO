@@ -54,7 +54,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 4: the four seams a queued Tier 1 row touches
   - [x] Task 5: the D33 bulk half, found_by and outcome_code in the CSV and the bulk summary
   - [x] Task 6: the shared vendor rate budget, and the Tier-1-only capacity gap
-  - [ ] Task 7: the one billing path, extracted
+  - [x] Task 7: the one billing path, extracted
   - [ ] Task 8: the Tier 1 cron
   - [ ] Task 9: suite gates, then the live check
 - [ ] Phase 2B: API bulk and the gateway MCP onto the queue (plan written after 2A)

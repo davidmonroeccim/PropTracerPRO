@@ -485,3 +485,120 @@ describe('runSingleTier1: what it writes', () => {
     expect(update?.filters).toEqual([['eq', 'id', 'row-1']])
   })
 })
+
+describe('BEFORE AND AFTER THE TASK 7 REFACTOR: the persist payload and the result, in full', () => {
+  /**
+   * A reused, already-paid address: an EARLIER owner's contacts on the row.
+   *
+   * Declared locally because the file's own PAID_ROW is scoped inside the D39 describe block.
+   * Same shape, deliberately, so the two cannot drift.
+   */
+  const PAID_ROW = {
+    id: 'row-1',
+    charge: 0.25,
+    tier: 2,
+    trace_result: {
+      owner_name: 'Earlier Owner',
+      phones: [{ number: '5550000999', type: 'mobile' }],
+      emails: [],
+    },
+  }
+
+  /**
+   * WHY THE WHOLE OBJECT AND NOT THE FIELDS THIS TEST CARES ABOUT. This is money code that shipped
+   * eight days ago and was reviewed twice. The refactor that follows moves its body behind a new
+   * signature, and the only way to show a single trace still does exactly what it did is to assert
+   * every key and every value of both writes and of the returned result, run it against the code as
+   * it stands today, and then run the same unchanged test against the refactor. A test that asserts
+   * the five interesting keys cannot tell you that the sixth stopped being written.
+   */
+  it('writes exactly these keys on the ordinary persist', async () => {
+    const result = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+
+    expect(Object.keys(persisted()!).sort()).toEqual(
+      [
+        'ai_research_status',
+        'charge',
+        'contact_vendor',
+        'cost',
+        'email_count',
+        'found_by',
+        'input_owner_name',
+        'is_successful',
+        'outcome_code',
+        'phone_count',
+        'property_trace_status',
+        'status',
+        'tier',
+        'trace_result',
+        'trace_steps',
+        'tracerfy_job_id',
+      ].sort()
+    )
+    expect(persisted()).toMatchObject({
+      status: 'success',
+      is_successful: true,
+      charge: 0.15,
+      tier: 1,
+      outcome_code: 'found_by_address',
+      found_by: 'address',
+      input_owner_name: 'Marcus T Halloway',
+      contact_vendor: 'tracerfy',
+      cost: 0.1,
+      tracerfy_job_id: null,
+      ai_research_status: null,
+      property_trace_status: null,
+    })
+    expect(Object.keys(result).sort()).toEqual(
+      [
+        'charge',
+        'deduction',
+        'execution',
+        'foundBy',
+        'outcome',
+        'persistError',
+        'result',
+        'skipReason',
+        'status',
+      ].sort()
+    )
+    expect(result).toMatchObject({
+      outcome: 'found_by_address',
+      foundBy: 'address',
+      skipReason: null,
+      status: 'success',
+      charge: 0.15,
+      deduction: 'charged',
+      persistError: null,
+    })
+  })
+
+  it('writes exactly these keys on the D39 keep-the-paid-contacts persist', async () => {
+    // deps() defaults both vendors to MISS, which is the D39 case: this trace finds nothing on a row
+    // that already holds paid contacts.
+    await run({ row: PAID_ROW, inputOwnerName: 'A Different Owner' })
+
+    // D39: the paid result, the owner name it belongs to, the counts, the charge, the cost, the
+    // success flag and found_by are ALL left alone. Only the internal columns and the restored
+    // status are written.
+    expect(Object.keys(persisted()!).sort()).toEqual(
+      [
+        'ai_research_status',
+        'contact_vendor',
+        'property_trace_status',
+        'status',
+        'trace_steps',
+        'tracerfy_job_id',
+      ].sort()
+    )
+    expect(persisted()).toMatchObject({ status: 'success' })
+    expect(persisted()).not.toHaveProperty('trace_result')
+    expect(persisted()).not.toHaveProperty('charge')
+    expect(persisted()).not.toHaveProperty('found_by')
+  })
+
+  it('carries the busy outcome onto a preserved row and no other outcome', async () => {
+    await run({ row: PAID_ROW, deps: deps({ tracePerson: vi.fn(async () => DOWN) }) })
+    expect(persisted()).toMatchObject({ outcome_code: 'busy_try_again' })
+  })
+})
