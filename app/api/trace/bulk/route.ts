@@ -413,8 +413,8 @@ export async function POST(request: Request) {
           .upsert(rows.slice(i, i + BATCH_SIZE), { onConflict: 'user_id,address_hash' });
         if (insertError) {
           // THROWS, AND IT USED TO console.error AND RETURN. That swallow was harmless while the
-          // tier 1 half had a real failure path of its own: submitBulkTrace could fail, and this
-          // route corrected records_submitted, wrote the accepted rows terminal and told the
+          // tier 1 half had a real failure path of its own: the Tracerfy person submit could fail,
+          // and this route corrected records_submitted, wrote the accepted rows terminal and told the
           // customer which half failed and that it was free. Phase 2A deletes that submit, so THIS
           // WRITE IS THE SUBMIT, and a swallowed error means: this handler answers success: true
           // with records_submitted counting rows that were never written; app/api/trace/bulk/status
@@ -474,15 +474,21 @@ export async function POST(request: Request) {
       // row wearing it is handed to FastAppend on its owner name with no route planned at all.
       //
       // `status: 'processing'` because the row genuinely is in flight, and because that is what the
-      // wallet reserve prices (lib/trace/bulkPreflight.ts). No tracerfy_job_id: it is the column
-      // every CSV settle path finds its rows by, and a queued row settled there would be billed by
-      // the wrong engine at the wrong moment.
+      // wallet reserve prices (lib/trace/bulkPreflight.ts). `tracerfy_job_id: null`, WRITTEN rather
+      // than omitted: the upsert is onConflict: 'user_id,address_hash', so this row is REUSED, and
+      // an omitted key leaves whatever the row already carried. A CSV-era row can carry a stale
+      // tracerfy_job_id from before this row was moved to the Tier 1 queue, and both CSV settle
+      // paths (app/api/trace/bulk/status/route.ts, app/api/cron/sweep-stale-traces/route.ts) find
+      // their rows by that column, so a stale value would let the CSV engine settle or fail a row
+      // the Tier 1 cron also owns, and it would show up in the OLD job's results CSV. Same
+      // reasoning and the same explicit null as lib/trace/singleTier1.ts's internalWrite.
       if (tier1Records.length > 0) {
         await insertHistoryRows(
           tier1Records.map((r) => ({
             ...buildHistoryRow(r),
             ai_research_status: tier1QueuedStatusFor(1),
             status: 'processing' as const,
+            tracerfy_job_id: null,
           }))
         );
       }
@@ -493,14 +499,30 @@ export async function POST(request: Request) {
       // two queues hold nothing as `completed` with records_matched 0, and then answers every later
       // poll from the stored stats. Without this write the customer's only evidence is an empty CSV.
       //
-      // NO NEW CUSTOMER-FACING SENTENCE (spec 7.3, L-028): both strings below are the ones this file
-      // already uses on its own submit-failure path, and the reason written to the job row is the
-      // thrown message, exactly as that path wrote submitResult.error.
+      // THE JOB MUST REACH A TERMINAL STATE, not merely get a response. David's ruling: "You cannot
+      // leave the job processing because the Gateway and API will never complete." The Suite
+      // Gateway and the v1 API both poll this job for completion, and a job parked at 'processing'
+      // never completes for them, so 'failed' is written here even though this handler already
+      // answers the browser directly. Rows already enqueued by an EARLIER batch in this same submit
+      // (noKeyRecords, tier2Records) keep running and bill as disclosed: tier 2 is charged per
+      // record submitted whatever the result, and the customer is told that before they submit, so
+      // nothing here needs to say so again.
+      //
+      // THE CUSTOMER-FACING SENTENCE IS FIXED AND GENERIC, approved by David. The thrown message
+      // (`reason` below) names a table and raw Postgres text, so it goes to the server log only,
+      // never to `trace_jobs.error_message`, which `bulk/status` returns and the page renders
+      // verbatim. It deliberately carries NO "not charged" claim: a part-way failure can leave rows
+      // that were already written and will be billed, so that claim would be false, and the global
+      // constraints permit "not charged" only where it is true.
       const reason = enqueueError instanceof Error ? enqueueError.message : 'Unknown error';
       console.error('Failed to enqueue bulk trace rows:', reason);
       await adminClient
         .from('trace_jobs')
-        .update({ status: 'failed', error_message: reason })
+        .update({
+          status: 'failed',
+          error_message:
+            'We could not finish starting your upload. Some records may already be running, so check your results before uploading those addresses again.',
+        })
         .eq('id', job.id);
       return NextResponse.json(
         { success: false, error: 'Failed to submit bulk trace' },

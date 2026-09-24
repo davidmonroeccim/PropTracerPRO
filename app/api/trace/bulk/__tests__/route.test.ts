@@ -749,7 +749,20 @@ describe("when the rows cannot be written", () => {
         (o.payload as Record<string, unknown>).status === "failed"
     );
     expect(failed).toBeDefined();
-    expect((failed!.payload as Record<string, unknown>).error_message).toContain("deadlock detected");
+    // THE CUSTOMER GETS THE FIXED GENERIC SENTENCE, David approved, never the raw Postgres text.
+    // No "not charged" claim: a part-way failure can leave rows already written and billable.
+    expect((failed!.payload as Record<string, unknown>).error_message).toBe(
+      "We could not finish starting your upload. Some records may already be running, so check your results before uploading those addresses again."
+    );
+    expect((failed!.payload as Record<string, unknown>).error_message).not.toMatch(/not charged/i);
+  });
+
+  it("keeps the detailed failure in the server log, so nothing is lost by generalizing the customer sentence", async () => {
+    await post([rec("Jane Smith")]);
+    expect(console.error).toHaveBeenCalledWith(
+      "Failed to enqueue bulk trace rows:",
+      expect.stringContaining("deadlock detected")
+    );
   });
 
   it("stops at the FIRST failed batch rather than reporting on rows it never tried", async () => {
@@ -849,9 +862,11 @@ describe("a traced row", () => {
     expect(rows[0].ai_research_status).toBe("tier1_queued");
     expect(rows[0].status).toBe("processing");
     expect(rows[0].trace_job_id).toBe("job-1");
-    // No tracerfy_job_id: it is the column every tier 1 CSV settle path finds its rows by, and a
-    // queued row settled there would be billed by the wrong engine.
-    expect(rows[0].tracerfy_job_id).toBeUndefined();
+    // tracerfy_job_id is WRITTEN null, not omitted: the upsert reuses this row, and an omitted
+    // key would leave a stale job id from a CSV-era write in place. Both CSV settle paths find
+    // their rows by this column, and a queued row carrying a stale value would be billed by the
+    // wrong engine.
+    expect(rows[0].tracerfy_job_id).toBeNull();
   });
 
   it("writes property_trace_status NULL, so no stale tier 2 value survives on it", async () => {

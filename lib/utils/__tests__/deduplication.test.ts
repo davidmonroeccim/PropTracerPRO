@@ -451,6 +451,26 @@ describe('the bulk duplicate key (spec 6.3, D36)', () => {
     expect(unique).toHaveLength(1)
     expect(internalDuplicates).toBe(1)
   })
+
+  it('checkDuplicates looks up the LOOKUP half on traceKeyFor too, not just the RETURNED key', async () => {
+    // The other two traceKeyFor call sites (removeBatchDuplicates above, and buildHistoryRow in
+    // app/api/trace/bulk/route.ts) are fenced. This third one, recordsWithHashes inside
+    // checkDuplicates itself, was not: it is the LOOKUP half of the duplicate key, the .in()
+    // filter that decides whether a record matches an existing row and is therefore billed again,
+    // and it is exactly the record shape 2B will send (a street-less parcel record).
+    //
+    // MUTATION: revert to `normalizeAddress(record.address, record.city, record.state)` (the
+    // tsc-legal three-argument form; the one-argument `normalizeAddress(record)` does not
+    // typecheck and proves nothing, L-020) and this goes red. It survives every OTHER test in this
+    // file because every record there carries both a street and a city, for which the two
+    // derivations agree.
+    stubRows([])
+    const record = { address: '', city: 'Austin', state: 'TX', apn: '0123-456', county: 'Travis' }
+    await checkDuplicates('user-1', [record])
+    const inFilter = filter(H.ops[0], 'in', 'address_hash')
+    expect(inFilter).toBeDefined()
+    expect(inFilter![2]).toEqual([createAddressHash(traceKeyFor(record))])
+  })
 })
 
 describe('the busy_try_again resend exemption (spec 5.2)', () => {
@@ -473,6 +493,13 @@ describe('the busy_try_again resend exemption (spec 5.2)', () => {
     const result = await checkDuplicates('user-1', [record])
     expect(result.newRecords).toHaveLength(1)
     expect(result.duplicates).toHaveLength(0)
+    // THE INVARIANT THE PAIR RESTS ON. The busy row is not a duplicate, but the route still needs
+    // to FIND it, in cachedResults, to know this is a resume rather than a fresh start and keep its
+    // step log (app/api/trace/bulk/route.ts's busyResumeHashes). checkDuplicates returns
+    // cachedResults: existingTraces, every row in the window, not just the ones treated as
+    // duplicates (deduplication.ts). Narrowing that later to duplicates only would make every busy
+    // resend re-buy its answered lookups with this very suite still green.
+    expect(result.cachedResults.map((r) => r.address_hash)).toContain(hash)
   })
 
   it('still counts every OTHER finished row as a duplicate, busy being the one exemption', async () => {
