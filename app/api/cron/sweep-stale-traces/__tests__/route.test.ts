@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -386,6 +388,89 @@ describe("a stale bulk job carrying tier 2 rows", () => {
       status: "failed",
       error_message: "No Tracerfy job ID",
     });
+  });
+});
+
+/**
+ * THE STAGE 2 SELECT NAMES BOTH QUEUE COLUMNS, ASSERTED AT THE SOURCE.
+ *
+ * This mock returns `H.historyRows` VERBATIM for any `trace_history` select that is not stage 1's
+ * (it branches only on whether the select string contains `normalized_address` -- see `settle()`
+ * above), so no test built against this harness can ever notice a column silently dropped from
+ * stage 2's select: `tier1QueueRows` would just read `undefined` off a row the mock still hands
+ * back in full, and every existing test stays green. Measured: dropping `ai_research_status` from
+ * the route's stage 2 select leaves the WHOLE SUITE green, tsc included -- `tier1QueueRows` becomes
+ * permanently empty in production, and a draining web job is written failed with "No Tracerfy job
+ * ID" at the 60-minute cutoff, which is exactly the defect this task exists to close.
+ *
+ * The status route's own widened selects are fenced for real by `projectRow`, the PostgREST
+ * column-projection emulation in its own harness (`app/api/trace/bulk/status/__tests__/route.test.ts:56-71`).
+ * This harness carries no such emulation, so the fence has to live at the source instead, the same
+ * way `lib/trace/__tests__/rowSkipReason.test.ts` (`the session summary SELECTS the tier 2 column
+ * on every branch that reads it`) fences the status route's selects by reading the file and
+ * regex-matching the select string, rather than by mocking column projection.
+ */
+const read = (path: string) => readFileSync(join(process.cwd(), path), "utf8");
+
+describe("the stage 2 select names both queue columns", () => {
+  it("selects ai_research_status alongside property_trace_status", () => {
+    // MUTATION: drop `ai_research_status` from the stage 2 select in the route and this goes red.
+    const source = read("app/api/cron/sweep-stale-traces/route.ts");
+    const selects = source.match(/\.select\('[^']*property_trace_status[^']*'\)/g) ?? [];
+    const stage2Select = selects.find((s) => s.includes("is_successful"));
+    expect(stage2Select, source).toBeDefined();
+    expect(stage2Select).toContain("ai_research_status");
+  });
+});
+
+/**
+ * A STALE BULK JOB WHOSE TIER 1 QUEUE ROWS ARE STILL DRAINING.
+ *
+ * Stage 2's queue guard used to ask only tier2Rows. Since Task 3 the web upload
+ * enqueues its Tier 1 rows into ai_research_status instead of submitting a
+ * Tracerfy CSV, so a web job now reaches this 60-minute cutoff with NO tier 2
+ * rows and no tracerfy_job_id: it fell straight into the 'No Tracerfy job ID'
+ * branch and was written FAILED while its Tier 1 rows were still being worked
+ * and billed. The status route's top-of-handler early return then makes that
+ * verdict permanent.
+ */
+describe("a stale bulk job whose Tier 1 queue rows are still draining", () => {
+  const jobWrites = () =>
+    H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+
+  beforeEach(() => {
+    H.staleJobs = [
+      { id: "job-1", user_id: "user-1", tracerfy_job_id: null, records_submitted: 1 },
+    ];
+  });
+
+  it("is left entirely alone, not failed", async () => {
+    // MUTATION: delete the `|| tier1QueueRows.some(...)` clause and this goes red -- with no tier 2
+    // rows the queue guard then reads false, so the job falls straight through to the
+    // !job.tracerfy_job_id branch's `tier2Rows.length > 0 || tier1QueueRows.length > 0` check
+    // (unaffected by this deletion), which is still true because tier1QueueRows itself is
+    // unchanged, and the job is written COMPLETED with records_matched: 0 -- premature, not failed,
+    // but still a terminal verdict the status route's early return then makes permanent while the
+    // row is still queued and unbilled. Confirmed by running the mutation and inspecting the
+    // written payload.
+    H.historyRows = [
+      { property_trace_status: null, ai_research_status: "tier1_queued", is_successful: null },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(0);
+  });
+
+  it("COMPLETES such a job once the queue has drained, rather than failing it", async () => {
+    // MUTATION: delete the `|| tier1QueueRows.length > 0` clause and this goes
+    // red -- the job falls into the 'No Tracerfy job ID' failure instead.
+    H.historyRows = [
+      { property_trace_status: null, ai_research_status: "tier1_done", is_successful: true },
+      { property_trace_status: null, ai_research_status: "tier1_done", is_successful: false },
+    ];
+    await run();
+    expect(jobWrites()).toHaveLength(1);
+    expect(jobWrites()[0].payload).toMatchObject({ status: "completed", records_matched: 1 });
+    expect(jobWrites()[0].payload?.error_message).toBeUndefined();
   });
 });
 

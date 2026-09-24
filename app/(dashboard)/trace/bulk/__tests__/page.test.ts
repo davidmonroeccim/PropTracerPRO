@@ -287,7 +287,7 @@ describe('the record cap, refused at selection time', () => {
 
   it('does not tell a customer their job is over the limit when it may not be', () => {
     // THE CHECK IS ON ROWS AND THE CAP IS ON RECORDS, and they are not the same
-    // number: mapRows drops any row missing an address, city or state before the
+    // number: mapRows drops any row missing an address or a state before the
     // page posts, so a 520-row export with 30 unusable rows is a legitimate
     // 490-record job this refuses. The copy must therefore say THIS FILE has
     // more rows than the cap, which is the fact actually checked, rather than
@@ -295,6 +295,31 @@ describe('the record cap, refused at selection time', () => {
     // reads as a statement about their job.
     expect(PROSE).toContain('this file has more rows than that');
     expect(PROSE).not.toContain('This file has more rows than we can take');
+  });
+});
+
+describe('which rows leave the browser at all', () => {
+  it('no longer drops a row for having no city', () => {
+    // Spec 3.1. Until Phase 2A this row was dropped here, before anything was posted: a 520-row
+    // county export with 30 city-less rows submitted 490 records and said nothing about the other
+    // 30. A company owner with no city traces on name and state alone (D4), and a person owner with
+    // no city ends no_lookup_key, free, with a sentence. Dropping it is the one outcome that tells
+    // the customer nothing at all.
+    //
+    // A TEXT ASSERTION, and the file header says why this file only has those. The behaviour is
+    // fenced in app/api/trace/bulk/__tests__/route.test.ts, which drives the real handler.
+    expect(SOURCE).toContain('if (!address || !state) continue;');
+    expect(SOURCE).not.toContain('if (!address || !city || !state) continue;');
+  });
+
+  it('still drops a row with no street and a row with no state', () => {
+    // Neither vendor can be asked about a record with no state. And a record with no street keys on
+    // `||STATE` (spec 6.3 rule 3), so thirty street-less rows in one state would collapse onto ONE
+    // trace_history row: the customer gets one result back out of thirty while records_submitted
+    // says thirty. Spec 6.3 records that collision rather than solving it, so the page keeps it out
+    // of reach.
+    expect(SOURCE).toContain('!address');
+    expect(SOURCE).toContain('!state');
   });
 });
 

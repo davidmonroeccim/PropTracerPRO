@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { NotATier1PlanError, runSingleTier1, TIER1_CHARGE_DESCRIPTION, type SingleTier1Input } from '@/lib/trace/singleTier1'
+import {
+  NotATier1PlanError,
+  runSingleTier1,
+  runTier1Record,
+  TIER1_CHARGE_DESCRIPTION,
+  VendorBudgetThrottledError,
+  type SingleTier1Input,
+  type Tier1RecordInput,
+} from '@/lib/trace/singleTier1'
 import { requestKeyFor, type ContactResult, type RouteDeps, type StepReport } from '@/lib/routing/executeRoute'
-import { planRoute, type ParcelInput } from '@/lib/routing/ownerRoute'
+import { planRoute, type ParcelInput, type RouteStep } from '@/lib/routing/ownerRoute'
 import { BUSY_TRY_AGAIN_REASON, OWNER_NAME_NOT_MATCHED_REASON } from '@/lib/trace/tier1Outcome'
 
 type Op = { table: string; op: 'select' | 'update'; payload?: Record<string, unknown>; filters: unknown[][] }
@@ -483,5 +491,251 @@ describe('runSingleTier1: what it writes', () => {
     expect(probe?.filters).toEqual([['eq', 'trace_history_id', 'row-1']])
     const update = H.ops.find(o => o.table === 'trace_history' && o.op === 'update')
     expect(update?.filters).toEqual([['eq', 'id', 'row-1']])
+  })
+})
+
+describe('BEFORE AND AFTER THE TASK 7 REFACTOR: the persist payload and the result, in full', () => {
+  /**
+   * A reused, already-paid address: an EARLIER owner's contacts on the row.
+   *
+   * Declared locally because the file's own PAID_ROW is scoped inside the D39 describe block.
+   * Same shape, deliberately, so the two cannot drift.
+   */
+  const PAID_ROW = {
+    id: 'row-1',
+    charge: 0.25,
+    tier: 2,
+    trace_result: {
+      owner_name: 'Earlier Owner',
+      phones: [{ number: '5550000999', type: 'mobile' }],
+      emails: [],
+    },
+  }
+
+  /**
+   * WHY THE WHOLE OBJECT AND NOT THE FIELDS THIS TEST CARES ABOUT. This is money code that shipped
+   * eight days ago and was reviewed twice. The refactor that follows moves its body behind a new
+   * signature, and the only way to show a single trace still does exactly what it did is to assert
+   * every key and every value of both writes and of the returned result, run it against the code as
+   * it stands today, and then run the same unchanged test against the refactor. A test that asserts
+   * the five interesting keys cannot tell you that the sixth stopped being written.
+   */
+  it('writes exactly these keys on the ordinary persist', async () => {
+    const result = await run({ deps: deps({ tracePerson: vi.fn(async () => HIT) }) })
+
+    expect(Object.keys(persisted()!).sort()).toEqual(
+      [
+        'ai_research_status',
+        'charge',
+        'contact_vendor',
+        'cost',
+        'email_count',
+        'found_by',
+        'input_owner_name',
+        'is_successful',
+        'outcome_code',
+        'phone_count',
+        'property_trace_status',
+        'status',
+        'tier',
+        'trace_result',
+        'trace_steps',
+        'tracerfy_job_id',
+      ].sort()
+    )
+    expect(persisted()).toMatchObject({
+      status: 'success',
+      is_successful: true,
+      charge: 0.15,
+      tier: 1,
+      outcome_code: 'found_by_address',
+      found_by: 'address',
+      input_owner_name: 'Marcus T Halloway',
+      contact_vendor: 'tracerfy',
+      cost: 0.1,
+      tracerfy_job_id: null,
+      ai_research_status: null,
+      property_trace_status: null,
+    })
+    expect(Object.keys(result).sort()).toEqual(
+      [
+        'charge',
+        'deduction',
+        'execution',
+        'foundBy',
+        'outcome',
+        'persistError',
+        'result',
+        'skipReason',
+        'status',
+      ].sort()
+    )
+    expect(result).toMatchObject({
+      outcome: 'found_by_address',
+      foundBy: 'address',
+      skipReason: null,
+      status: 'success',
+      charge: 0.15,
+      deduction: 'charged',
+      persistError: null,
+    })
+  })
+
+  it('writes exactly these keys on the D39 keep-the-paid-contacts persist', async () => {
+    // deps() defaults both vendors to MISS, which is the D39 case: this trace finds nothing on a row
+    // that already holds paid contacts.
+    await run({ row: PAID_ROW, inputOwnerName: 'A Different Owner' })
+
+    // D39: the paid result, the owner name it belongs to, the counts, the charge, the cost, the
+    // success flag and found_by are ALL left alone. Only the internal columns and the restored
+    // status are written.
+    expect(Object.keys(persisted()!).sort()).toEqual(
+      [
+        'ai_research_status',
+        'contact_vendor',
+        'property_trace_status',
+        'status',
+        'trace_steps',
+        'tracerfy_job_id',
+      ].sort()
+    )
+    expect(persisted()).toMatchObject({ status: 'success' })
+    expect(persisted()).not.toHaveProperty('trace_result')
+    expect(persisted()).not.toHaveProperty('charge')
+    expect(persisted()).not.toHaveProperty('found_by')
+  })
+
+  it('carries the busy outcome onto a preserved row and no other outcome', async () => {
+    await run({ row: PAID_ROW, deps: deps({ tracePerson: vi.fn(async () => DOWN) }) })
+    expect(persisted()).toMatchObject({ outcome_code: 'busy_try_again' })
+  })
+})
+
+/**
+ * THE FOUR QUEUE BEHAVIOURS, FENCED HERE BECAUSE ONLY HERE CAN THEY BE.
+ *
+ * runTier1Record gained five things a single trace does not use, so no test that goes through
+ * runSingleTier1 can reach them: the wrapper passes no canSpend and no onStep, nulls both queue
+ * columns, and resumes only a busy row. Task 7's first round deferred the four mutations to Task 8
+ * on that ground, and that deferral was WRONG: task-8-brief.md:37 mocks `runTier1Record` as a
+ * `vi.fn` (correctly, so that the cron's tests stay about the cron), which means no Task 8 test ever
+ * executes this function body. Task 8's mutations 5b, 9 and 10 sit at the CRON's call site and
+ * assert the argument the cron passes, never whether this function honours it. Four money-relevant
+ * behaviours would have shipped as comments rather than guarantees.
+ *
+ * So these call the exported core DIRECTLY. They are the only tests in the repo that do.
+ */
+describe('runTier1Record: the five things only a queue passes', () => {
+  const runRecord = (over: Partial<Tier1RecordInput> = {}) =>
+    runTier1Record({
+      adminClient: adminClient(),
+      userId: 'user-1',
+      row: { id: 'row-1', charge: 0, tier: null },
+      parcel: PARCEL,
+      pricePlan: 'pro',
+      chargeAmount: 0.15,
+      deadlineMs: Date.now() + 50_000,
+      deps: deps(),
+      inputOwnerName: 'Marcus T Halloway',
+      // The queue fields, at their single-trace values, so each test below varies exactly one.
+      ledgerSince: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      queueWrite: { ai_research_status: null, property_trace_status: null },
+      resumeFromStepLog: false,
+      ...over,
+    })
+
+  /** An entity name, so the plan is the Instant person lookup AND a FastAppend entity step. */
+  const TRUST: ParcelInput = { ...PARCEL, ownerName: 'Marcus Halloway Revocable Trust' }
+  const loggedInstantMiss = (): StepReport[] => [{
+    kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0,
+    at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    requestKey: requestKeyFor(planRoute(TRUST, 'pro').steps[0]),
+  }]
+
+  it('throws VendorBudgetThrottledError and judges, charges and persists NOTHING when the budget refuses', async () => {
+    // THE MONEY GUARD OF THIS WHOLE PHASE (spec 5.1, 5.3, CLAUDE.md rule 7). Without the
+    // `if (execution.throttled) throw` line the record is judged no_match, settled, and filed with
+    // "We looked this owner up by address and found no match. You were not charged." about a lookup
+    // no vendor was ever asked to make.
+    //
+    // MUTATION: delete `if (execution.throttled) throw new VendorBudgetThrottledError()`: red here.
+    // MUTATION: delete `canSpend: input.canSpend` from the executeRoute options: red here too, because
+    // executeRoute is then never asked and never sets `throttled`, so nothing throws.
+    const d = deps({ tracePerson: vi.fn(async () => HIT) })
+    await expect(runRecord({ deps: d, canSpend: () => false })).rejects.toThrow(VendorBudgetThrottledError)
+
+    // Refused BEFORE the call, so nothing was bought.
+    expect(d.tracePerson).not.toHaveBeenCalled()
+    // Nothing judged and nothing settled: no persist at all, not even the internal columns.
+    expect(H.ops.filter(o => o.table === 'trace_history' && o.op === 'update')).toHaveLength(0)
+    // Nothing charged, and the ledger was not even asked: a throttled record has no billing decision.
+    expect(deducts()).toHaveLength(0)
+    expect(H.ops.some(o => o.table === 'wallet_transactions')).toBe(false)
+  })
+
+  it('asks canSpend for the call it is about to make, and runs it when the budget allows', async () => {
+    // The other half of the hook: a budget that says yes must not change what the record does.
+    // MUTATION: delete `canSpend: input.canSpend` and this goes red on the spy.
+    // Typed as the hook itself, so the assertion below reads the step it was actually asked about.
+    const canSpend = vi.fn<(step: RouteStep) => boolean>(() => true)
+    const r = await runRecord({ deps: deps({ tracePerson: vi.fn(async () => HIT) }), canSpend })
+    expect(canSpend).toHaveBeenCalledTimes(1)
+    expect(canSpend.mock.calls[0][0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED' })
+    expect(r).toMatchObject({ outcome: 'found_by_address', status: 'success', charge: 0.15 })
+  })
+
+  it('calls onStep as each answer arrives, so a killed run never re-buys an answered step', async () => {
+    // MUTATION: delete `onStep: input.onStep` from the executeRoute options and this goes red.
+    const onStep = vi.fn<(step: StepReport) => void>(() => {})
+    await runRecord({ deps: deps({ tracePerson: vi.fn(async () => HIT) }), onStep })
+    expect(onStep).toHaveBeenCalledTimes(1)
+    expect(onStep.mock.calls[0][0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'hit' })
+    // What the hook saw is what the persist ends up holding: the same log, not a second derivation.
+    expect(onStep.mock.calls.map(c => c[0])).toEqual(persisted()!.trace_steps)
+  })
+
+  it('writes the queue columns it was given, on BOTH persist branches', async () => {
+    // What releases the parent bulk job. A single trace nulls both; a queued record writes its own
+    // terminal status into ai_research_status.
+    // MUTATION: replace `...input.queueWrite` with hard-coded nulls and this goes red on both halves.
+    const queueWrite = { ai_research_status: 'tier1_done', property_trace_status: null }
+
+    await runRecord({ deps: deps({ tracePerson: vi.fn(async () => HIT) }), queueWrite })
+    expect(persisted()).toMatchObject({ ai_research_status: 'tier1_done', property_trace_status: null })
+
+    // The D39 preserve branch spreads the SAME internalWrite, so it carries the terminal status too:
+    // a queued record that finds nothing on a row holding paid contacts must still release its job.
+    H.ops = []
+    await runRecord({
+      row: {
+        id: 'row-1', charge: 0.25, tier: 2,
+        trace_result: { owner_name: 'Earlier Owner', phones: [{ number: '5550000999', type: 'mobile' }], emails: [] },
+      },
+      queueWrite,
+    })
+    expect(persisted()).toMatchObject({ ai_research_status: 'tier1_done', property_trace_status: null })
+    expect(persisted()).not.toHaveProperty('trace_result')
+  })
+
+  it('resumes from the step log whenever the FLAG says so, whatever the outcome_code', async () => {
+    // THE CRON'S RESUME. A row recovered from a dead claim has NO outcome_code, so the wrapper's
+    // busy-only predicate would buy every answered step again. This fences the core's use of the
+    // flag independently of that predicate, which is the half nothing else covers.
+    //
+    // MUTATION: `const priorSteps = []` (never resume): red, tracePerson is called.
+    // MUTATION: restore the pre-extraction predicate in the CORE,
+    //   `input.row.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN` instead of input.resumeFromStepLog:
+    //   red, because this row's outcome_code is 'no_match'.
+    const d = deps()
+    await runRecord({
+      parcel: TRUST,
+      deps: d,
+      resumeFromStepLog: true,
+      row: { id: 'row-1', charge: 0, tier: null, outcome_code: 'no_match', trace_steps: loggedInstantMiss() },
+    })
+    // The logged Instant miss is replayed, not re-bought; the ladder moves on to the entity step.
+    expect(d.tracePerson).not.toHaveBeenCalled()
+    expect(d.traceEntity).toHaveBeenCalledTimes(1)
+    expect((persisted()!.trace_steps as StepReport[])[0]).toMatchObject({ outcome: 'miss', reused: true })
   })
 })

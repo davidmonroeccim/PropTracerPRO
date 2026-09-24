@@ -18,6 +18,11 @@ import {
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { isParcelKey } from '@/lib/trace/historyDisplay';
+import {
+  pruneVendorRateWindows,
+  reservationForSteps,
+  reserveVendorCalls,
+} from '@/lib/trace/vendorRateBudget';
 import { deductOrZero } from '@/lib/wallet/deduct';
 import { collectedChargesFor } from '@/lib/wallet/collectedCharge';
 import { pricePlanFor } from '@/lib/suite/pricing';
@@ -77,14 +82,43 @@ export const maxDuration = 300;
  *
  * BOTH tier 2 calls draw Tracerfy's SHARED 500/minute instant pool (the dossier
  * endpoint's own header says the counter is shared with Instant Trace, Enhanced
- * Trace, Phone Verification and APN Instant Lookup). Tier 1 bulk posts to the
- * BATCH endpoint, a different bucket, so it does not compete. Two calls per
- * record is therefore a hard ceiling of 250 records/minute for this queue alone.
+ * Trace, Phone Verification and APN Instant Lookup).
  *
- * 120 records at concurrency 5 is 240 calls/minute, 48% of the pool, which
- * leaves headroom for single traces running at the same time. sweep-entity-
- * traces also runs every minute and draws the same pool, but its
- * MAX_ROWS_PER_RUN is 5, under 2% of it, so it does not change this arithmetic.
+ * THE SENTENCE THAT USED TO BE HERE IS NOW FALSE, and it is corrected rather
+ * than deleted because it explains the arithmetic below. It said "Tier 1 bulk
+ * posts to the BATCH endpoint, a different bucket, so it does not compete."
+ * Since Phase 2A the WEB upload's Tier 1 rows are worked per record by
+ * sweep-entity-traces through the SAME instant pool (spec 3.2), so they compete
+ * directly. API bulk and the MCP tool still post to the batch endpoint, until 2B.
+ *
+ * SIZING, AND IT IS AN ESTIMATE RATHER THAN A GUARANTEE. 120 records at
+ * concurrency 5 is at least 240 calls a minute. The Tier 1 lane is 120 rows at
+ * concurrency 8 and at most ONE Tracerfy call per record on the web path (that
+ * surface sends no parcel id, so planRoute can emit one person step, not two),
+ * which is at most 120 more. That says the two lanes should not normally reach
+ * the 450 shared ceiling.
+ *
+ * DO NOT READ 240 AS A CEILING FOR THIS LANE. It is a FLOOR.
+ * lib/routing/ownerRoute.ts says so about its own figure, in capitals, and
+ * D21(c) with D40 put no cap on how many owners a dossier record tries: the
+ * worst case is 2 + 2N Tracerfy calls for N individual owners, which is 8 for
+ * three. At three owners a record this lane alone would want 960 a minute.
+ *
+ * WHICH IS WHY THE BOUND IS NOT HERE AND IS NOT ARITHMETIC.
+ * lib/trace/vendorRateBudget.ts holds it. This cron reserves ONCE PER RECORD,
+ * immediately before that record's first vendor call, and then the record runs
+ * to completion: a record whose dossier has been bought is never refused
+ * part-way and never re-run, so no dossier is ever bought twice. A record the
+ * budget cannot cover is released to its own rung before it asks any vendor
+ * anything, no attempt spent, and waits for the next minute.
+ *
+ * SO THE BUDGET BOUNDS RECORD STARTS ON THIS LANE, NOT EVERY CALL INSIDE THEM,
+ * and the pass-2 owner lookups are unreserved. The overshoot is CONCURRENCY (5)
+ * times a record's worst-case remaining ladder (2N calls for N owners), which is
+ * 30 at three owners: 450 + 30 = 480 against the vendor's 500. The 50-call gap
+ * absorbs it and also carries the single traces. Do not claim a per-call ceiling
+ * for this lane; that one belongs to the Tier 1 lane, which reserves per call.
+ * The plan's Task 6 header carries the arithmetic and says where it runs out.
  *
  * At the measured ~1.2-1.7 s per record that is ~36 s per run, far inside
  * maxDuration = 300. Bulk submissions are capped at 500 records (David,
@@ -188,6 +222,11 @@ export async function GET(request: Request) {
   }
 
   const adminClient = createAdminClient();
+  // Housekeeping, once per run rather than once per claim. Buckets are one wall-clock SECOND wide, so
+  // a saturated vendor writes up to 60 rows a minute and up to 86,400 a day; the prune is what keeps
+  // the table at hundreds of rows rather than tens of thousands. It never bounds the RATE, which the
+  // claim's own trailing-60-second predicate does, so it logs and swallows rather than failing a run.
+  await pruneVendorRateWindows(adminClient);
   let processed = 0;
   let billed = 0;
   let propertyRecords = 0;
@@ -201,6 +240,10 @@ export async function GET(request: Request) {
   // signal, and PTP has no other one.
   let contactsUnreachable = 0;
   let skippedNoKey = 0;
+  // Records the shared vendor budget could not cover THIS MINUTE, released to the
+  // rung they were claimed from before they asked any vendor anything (spec 5.3).
+  // Not a failure and not an error: nothing was bought and no attempt was spent.
+  let throttled = 0;
   let errored = 0;
   let staleReverted = 0;
   // Rows that used up every attempt this run and were written terminal. Not a
@@ -385,6 +428,53 @@ export async function GET(request: Request) {
           })
           .eq('id', row.id);
         skippedNoKey++;
+        return;
+      }
+
+      /**
+       * THE SHARED BUDGET (spec 5.3), ONCE, BEFORE THIS RECORD'S FIRST VENDOR CALL.
+       *
+       * ONCE, AND NOT PER CALL, BECAUSE A TIER 2 RECORD CANNOT BE REWOUND. Its pass-2 contact
+       * lookups exist only because the dossier was bought and named the owners they are for. A
+       * refusal after that point could only be handled by releasing the record and running it again
+       * next minute, which buys the same dossier twice. So this lane asks once: refused, the record
+       * has spent nothing and asks no vendor anything; granted, it finishes. Every owner the dossier
+       * names is asked, the customer is billed once, and nothing is re-bought.
+       *
+       * NO canSpend IS PASSED TO executeRoute HERE, deliberately. The Tier 1 lane passes one because
+       * its steps are independent and a refusal there costs nothing. This one would be a refusal
+       * mid-ladder, which is the thing that must not happen.
+       *
+       * WHAT IT RESERVES: the steps the plan carries, which on this lane are the dossier calls.
+       * reservationForSteps reads them off the plan rather than restating a constant, so a routing
+       * change cannot leave a stale number here. A plan whose FIRST dossier step hits leaves the
+       * second unmade, so the claim over-reserves by one, which is the conservative direction.
+       *
+       * WHAT IT DOES NOT RESERVE, SAID PLAINLY: the pass-2 owner lookups. On this lane the budget
+       * bounds how many records BEGIN in a window, not every call inside them, and an in-flight
+       * ladder can overshoot the reserved figure. Bounded by CONCURRENCY (5) times a record's
+       * worst-case remaining ladder (2N calls for N owners, 30 at three), which the 50-call gap
+       * below the vendor's own 500 absorbs. The plan's Task 6 header has the arithmetic.
+       */
+      if (!(await reserveVendorCalls(adminClient, reservationForSteps(plan.steps)))) {
+        // THROTTLED (spec 5.1, spec 5.3), AND IT SPENT NOTHING. No vendor was asked about this
+        // record, nothing was judged, nothing was billed, and the customer is told nothing.
+        //
+        // RELEASED TO THE RUNG IT WAS CLAIMED FROM, WITH NO ATTEMPT SPENT. A throttle is not a
+        // failure: giving up an attempt for it would burn a customer's row through five rungs on a
+        // busy minute and then write it terminal.
+        //
+        // A rising `throttled` in the response means the budget is the binding constraint and
+        // MAX_ROWS_PER_RUN or CONCURRENCY should come down, not that anything is broken.
+        await adminClient
+          .from('trace_history')
+          .update({
+            property_trace_status: row.property_trace_status,
+            property_trace_claimed_at: null,
+          })
+          .eq('id', row.id);
+        processed--;
+        throttled++;
         return;
       }
 
@@ -711,6 +801,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         success: true,
         processed: 0,
+        throttled,
         exhausted,
         staleReverted,
       });
@@ -740,6 +831,7 @@ export async function GET(request: Request) {
       noContacts,
       contactsUnreachable,
       skippedNoKey,
+      throttled,
       errored,
       exhausted,
       staleReverted,

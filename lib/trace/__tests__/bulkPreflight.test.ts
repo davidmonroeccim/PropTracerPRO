@@ -5,6 +5,11 @@ import {
   PROPERTY_TRACE_SETTLED_STATUS,
 } from "@/lib/trace/propertyTraceAttempts";
 import { STALE_PROCESSING } from "@/lib/constants";
+import {
+  TIER1_FAILED_STATUS,
+  TIER1_PENDING_STATUSES,
+  TIER1_SETTLED_STATUS,
+} from "@/lib/trace/tier1Queue";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
@@ -23,6 +28,12 @@ const H = vi.hoisted(() => ({
   analytics: { success: true, data: { balance: 10694 } } as Record<string, unknown>,
   queuedCount: 0 as number | null,
   queuedError: null as { message: string } | null,
+  // The TIER 1 queue's own count and its own error, kept SEPARATE from the tier 2 pair above.
+  // Separate so the "raises OUR failure on the Tier 1 count too" test can fence that branch on its
+  // own: with one shared error field the tier 2 query throws first and the Tier 1 branch is never
+  // reached, which would be a test that passes without fencing anything.
+  queuedTier1Count: 0 as number | null,
+  queuedTier1Error: null as { message: string } | null,
   inFlightRows: [] as Array<Record<string, unknown>>,
   inFlightError: null as { message: string } | null,
   filters: [] as Array<[string, unknown, unknown]>,
@@ -35,9 +46,10 @@ vi.mock("@/lib/tracerfy/client", () => ({
 const { getAnalytics } = await import("@/lib/tracerfy/client");
 const {
   TRACERFY_DOSSIER_CREDITS,
+  TRACERFY_TIER1_CREDITS,
   TIER2_CAPACITY_REFUSAL,
   inFlightUnbilledCost,
-  tracerfyCanRunTier2,
+  tracerfyCanRun,
 } = await import("@/lib/trace/bulkPreflight");
 
 /** A client that records its filters and answers the two shapes this module uses. */
@@ -49,7 +61,15 @@ function fakeClient() {
         H.filters.push([name, a, b]);
         return node;
       };
-      node.in = track("in");
+      // WHICH QUEUE WAS ASKED ABOUT. tracerfyCanRun makes TWO head+count queries, one per queue, and
+      // a harness that answers the same number to both cannot tell a per-tier bug from a correct
+      // answer. Recorded here rather than inferred from call order, because order is not the contract.
+      let countColumn: string | null = null;
+      node.in = (a: unknown, b: unknown) => {
+        H.filters.push(["in", a, b]);
+        countColumn = String(a);
+        return node;
+      };
       node.eq = track("eq");
       node.or = track("or");
       // A head+count select answers `{ count, error }`; a plain one answers
@@ -63,7 +83,9 @@ function fakeClient() {
       node.then = (res: (v: unknown) => unknown) =>
         Promise.resolve(
           counting
-            ? { count: H.queuedCount, error: H.queuedError }
+            ? countColumn === "ai_research_status"
+              ? { count: H.queuedTier1Count, error: H.queuedTier1Error }
+              : { count: H.queuedCount, error: H.queuedError }
             : { data: H.inFlightRows, error: H.inFlightError }
         ).then(res);
       return node;
@@ -79,6 +101,8 @@ beforeEach(() => {
   H.analytics = { success: true, data: { balance: 10694 } };
   H.queuedCount = 0;
   H.queuedError = null;
+  H.queuedTier1Count = 0;
+  H.queuedTier1Error = null;
   H.inFlightRows = [];
   H.inFlightError = null;
   H.filters = [];
@@ -91,13 +115,13 @@ beforeEach(() => {
 
 describe("the Tracerfy capacity check", () => {
   it("lets a job through when the pool covers it", async () => {
-    expect(await tracerfyCanRunTier2(fakeClient(), 500)).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 500 })).toBe(true);
   });
 
-  it("asks no vendor at all when the job has no tier 2 records", async () => {
-    // A tier 1 only batch draws no dossier credits, so spending an HTTP round
+  it("asks no vendor at all when the job is empty on BOTH tiers", async () => {
+    // An empty batch draws nothing from either pool, so spending an HTTP round
     // trip to prove it would be a cost with no question behind it.
-    expect(await tracerfyCanRunTier2(fakeClient(), 0)).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 0 })).toBe(true);
     expect(getAnalytics).not.toHaveBeenCalled();
   });
 
@@ -105,10 +129,10 @@ describe("the Tracerfy capacity check", () => {
     // MUTATION: change the multiplicand and this goes red. 100 records is
     // 1,000 credits, so a 999 balance cannot run it and a 1,000 one can.
     H.analytics = { success: true, data: { balance: 100 * TRACERFY_DOSSIER_CREDITS } };
-    expect(await tracerfyCanRunTier2(fakeClient(), 100)).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 100 })).toBe(true);
 
     H.analytics = { success: true, data: { balance: 100 * TRACERFY_DOSSIER_CREDITS - 1 } };
-    expect(await tracerfyCanRunTier2(fakeClient(), 100)).toBe(false);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 100 })).toBe(false);
   });
 
   it("counts what is ALREADY queued, because the pool is shared", async () => {
@@ -117,13 +141,13 @@ describe("the Tracerfy capacity check", () => {
     // goes red.
     H.analytics = { success: true, data: { balance: 100 * TRACERFY_DOSSIER_CREDITS } };
     H.queuedCount = 1;
-    expect(await tracerfyCanRunTier2(fakeClient(), 100)).toBe(false);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 100 })).toBe(false);
   });
 
   it("counts every rung of the ladder as still in flight, claimed rows included", async () => {
     // A row mid-retry and a row a worker is holding are both work the pool
     // still owes credits to.
-    await tracerfyCanRunTier2(fakeClient(), 1);
+    await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 1 });
     const inFilter = H.filters.find(
       (f) => f[0] === "in" && f[1] === "property_trace_status"
     );
@@ -132,6 +156,15 @@ describe("the Tracerfy capacity check", () => {
     // A terminal row is finished with the pool and must not hold capacity back.
     expect(inFilter![2]).not.toContain(PROPERTY_TRACE_SETTLED_STATUS);
     expect(inFilter![2]).not.toContain(PROPERTY_TRACE_NO_KEY_STATUS);
+
+    // TWO LADDERS NOW, so the twin assertion for the Tier 1 queue. A Tier 1 row mid-retry owes the
+    // same pool its person lookup, so it holds capacity back exactly as a tier 2 row does.
+    const tier1Filter = H.filters.find((f) => f[0] === "in" && f[1] === "ai_research_status");
+    expect(tier1Filter).toBeDefined();
+    expect(tier1Filter![2]).toEqual(TIER1_PENDING_STATUSES);
+    // A terminal Tier 1 row is finished with the pool and must not hold capacity back.
+    expect(tier1Filter![2]).not.toContain(TIER1_SETTLED_STATUS);
+    expect(tier1Filter![2]).not.toContain(TIER1_FAILED_STATUS);
   });
 
   it("refuses when it cannot read the balance, rather than assuming one", async () => {
@@ -139,12 +172,12 @@ describe("the Tracerfy capacity check", () => {
     // plenty. Treating it as enough is inventing a result, which is the one
     // thing this project is least allowed to do.
     H.analytics = { success: false, error: "Tracerfy service unavailable" };
-    expect(await tracerfyCanRunTier2(fakeClient(), 1)).toBe(false);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 1 })).toBe(false);
   });
 
   it("refuses when the response carries no balance number", async () => {
     H.analytics = { success: true, data: {} };
-    expect(await tracerfyCanRunTier2(fakeClient(), 1)).toBe(false);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 1 })).toBe(false);
   });
 
   it("leaves the operator a log line, which is the only surface there is", async () => {
@@ -152,7 +185,7 @@ describe("the Tracerfy capacity check", () => {
     // line is the whole of it. MUTATION: delete the console.error and an
     // operator finds out the pool ran dry from a customer.
     H.analytics = { success: true, data: { balance: 0 } };
-    await tracerfyCanRunTier2(fakeClient(), 1);
+    await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 1 });
     expect(errorLogs().filter((l) => l.includes("[bulk-preflight]"))).toHaveLength(1);
   });
 
@@ -161,7 +194,71 @@ describe("the Tracerfy capacity check", () => {
     // not: it is an infrastructure failure and it belongs in the route's 500,
     // not dressed up as a refusal the customer will read as our credit pool.
     H.queuedError = { message: "connection reset" };
-    await expect(tracerfyCanRunTier2(fakeClient(), 1)).rejects.toThrow(/connection reset/);
+    await expect(tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 1 })).rejects.toThrow(
+      /connection reset/
+    );
+  });
+});
+
+describe("tracerfyCanRun and a TIER 1 batch", () => {
+  it("reads the balance for a tier-1-only batch, which it used to skip entirely", async () => {
+    // THE GAP THIS STEP CLOSES. The old tier-2-only capacity check, which took a tier 2 count and
+    // nothing else, returned true unconditionally for `newRecords <= 0`, so a 500-record
+    // all-tier-1 batch never read the balance at all. Its own docstring recorded that as
+    // deliberate, and it WAS, while tier 1 posted to the BATCH endpoint.
+    H.analytics = { success: true, data: { balance: 100 } };
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 500, tier2: 0 })).toBe(false);
+    expect(getAnalytics).toHaveBeenCalled();
+  });
+
+  it("sizes a tier 1 record at the person lookup it spends", async () => {
+    // 10 records x TRACERFY_TIER1_CREDITS = 50, exactly the balance.
+    H.analytics = { success: true, data: { balance: 10 * TRACERFY_TIER1_CREDITS } };
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 10, tier2: 0 })).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 11, tier2: 0 })).toBe(false);
+  });
+
+  it("adds the two tiers rather than sizing on whichever is larger", async () => {
+    // 4 tier 1 (20) + 3 tier 2 (30) = 50.
+    H.analytics = {
+      success: true,
+      data: { balance: 4 * TRACERFY_TIER1_CREDITS + 3 * TRACERFY_DOSSIER_CREDITS },
+    };
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 4, tier2: 3 })).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 4, tier2: 4 })).toBe(false);
+  });
+
+  it("counts the rows ALREADY queued on BOTH queues, not just the new ones", async () => {
+    // THE POINT OF THE CHECK, now doubled. Sized against the raw balance, two jobs that cannot both
+    // run both pass. Sized against ONE queue, a customer with 5 tier 1 rows already queued passes a
+    // batch the pool cannot cover.
+    H.analytics = { success: true, data: { balance: 50 } };
+    H.queuedTier1Count = 5;
+    H.queuedCount = 2;
+    // queued: 5 x 5 + 2 x 10 = 45. One more tier 1 record is 50; two is 55.
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 1, tier2: 0 })).toBe(true);
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 2, tier2: 0 })).toBe(false);
+  });
+
+  it("asks nothing when the batch is empty on both tiers", async () => {
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 0, tier2: 0 })).toBe(true);
+    expect(getAnalytics).not.toHaveBeenCalled();
+  });
+
+  it("refuses rather than assuming plenty when the balance cannot be read", async () => {
+    H.analytics = { success: false, error: "timeout" };
+    expect(await tracerfyCanRun(fakeClient(), { tier1: 1, tier2: 0 })).toBe(false);
+  });
+
+  it("raises OUR failure on the Tier 1 count too, never answers it", async () => {
+    // Same rule as the tier 2 count above: a vendor we cannot read is a capacity answer, our own
+    // table failing is an infrastructure failure and belongs in the route's 500. The error is set on
+    // the TIER 1 pair specifically, so the tier 2 query succeeds and this reaches the branch it is
+    // written for. With one shared error field it would pass without fencing anything.
+    H.queuedTier1Error = { message: "connection reset on the tier 1 count" };
+    await expect(tracerfyCanRun(fakeClient(), { tier1: 1, tier2: 0 })).rejects.toThrow(
+      /connection reset on the tier 1 count/
+    );
   });
 });
 
@@ -283,5 +380,116 @@ describe("in-flight unbilled work", () => {
     await expect(inFlightUnbilledCost(fakeClient(), "u1", RATES)).rejects.toThrow(
       /statement timeout/
     );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE TIER 1 QUEUE (spec 6.2). A web bulk job's rows are queued on
+ * ai_research_status rather than submitted to Tracerfy, so this column has to
+ * reserve too, or two batches sent back to back can both pass on the same
+ * dollars.
+ * ------------------------------------------------------------------ */
+
+describe("inFlightUnbilledCost and the Tier 1 queue (spec 6.2)", () => {
+  const RATES = { tier1: 0.15, tier2: 0.25 };
+
+  it("reserves the tier 1 rate for a QUEUED Tier 1 bulk row", async () => {
+    // Spec 6.2: "inFlightUnbilledCost counts queued Tier 1 records as well as processing ones, so
+    // two batches sent back to back cannot both pass on the same dollars."
+    H.inFlightRows = [
+      { status: "processing", property_trace_status: null, ai_research_status: "tier1_queued" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("keeps reserving for a Tier 1 queue row OLDER than the stale-processing bound", async () => {
+    // THE ASYMMETRY IS THE POINT, and it is the tier 2 argument arriving on the tier 1 column. The
+    // age bound exists for an ORPHANED single-trace row that nothing will ever resolve. A queued
+    // bulk row is not orphaned: the ladder and the stale-claim sweep guarantee it reaches a
+    // terminal, so it WILL be billed, and under-reserving certain money is the wrong direction to
+    // fail in.
+    //
+    // WHAT THIS TEST ACTUALLY FENCES, AND WHAT IT DOES NOT. It proves that an old, still-queued
+    // Tier 1 row is PRESENT in the reserved total at all (0.15, not silently 0) -- the shape that
+    // matters is a row this old reaching the customer's reserve rather than falling out of it.
+    // It does NOT fence the isTier1QueuePending loop arm's own presence: deleting that arm alone
+    // is an EQUIVALENT MUTANT at this level (confirmed by running it) -- a Tier 1 queued row always
+    // carries status: 'processing' (Task 3), so the loop's bare `else if (row.status ===
+    // 'processing') total += rates.tier1` arm reserves the identical rate for the identical row
+    // whether or not the isTier1QueuePending arm exists, and fakeClient() returns whatever
+    // H.inFlightRows holds regardless of the `.or()` clause content, so this test cannot see the
+    // difference either way. The real "not age-bounded" guarantee lives in the SQL clause, not the
+    // loop, and the two tests below (`puts the Tier 1 queue statuses in the OR clause`, `does NOT
+    // bound the Tier 1 queue arm by age either`) are what actually fence it -- they inspect the
+    // `.or()` string itself and go red when the clause is dropped or age-wrapped.
+    H.inFlightRows = [
+      {
+        status: "processing",
+        property_trace_status: null,
+        ai_research_status: "tier1_processing_2",
+        created_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("prices a Tier 1 queue row ONCE, at the tier 1 rate, never at both rates", async () => {
+    // A queued row is ALSO status 'processing', so two ifs instead of an else-if chain would
+    // reserve the two rates added together for a row that can only ever cost one of them and 402
+    // a wallet that can afford the batch. MUTATION: turn the else-if chain into three plain ifs and
+    // this goes red.
+    H.inFlightRows = [
+      { status: "processing", property_trace_status: null, ai_research_status: "tier1_queued" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.15, 4);
+  });
+
+  it("reserves the TIER 2 rate when a row is somehow on both columns", async () => {
+    // Tier 2 outranks, exactly as rowSkipReason orders the two queues, because tier 2 is certain
+    // money: the cron will bill it whatever it finds. MUTATION: move the Tier 1 arm above the tier 2
+    // arm and this goes red.
+    H.inFlightRows = [
+      {
+        status: "processing",
+        property_trace_status: "queued",
+        ai_research_status: "tier1_queued",
+      },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(0.25, 4);
+  });
+
+  it("reserves nothing for a SETTLED Tier 1 queue row", async () => {
+    H.inFlightRows = [
+      { status: "success", property_trace_status: null, ai_research_status: "tier1_done" },
+    ];
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBe(0);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * THE ACTUAL "NOT AGE-BOUNDED" GUARANTEE LIVES IN THE SQL CLAUSE, NOT THE LOOP.
+   *
+   * A Tier 1 queued row always carries status: 'processing' (Task 3), so the loop's bare
+   * `else if (row.status === 'processing') total += rates.tier1` arm reserves the SAME rate for it
+   * as the isTier1QueuePending arm does -- the two tests above pass whether or not that loop arm
+   * exists, because fakeClient() returns whatever stubRows() holds regardless of the `.or()`
+   * string, exactly as a real Postgres query WOULD exclude an old row that only the loop, not the
+   * query, tries to rescue. What actually keeps an old queued row IN the result set at all is the
+   * query's own ai_research_status.in.(...) clause carrying no created_at wrapper. These two tests
+   * fence THAT, the same way the sibling tier 2 test above fences its own arm.
+   * ------------------------------------------------------------------ */
+  it("puts the Tier 1 queue statuses in the OR clause", async () => {
+    // MUTATION: drop the ai_research_status.in.(...) branch from the query and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    expect(clause).toContain("ai_research_status.in.(");
+  });
+
+  it("does NOT bound the Tier 1 queue arm by age either", async () => {
+    // MUTATION: wrap ai_research_status.in.(...) in an and(...) with created_at, the way the bare
+    // processing arm is wrapped, and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    const clause = String(H.filters.find((f) => f[0] === "or")![1]);
+    const tier1QueuePart = clause.slice(clause.indexOf("ai_research_status.in."));
+    expect(tier1QueuePart).not.toContain("created_at");
   });
 });

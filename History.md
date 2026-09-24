@@ -4,6 +4,339 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (g): Tier 1 Phase 2A CLOSED: live check run, merged to main, pushed, deployed.
+
+- **The live check ran on 20 records in one web bulk upload** (job f406e591), a local server pointed
+  at production, David uploading in his own browser because that route authenticates by session
+  cookie. Vendor spend $1.70 of a $4.40 worst case the runner computed itself, under a --max-dollars 6
+  cap and his $10 authorisation. Customer charge $2.10, wallet $14.33 -> $12.23, reconciled to the
+  cent, 12 ledger debits, one per charged record.
+- **The capability the phase exists for is proved: four city-less PERSON rows settled no_lookup_key
+  with ZERO steps, $0.00 cost, $0.00 charge and no ledger row.** Before 2A the browser discarded those
+  rows silently. A city-less COMPANY row traced on name and state alone. The trust ladder hit rung one
+  and SKIPPED rung two. The shared rate budget reserved EXACTLY what the step logs spent on both
+  vendors, 8 tracerfy and 4 fastappend, and a skipped rung claimed nothing. CSV: 105 columns, found_by
+  and outcome_code at 104 and 105, no APN| anywhere. Priced in the PRO column through the gateway
+  grant, which exercises the L-030 collapse on the one profile shape that used to carry two prices.
+- **What it did NOT prove is written into the report as an exhaustive list:** the tier 2 lane's rate
+  reservation, the parcel/APN path, throttling, the stale-claim ladder, step-log resume, scale, and
+  job completion through this branch's own status route.
+- **A local server pointed at the production database RACES the production crons.** Production drained
+  all four tier 2 rows 50 seconds after submit, on main's code, so vendor_rate_windows carries zero
+  tier 2 contribution. Those rows prove the Tier 1 queue did not disturb the Tier 2 queue and nothing
+  about this branch's tier 2 changes. Only tier1_* statuses are invisible to main, which is why the
+  Tier 1 half survived untouched and is the half the check actually proves.
+- **Two defects found by the check, neither introduced by 2A, both carried out with David's rulings.**
+  (1) Nothing finalizes a bulk job when its queue drains: only a polling tab or the 60-minute stale
+  sweep, and History is a server component with no poll, so a customer who closes the tab sees
+  Processing with no export for up to an hour after being billed. Measured: last row 17:11, completed
+  17:50. Goes to Phase 2B as its first item; CRON_TIMEOUT_MINUTES stays 60 because it is a give-up
+  deadline, not a completion mechanism. (2) **The tier 2 lane is underwater at the PRO rate** and this
+  had never been recorded anywhere: cost is $0.20 plus $0.10 per owner lookup that hits, against a
+  flat $0.25, so margin is 0.05 - 0.10N with no cap on N. This run: tier 2 cost $0.80 against $0.75
+  charged, net -$0.05, hidden inside a +$0.40 job total by the healthy Tier 1 lane. Not decided.
+- **Merged to main, pushed and deployed on David's instruction. He was offered the whole-branch review
+  and declined it**, choosing merge-and-deploy over review-then-deploy and over a branch-only push.
+  The nine per-task reviews stand; no cross-task pass was made on the 23 commits. Recorded so a later
+  reader does not assume one happened.
+- Gates at merge, all four measured by the controller: vitest 2040 passing / 87 files / 0 failed, tsc
+  exit 0, eslint 45 (the baseline), next build exit 0. **Both migrations were already live in
+  production before the deploy**, verified by reading pg_indexes and pg_proc, so the deploy was
+  code-only, which is the safe ordering.
+
+---
+
+## 2026-09-24 (f): Tier 1 Phase 2A, Task 9 build half: gates green, mutation table, live runner fenced.
+
+- Suite gates: vitest 2040 passing / 87 files, 0 failing (Task 1 baseline 1902 / 84); tsc 0 errors;
+  eslint 45 problems, exactly the baseline, under the 46 ceiling and the 47 cap; next build compiles
+  clean. Eight gate greps: six print nothing, grep 7 prints only the one true `39-103` dossier range
+  at `lib/trace/exportCsv.ts:141`, and grep 3's four hits are all prose recording the removal of the
+  second price derivation, with `lib/api/pricing.ts` gone and no live reference anywhere.
+- Mutation table in `tasks/todo.md`: 115 mutations across Tasks 2 to 8, 104 RED in the final
+  measured state, every survivor written as such with its reason. **Three of the brief's own
+  predictions were stale and the measured results are recorded instead.** Task 7's mutation 3 was RED
+  in Task 7, not green and deferred. Task 7's mutations 4, 6, 7 and 8 were fenced in Task 7's OWN
+  file in its fix round, because Task 8 mocks `runTier1Record` and could never have killed them.
+  Task 8's run-budget line was UNFENCED in round 1 and KILLED in its fix round with fake timers.
+  Task 2's predicted unreached `record()` site does not exist: all seven were mutated separately and
+  all seven went red. Three things remain genuinely unfenced, and no more: the MCP `tier1: 0` call
+  site, the Tier 1 lane's try/catch placement, and `TIER1_RECORD_BUDGET_MS`.
+- Twenty records chosen, FOUR per path across the five paths, on David's 2026-09-24 override of the
+  plan's one per path. Thirteen states, four property types, no county or parcel from Phase 0, the
+  Phase 1 live check or the FastAppend probe. **Parcels came from the property-registry database
+  DIRECTLY, not the Suite Gateway**, which is mid-modification: read as the registry's own
+  SELECT-only `registry_readonly` role over `supabase db query --db-url`, which needs no project link
+  and so cannot touch this repo's own (confirmed still PropTracerPRO afterwards).
+- All twenty were verified against the real `planRoute` locally, free: B1 routes one Instant, B2 no
+  step at all, B3 one FastAppend, B4 the Instant then FastAppend ladder, B5 the tier 2 dossier, and
+  every owner name parses to the right first and last name. The name-order rule was met by
+  MEASUREMENT rather than by county label: the two Wisconsin counties store names naturally, and
+  elsewhere a three-token name with a trailing middle initial is read correctly by `splitPersonName`.
+- `tasks/research-scripts/phase2a/run-live.ts` computes its own worst case from the product's own
+  `VENDOR_COST` table, per ROW rather than per path label: **$4.40**, not the $4.00 the dispatch
+  estimated, because a city-less row is budgeted at the FastAppend figure it could still reach and a
+  tier 2 record is budgeted at three owners rather than two. Five refusals proven with PTP_LIVE_RUN
+  absent, nothing spent: no records file, a duplicate id, a path with no record, a tier 2 record
+  declaring no owner count, and `--live` without the token, which fires first and shadows both cap
+  checks. Rendered the 20-row upload.csv.
+- Nothing was spent and nothing was uploaded. The live check waits for David's dollar amount and his
+  own browser session, and the controller drains the queue. Task 9 and the Phase 2A line stay
+  unticked. Never pushed, merged or deployed.
+
+## 2026-09-24 (e): Tier 1 Phase 2A, Task 8: sweep-entity-traces becomes the Tier 1 cron.
+
+- A second lane, beside the legacy entity lane, claiming only tier1_ statuses: atomic
+  compare-and-swap on the status just read, claimed_at set with the flip, a shared cursor across 8
+  Promise.all workers, and a per-rung stale revert in which a dead claim SPENDS an attempt. Copied
+  from sweep-property-traces, which spec 3.2 names as the pattern to copy.
+- It bills through runTier1Record and nothing else: no gate, no probe and no fold is re-derived
+  (lessons L-030). One profile read per user per run, one derivation from lib/suite/pricing.ts, and
+  the dearest column when the profile cannot be read.
+- 120 rows a minute at concurrency 8: ~45 s a run and a 500-record job in 4.2 minutes, inside spec
+  3.2's target. Pinned by a test so a change to either is deliberate. The test asserts the LATENCY
+  relationship and no longer asserts 120 + 240 <= 450: that inequality reads like a proof and is not
+  one, because 240 is the tier 2 lane's FLOOR, not its ceiling. The rate ceiling is the budget.
+- The step log is written as each answer arrives, so a killed run does not re-buy what the row
+  already paid for. Every vendor call is reserved individually through the canSpend hook, and a
+  refused call comes back as VendorBudgetThrottledError: the row goes back to its OWN rung with no
+  attempt spent, nothing judged, nothing charged and nothing said to the customer. Checked before
+  out.errored++, so a throttle never reads as a fault.
+- DISCLOSED COST: on the D39 path a row settles tier1_done with BOTH new CSV columns empty while
+  is_successful stays true and records_matched counts it, because its contacts and charge belong to
+  an earlier trace and labelling them with this trace's key would be wrong. Blank, never wrong. The
+  comment at the queueWrite line spells out what the customer sees.
+- A VENDOR failure is not retried (D7, spec 5.1): runTier1Record settles the row busy_try_again,
+  free and terminal. The ladder is for a dead CLAIM only, and its last rung writes the row
+  tier1_failed with the same busy sentence, free, with no money columns in the payload.
+- The cron's test stub now evaluates `.in()`, `.limit()`, `.or()` and `.lt()` the way PostgREST
+  would, and snapshots update payloads with their arrays copied. A stub blind to `.in()` could not
+  tell the two lanes apart, which is the whole safety argument for sharing one column.
+- Fix round 1. parcelForTier1Row had NO tests, which is the one thing its own docblock said it was
+  extracted to make possible. Deleting its `ownerName` line compiled clean and left all 2029 tests
+  green while making every record plan as TIER 2: runTier1Record would refuse each one, the whole
+  queue would settle tier1_done / no_match free, and the lane would deliver nothing to every customer
+  with a green suite. It now has a ten-test describe block called directly, modelled on the tier 2
+  cron's parcelForRow block, which calls planRoute on the result so the TIER is asserted and not just
+  the field. Six mutants in that function and at its call site now go red, including the owner name,
+  the isParcelKey street guard, the state upper-case, the blank-to-null trims, and inputOwnerName
+  changed to null.
+- Fix round 1. The run budget IS fenceable from this file after all: vi.useFakeTimers() with the
+  mocked billing core as the injection point, where the first settled record moves the clock past the
+  deadline. Eight workers pass the check synchronously before any await, so the guard gives 8 and its
+  deletion gives 20. The first report called it unfenceable on an incomplete list of alternatives.
+- Fix round 1. The Tier 1 lane and the budget prune moved INSIDE GET's try/catch. Anything that threw
+  in the lane's stale-revert loop, claim window or `.or()` interpolation would have 500'd the cron
+  without the `{ success: false }` shape, skipped the fatal-error log, and stopped the legacy lane
+  running at all.
+
+## 2026-09-24 (d): Tier 1 Phase 2A, Task 7: one Tier 1 settle for the routes and the cron.
+
+- lib/trace/singleTier1.ts exports runTier1Record. runSingleTier1 is now a wrapper that supplies
+  the five things only a queue needs: the ledger probe's window, the queue columns the persist
+  writes, whether to resume from the step log, the per-arrival step hook, and the shared vendor
+  budget's canSpend hook.
+- A record the budget refuses throws VendorBudgetThrottledError BEFORE the judge, the ledger and the
+  persist, so a lookup nobody made can never be filed as "we looked and found no match" (CLAUDE.md
+  rule 7). A THROW rather than a result field, because a field would change Tier1RecordResult's key
+  set and the characterization tests below assert it in full. Unreachable from either single route:
+  neither passes canSpend, which is what keeps a single trace identical. Unreachable from the tier 2
+  cron too, which passes none either and reserves once before a record starts.
+- The billing gate, the crash probe, the fold and both persist shapes are UNCHANGED and are not
+  duplicated anywhere. Two money derivations drift, and PTP has already paid for that once
+  (lessons L-030).
+- Proved byte-identical for a single trace by three characterization tests asserting the FULL
+  persist payload key set and the FULL result key set, written and passing against the old code
+  first, then run unchanged against the new. chargeReceipt.test.ts needed no edit, which is what
+  proves the charge write is still folded and still in this file.
+- The file keeps its name: chargeReceipt.test.ts pins it by path. The rename goes on Phase 4's list.
+- FIX ROUND 1. The five queue behaviours are fenced HERE, by five tests that call runTier1Record
+  directly, because Task 8 mocks runTier1Record as a vi.fn and so can never execute this body: the
+  throttle throw, the canSpend hook both ways, the per-arrival onStep, the queue columns on BOTH
+  persist branches, and the core's resume flag. Six mutations, all RED, including deleting the
+  throttle line. Round 1 had deferred four of these to Task 8, which was wrong.
+- deadlineMs is `number | undefined`, required but nullable, not optional: a caller that omits it now
+  fails to compile (TS2741) instead of silently getting an unbounded ladder. SingleTier1Input still
+  narrows it to a real number for both single routes.
+
+## 2026-09-24 (c): Tier 1 Phase 2A, Task 6: one shared vendor budget, sliding, claimed before the spend.
+
+- Migration 20260923_vendor_rate_budget.sql adds vendor_rate_windows (one row per vendor per
+  wall-clock SECOND) and the claim_vendor_rate RPC, which sums the trailing 60 seconds under a
+  per-vendor pg_advisory_xact_lock. The lock is explicit because the rows being COUNTED are not the
+  row being WRITTEN, so the ON CONFLICT row lock a fixed-minute window could lean on cannot
+  serialise this one. Applied, both ACLs read back (nothing for anon or authenticated on either the
+  table or the function, service_role only, RLS on), and the arithmetic AND the slide both proved
+  against the live database: 450 granted, one more refused, granted again 61 seconds later.
+- ONE UNPREDICTED ACL VALUE, FOUND BY READING IT BACK, AND IT IS THE 2026-09-17 LESSON ONE OBJECT
+  TYPE OVER. The migration grants anon and authenticated nothing, and the table ACL still came back
+  `anon=rm/postgres | authenticated=rm/postgres`. Supabase ships ALTER DEFAULT PRIVILEGES for
+  TABLES in public, not only for functions: pg_default_acl carries exactly that pair for objtype
+  'r', landing as EXPLICIT grants to named roles at CREATE time. So granting nothing is not the
+  same as having nothing, for a table as much as for a function. r = SELECT and m = MAINTAIN, with
+  no a/w/d, so no role could ever write and the SELECT was already dead through the Data API (RLS
+  on, zero policies); it is revoked by name anyway, and the table now reads postgres and
+  service_role only. trace_history's own pre-existing anon=rDxtm was verified unchanged.
+- WHY SLIDING. A fixed one-minute bucket permits 450 calls at :59 and 450 at the next
+  :00, which is 900 in one 60-second span against a vendor limit of 500. Both crons being scheduled
+  on the minute does not save it: a run takes about 45 seconds, so its calls straddle by design.
+- A RECORD IS THROTTLED AT ITS START OR NOT AT ALL, on both lanes, and no dossier is ever bought
+  twice. Tier 1 reserves per CALL through executeRoute's canSpend hook, which is exact there because
+  that ladder's steps are independent and a refusal lands before the call it refused. Tier 2 reserves
+  ONCE, for reservationForSteps(plan.steps), immediately before the record's first vendor call, and
+  passes no canSpend at all: its pass-2 lookups exist only because the dossier was bought and named
+  the owners, so a mid-ladder refusal could only be handled by re-running the record and re-buying
+  that dossier.
+- WHAT IS GUARANTEED, written out in the plan's Task 6 header: a per-vendor ceiling of 450 inside any
+  60-second span on the Tier 1 lane; a bound on how many records BEGIN on the Tier 2 lane; and no row
+  starving forever, because a refusal spends no attempt and both claim queries are oldest-first.
+- WHAT THE TIER 2 SHAPE COSTS, with the arithmetic. Its pass-2 owner lookups are unreserved, so an
+  in-flight ladder can overshoot the reserved figure. The overshoot is that cron's CONCURRENCY (5)
+  times a record's worst-case remaining ladder (2N calls for N owners), which is 30 at three owners:
+  450 + 30 = 480 against the vendor's 500, absorbed by the 50-call gap that also carries the single
+  traces. The per-call ceiling is claimed for the Tier 1 lane only, and nowhere for Tier 2.
+- sweep-property-traces reserves once and releases a refused record to the rung it was claimed FROM
+  with no attempt spent and nothing bought (spec 5.1). No hard-coded reservation constant: the figure
+  comes from the plan it is about to run. Its sizing comment said tier 1 posts to a different bucket
+  and does not compete, which Phase 2A made false; corrected, and it now says plainly that 240 is a
+  FLOOR and that the bound is the budget, not the arithmetic.
+- bulkPreflight's tracerfyCanRunTier2 becomes tracerfyCanRun({ tier1, tier2 }), closing the gap
+  where a 500-record all-tier-1 batch never read the Tracerfy balance at all, and counting BOTH
+  queues. The v1 route and the MCP tool pass tier1: 0, which is true for them until 2B. The rename
+  touched four test files, two of which were missing from this plan's first draft: 78 failing tests
+  measured before the mock rewrites (bulkPreflight 9, v1 bulk 23, mcp-tools 6, web bulk 40) plus the
+  3 predicted tsc errors, and 0 after.
+- A STATED BEHAVIOUR CONSEQUENCE ON TWO SURFACES THE PHASE SCOPED AS UNCHANGED. The v1 bulk route
+  and the MCP tool pass tier1: 0, which is inert as an argument, but tracerfyCanRun also adds
+  queuedTier1 x TRACERFY_TIER1_CREDITS to `needed`. So those two surfaces now size against rows
+  already queued on the TIER 1 ladder and can return 503 where they previously accepted the batch,
+  when the Tier 1 queue is deep enough that the shared pool cannot cover both ladders. This is
+  correct -- one shared Tracerfy pool, a queued Tier 1 row really does owe it a lookup, and the
+  function commits to counting every rung of both ladders -- but it couples the three submit surfaces
+  through the Tier 1 queue for the first time, and the refusal is silent to operators by the
+  2026-09-18 decision. Named here rather than passing as a no-op.
+- MUTATIONS: 22 applied, 21 RED, 1 SURVIVED as UNFENCED and recorded rather than papered over. The two
+  that matter both went RED: turning the once-per-record reservation into a per-call canSpend hook
+  (the rejected design, the one that can refuse a record after its dossier is bought) and inverting
+  the guard so a refused record runs anyway. The survivor is the MCP tool's tier1: 0 argument, which
+  lib/suite/__tests__/mcp-tools.test.ts fences nowhere: that file references the symbol only in its
+  vi.mock factory and asserts the capacity call's arguments in no test. One mutation was misclassified
+  as equivalent in the first report and re-run properly in fix round 2: moving the reservation below
+  the executeRoute call compiles clean and is RED on two tests, so the claim that it could not compile
+  was wrong and untested.
+
+## 2026-09-24 (b): Tier 1 Phase 2A, Task 5: a bulk row says why, and the CSV says which key.
+
+- rowSkipReason lets a TIER 1 QUEUE row serve its own outcome sentence. That is D33's recorded
+  other half: the web submit now clears a reused row's outcome_code, found_by and trace_steps
+  (Task 3), so on those rows the code can only belong to the trace the customer is looking at. API
+  and MCP bulk rows carry no tier1_ status and keep showing exactly what they show today.
+- The results CSV gains found_by and outcome_code as columns 104 and 105, at the very end of an
+  append-only header, after the 65 dossier columns. The dossier-tail assertion gained an upper bound
+  (slice(38, 103), because the dossier block stopped being the tail); every 103 became 105 across
+  THREE test files and four prose sites, the third test file being the single-record download
+  route's, which asserts the count because its point is that it matches the bulk button. The only
+  103s left in the repo are exportCsv.ts's true 39-103 dossier range and a phone number.
+- The bulk page's per-outcome counts needed no new component and no new string: summarizeSkips
+  already groups by sentence and appends "That happened to N of them", and it reaches the Tier 1
+  outcomes now that the gate is open and both selects carry the columns it reads.
+
+## 2026-09-24 (a): Tier 1 Phase 2A, Task 4: the four seams a queued Tier 1 row touches.
+
+- app/api/trace/bulk/status: job completion and the match count now ask BOTH queue columns. A web
+  job has no tracerfy_job_id at all since Task 3, so the branch that used to mean "nothing was
+  submitted" was finalizing live jobs seconds after submit, and every Tier 1 bulk match read as 0.
+  Both selects widened to the columns rowSkipReason reads.
+- The processing responses carry records_pending, and the bulk page turns it into a progress line,
+  so a 500-record upload shows movement instead of a silent spinner.
+- sweep-stale-traces stage 2 no longer writes a web job failed with "No Tracerfy job ID" while its
+  Tier 1 rows are draining; it defers while they are pending and COMPLETES the job when they are
+  not.
+- Both single routes' live-work guard recognises a Tier 1 queue row, so a single trace cannot
+  delete or reuse a row the cron is about to claim. Mutated in both files, not one.
+- inFlightUnbilledCost reserves the tier 1 rate for a queued Tier 1 row, with NO age bound: the
+  ladder guarantees the row reaches a terminal, so the money is certain (spec 6.2).
+
+## 2026-09-23 (i): Tier 1 Phase 2A, Task 3: the web upload enqueues, and a city-less row runs.
+
+- app/api/trace/bulk/route.ts no longer builds a Tracerfy person CSV. Every owned row is written
+  ai_research_status 'tier1_queued', status 'processing', no tracerfy_job_id, for the Tier 1 lane
+  of the cron. The half-failure branch is gone with the submit that could fail.
+- The bulk page stops dropping rows with no city (spec 3.1). A street and a state are still
+  required: a street-less row keys on ||STATE and thirty of them in one state would collapse onto
+  one row.
+- lib/utils/deduplication.ts keys on traceKeyFor, the derivation the single routes use (D36), and
+  exempts a busy_try_again row from the duplicate check (spec 5.2) so the sentence that tells the
+  customer to send it again is true. Its step log is kept on a resume, which is what stops the
+  resend buying answers this record already paid for.
+- The bulk submit clears outcome_code, found_by and trace_steps on every reused row except a busy
+  resume, which is D33's recorded Phase 2 half. DISCLOSED COST: that clear runs on every reused row,
+  so a row already holding paid contacts shows a BLANK found_by on the results CSV until this trace
+  writes its own. The contacts, the charge and the counts are untouched (D39).
+- insertHistoryRows now THROWS instead of console.erroring its upsert error, and the three enqueues
+  share one catch that writes the job failed with the reason and answers 500. The enqueue IS the
+  submit on this surface now, and the swallow it replaces would have answered success: true on a
+  failed write, after which bulk/status finalizes the job completed with records_matched 0 on its
+  first poll and its early return makes that permanent: the customer is told 500 rows were accepted
+  and downloads an empty CSV. Three tests, and the mutation that restores the swallow goes red on
+  all three.
+- NOTE FOR ANYONE READING THIS MID-PHASE: the queue has no worker until Task 8. This branch is not
+  to be deployed until then.
+
+## 2026-09-23 (h): Tier 1 Phase 2A, Task 2: the Tier 1 ladder and two per-step hooks.
+
+- lib/trace/tier1Queue.ts adds the Tier 1 rungs to the EXISTING ai_research_status column, with
+  every value prefixed tier1_ so the set is disjoint from the legacy entity ladder's. One cron
+  will run both lanes and the disjointness is what makes that safe; a test asserts it directly,
+  and the mutation that reverts attempt 1 to a bare 'queued' goes red.
+- Two terminals rather than four: tier1_done and tier1_failed. The Tier 1 reason lives in
+  outcome_code, not in the status column, which is the difference from the tier 2 ladder.
+- The ladder's rungs are for a DEAD CLAIM only. D7 and spec 5.1 say a vendor failure is never
+  retried: the record ends busy_try_again at once, free.
+- lib/trace/__tests__/entityTraceAttempts.test.ts is new: that ladder had no test file at all.
+- executeRoute gains ExecuteOptions.onStep, awaited, called from all SEVEN report sites through one
+  recorder. Each of the seven was mutated separately (L-018), each driven by its own case, and each
+  went red. A hook that throws is logged and swallowed, because this module never throws.
+- executeRoute also gains ExecuteOptions.canSpend, asked immediately before each vendor call, and
+  ExecutionResult.throttled (optional, so the two files that build an ExecutionResult literal keep
+  typechecking). It is where Task 6's shared per-minute budget is drawn ONE CALL AT A TIME by the
+  TIER 1 cron lane, which is its only caller: a reservation taken per record is a guess at a worst
+  case that D21(c) and D40 let a tier 2 record exceed, and ownerRoute.ts calls its own figure "A
+  FLOOR, NOT A CEILING". The tier 2 cron passes no canSpend, because a refusal here stops a ladder
+  whose dossier is already bought. A refusal is not a
+  failure (spec 5.1): the ladder stops, nothing is charged, nothing is said, and every answer
+  already bought stays in the log so the released row replays it instead of buying it again.
+- The two hook test blocks use John Smith Revocable Trust, not Smith Family Trust. Measured:
+  D16 strips the trust words of the second one down to SMITH, which leaves no first name, so it
+  plans ONE step and cannot fence a per-step hook.
+- ONE TEST BEYOND THE BRIEF'S 32, added deliberately. Moving the canSpend gate above the reuse
+  branch (a mutation) survived every one of the 32 prescribed tests, including the one named to
+  catch it ("never asks the budget about a step it was not going to call anyway"), because that
+  test only covers a step skipped behind an earlier HIT, never a REUSED step. Added a 33rd test
+  pairing priorSteps with canSpend to close the gap; it goes red under that mutation. Suite is
+  1935 passing, not the predicted 1934.
+
+## 2026-09-23 (g): Tier 1 Phase 2A, Task 1: both ai_research_status indexes widened.
+
+- Migration 20260923_tier1_queue_index.sql rebuilds idx_trace_history_research_queue as
+  (ai_research_status, created_at) WHERE ai_research_status IS NOT NULL, and
+  idx_trace_history_research_stale_claim as (ai_research_status, ai_research_claimed_at) with the
+  same predicate. Applied with supabase db query and read back.
+- The old predicates were = 'queued' and = 'processing', so nine of the entity ladder's ten claim
+  and sweep statements have been sequential-scanning since that ladder landed. The Tier 1 queue
+  adds ten more values, so both predicates are now IS NOT NULL, the shape the tier 2 queue's own
+  index already uses.
+- Two column comments record which values belong to which lane, and that the two sets are
+  disjoint. No grants changed: anon and authenticated are still SELECT only for DML.
+- ACL read back before and after the migration and found byte-identical; the migration itself
+  contains zero GRANT/REVOKE statements. anon and authenticated also carry pre-existing
+  TRUNCATE-class privileges (TRUNCATE, REFERENCES, TRIGGER, MAINTAIN) on trace_history, left in
+  place by 20260918_lock_trace_history_writes.sql, which only ever revoked INSERT/UPDATE/DELETE.
+  Not reachable via PostgREST, not new, and not widened by this migration; logged here rather than
+  left only in the task report.
+- Baseline for this phase, measured on the branch point: vitest 1902 passing / 84 files,
+  tsc 0 errors, eslint 45 problems.
+
 ## 2026-09-23 (f): FastAppend yield probe. $0.20, 2 hits in 10, and the company lane has no name match.
 
 - Run before Phase 2 gives the company lane bulk volume. David approved roughly $1; actual vendor spend

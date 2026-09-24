@@ -488,6 +488,25 @@ describe("a Tracerfy stall on a job with tier 2 rows", () => {
     expect(jobStatusWrites()).toHaveLength(1);
     expect(jobStatusWrites()[0].payload.status).toBe("failed");
   });
+
+  it("does NOT fail the job while a Tier 1 row is still queued, with no tier 2 rows at all", async () => {
+    // L-018: stillWorking has THREE call sites (the no-tracerfy-job-id branch, this stall branch,
+    // and the mixed-job completion gate), and every test above this one in the file seeds only a
+    // property_trace_status value, so a narrowing of stillWorking to isPropertyTracePending alone
+    // AT THIS CALL SITE specifically would still pass every test above it. This is the fence for
+    // this site.
+    // MUTATION: narrow `stallRows.filter(stillWorking)` to
+    // `stallRows.filter((r) => isPropertyTracePending(r.property_trace_status))` and this goes red.
+    H.jobRows = [{ charge: null, ai_research_status: "tier1_queued", property_trace_status: null }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(jobStatusWrites()).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -926,6 +945,235 @@ describe("the job summary says how many rows were skipped and why", () => {
     // No premature verdict: the processing branch makes no skip claim at all.
     expect(body.records_skipped).toBeUndefined();
     expect(body.skip_reason).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE TIER 1 QUEUE. A WEB JOB NEVER GETS A tracerfy_job_id ANY MORE, SO THIS
+ * IS THE BRANCH EVERY WEB JOB NOW LANDS IN.
+ *
+ * Task 3 made the web bulk upload enqueue Tier 1 rows instead of submitting a
+ * Tracerfy CSV, so a web job's rows are all queued and its tracerfy_job_id is
+ * NULL. Before this wiring that fell into the `!traceJob.tracerfy_job_id`
+ * branch, which used to mean "the submit had nothing to send", and the job
+ * was finalized COMPLETED with records_matched: 0 on the very first poll.
+ * This handler's own top-of-function early return (`status === 'completed'`)
+ * then makes that permanent: the job is never polled again and the
+ * customer's CSV is short by every row they are about to be billed for.
+ * ------------------------------------------------------------------ */
+
+describe("a job whose Tier 1 rows are on the queue", () => {
+  beforeEach(() => {
+    H.job = { ...H.job, tracerfy_job_id: null };
+  });
+
+  it("stays PROCESSING while a Tier 1 row is still queued", async () => {
+    // MUTATION: narrow stillWorking to isPropertyTracePending alone and this
+    // goes red.
+    H.job = { ...H.job, records_submitted: 1 };
+    H.jobRows = [
+      { charge: 0, ai_research_status: "tier1_queued", property_trace_status: null },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending).toBe(1);
+  });
+
+  it("stays PROCESSING while a Tier 1 row is CLAIMED, not only while it waits", async () => {
+    H.jobRows = [
+      { charge: 0, ai_research_status: "tier1_processing_3", property_trace_status: null },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+  });
+
+  it("completes once every Tier 1 row is terminal, and COUNTS its matches", async () => {
+    // MUTATION: delete the isTier1QueueRow arm from finalize's recordsMatched
+    // and this goes red -- every Tier 1 bulk match used to read as 0.
+    H.jobRows = [
+      {
+        charge: 0.15,
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "success",
+        is_successful: true,
+      },
+      {
+        charge: 0,
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "no_match",
+        is_successful: false,
+        outcome_code: "no_match",
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+    expect(body.total_charge).toBeCloseTo(0.15, 4);
+  });
+
+  it("counts a tier 2 match and a Tier 1 match once each, never twice", async () => {
+    // The three arms of the count are disjoint by construction: the submit writes null into
+    // whichever queue column the row is not on, and the legacy CSV half carries neither column.
+    H.jobRows = [
+      {
+        charge: 0.15,
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+      },
+      {
+        charge: 0.25,
+        ai_research_status: null,
+        property_trace_status: "property_trace_done",
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.records_matched).toBe(2);
+  });
+
+  it("reports how many records are still pending, so the page can show progress", async () => {
+    H.job = { ...H.job, records_submitted: 3 };
+    H.jobRows = [
+      { charge: 0, ai_research_status: "tier1_queued", property_trace_status: null },
+      { charge: 0, ai_research_status: "tier1_processing", property_trace_status: null },
+      {
+        charge: 0.15,
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending).toBe(2);
+    expect(body.records_submitted).toBe(3);
+  });
+});
+
+describe("the job summary counts Tier 1 bulk rows by outcome", () => {
+  it("names each outcome and how many rows it covers", async () => {
+    H.job = { ...H.job, tracerfy_job_id: null, records_submitted: 6 };
+    H.jobRows = [
+      // Two rows that found nothing by address.
+      ...[1, 2].map((n) => ({
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "no_match",
+        is_successful: false,
+        outcome_code: "no_match",
+        normalized_address: `${n} MAIN ST|DALLAS|TX`,
+        city: "DALLAS",
+        state: "TX",
+        charge: 0,
+        trace_steps: [
+          { kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0, at: "2026-09-23T00:00:00Z" },
+        ],
+      })),
+      // Three rows with no city and no parcel id.
+      ...[3, 4, 5].map((n) => ({
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "no_match",
+        is_successful: false,
+        outcome_code: "no_lookup_key",
+        normalized_address: `${n} MAIN ST||TX`,
+        city: "",
+        state: "TX",
+        charge: 0,
+        trace_steps: [],
+      })),
+      // One row that delivered, which has nothing to explain and must not be counted.
+      {
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "success",
+        is_successful: true,
+        outcome_code: "found_by_address",
+        found_by: "address",
+        normalized_address: "6 MAIN ST|DALLAS|TX",
+        city: "DALLAS",
+        state: "TX",
+        charge: 0.15,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+    // Only rows with a stated reason are counted, which is the rule BulkSkipSummary's own header
+    // insists on: the heading scopes itself to the rows we can EXPLAIN.
+    expect(body.records_skipped).toBe(5);
+    expect(body.skip_reason).toContain(
+      "We looked this owner up by address and found no match. You were not charged. That happened to 2 of them."
+    );
+    expect(body.skip_reason).toContain(
+      "This record is missing the city and the parcel ID, so it could not be looked up. You were not charged. Send it again with the city or the parcel ID. That happened to 3 of them."
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE MIXED-JOB COMPLETION GATE ALSO HAS TO RECOGNISE A QUEUED TIER 1 ROW.
+ *
+ * L-018: stillWorking has THREE call sites, and every test above this point in the file that
+ * reaches this specific gate (the one just below the Tracerfy result loop, after tracerfy_job_id
+ * is truthy and Tracerfy has answered) seeds only a property_trace_status value. A narrowing of
+ * stillWorking to isPropertyTracePending alone AT THIS CALL SITE would still pass every one of
+ * them. This is the fence for this site.
+ * ------------------------------------------------------------------ */
+describe("the mixed-job completion gate, on a job whose Tracerfy half already answered", () => {
+  it("stays processing over a queued Tier 1 row, even with no tier 2 rows at all", async () => {
+    // MUTATION: narrow `jobRows.some(stillWorking)` (and the `records_pending` filter beside it)
+    // to `isPropertyTracePending` alone and this goes red.
+    H.jobRows = [{ charge: null, ai_research_status: "tier1_queued", property_trace_status: null }];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const res = await GET(
+      new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1")
+    );
+    const body = await res.json();
+
+    expect(body.status).toBe("processing");
+    expect(body.records_pending).toBe(1);
+    const completed = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(completed).toHaveLength(0);
   });
 });
 

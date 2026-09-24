@@ -19,6 +19,7 @@ import { runSingleTier1 } from '@/lib/trace/singleTier1';
 import { BUSY_TRY_AGAIN_REASON, TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
+import { isTier1QueuePending } from '@/lib/trace/tier1Queue';
 import { ownerNamesMatch } from '@/lib/utils/ownerName';
 import { planRoute } from '@/lib/routing/ownerRoute';
 import {
@@ -194,6 +195,13 @@ export async function POST(request: Request) {
       existingRow &&
         (isPropertyTracePending(existingRow.property_trace_status) ||
           isEntityTracePending(existingRow.ai_research_status) ||
+          // THE TIER 1 QUEUE, added in Phase 2A. isEntityTracePending answers for the LEGACY
+          // values on this column only; a row the web upload queued wears tier1_queued and was
+          // invisible here. This route would then have deleted it, or reused it and nulled the
+          // queue column out from under the cron mid-claim: the customer's bulk row silently
+          // never runs, and runSingleTier1 counts any debit the cron had already booked as THIS
+          // request's charge.
+          isTier1QueuePending(existingRow.ai_research_status) ||
           processingIsLive)
     );
 

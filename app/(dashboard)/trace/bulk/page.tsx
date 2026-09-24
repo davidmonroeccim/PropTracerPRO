@@ -30,11 +30,12 @@ import * as XLSX from 'xlsx';
  * `records.length` at :65, BEFORE removeBatchDuplicates at :90, so duplicates
  * are not the gap at all.
  *
- * The real gap is INVALID rows. mapRows() below drops any row missing an
- * address, city or state before the page posts anything, so a 520-row county
- * export carrying 30 rows with no city is a legitimate 490-record job that this
- * refuses. mapRows only ever drops rows, never adds them, so the parsed count is
- * always at least the submitted count and this can never under-refuse.
+ * The real gap is INVALID rows, and Phase 2A made it NARROWER rather than closing it. mapRows()
+ * below drops any row missing an address or a state before the page posts anything. It used to
+ * drop rows with no CITY too, which is where the 30-rows-of-a-520-row-file example came from; a
+ * city-less row is now accepted and traced or explained (spec 3.1). What is left is a row with no
+ * street or no state, which is rarer. mapRows only ever drops rows, never adds them, so the parsed
+ * count is always at least the submitted count and this can never under-refuse.
  *
  * That is the safe direction and it is chosen, not overlooked: a false refusal
  * is instant, visible and fixed by splitting the file, while a false acceptance
@@ -145,7 +146,19 @@ function mapRows(
     const city = mapped.city || '';
     const state = mapped.state || '';
 
-    if (!address || !city || !state) continue;
+    // A CITY IS NO LONGER REQUIRED (spec 3.1, Phase 2A). This line used to drop the row here, in
+    // the browser, before anything was posted, which is the one outcome that tells the customer
+    // nothing: a company owner with no city traces on name and state alone (D4), and a person
+    // owner with no city and no parcel id comes back no_lookup_key, free, with a sentence naming
+    // what is missing. The submit route splits on the owner name and does not validate per record,
+    // so the row reaches the right bucket on its own.
+    //
+    // A STREET AND A STATE ARE STILL REQUIRED, and they are not the same case. No state means no
+    // vendor can be asked at all. No street means the row keys on `||STATE` (spec 6.3 rule 3), so
+    // every street-less row in one state collapses onto ONE trace_history row: the customer would
+    // get one result back out of thirty while records_submitted said thirty. Spec 6.3 records that
+    // collision rather than solving it, so this keeps it out of reach.
+    if (!address || !state) continue;
 
     results.push({
       address,
@@ -496,7 +509,17 @@ export default function BulkUploadPage() {
         }
 
         if (statusData.status === 'processing') {
-          if (statusData.results_so_far && statusData.records_submitted) {
+          // `results_so_far` was only ever sent by the Tracerfy batch poll, which this surface no
+          // longer uses, so the line never appeared for a queued job. `records_pending` comes from
+          // both queues, so a 500-record upload now shows movement every 5 seconds instead of a
+          // silent spinner for four minutes.
+          if (
+            typeof statusData.records_pending === 'number' &&
+            typeof statusData.records_submitted === 'number'
+          ) {
+            const done = Math.max(statusData.records_submitted - statusData.records_pending, 0);
+            setPollProgress(`${done} of ${statusData.records_submitted} records processed`);
+          } else if (statusData.results_so_far && statusData.records_submitted) {
             setPollProgress(`${statusData.results_so_far} of ${statusData.records_submitted} records processed`);
           }
           continue;
@@ -904,18 +927,19 @@ export default function BulkUploadPage() {
 
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto" />
             <p className="text-gray-700 font-medium">Processing your upload...</p>
-            {pollProgress ? (
-              <p className="text-gray-500 text-sm">{pollProgress}</p>
-            ) : (
-              // IT NO LONGER ASKS THEM TO KEEP THE PAGE OPEN, because that was
-              // never true and is now the opposite of the advice one card over.
-              // The rows are on a queue a cron works, so closing this tab costs
-              // the customer nothing.
-              <p className="text-gray-500 text-sm">
-                This can take a few minutes on a big upload. You can leave this page if you want,
-                the work carries on without it and the results show up in your history.
-              </p>
-            )}
+            {/* BOTH LINES, ALWAYS. Before Task 4, `records_pending` was never present on a
+                queued job, so pollProgress was always empty and the reassurance below always
+                showed. Task 4 made records_pending present on every processing poll of a web
+                job, which is every job now, so the ternary this used to be silently suppressed
+                the reassurance on every single upload. It is still true: the rows are on a
+                queue a cron works, so closing this tab costs the customer nothing. Text
+                unchanged from the sentence it replaced the untrue "keep this page open"
+                instruction with. */}
+            {pollProgress && <p className="text-gray-500 text-sm">{pollProgress}</p>}
+            <p className="text-gray-500 text-sm">
+              This can take a few minutes on a big upload. You can leave this page if you want,
+              the work carries on without it and the results show up in your history.
+            </p>
 
             {error && (
               <p className="text-sm text-red-600 mt-4">{error}</p>

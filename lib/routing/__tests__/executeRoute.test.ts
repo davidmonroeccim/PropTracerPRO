@@ -9,6 +9,7 @@ import {
   type RouteDeps,
   type ContactResult,
   type StepReport,
+  type ExecuteOptions,
 } from '../executeRoute'
 import { planRoute, VENDOR_COST, type ParcelInput } from '../ownerRoute'
 import { parseDossierResponse, type DossierResult } from '@/lib/tracerfy/dossier'
@@ -1012,5 +1013,391 @@ describe('contactVendorFrom: the vendor that produced the contacts wins', () => 
       { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0 },
       { kind: 'FASTAPPEND_ENTITY', outcome: 'hit', cost: 0.1 },
     ])).toBe('fastappend')
+  })
+})
+
+/**
+ * A trust name that genuinely plans TWO steps: the Instant person lookup, then FastAppend.
+ *
+ * Measured, not assumed. `Smith Family Trust` plans ONE (D16 strips the trust words to SMITH, which
+ * leaves no first name), so it cannot fence a hook that fires once per step. Do not substitute a
+ * "simpler" trust name here without re-measuring planRoute.
+ */
+const TWO_STEP_TRUST = {
+  state: 'TX',
+  situsAddress: '1 Main St',
+  situsCity: 'Smithville',
+  situsState: 'TX',
+  ownerName: 'John Smith Revocable Trust',
+} as const
+
+/** A tier 1 plan has no dossier step at all, so reaching this dep is itself the failure. */
+const NO_DOSSIER: RouteDeps['lookupDossier'] = async () => {
+  throw new Error('no dossier on a tier 1 plan')
+}
+
+describe('onStep, the per-arrival step-log hook (spec 5.2)', () => {
+  it('hands the caller every report as it is produced, in order', async () => {
+    // A QUEUE NEEDS THIS AND AN INLINE REQUEST DOES NOT. A single trace writes trace_steps once,
+    // after the ladder finishes, because its request is guaranteed to finish. A cron worker can be
+    // killed between two vendor calls, and the row is then re-claimed one rung up: without the log
+    // already on the row, the resumed attempt buys the answered steps again.
+    const seen: Array<{ kind: string; outcome: string }> = []
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    // The name is chosen to plan two steps; if this ever plans one, the assertion below is not
+    // fencing the hook and the name must be re-measured rather than the assertion relaxed.
+    expect(plan.steps).toHaveLength(2)
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      { onStep: (step) => void seen.push({ kind: step.kind, outcome: step.outcome }) }
+    )
+
+    expect(seen).toEqual(execution.steps.map((s) => ({ kind: s.kind, outcome: s.outcome })))
+    expect(seen.length).toBeGreaterThan(1)
+  })
+
+  it('awaits an async hook, so a worker can finish its write before the next vendor call', async () => {
+    const order: string[] = []
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    await executeRoute(
+      plan,
+      {
+        lookupDossier: NO_DOSSIER,
+        traceEntity: async () => {
+          order.push('vendor')
+          return CONTACT_MISS
+        },
+        tracePerson: async () => {
+          order.push('vendor')
+          return CONTACT_MISS
+        },
+      },
+      {
+        onStep: async () => {
+          await Promise.resolve()
+          order.push('write')
+        },
+      }
+    )
+
+    // Every write lands before the next vendor call, never after the ladder has moved on. Two steps
+    // means four entries, which is what makes the pairing assertion say anything.
+    expect(order).toHaveLength(4)
+    for (let i = 0; i < order.length; i += 2) {
+      expect(order[i]).toBe('vendor')
+      expect(order[i + 1]).toBe('write')
+    }
+  })
+
+  it('never lets a failing hook break the ladder, and logs it instead', async () => {
+    // executeRoute's house contract is NEVER THROWS (its own header). A step-log write is a
+    // database call and database calls fail, so a hook that throws must not take the vendor work
+    // with it. It is logged, because the console is the only operator channel PTP has.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const plan = planRoute(
+      { state: 'TX', situsAddress: '1 Main St', situsCity: 'Smithville', situsState: 'TX', ownerName: 'Jane Smith' },
+      'pro'
+    )
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      {
+        onStep: () => {
+          throw new Error('step write failed')
+        },
+      }
+    )
+
+    expect(execution.steps.length).toBeGreaterThan(0)
+    expect(execution.error).toBeUndefined()
+    expect(logged).toHaveBeenCalledWith(
+      '[executeRoute] onStep failed, the ladder continued:',
+      expect.any(Error)
+    )
+    logged.mockRestore()
+  })
+
+  it('runs the whole ladder unchanged when no hook is passed', async () => {
+    const plan = planRoute(
+      { state: 'TX', situsAddress: '1 Main St', situsCity: 'Smithville', situsState: 'TX', ownerName: 'Jane Smith' },
+      'pro'
+    )
+    const execution = await executeRoute(plan, {
+      lookupDossier: NO_DOSSIER,
+      traceEntity: async () => CONTACT_MISS,
+      tracePerson: async () => CONTACT_MISS,
+    })
+    expect(execution.steps.map((s) => s.outcome)).toEqual(['miss'])
+    expect(execution.throttled).toBeFalsy()
+  })
+
+  /**
+   * EVERY REPORT SITE, THROUGH THE ONE FUNNEL (L-018).
+   *
+   * runStage produces a report from seven places, and each needs its own case to be reached at all.
+   * The assertion is the same in every case and it is the only one that can catch an unwired site:
+   * the hook's own sequence must equal execution.steps exactly.
+   */
+  const SITE_CASES: Array<{
+    site: string
+    deps: Partial<RouteDeps>
+    options?: Omit<ExecuteOptions, 'onStep'>
+    reaches: string
+  }> = [
+    {
+      site: 'answered',
+      deps: { tracePerson: async () => CONTACT_MISS, traceEntity: async () => CONTACT_MISS },
+      reaches: 'two miss reports',
+    },
+    {
+      site: 'skipped after a hit',
+      // THE HIT HAS TO BE ON STEP 1. A two-step ladder whose every step MISSES never reaches this
+      // site at all: a miss does not set `hit`, so step 2 is asked rather than skipped.
+      deps: { tracePerson: async () => CONTACT_HIT },
+      reaches: 'hit, then FASTAPPEND_ENTITY skipped behind it',
+    },
+    {
+      site: 'vendor failure, and skipped after a failure',
+      deps: { tracePerson: async () => CONTACT_FAILURE },
+      reaches: 'failed, then FASTAPPEND_ENTITY skipped behind it',
+    },
+    {
+      site: 'our own refused request',
+      deps: {
+        tracePerson: async () => ({
+          success: false, hit: false, contacts: null, inputError: true,
+          error: 'Person trace requires address, city and state',
+        }),
+        traceEntity: async () => CONTACT_MISS,
+      },
+      reaches: 'skipped with a "not sent" note, then the entity step still runs',
+    },
+    {
+      site: 'the request budget',
+      deps: { tracePerson: async () => CONTACT_MISS },
+      // Already past the deadline, so no call can start and the FIRST step takes this branch.
+      options: { deadlineMs: Date.now() - 1 },
+      reaches: 'failed with "ran out of time", then skipped behind it',
+    },
+    {
+      site: 'a reused answer',
+      deps: { tracePerson: async () => CONTACT_MISS, traceEntity: async () => CONTACT_MISS },
+      options: {
+        priorSteps: [
+          {
+            kind: 'TRACERFY_INSTANT_NAMED',
+            outcome: 'miss',
+            cost: 0,
+            at: new Date().toISOString(),
+            requestKey: requestKeyFor(planRoute(TWO_STEP_TRUST, 'pro').steps[0]),
+          },
+        ],
+      },
+      reaches: 'the logged miss replayed, then the entity step asked',
+    },
+    {
+      site: 'the vendor budget refusal',
+      deps: { tracePerson: async () => CONTACT_MISS },
+      options: { canSpend: () => false },
+      reaches: 'skipped with the budget note, and the ladder stops',
+    },
+  ]
+
+  for (const c of SITE_CASES) {
+    it(`sends the ${c.site} report through the hook (${c.reaches})`, async () => {
+      const seen: StepReport[] = []
+      const execution = await executeRoute(
+        planRoute(TWO_STEP_TRUST, 'pro'),
+        { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS, ...c.deps },
+        { ...c.options, onStep: (step) => void seen.push(step) }
+      )
+      expect(seen.length).toBeGreaterThan(0)
+      expect(seen).toEqual(execution.steps)
+    })
+  }
+})
+
+describe('canSpend, the per-call budget hook (spec 5.3)', () => {
+  it('is asked once per call, with the step about to be made, BEFORE the vendor', async () => {
+    // WHY THE HOOK IS PER CALL. A reservation taken here, one call at a time, at the moment the call
+    // is about to be made, cannot be exceeded; a per-record figure can, because lib/routing/
+    // ownerRoute.ts says of its own tier 2 figure "A FLOOR, NOT A CEILING" and D21(c) with D40 let a
+    // tier 2 record try every owner the dossier names, with no cap. THE TIER 1 LANE IS THE ONLY
+    // CALLER THAT PASSES THIS HOOK, because its steps are independent and a refusal costs it nothing.
+    // The tier 2 cron reserves once before a record starts and accepts a stated overshoot instead
+    // (Task 6): refusing it here, mid-ladder, would mean re-running the record and re-buying its
+    // dossier, and that is out.
+    const order: string[] = []
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const asked: string[] = []
+    await executeRoute(
+      plan,
+      {
+        lookupDossier: NO_DOSSIER,
+        traceEntity: async () => {
+          order.push('vendor')
+          return CONTACT_MISS
+        },
+        tracePerson: async () => {
+          order.push('vendor')
+          return CONTACT_MISS
+        },
+      },
+      {
+        canSpend: (step) => {
+          order.push('ask')
+          asked.push(step.kind)
+          return true
+        },
+      }
+    )
+    expect(asked).toEqual(['TRACERFY_INSTANT_NAMED', 'FASTAPPEND_ENTITY'])
+    expect(order).toEqual(['ask', 'vendor', 'ask', 'vendor'])
+  })
+
+  it('does not make the call it was refused for, and spends nothing', async () => {
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const tracePerson = vi.fn(async () => CONTACT_MISS)
+    const traceEntity = vi.fn(async () => CONTACT_MISS)
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity, tracePerson },
+      { canSpend: () => false }
+    )
+    expect(tracePerson).not.toHaveBeenCalled()
+    expect(traceEntity).not.toHaveBeenCalled()
+    expect(execution.vendorSpend).toBe(0)
+    expect(execution.throttled).toBe(true)
+    // NOT A FAILURE (spec 5.1). A throttle is not busy_try_again and is not an error: nothing was
+    // asked, so there is nothing to report as having gone wrong. The caller releases the row.
+    expect(execution.success).toBe(true)
+    expect(execution.error).toBeUndefined()
+  })
+
+  it('STOPS the ladder at the refused call rather than skipping past it', async () => {
+    // A refused FIRST step must not let the SECOND one run: the budget said this minute has no room
+    // for this record, not "try the other vendor". One report for the refused step, none after it.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      { canSpend: () => false }
+    )
+    expect(execution.steps).toHaveLength(1)
+    expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'skipped', cost: 0 })
+    expect(execution.steps[0].note).toContain('per-minute vendor budget')
+  })
+
+  it('keeps every answer bought before the refusal, so a resume does not re-buy it', async () => {
+    // THE MONEY HALF. Refusing the SECOND call of a two-step ladder must leave the FIRST answer in
+    // the log with its own requestKey and timestamp, because that is what executeRoute replays when
+    // the released row is claimed again (spec 5.2). Losing it means paying twice for one answer.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    let asks = 0
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      { canSpend: () => ++asks === 1 }
+    )
+    expect(execution.throttled).toBe(true)
+    expect(execution.steps).toHaveLength(2)
+    expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss' })
+    expect(execution.steps[0].requestKey).toBe(requestKeyFor(plan.steps[0]))
+    expect(execution.steps[0].at).toBeTruthy()
+    expect(execution.steps[1]).toMatchObject({ kind: 'FASTAPPEND_ENTITY', outcome: 'skipped' })
+  })
+
+  it('awaits an async hook, because the budget lives in the database', async () => {
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const tracePerson = vi.fn(async () => CONTACT_MISS)
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson },
+      {
+        canSpend: async () => {
+          await Promise.resolve()
+          return false
+        },
+      }
+    )
+    expect(tracePerson).not.toHaveBeenCalled()
+    expect(execution.throttled).toBe(true)
+  })
+
+  it('never asks the budget about a step it was not going to call anyway', async () => {
+    // A reused answer (spec 5.2) and a step skipped after an earlier hit make no vendor call, so
+    // reserving for them would spend budget on calls that never happen and throttle records that
+    // could have run. HIT first, then the FastAppend step that is skipped behind it.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const asked: string[] = []
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_HIT },
+      {
+        canSpend: (step) => {
+          asked.push(step.kind)
+          return true
+        },
+      }
+    )
+    expect(asked).toEqual(['TRACERFY_INSTANT_NAMED'])
+    expect(execution.steps.map((s) => s.outcome)).toEqual(['hit', 'skipped'])
+    expect(execution.throttled).toBeFalsy()
+  })
+
+  it('never asks the budget about a step that will be REPLAYED from the log, not called', async () => {
+    // The companion to the skip-after-hit case above, and a distinct call site: a reusable prior
+    // answer also makes no vendor call. MUTATION (Task 2 Step 8, item 2): moving the canSpend gate
+    // above the reuse branch survives every OTHER test in this file, because none of them combines
+    // priorSteps with canSpend, so this is the one case that fences that ordering.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const asked: string[] = []
+    const priorSteps: StepReport[] = [
+      {
+        kind: 'TRACERFY_INSTANT_NAMED',
+        outcome: 'miss',
+        cost: 0,
+        at: new Date().toISOString(),
+        requestKey: requestKeyFor(plan.steps[0]),
+      },
+    ]
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      {
+        priorSteps,
+        canSpend: (step) => {
+          asked.push(step.kind)
+          return true
+        },
+      }
+    )
+    expect(asked).toEqual(['FASTAPPEND_ENTITY'])
+    expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', reused: true })
+  })
+
+  it('never asks the budget about a call the request deadline already refused', async () => {
+    // The fourth ordering boundary in this loop, and the only one left unfenced after Task 2's
+    // first round: a call the deadline check refuses (VENDOR_TIMEOUT.MIN_CALL_MS not available
+    // before deadlineMs) never reaches canSpend, so the reservation is never spent on a call that
+    // could not have been made anyway. MUTATION: hoisting the canSpend gate above the deadline
+    // branch asks the budget about this call regardless, and this goes red.
+    const plan = planRoute(TWO_STEP_TRUST, 'pro')
+    const asked: string[] = []
+    const execution = await executeRoute(
+      plan,
+      { lookupDossier: NO_DOSSIER, traceEntity: async () => CONTACT_MISS, tracePerson: async () => CONTACT_MISS },
+      {
+        deadlineMs: Date.now() - 1,
+        canSpend: (step) => {
+          asked.push(step.kind)
+          return true
+        },
+      }
+    )
+    expect(asked).toEqual([])
+    expect(execution.steps[0]).toMatchObject({ kind: 'TRACERFY_INSTANT_NAMED', outcome: 'failed' })
+    expect(execution.steps[0].error).toMatch(/ran out of time/)
   })
 })

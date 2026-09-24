@@ -47,6 +47,7 @@
 
 import { skipReasonFor } from '@/lib/trace/blankOwnerSkip';
 import { propertyTraceSkipReason } from '@/lib/trace/propertyTraceAttempts';
+import { isTier1QueueRow } from '@/lib/trace/tier1Queue';
 import { tier1OutcomeReason, type Tier1OutcomeRow } from '@/lib/trace/tier1Outcome';
 
 /**
@@ -76,19 +77,34 @@ export type SkipReasonRow = Tier1OutcomeRow & {
 /**
  * Why this row came back with no contacts, or null when there is nothing to say.
  *
- * Tier 2 first, deliberately (see the header). Then a single trace's Tier 1 outcome (spec 7.2,
- * D33): a Tier 1 single row clears both queue columns when it settles, so a queue value can
- * only be stale there, while a bulk tier 2 re-enqueue sets property_trace_status and must win
- * over a stale outcome_code on a reused row. The Tier 1 term applies ONLY when trace_job_id is
- * explicitly null -- the row a single trace itself wrote. A bulk upload never clears
- * outcome_code on the row it reuses (D33), so without this gate a bulk-billed row could still
- * surface a stale "you were not charged" from before the bulk trace ran; bulk rows show
- * exactly what they show today.
+ * Tier 2 first, deliberately (see the header). Then the Tier 1 outcome, for the two row shapes
+ * that are allowed to serve it, and the gate is the whole subtlety of this function:
+ *
+ *   trace_job_id === null                 a row a SINGLE trace itself wrote (spec D33). Such a row
+ *                                         clears both queue columns when it settles, so a queue
+ *                                         value on it can only be stale.
+ *   isTier1QueueRow(ai_research_status)   a row the WEB BULK upload wrote and the Tier 1 cron
+ *                                         settled (Phase 2A). D33 chose to gate the sentence
+ *                                         rather than clear the stale columns, and recorded the
+ *                                         clearing as "(Phase 2 code)". The web submit now clears
+ *                                         outcome_code, found_by and trace_steps on every reused
+ *                                         row except a busy resume, so on THESE rows the
+ *                                         outcome_code can only belong to the trace the customer
+ *                                         is looking at.
+ *
+ * NOTHING ELSE. An API or MCP bulk row carries no tier1_ status, because those two surfaces still
+ * build a Tracerfy person CSV and still do not clear a reused row's outcome (2B). They keep
+ * showing exactly what they show today, which is what D33 decided and what stops a stale "You were
+ * not charged" answering for a bulk trace that charged.
+ *
+ * `=== null`, not merely falsy, on trace_job_id: a caller that did not select the column gets
+ * `undefined`, and that row gets NO Tier 1 sentence either. Blank, never wrong (CLAUDE.md rule 7).
  */
 export function rowSkipReason(row: SkipReasonRow): string | null {
+  const tier1MaySpeak = row.trace_job_id === null || isTier1QueueRow(row.ai_research_status);
   return (
     propertyTraceSkipReason(row.property_trace_status) ??
-    (row.trace_job_id === null ? tier1OutcomeReason(row) : null) ??
+    (tier1MaySpeak ? tier1OutcomeReason(row) : null) ??
     skipReasonFor(row.ai_research_status)
   );
 }

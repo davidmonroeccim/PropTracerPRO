@@ -45,7 +45,7 @@ const row = (over: Partial<TraceHistory> = {}) =>
   }) as unknown as TraceHistory;
 
 /**
- * The 103 rendered cells of one row, addressed by column name.
+ * The 105 rendered cells of one row, addressed by column name.
  *
  * This used to resolve DUPLICATE names last-wins, which quietly made `state` and
  * the research `property_type` unreachable and therefore unasserted -- both
@@ -209,7 +209,7 @@ describe('a value a spreadsheet would run as a formula', () => {
   /**
    * CSV quoting is not a security boundary. `"=1+1"` is correctly quoted and
    * Excel, Sheets and LibreOffice all strip the quotes and evaluate it. 65 of
-   * the 103 columns now carry vendor-controlled free text.
+   * the 105 columns now carry vendor-controlled free text.
    */
   it('defuses every leading trigger character', () => {
     // MUTATION: drop the leading-apostrophe guard and every one of these goes red.
@@ -254,8 +254,8 @@ describe('a value a spreadsheet would run as a formula', () => {
 });
 
 describe('the column set', () => {
-  it('is 103 columns and the first 16 are exactly what they always were', () => {
-    expect(EXPORT_COLUMNS).toHaveLength(103);
+  it('is 105 columns and the first 16 are exactly what they always were', () => {
+    expect(EXPORT_COLUMNS).toHaveLength(105);
     expect(EXPORT_COLUMNS.slice(0, 16)).toEqual([
       'address',
       'city',
@@ -289,7 +289,7 @@ describe('the column set', () => {
       DOSSIER_EXPORT_KEYS.map((k) => `${DOSSIER_COLUMN_PREFIX}${k}`)
     );
     expect(DOSSIER_EXPORT_COLUMNS.every((c) => c.startsWith('prop_'))).toBe(true);
-    expect(EXPORT_COLUMNS.slice(38)).toEqual(DOSSIER_EXPORT_COLUMNS);
+    expect(EXPORT_COLUMNS.slice(38, 103)).toEqual(DOSSIER_EXPORT_COLUMNS);
   });
 
   it('keeps the research block at the indices it already occupied', () => {
@@ -320,6 +320,17 @@ describe('the column set', () => {
       TRACERFY.MAX_PHONES
     );
     expect(EXPORT_COLUMNS.filter((c) => /^email_\d+$/.test(c))).toHaveLength(TRACERFY.MAX_EMAILS);
+  });
+
+  it('appends found_by and outcome_code at the very END of the header', () => {
+    // THE HEADER IS APPEND-ONLY (this module's own header: "never reorder, never rename"). An
+    // importer keyed on column position has to survive this, and the dossier block occupies 39-103,
+    // so the only safe place for a new column is after it. Spec 7.2 says so in as many words: "CSV
+    // export appends found_by and outcome_code at the END of the header".
+    expect(EXPORT_COLUMNS[103]).toBe('found_by');
+    expect(EXPORT_COLUMNS[104]).toBe('outcome_code');
+    expect(EXPORT_COLUMNS.indexOf('skip_reason')).toBe(20);
+    expect(EXPORT_COLUMNS.indexOf('owner_of_record')).toBe(21);
   });
 });
 
@@ -359,6 +370,44 @@ describe('the base columns', () => {
     expect(cells(row({ charge: 0.4 })).charge).toBe('0.40');
     expect(cells(row({ charge: 0 })).charge).toBe('0.00');
     expect(cells(row({ charge: 0.25 })).charge).toBe('0.25');
+  });
+
+  it('exports the KEY that found the owner, never the vendor', () => {
+    // spec 7.1: found_by names the key (address, parcel_id, company_name). The vendor stays in
+    // contact_vendor, which is internal and has no column here.
+    expect(cells(row({ found_by: 'parcel_id', outcome_code: 'found_by_parcel_id' })).found_by).toBe(
+      '"parcel_id"'
+    );
+    expect(cells(row({ found_by: 'parcel_id' })).outcome_code).toBe('');
+    expect(EXPORT_COLUMNS).not.toContain('contact_vendor');
+    // trace_steps is "Internal; never in a customer payload" (types/index.ts), and this task reads
+    // it through rowSkipReason for every exported row. Nothing exports the log itself.
+    expect(EXPORT_COLUMNS).not.toContain('trace_steps');
+  });
+
+  it('exports the outcome code of a row that found nothing, beside its sentence', () => {
+    const c = cells(
+      row({
+        outcome_code: 'no_match',
+        is_successful: false,
+        trace_job_id: 'job-1',
+        ai_research_status: 'tier1_done',
+        trace_steps: [
+          { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
+        ],
+      })
+    );
+    expect(c.outcome_code).toBe('"no_match"');
+    expect(c.skip_reason).toBe(
+      '"We looked this owner up by address and found no match. You were not charged."'
+    );
+    expect(c.found_by).toBe('');
+  });
+
+  it('renders both new columns blank on every row written before they existed', () => {
+    const c = cells(row());
+    expect(c.found_by).toBe('');
+    expect(c.outcome_code).toBe('');
   });
 });
 
@@ -482,7 +531,7 @@ describe('the file itself', () => {
     const lines = csv.split('\n');
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe(EXPORT_COLUMNS.join(','));
-    expect(lines[1].split(',')).toHaveLength(103);
+    expect(lines[1].split(',')).toHaveLength(105);
   });
 
   it('is the header alone when a job has no rows', () => {
@@ -629,6 +678,19 @@ describe('the file itself', () => {
     expect(csv).not.toContain('APN|');
   });
 
+  it('never exports the internal parcel key as an address (D38)', () => {
+    // A web upload cannot produce an APN| row: the page has no parcel id column (D5) and
+    // traceKeyFor only reaches its parcel branch with an apn AND a county. This pins the rendering
+    // for the 2B surfaces that CAN, and for any row already stored that way by a single trace.
+    expect(
+      cells(row({ normalized_address: 'APN|0123-456|TRAVIS|TX', parcel_id_local: '0123-456', county: 'Travis' }))
+        .address
+    ).toBe('"Parcel 0123-456, Travis County"');
+    expect(
+      cells(row({ normalized_address: 'APN|0123-456|TRAVIS|TX' })).address
+    ).not.toContain('APN|');
+  });
+
   it('keeps a comma in an address inside one cell', () => {
     const csv = buildExportCsv([row({ normalized_address: '100 MAIN ST, APT 2' })]);
     expect(csv.split('\n')[1].startsWith('"100 MAIN ST, APT 2",')).toBe(true);
@@ -652,7 +714,7 @@ describe('the file itself', () => {
     expect(parsed.errors).toEqual([]);
     expect(parsed.data).toHaveLength(3);
     expect(parsed.data[0]).toEqual([...EXPORT_COLUMNS]);
-    expect(parsed.data[1]).toHaveLength(103);
+    expect(parsed.data[1]).toHaveLength(105);
     expect(parsed.data[1][0]).toBe('100 MAIN ST, APT 2');
     expect(parsed.data[1][1]).toBe('THE "BIG" CITY');
     expect(parsed.data[1][4]).toBe('Line one\nLine two');

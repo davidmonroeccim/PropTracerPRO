@@ -2,13 +2,14 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import {
-  normalizeAddress,
   createAddressHash,
+  traceKeyFor,
   usableZip,
   validateAddressInput,
 } from '@/lib/utils/address-normalizer';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
-import { submitBulkTrace } from '@/lib/tracerfy/client';
+import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
+import { tier1QueuedStatusFor } from '@/lib/trace/tier1Queue';
 import {
   PROPERTY_TRACE_NO_KEY_REASON,
   PROPERTY_TRACE_NO_KEY_STATUS,
@@ -17,7 +18,7 @@ import {
 import {
   TIER2_CAPACITY_REFUSAL,
   inFlightUnbilledCost,
-  tracerfyCanRunTier2,
+  tracerfyCanRun,
 } from '@/lib/trace/bulkPreflight';
 import { chargePerRecord, chargePerTrace, TRACE_SOURCE } from '@/lib/suite/pricing';
 import type { AddressInput } from '@/types';
@@ -127,8 +128,15 @@ export async function POST(request: Request) {
     // submitted. 273 of 1,270 historical bulk rows arrived this way, so this is
     // a real change to what existing bulk users pay.
     //
-    //   tier 1      owner of record present. Tracerfy person CSV, billed per
-    //               SUCCESSFUL trace, free on a miss.
+    //   tier 1      owner of record present. ENQUEUED into ai_research_status for
+    //               app/api/cron/sweep-entity-traces, which runs planRoute() and
+    //               executeRoute() per record. Billed per SUCCESSFUL trace, free on a miss.
+    //               The Tracerfy person CSV is gone from this surface (spec D1, 3.3): rows
+    //               already in flight there keep settling through settleBulkJob, and nothing
+    //               new is sent. A row with no CITY reaches this bucket now, because the page
+    //               stopped dropping it: a company traces on name and state alone (D4), and a
+    //               person with no city and no parcel id ends no_lookup_key, free, with a
+    //               sentence that says so.
     //   tier 2      no owner of record, but an address a vendor can be asked
     //               about. Queued for the cron, billed per RECORD SUBMITTED.
     //   no key      no owner of record AND no usable address. Nobody can be
@@ -207,7 +215,12 @@ export async function POST(request: Request) {
     // has no alerting channel and he chose no alert over a fake one, so nothing
     // here claims anyone was told. lib/trace/bulkPreflight.ts logs for the
     // operator, which is the only surface that exists.
-    if (!(await tracerfyCanRunTier2(adminClient, tier2Records.length))) {
+    if (
+      !(await tracerfyCanRun(adminClient, {
+        tier1: tier1Records.length,
+        tier2: tier2Records.length,
+      }))
+    ) {
       return NextResponse.json(
         { success: false, error: TIER2_CAPACITY_REFUSAL },
         { status: 503 }
@@ -281,6 +294,24 @@ export async function POST(request: Request) {
 
     const BATCH_SIZE = 500;
 
+    /**
+     * Rows this submit is RESUMING rather than starting: the ones whose stored outcome is
+     * busy_try_again (spec 5.2).
+     *
+     * checkDuplicates lets a busy row through as a new record rather than a duplicate, because
+     * its own sentence told the customer to send it again. Its step log is the money: it is what
+     * stops executeRoute re-buying the lookups this record already paid for. So the clear below
+     * skips these rows, and ONLY these rows.
+     *
+     * Read off cachedResults, which is every row checkDuplicates found inside the 90-day window
+     * for the hashes submitted, not just the ones it treated as duplicates.
+     */
+    const busyResumeHashes = new Set(
+      dedupeResult.cachedResults
+        .filter((r) => r.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN)
+        .map((r) => r.address_hash)
+    );
+
     // trace_job_id links every row of this upload to its job, the same way the
     // v1 route does. Without it the skipped rows, which never get a
     // tracerfy_job_id, are invisible to the results CSV.
@@ -291,15 +322,22 @@ export async function POST(request: Request) {
       // of this, so a genuinely absent field throws there first. These keep the
       // row writable for the empty-string case, which is the one that reaches
       // here.
-      const normalizedAddress = normalizeAddress(
-        record.address || '',
-        record.city || '',
-        record.state || ''
-      );
+      // ONE KEY DERIVATION (spec 6.3, D36), the same one the single routes and
+      // lib/utils/deduplication.ts use, so a record sent through single and bulk lands on ONE row.
+      // On this surface it returns exactly what normalizeAddress returned: the page requires a
+      // street and a state, and the web app has no parcel id column (D5).
+      const normalizedAddress = traceKeyFor({
+        address: record.address || '',
+        city: record.city || '',
+        state: record.state || '',
+        apn: record.apn,
+        county: record.county,
+      });
+      const addressHash = createAddressHash(normalizedAddress);
       return {
         user_id: user.id,
         trace_job_id: job.id,
-        address_hash: createAddressHash(normalizedAddress),
+        address_hash: addressHash,
         normalized_address: normalizedAddress,
         city: (record.city || '').toUpperCase(),
         state: (record.state || '').toUpperCase(),
@@ -337,6 +375,39 @@ export async function POST(request: Request) {
         // Same tag as the job above, and on EVERY row including the skipped
         // ones: the crons read the row's tag, not the job's.
         source: TRACE_SOURCE.WEB,
+        // THE D33 BULK HALF (carried item 5). A row is REUSED, and a bulk upload never used to
+        // clear the Tier 1 answer on it, so a sentence written for an earlier trace could answer
+        // for this one: "You were not charged" over a row this job is about to charge. D33 chose
+        // to gate the sentence on trace_job_id instead and recorded this half as Phase 2 code.
+        // lib/trace/rowSkipReason.ts stops gating a Tier 1 QUEUE row in Task 5, and this is what
+        // makes that safe.
+        //
+        // NOT on a busy resume: that row's step log is what spares the resend from buying its
+        // answered lookups again, and the resume is keyed on finding outcome_code busy_try_again.
+        //
+        // ------------------------------------------------------------------
+        // DISCLOSED COST 1 OF 2 IN THIS PHASE, AND THIS IS WHERE IT HAPPENS.
+        //
+        // This clear runs on EVERY reused row of a web upload, not only the Tier 1 ones. A row that
+        // already holds PAID contacts from an earlier single trace loses its `found_by` label here.
+        // It keeps the contacts, the charge and the counts (D39 protects those inside the settle),
+        // so nothing the customer bought is lost.
+        //
+        // WHAT THE CUSTOMER SEES, on the results CSV Task 5 adds the two columns to: for such a row
+        // the `found_by` cell is EMPTY until this trace writes its own, so between submit and settle
+        // a row holding real, paid-for phone numbers reads as though nobody knows which key found
+        // them. If this trace then finds nothing on a row D39 preserves, it stays empty (that is
+        // disclosed cost 2, in Task 8's own note).
+        //
+        // ACCEPTED, AND IT IS D33'S OWN TRADE: the alternative is a stale sentence from an earlier
+        // trace answering for this one, which is a row saying "You were not charged" over work this
+        // job is about to charge for. Blank, never wrong (CLAUDE.md rule 7). If David wants the
+        // label preserved it is a per-column clear rather than this spread, and it is his call
+        // because it changes stored customer data.
+        // ------------------------------------------------------------------
+        ...(busyResumeHashes.has(addressHash)
+          ? {}
+          : { outcome_code: null, found_by: null, trace_steps: null }),
       };
     };
 
@@ -346,45 +417,121 @@ export async function POST(request: Request) {
           .from('trace_history')
           .upsert(rows.slice(i, i + BATCH_SIZE), { onConflict: 'user_id,address_hash' });
         if (insertError) {
-          console.error('Failed to insert trace history batch:', insertError.message);
+          // THROWS, AND IT USED TO console.error AND RETURN. That swallow was harmless while the
+          // tier 1 half had a real failure path of its own: the Tracerfy person submit could fail,
+          // and this route corrected records_submitted, wrote the accepted rows terminal and told the
+          // customer which half failed and that it was free. Phase 2A deletes that submit, so THIS
+          // WRITE IS THE SUBMIT, and a swallowed error means: this handler answers success: true
+          // with records_submitted counting rows that were never written; app/api/trace/bulk/status
+          // finds zero pending rows on its first poll and finalizes the job `completed` with
+          // records_matched 0; and its own early return makes that verdict permanent. The customer
+          // uploaded 500 rows, was told it worked, and downloads an empty CSV.
+          //
+          // The message names the batch size rather than the rows, because the rows carry addresses.
+          throw new Error(
+            `could not write ${rows.length} trace_history row(s): ${insertError.message}`
+          );
         }
       }
     };
 
-    // Rows nobody can be asked about land already finished. No tracerfy_job_id
-    // and no queue rung, so neither the status route nor the cron ever picks
-    // them up, and nothing money-shaped is written: no charge, no
-    // ai_research_charge, no tier, because nothing was billed and nothing was
-    // spent. The reason reaches the user through the response below and the
-    // skip_reason column of the results CSV, via propertyTraceSkipReason().
-    if (noKeyRecords.length > 0) {
-      await insertHistoryRows(
-        noKeyRecords.map((r) => ({
-          ...buildHistoryRow(r),
-          property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
-          status: 'no_match' as const,
-        }))
-      );
-    }
+    try {
+      // Rows nobody can be asked about land already finished. No tracerfy_job_id
+      // and no queue rung, so neither the status route nor the cron ever picks
+      // them up, and nothing money-shaped is written: no charge, no
+      // ai_research_charge, no tier, because nothing was billed and nothing was
+      // spent. The reason reaches the user through the response below and the
+      // skip_reason column of the results CSV, via propertyTraceSkipReason().
+      if (noKeyRecords.length > 0) {
+        await insertHistoryRows(
+          noKeyRecords.map((r) => ({
+            ...buildHistoryRow(r),
+            property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
+            status: 'no_match' as const,
+          }))
+        );
+      }
 
-    // TIER 2 ROWS, ONTO THE QUEUE. Attempt 1 of the ladder, which is the bare
-    // 'queued' the cron's claim window looks for. Written BEFORE the Tracerfy
-    // submit below so the cron can start on them the moment this handler
-    // returns, and so a failed person submit does not strand them.
-    //
-    // `status: 'processing'` because the row genuinely is in flight. It carries
-    // no tracerfy_job_id, which is what keeps every tier 1 settle path away
-    // from it: bulk/status finds its billable rows by that column, and a tier 2
-    // row settled there would be billed the tier 1 rate by the wrong engine.
-    // sweep-stale-traces cannot reach it either, because its single-trace stage
-    // filters on `trace_job_id IS NULL`.
-    if (tier2Records.length > 0) {
-      await insertHistoryRows(
-        tier2Records.map((r) => ({
-          ...buildHistoryRow(r),
-          property_trace_status: queuedStatusFor(1),
-          status: 'processing' as const,
-        }))
+      // TIER 2 ROWS, ONTO THE QUEUE. Attempt 1 of the ladder, which is the bare
+      // 'queued' the cron's claim window looks for. Written BEFORE the Tracerfy
+      // submit below so the cron can start on them the moment this handler
+      // returns, and so a failed person submit does not strand them.
+      //
+      // `status: 'processing'` because the row genuinely is in flight. It carries
+      // no tracerfy_job_id, which is what keeps every tier 1 settle path away
+      // from it: bulk/status finds its billable rows by that column, and a tier 2
+      // row settled there would be billed the tier 1 rate by the wrong engine.
+      // sweep-stale-traces cannot reach it either, because its single-trace stage
+      // filters on `trace_job_id IS NULL`.
+      if (tier2Records.length > 0) {
+        await insertHistoryRows(
+          tier2Records.map((r) => ({
+            ...buildHistoryRow(r),
+            property_trace_status: queuedStatusFor(1),
+            status: 'processing' as const,
+          }))
+        );
+      }
+
+      // TIER 1 ROWS, ONTO THE TIER 1 QUEUE (spec 3.2, D1). Attempt 1 of the Tier 1 ladder, which is
+      // the rung app/api/cron/sweep-entity-traces claims in its Tier 1 lane. `tier1_queued`, never a
+      // bare 'queued': that value is the LEGACY entity ladder's attempt 1 on the same column, and a
+      // row wearing it is handed to FastAppend on its owner name with no route planned at all.
+      //
+      // `status: 'processing'` because the row genuinely is in flight, and because that is what the
+      // wallet reserve prices (lib/trace/bulkPreflight.ts). `tracerfy_job_id: null`, WRITTEN rather
+      // than omitted: the upsert is onConflict: 'user_id,address_hash', so this row is REUSED, and
+      // an omitted key leaves whatever the row already carried. A CSV-era row can carry a stale
+      // tracerfy_job_id from before this row was moved to the Tier 1 queue, and both CSV settle
+      // paths (app/api/trace/bulk/status/route.ts, app/api/cron/sweep-stale-traces/route.ts) find
+      // their rows by that column, so a stale value would let the CSV engine settle or fail a row
+      // the Tier 1 cron also owns, and it would show up in the OLD job's results CSV. Same
+      // reasoning and the same explicit null as lib/trace/singleTier1.ts's internalWrite.
+      if (tier1Records.length > 0) {
+        await insertHistoryRows(
+          tier1Records.map((r) => ({
+            ...buildHistoryRow(r),
+            ai_research_status: tier1QueuedStatusFor(1),
+            status: 'processing' as const,
+            tracerfy_job_id: null,
+          }))
+        );
+      }
+    } catch (enqueueError) {
+      // A 500 ALONE IS NOT ENOUGH, and that is the whole reason this is handled here rather than by
+      // the outer catch: `job` is in scope here, and the job ROW has to carry the failure before
+      // this handler returns. The page polls app/api/trace/bulk/status, which finalizes a job whose
+      // two queues hold nothing as `completed` with records_matched 0, and then answers every later
+      // poll from the stored stats. Without this write the customer's only evidence is an empty CSV.
+      //
+      // THE JOB MUST REACH A TERMINAL STATE, not merely get a response. David's ruling: "You cannot
+      // leave the job processing because the Gateway and API will never complete." The Suite
+      // Gateway and the v1 API both poll this job for completion, and a job parked at 'processing'
+      // never completes for them, so 'failed' is written here even though this handler already
+      // answers the browser directly. Rows already enqueued by an EARLIER batch in this same submit
+      // (noKeyRecords, tier2Records) keep running and bill as disclosed: tier 2 is charged per
+      // record submitted whatever the result, and the customer is told that before they submit, so
+      // nothing here needs to say so again.
+      //
+      // THE CUSTOMER-FACING SENTENCE IS FIXED AND GENERIC, approved by David. The thrown message
+      // (`reason` below) names a table and raw Postgres text, so it goes to the server log only,
+      // never to `trace_jobs.error_message`, which `bulk/status` returns and the page renders
+      // verbatim. It deliberately carries NO "not charged" claim: a part-way failure can leave rows
+      // that were already written and will be billed, so that claim would be false, and the global
+      // constraints permit "not charged" only where it is true.
+      const reason = enqueueError instanceof Error ? enqueueError.message : 'Unknown error';
+      console.error('Failed to enqueue bulk trace rows:', reason);
+      await adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'failed',
+          error_message:
+            'We could not finish starting your upload. Some records may already be running, so check your results before uploading those addresses again.',
+        })
+        .eq('id', job.id);
+      return NextResponse.json(
+        { success: false, error: 'Failed to submit bulk trace' },
+        { status: 500 }
       );
     }
 
@@ -427,152 +574,25 @@ export async function POST(request: Request) {
       });
     }
 
-    // NO PERSON CSV TO BUILD. Every remaining row is queued, so there is no
-    // Tracerfy bulk submit to make and no tracerfy_job_id for this job. The
-    // cron owns the whole of it from here; the status route waits on the queue.
-    if (tier1Records.length === 0) {
-      return NextResponse.json({
-        success: true,
-        job_id: job.id,
-        total_records: records.length,
-        dedupe_removed: totalDeduped,
-        records_submitted: tier2Records.length,
-        records_queued: tier2Records.length,
-        records_failed: 0,
-        ...noKeyFields,
-        cached_count: dedupeResult.cachedResults.length,
-        estimated_cost: estimatedCost,
-      });
-    }
-
-    // Build the Tracerfy person CSV from the TIER 1 records only. A tier 2 row
-    // has no owner to put in it: the dossier is what discovers one.
-    const esc = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
-
-    const csvLines = [
-      'address,city,state,first_name,last_name,mail_address,mail_city,mail_state',
-    ];
-
-    for (const record of tier1Records) {
-      // Split owner_name into first/last.
-      const parts = (record.owner_name || '').trim().split(' ');
-      const firstName = parts[0] || '';
-      const lastName = parts.slice(1).join(' ') || '';
-
-      // Use property address as mail fallback
-      const mailAddress = record.mailing_address || record.address;
-      const mailCity = record.city;
-      const mailState = record.state;
-
-      csvLines.push(
-        `${esc(record.address)},${esc(record.city)},${esc(record.state)},${esc(firstName)},${esc(lastName)},${esc(mailAddress)},${esc(mailCity)},${esc(mailState)}`
-      );
-    }
-
-    const csvContent = csvLines.join('\n');
-
-    // Submit to Tracerfy
-    const submitResult = await submitBulkTrace(csvContent);
-
-    if (!submitResult.success || !submitResult.jobId) {
-      // THE TIER 2 ROWS ARE ALREADY ON THE QUEUE, AND THIS BRANCH USED TO
-      // DECLARE THE WHOLE JOB DEAD OVER THEM.
-      //
-      // They were written above, before this call, deliberately. The cron claims
-      // on `property_trace_status` alone and never reads the parent job, so
-      // marking the job failed here stops nothing: it works all of them and
-      // bills every one. The customer would get an HTTP 500, a job reading
-      // failed, and a charge for work they were told did not happen -- and
-      // because the rows now exist, a resubmit inside the 90-day window comes
-      // back "all records are duplicates", so they cannot even re-run what they
-      // paid for. Charged, told nothing ran, and blocked from retrying.
-      //
-      // The tier 1 half really did fail, so those rows are written terminal as
-      // errors. Every accepted record therefore has a row, which keeps the job's
-      // records_submitted honest as the denominator of the match rate.
-      await insertHistoryRows(
-        tier1Records.map((record) => ({
-          ...buildHistoryRow(record),
-          status: 'error' as const,
-        }))
-      );
-
-      if (tier2Records.length === 0) {
-        // Nothing survives the failure. The job really is dead, which is what
-        // this branch was written for.
-        await adminClient
-          .from('trace_jobs')
-          .update({ status: 'failed', error_message: submitResult.error || 'Submit failed' })
-          .eq('id', job.id);
-
-        return NextResponse.json(
-          { success: false, error: submitResult.error || 'Failed to submit bulk trace' },
-          { status: 500 }
-        );
-      }
-
-      // records_submitted is the DENOMINATOR of the match rate, read back by the
-      // status route and carried in the bulk_job.completed webhook. It was
-      // written before this failure and counts the tier 1 rows, so leaving it
-      // would understate the match rate by exactly the rows nobody was asked
-      // about.
-      await adminClient
-        .from('trace_jobs')
-        .update({ records_submitted: tier2Records.length })
-        .eq('id', job.id);
-
-      // PARTIAL. The job stays open because the queue is still working, and the
-      // customer is told exactly which half failed rather than being handed a
-      // blanket failure for a job that is still running and will still be
-      // billed.
-      return NextResponse.json({
-        success: true,
-        job_id: job.id,
-        total_records: records.length,
-        dedupe_removed: totalDeduped,
-        records_submitted: tier2Records.length,
-        records_queued: tier2Records.length,
-        records_failed: tier1Records.length,
-        ...noKeyFields,
-        cached_count: dedupeResult.cachedResults.length,
-        estimated_cost: tier2Records.length * tier2Rate,
-        message: [
-          `We could not send the ${tier1Records.length} records that came with an owner name, so those were not traced and you were not charged for them.`,
-          `The other ${tier2Records.length} are running a full property trace, which you will be charged for.`,
-          noKeyRecords.length > 0
-            ? `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(' '),
-      });
-    }
-
-    // Update job with Tracerfy job ID
-    await adminClient
-      .from('trace_jobs')
-      .update({ tracerfy_job_id: submitResult.jobId })
-      .eq('id', job.id);
-
-    // Insert pending trace_history rows for each TIER 1 record. No
-    // property_trace_status on any of them: a tier 1 row that landed on the
-    // tier 2 queue would be billed per record submitted instead of per
-    // successful trace, and by two engines rather than one.
-    await insertHistoryRows(
-      tier1Records.map((record) => ({
-        ...buildHistoryRow(record),
-        tracerfy_job_id: submitResult.jobId,
-        status: 'processing' as const,
-      }))
-    );
-
+    // EVERY ACCEPTED ROW IS NOW QUEUED, on one of the two columns, so this handler is done the
+    // moment the rows are written. The job stays 'processing' and app/api/trace/bulk/status
+    // finishes it when both queues have drained; closing it here would stop the page polling
+    // before results the customer is billed for ever arrive.
     return NextResponse.json({
       success: true,
       job_id: job.id,
       total_records: records.length,
       dedupe_removed: totalDeduped,
       records_submitted: tier1Records.length + tier2Records.length,
-      records_queued: tier2Records.length,
+      // BOTH TIERS ARE QUEUED NOW. This field used to mean the tier 2 half alone. Nothing renders
+      // it (app/(dashboard)/trace/bulk/page.tsx reads records_submitted, records_skipped and
+      // records_failed); it stays because the route tests assert it and it is the honest count of
+      // rows a cron still owes work on.
+      records_queued: tier1Records.length + tier2Records.length,
+      // Always 0 on this surface now. It counted rows accepted and then never sent because the
+      // Tracerfy person submit failed, and there is no such submit any more. Kept at 0 rather than
+      // removed so the page's "Records We Could Not Send" tile keeps reading a number it
+      // understands instead of undefined.
       records_failed: 0,
       ...noKeyFields,
       cached_count: dedupeResult.cachedResults.length,

@@ -157,7 +157,7 @@ export async function GET(request: Request) {
       );
     }
 
-    // The 103 columns live in lib/trace/exportCsv.ts, shared with the
+    // The 105 columns live in lib/trace/exportCsv.ts, shared with the
     // single-record download so the two files cannot drift apart. The header is
     // FIXED: it no longer depends on whether a row in this particular job
     // happens to carry research or a skip reason, because a header that changes

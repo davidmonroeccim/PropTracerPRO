@@ -1,5 +1,227 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-24 EVENING. **PHASE 2A IS COMPLETE, MERGED TO MAIN, PUSHED AND DEPLOYED.**
+>
+> **All nine tasks done, the live check RAN, and David chose to merge and deploy.** Report:
+> `tasks/phase2a-live-check.md` (counts only; raw pairs gitignored under `tasks/research-test/phase2a/`).
+> The ledger `.superpowers/sdd/2026-09-23-tier1-phase2a/progress.md` is gitignored, authoritative over
+> this block, and now carries rulings 1 to 42 plus the live-check record.
+>
+> **THE LIVE CHECK, 20 records in one web bulk upload, job `f406e591-0205-4403-876d-160331373a77`:**
+> vendor spend **$1.70** of a $4.40 computed worst case under a `--max-dollars 6` cap and David's $10;
+> customer charge **$2.10**, wallet $14.33 -> $12.23, **reconciled to the cent**, 12 ledger debits, one
+> per charged record. Priced in the PRO column through his gateway grant, which is the L-030 collapse
+> working on the one profile shape that used to carry two prices.
+> - **B2, the reason the phase exists: 4/4 city-less PERSON rows settled `no_lookup_key` with ZERO
+>   steps, $0.00 cost, $0.00 charge and NO ledger row.** Before 2A the browser discarded them silently.
+> - B3: a city-less COMPANY row traced on name and state alone. B1: 4/4 by address. B4: 4/4 hit rung
+>   one and **skipped** rung two.
+> - Rate budget EXACT: tracerfy reserved 8 for 8 calls, fastappend 4 for 4. A skipped rung claimed
+>   nothing. CSV: 105 columns, `found_by` and `outcome_code` at 104 and 105, no `APN|` anywhere.
+>
+> **WHAT THE CHECK DID NOT PROVE, exhaustive, and it is in the report:** the Tier 2 lane's Task 6
+> reservation (see contamination below), the parcel/APN path, throttling, the stale-claim ladder,
+> step-log resume, scale beyond 16 records, and job completion through this branch's own status route.
+>
+> **CONTAMINATION, and it bounds a claim.** A local server pointed at the PRODUCTION database races the
+> production crons. Production's own cron drained all four tier 2 rows 50 seconds after submit, on
+> `origin/main` code with none of Task 6's 99 lines (`vendor_rate_windows` shows zero tier 2
+> contribution). Those rows prove the Tier 1 queue did not disturb the Tier 2 queue and NOTHING about
+> this branch's tier 2 changes. Only `tier1_*` statuses are invisible to main, which is why the Tier 1
+> half survived untouched for 25 minutes and is the half this check actually proves.
+>
+> **DAVID DECLINED THE WHOLE-BRANCH REVIEW.** It was offered with the alternatives (branch-only push, or
+> review-then-deploy) and he chose merge-and-deploy now. The nine per-task reviews stand; **no
+> cross-task pass was ever made on these 23 commits.** Recorded because a future reader will assume one
+> happened.
+>
+> **GATES, all four measured by the controller at merge, never relayed:** vitest **2040 passing / 87
+> files / 0 failed** (exit 0), `npx tsc --noEmit` **exit 0**, `npx eslint app lib components` **45
+> problems** (the baseline; ceiling 46, hard cap 47, never bare `npm run lint`), `npx next build`
+> **exit 0**. BOTH migrations were already live in production BEFORE the deploy, verified by reading
+> `pg_indexes` and `pg_proc`: the two widened partial indexes and `claim_vendor_rate`. So the deploy was
+> CODE-ONLY, which is the safe ordering.
+>
+> **TWO THINGS CARRIED OUT OF 2A, both David's calls:**
+> 1. **Job completion latency -> PHASE 2B, FIRST ITEM (his answer: b).** Nothing finalizes a bulk job
+>    when its queue drains: only a polling tab, or `sweep-stale-traces` at 60 minutes. History is a
+>    SERVER component with no poll, and Download / Push-to-CRM are gated on `status === 'completed'`, so
+>    a customer who closes the tab (which the upload page invites) sees `Processing` with no export for
+>    up to an hour after the work is done and billed. MEASURED: last row settled 17:11, job read
+>    completed 17:50. **PRE-EXISTING, not a 2A regression** (`settleBulkJob` is called only from status
+>    routes on main too). **`CRON_TIMEOUT_MINUTES` STAYS 60** - David correctly recalled it is a "give up
+>    entirely" deadline (History.md:2577) sized to absorb queue depth. The fix is a POSITIVE trigger,
+>    `finalizeJobIfDrained`, extracted ONCE across all four completion sites, with a
+>    `.eq('status','processing')` guard so a concurrent last-row settle cannot fire the one-shot
+>    `bulk_job.completed` webhook twice. That webhook ALREADY fires from a cron (`sweep-stale-traces:462`),
+>    so this is the same event an hour earlier, not a new one.
+> 2. **THE TIER 2 LANE IS UNDERWATER AT THE PRO RATE. Never recorded anywhere before 2026-09-24.**
+>    Arithmetic from constants, NOT a sampled rate: cost = $0.20 dossier + $0.10 per owner lookup that
+>    HITS (a miss is free), against a FLAT price of $0.25 pro / $0.40 PAYG. So margin is `0.05 - 0.10N`
+>    at pro and `0.20 - 0.10N` at PAYG, and D21(c) with D40 put NO cap on N. Measured this run: tier 2
+>    cost $0.80 against $0.75 charged, **net -$0.05**, invisible inside a +$0.40 job total because the
+>    Tier 1 lane is healthy (+$0.05 per success). **NOT a 2A defect, NOT decided.** What is NOT
+>    established and must not be claimed: how many owners a dossier typically reaches. The cheap next
+>    step is a FREE read of the owner-count distribution over existing `property_trace_done` rows.
+>
+> **STILL OPEN, unchanged by this phase:** the cross-project Supabase default-privileges finding (amend
+> the CLAUDE.md table template, then audit the six suite projects; do NOT edit CLAUDE.md without his
+> go), the stale-owner-name options, the nameless APN lookup question (L-035), and todo 16, 17, 19,
+> 20's remainder, 21 and 23.
+>
+> **THREE THINGS UNFENCED AT PHASE END, and no more:** the MCP `tier1: 0` call site, the Tier 1 lane's
+> try/catch placement, and `TIER1_RECORD_BUDGET_MS`.
+>
+> **NEXT: PHASE 2B.** API bulk (`app/api/v1/trace/bulk/route.ts`) and the gateway MCP
+> `skip_trace_bulk` onto the same queue, plus item 1 above as its first task. The carried-item list is
+> the "Carried to Phase 2B and later" section of the 2A plan. **The gateway is mid-modification and
+> broken for the Tier 1/2 approach - establish its state BEFORE planning against it.**
+
+
+> # READ FIRST. STATE AS OF 2026-09-24. PHASE 2A IS 7 OF 9 TASKS DONE ON AN UNMERGED BRANCH. NOTHING IS PUSHED.
+>
+> **David approved the Phase 2A plan as written on 2026-09-23** in answer to a single gate question. Execution
+> has run subagent-driven since, one task at a time, each with a task review and a fix loop.
+>
+> **BRANCH `feat/tier1-phase2a-queue-and-web-upload`, cut from main at `50310e5`. NOT pushed, NOT merged, NOT
+> deployed. Pushing, merging and deploying all need David's go and he has given none.**
+>
+> **THE LEDGER IS THE RECOVERY MAP AND IT IS AUTHORITATIVE OVER THIS BLOCK:**
+> `.superpowers/sdd/2026-09-23-tier1-phase2a/progress.md` (gitignored; the long path
+> `...-queue-and-web-upload/` is the same directory via a symlink). It holds the pre-flight scan table, every
+> ruling numbered 1 to 36 with what each costs if wrong, every deferred minor, and a per-task record. Tasks
+> with a `complete` line are DONE. Trust it and `git log` over memory.
+>
+> **TASKS 1-7 COMPLETE, each review-clean:**
+> 1. `a27079f` both `ai_research_status` partial indexes widened to `IS NOT NULL` (applied to production, ACL read back)
+> 2. `dfa837e` the Tier 1 ladder module, plus `executeRoute`'s `onStep` and `canSpend` hooks
+> 3. `b979e4e` the web upload enqueues Tier 1; a city-less row is no longer dropped in the browser
+> 4. `651c6a1` the four seams a queued row touches (job completion, stale sweep, both single routes, wallet reserve)
+> 5. `418a5a2` the D33 bulk half, `found_by` and `outcome_code` as CSV columns 104 and 105, per-outcome counts
+> 6. `78ad037` the shared vendor rate budget: one table, one SECURITY DEFINER RPC, sliding 60-second window
+> 7. `e066863` the ONE billing path extracted as `runTier1Record`; `runSingleTier1` is now its wrapper
+> Also on the branch: `9217293` and `d180943`, lessons L-034 and L-035. No code.
+>
+> 8. `98f3b19` the Tier 1 cron: a second lane beside the untouched legacy entity lane, one file, one column
+>
+> 9. `068cad3` Task 9 BUILD HALF ONLY: suite gates, the mutation table into `tasks/todo.md`, 20 parcels picked,
+>    and `tasks/research-scripts/phase2a/run-live.ts` with its five refusals proven. **NO MONEY SPENT.**
+>
+> **THE ONLY THING LEFT IN PHASE 2A IS THE LIVE CHECK SPEND, AND IT NEEDS DAVID AT A BROWSER.** The web bulk
+> route authenticates by session cookie, so it cannot be scripted (plan review finding 11). Sequence: the
+> controller starts `npm run dev` with `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED=true`, David signs in, opens
+> `/trace/bulk`, uploads `tasks/research-test/phase2a/upload.csv` and submits. **The page must show 20 records
+> ready to submit, not 12** — eight rows have no city and before this phase the browser dropped them silently.
+> Then the cron drains, the controller runs the runner with `PTP_LIVE_RUN=1` and `--max-dollars 6`, and writes
+> `tasks/phase2a-live-check.md` (counts only, no contact data).
+>
+> **DAVID AUTHORISED $10 on 2026-09-24 and said "pick parcels from the registry directly, skip the gateway".**
+> Both applied. Computed worst case **$4.40** (the runner derives it itself from `VENDOR_COST`; it corrected my
+> $4.00 in both directions, budgeting city-less rows at $0.10 because "spends nothing" is the thing under test,
+> and tier 2 at three owners). Cap **$6**: above the worst case, below his ceiling, so neither boundary is also
+> the live case (L-031). **Honest limit: the tier 2 owner count is a BUDGET, not a bound**, because that lane
+> reserves once and lets a started record finish by his own ruling; breaching $10 would need ~19 owners a
+> dossier.
+>
+> **AFTER the live check:** the whole-branch review (most capable model, per superpowers:requesting-code-review),
+> then superpowers:finishing-a-development-branch. **Then and only then does pushing/merging come to David.**
+>
+> **ONLY THREE THINGS ARE UNFENCED AT PHASE END**, corrected against the plan's own stale list: the MCP
+> `tier1: 0` call site (unfenced BY PLAN INSTRUCTION, recorded not papered over), the Tier 1 lane's try/catch
+> placement, and `TIER1_RECORD_BUDGET_MS`. Task 8's run-budget guard IS fenced (killed in its fix round with
+> fake timers, 8 with the guard and 20 without).
+>
+> **EIGHT OF NINE COMPLETE. Gates at `068cad3`: vitest 2040 passing / 87 files / 0 failed, tsc 0, eslint 45,
+> `next build` clean.**
+> The no-worker window is CLOSED, so the branch is coherent for the first time and the eventual deploy is
+> load-bearing. **Task 9 (suite gates, then the live check) has not started and stops for David twice: a
+> dollar amount, and whether to pick its parcels through the gateway or straight from the registry.**
+>
+> Task 8's Critical is worth knowing because it is the phase's sharpest near-miss: `parcelForTier1Row` was
+> exported specifically so it could be fenced, its own docblock cited L-020 for why, and it had zero tests.
+> Deleting one line of it left tsc clean and all 2029 tests green while making every Tier 1 record plan as
+> ownerless, return a TIER 2 plan, throw, and settle `tier1_done`/`no_match` free — the lane delivering
+> nothing to every customer with a green suite. Now fenced: the same deletion reddens four tests, and the new
+> block asserts the PLAN TIER rather than the field. The implementer's own diagnosis: "The same mock that
+> keeps these tests honest about the cron is what made the worst mutant in the phase invisible."
+>
+> **GATES at `e066863`, measured by the controller, not relayed: vitest 2006 passing / 87 files / 0 failed;
+> `npx tsc --noEmit` exit 0; `npx eslint app lib components` 45 problems.** Never bare `npm run lint`. The
+> plan's own baseline of 1902 is stale; the phase added 104 tests. Ceiling 46, hard cap 47, and note a
+> TEST-ONLY change moved lint to 47 once (mock parameter typing) so check lint after writing tests too.
+>
+> **THREE THINGS WAITING ON DAVID. None blocks Task 8.**
+> 1. **Task 9's live check needs his dollar amount.** The runner refuses without `PTP_LIVE_RUN=1` AND
+>    `--max-dollars`, the CONTROLLER runs the spend, never the implementer (L-031). Task 9's brief also plans
+>    to pick parcels through the Suite Gateway's registry tools; **David said on 2026-09-24 that the gateway is
+>    still broken for the new Tier 1/2 approach**, so ask whether to pick parcels from the registry directly
+>    instead. Nothing else in the phase touches the gateway.
+> 2. **A CROSS-PROJECT SECURITY FINDING, escalated and unanswered.** Supabase's `ALTER DEFAULT PRIVILEGES`
+>    covers new public TABLES, not just functions: `pg_default_acl` shows `anon=rm/postgres` AND
+>    `anon=arwdDxtm/supabase_admin` (full INSERT/UPDATE/DELETE/TRUNCATE). So a new public table's privileges
+>    depend on WHICH ROLE applied the migration. CLAUDE.md's template warns only about functions. Proposed:
+>    amend the table template to require the three revokes by name plus an ACL read-back, then audit new
+>    tables across the six suite projects for `anon`/`authenticated` entries in `relacl`. **I did not edit
+>    CLAUDE.md, because it governs how I work.**
+> 3. **The stale-owner-name question** he raised 2026-09-24: if a property recently sold, the registry's owner
+>    name may be the former owner. Researched and every load-bearing claim verified. The architecture already
+>    answers it (Tier 2 is dossier-first and `full_property_trace: true` wins even with a name supplied, so no
+>    new code); D25 does NOT cover it (both sides of its comparison are the caller's own assertion); there is
+>    NOTHING on the Tier 1 response that can date a record; and on Tier 2 we already buy `last_sale_date`,
+>    `recording_date`, `document_type`, `prior_sale_date`, `quit_claim` and `years_owned`, store them, display
+>    them, export them, and **no conditional anywhere reads any of them**. The registry publishes
+>    `parcels.last_sale_date` and its MCP returns it; the gateway's `recordSchema` has no date field to carry
+>    it. Options with costs are in the ledger. **Unverified and not to be claimed: that the dossier's owner is
+>    FRESHER than the registry's. No vintage field exists anywhere in the dossier response.**
+>
+> **DAVID'S CORRECTIONS THIS SESSION, both now lessons:**
+> - **L-034.** I put a Task 3 review finding to him as customer harm: a part-way enqueue failure marks the job
+>   `failed` while tier 2 rows already written keep billing. Both halves of my framing were wrong. Tier 2 bills
+>   per REQUEST and the customer is told before submitting, so the charge is the disclosure working; and a job
+>   parked at `processing`, which I recommended, never completes for the Gateway or the v1 API. His words: "The
+>   customer is told before they make the request that Tier 2 is paid per request, not per success. So why are
+>   you asking me this question. You cannot leave the job processing because the Gateway and API will never
+>   complete." **Before calling a charge a defect, check whether it was disclosed BEFORE the request.**
+> - **L-035.** I described the Tier 1 APN path as asking "for contacts directly", which hid that the owner name
+>   is not sent. It cannot be: `trace/parcel/lookup/` takes `parcel_id`, `county`, `state` and has no name
+>   parameter, so the name filters the returned `persons[]` array instead (D6, no `persons[0]` fallback). He was
+>   substantially right that he was never told: the phrase "the nameless APN lookup" appears once, inside D21's
+>   options, and is absent from D2 (which set the rung order) and D13 (where he chose Instant over Advanced).
+>   **Advanced would not have fixed it** — it is batch-only and still requires a city, and Enhanced needs
+>   address/city/state at 15 credits against Instant's 5. **The open question is his: what a Tier 1 record with
+>   a parcel id and no street should do.** Phase 2A does not touch it; the call shapes live in `client.ts` and
+>   `ownerRoute.ts`, untouched by this phase.
+>
+> **WHAT THIS PHASE KEEPS FINDING, and it is the reason to keep doing it.** FOUR times a mutation the plan
+> prescribed could not be killed by the test the plan named: Task 2's reuse-vs-budget ordering, Task 5's CSV
+> value emission, Task 6's "cannot compile" row that compiled clean and killed two tests, and Task 7's four
+> money behaviours deferred to Task 8 tests that mock the very function they were meant to fence. **Every one
+> was found by applying the mutation, never by reading the prediction.** The plan is unusually rigorous and
+> still predicted wrong four times. Treat its mutation table as hypotheses.
+>
+> **THE SINGLE MOST IMPORTANT GUARD IN THE PHASE**, now fenced and measured by the controller: deleting
+> `if (execution.throttled) throw new VendorBudgetThrottledError()` at `lib/trace/singleTier1.ts:265` reddens
+> `throws VendorBudgetThrottledError and judges, charges and persists NOTHING when the budget refuses`. Without
+> that line a throttled record is judged `no_match`, settled `tier1_done`, and files "We looked this owner up by
+> address and found no match. You were not charged." about a lookup nobody made.
+>
+> **TASK 8 MUST NOT WORK FROM ITS BRIEF'S MUTATION PREDICTIONS UNCORRECTED.** Its Step 2 mocks
+> `runTier1Record` as a `vi.fn`, correctly, so no test of its own executes the real billing core. Its brief
+> nonetheless labels several mutations "re-run where it can be killed" and predicts RED at `:1010` for Task 7's
+> mutations 7 and 8. Those are fenced in Task 7 now; Task 8's versions test the CRON'S ARGUMENTS, which is
+> different and still worth running, and must be relabelled rather than chased.
+>
+> **CARRIED INTO TASK 8:** pass `queueWrite` as a fresh object LITERAL, never a widened variable, because
+> `internalWrite` is spread LAST in the full-persist branch and would override money columns; pass `deadlineMs`
+> as a real number (it is now required-but-nullable, so `undefined` compiles); and whatever goes in
+> `queueWrite.ai_research_status` must fit VARCHAR(20).
+>
+> **OPEN, RECORDED, NONE BLOCKING** (full list with reasoning in the ledger): todo 19, 20's remainder, 21, 23
+> all still open and untouched by this phase. Deferred minors include the Task 1 migration's SHARE-vs-ACCESS
+> EXCLUSIVE comment, `onStep` handing the hook a mutable reference to the step log, the CSV count assertions
+> fencing the header but not the values, the 59-second rather than 60-second budget bound, and no test anywhere
+> running two simultaneous budget claims.
+
 > # READ FIRST. STATE AS OF 2026-09-23 EVENING. PHASE 1 IS DONE. PHASE 2A IS PLANNED AND AWAITS DAVID'S GO.
 >
 > **PHASE 1 IS CLOSED.** The live check RAN: 5 records, one per lookup path, all HTTP 200, $0.20 vendor

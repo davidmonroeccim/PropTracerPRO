@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { normalizeAddress, createAddressHash } from './address-normalizer';
+import { normalizeAddress, createAddressHash, traceKeyFor } from './address-normalizer';
+import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
 import { DEDUPE, STALE_PROCESSING } from '@/lib/constants';
 import { CACHE_HIT_FILTER } from '@/lib/trace/billedRows';
 import type { AddressInput, DedupeResult, TraceHistory } from '@/types';
@@ -39,12 +40,14 @@ export async function checkDuplicates(
   cutoffDate.setDate(cutoffDate.getDate() - DEDUPE.WINDOW_DAYS);
 
   // Create hashes for all input records
+  // ONE KEY DERIVATION (spec 6.3, D36). traceKeyFor is what the single routes key on, so a record
+  // sent through single and bulk lands on ONE row rather than two. It agrees with plain
+  // normalizeAddress on every record that carries a street and a city, which is every web upload
+  // record; it differs for a record keyed on a parcel, which is the shape 2B sends.
   const recordsWithHashes = records.map((record) => ({
     ...record,
-    normalizedAddress: normalizeAddress(record.address, record.city, record.state),
-    hash: createAddressHash(
-      normalizeAddress(record.address, record.city, record.state)
-    ),
+    normalizedAddress: traceKeyFor(record),
+    hash: createAddressHash(traceKeyFor(record)),
   }));
 
   const allHashes = recordsWithHashes.map((r) => r.hash);
@@ -77,8 +80,24 @@ export async function checkDuplicates(
 
   const validTraces = (existingTraces || []).filter((t: TraceHistory) => {
     if (t.status === 'processing' && new Date(t.created_at) < staleCutoff) {
-      return false; // Stale processing — don't count as duplicate
+      return false; // Stale processing: do not count as a duplicate.
     }
+    // THE BUSY EXEMPTION (spec 5.2), and it is what makes one of our own sentences true.
+    //
+    // busy_try_again tells the customer "The system is busy. Try again in 5 minutes. You were not
+    // charged." That row is written status 'error', so the stale-processing escape above never
+    // reaches it, and the address hash carries no outcome, so the resend matched this very row and
+    // was dropped into Duplicates Removed with nothing said. The customer did what we told them and
+    // got nothing. Resend advice is allowed on exactly two outcomes (spec 7.3) and this is one of
+    // them precisely because the resend genuinely runs.
+    //
+    // It reuses the SAME row, so the step log is still there and executeRoute replays the answers
+    // this record already bought rather than buying them again. Answers older than 24 hours are not
+    // reused, judged by each entry's own timestamp inside executeRoute, because a reused row keeps
+    // its original created_at.
+    //
+    // Only busy. Open task 17 (a finished row blocks a resend for 90 days) is unchanged.
+    if (t.outcome_code === TIER1_OUTCOME.BUSY_TRY_AGAIN) return false;
     return true;
   });
 
@@ -204,9 +223,8 @@ export function removeBatchDuplicates(records: AddressInput[]): {
   let internalDuplicates = 0;
 
   for (const record of records) {
-    const hash = createAddressHash(
-      normalizeAddress(record.address, record.city, record.state)
-    );
+    // The same key derivation checkDuplicates uses, for the same reason (spec 6.3, D36).
+    const hash = createAddressHash(traceKeyFor(record));
 
     if (!seen.has(hash)) {
       seen.add(hash);

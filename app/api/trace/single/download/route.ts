@@ -12,7 +12,7 @@ import type { TraceHistory } from '@/types';
  * get it into their own system except by retyping it. The county dossier makes
  * that worse, not better -- 65 more facts on a card that nothing can carry off.
  *
- * SAME 103 COLUMNS, from `lib/trace/exportCsv.ts`, on purpose. A single-record
+ * SAME 105 COLUMNS, from `lib/trace/exportCsv.ts`, on purpose. A single-record
  * file that had its own shape would mean a customer's importer worked for one
  * button and not the other, and the difference would only show up in their
  * system, not ours.

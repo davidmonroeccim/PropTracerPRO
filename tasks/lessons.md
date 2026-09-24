@@ -4,6 +4,128 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-036: A mock creates a blind spot exactly the size of the thing it replaces (2026-09-24)
+
+**What happened, five times in one phase.** Tier 1 Phase 2A was planned carefully, reviewed against a
+scratch worktree, and corrected twice before Task 1. Five times a guard the plan named as fenced was not,
+and the test the plan named as its owner could not kill it:
+
+1. **Task 2.** The plan named a test to fence the reuse-vs-budget ordering. All 32 prescribed tests passed
+   with the gate hoisted above the reuse branch; only a 33rd test the implementer added on its own initiative
+   caught it.
+2. **Task 5.** Deleting the CSV's `outcome_code` value emission reddened ONE test, not the predicted three,
+   because `toExportCells` is index-safe: the 105-column count assertions fence the HEADER, not the VALUES.
+3. **Task 6.** A mutation was filed as "cannot compile" with the compiler never run on it. Run, it returned
+   exit 0 and killed two tests, one of them fencing "the budget is asked before any money moves" — a property
+   the report had recorded as unfenceable.
+4. **Task 7.** Four money behaviours were deferred to Task 8 tests that mock `runTier1Record`. The throttle
+   test made the MOCK throw, so deleting the real guard changed nothing. Without that line a throttled record
+   is judged `no_match` and files "We looked this owner up by address and found no match. You were not
+   charged." about a lookup nobody made.
+5. **Task 8.** `parcelForTier1Row` was extracted SPECIFICALLY so it could be fenced, its docblock cited L-020
+   for why, and it had zero tests. Deleting one line left `tsc` clean and all 2029 tests green while making
+   every Tier 1 record plan as ownerless, return a TIER 2 plan, throw, and settle `tier1_done`/`no_match`
+   free. The lane would have delivered nothing to every customer.
+
+**The common cause, in the words of the implementer who wrote both the docblock and the gap:** "The same mock
+that keeps these tests honest about the cron is what made the worst mutant in the phase invisible. I wrote the
+docblock that says precisely this and then did not act on it."
+
+Every one of the five sat at a seam where a test double stood in for the thing under test. In each case the
+seam was CORRECT and documented: Task 8's cron tests should mock the billing core, or they stop being cron
+tests. The failure was never the mock. It was not noticing that the mock creates a blind spot the exact shape
+of what it replaces, and that the blind spot needs its own test somewhere else.
+
+**The rules.**
+- **When you mock something, name what you just made invisible, and say where it is fenced instead.** A mock
+  is a coverage decision, not only a convenience. "Task N will cover it" is how a guard goes permanently
+  unfenced, and the last task has no Task N+1.
+- **A prescribed mutation is a hypothesis.** Five of this plan's predictions were wrong after two review
+  passes. Apply every one, and when the result differs from the prediction, the prediction was wrong.
+- **Fence a behaviour in the file that owns the code**, not in the file that happens to call it. Task 7's four
+  guards belonged in Task 7's tests; moving them to Task 8 would have meant unmocking the core and losing both
+  tests.
+- **Assert the CONSEQUENCE, not the field.** `parcelForTier1Row`'s fence works because it calls `planRoute()`
+  and asserts the resulting TIER. A test asserting `parcel.ownerName === 'x'` would have passed while the plan
+  silently became Tier 2.
+- **Never write that a mutation cannot be applied without trying to apply it.** Every row in a mutation table
+  is an observation or the table is worthless.
+
+---
+
+## L-035: Say what the request SENDS, not what the call is for (2026-09-24)
+
+**What happened.** Describing the Tier 1 APN path to David I wrote that it goes "straight to the parcel
+contact lookup... to ask for contacts directly." He came back with the exact right question: "does that
+mean you are looking for the email and phone for the name you already have? I ask because your record
+says the existing name was dropped." It does not. That endpoint takes `parcel_id`, `county` and `state`
+and has no name parameter; the owner name is used only to filter the `persons[]` array the vendor returns.
+He then said: "When we decided on whether to use Advanced or Instant Lookup, I was never told the owner
+name was dropped in the search... this defeats the purpose of the trace in most cases."
+
+**The accounting, which I owed him and which is mixed.** The fact appears once in the decision record, in
+D21's option text on 2026-09-21 ("search the owner's name at their mailing address instead of running the
+nameless APN lookup") with Phase 0 evidence noting "Shasta's lookup sent no name", and he acted on it
+there by choosing arm (c) for the dossier path. It is absent from D2, which set the rung order, and from
+D13, which is where he chose Instant over Advanced. So it surfaced once, in a different context, and was
+never carried back to the decision he was actually making.
+
+**The rules.**
+- When describing a vendor call to David, state the FIELDS the request carries. "Asks for contacts" is a
+  description of purpose and it silently implies inputs the request does not have. Purpose language is
+  where a missing parameter hides.
+- A material property of a call belongs in the decision that turns on it. Recording "the nameless APN
+  lookup" inside one option of D21 did not put it in front of him when he chose Instant at D13. If a fact
+  changes what an option is worth, restate it AT that option, even if it is already written down
+  somewhere else.
+- Before agreeing that a defect is widespread, size it. Here the honest answer narrowed it sharply: the
+  gateway's `recordSchema` requires `address` and `city`, so the named lookup is always planned first on
+  that path, and the web upload has no parcel column at all. The nameless rung is the ONLY rung solely
+  for a v1 caller sending a parcel id with no address. Agreeing "most cases" without checking would have
+  been as unhelpful as the original omission.
+- Check whether the alternative he is weighing would even fix the thing. Advanced is batch-only and still
+  requires a city; Enhanced requires address, city and state at 15 credits against Instant's 5. Neither
+  addresses the no-city case, so framing the fix as an endpoint swap would have wasted his time.
+
+---
+
+## L-034: A disclosed charge is not a finding, and "leave it processing" is not available (2026-09-24)
+
+**What happened.** Task 3's review found that a bulk enqueue failing part-way marks the job `failed`
+while tier 2 rows already written keep running and get billed. I verified the chain (three separate
+upserts, `sweep-property-traces` reads `trace_jobs` only for `created_at` and never for `status`) and
+put it to David as a customer-harm decision, recommending that the job stay `processing` when billable
+rows survived. Both halves were wrong. David: "The customer is told before they make the request that
+Tier 2 is paid per request, not per success. So why are you asking me this question. You cannot leave
+the job processing because the Gateway and API will never complete."
+
+**Why it was wrong, and both reasons were already in my own record.**
+1. **The charge is disclosed up front.** Tier 2 bills per REQUEST, not per success. That is L-030, it
+   is in the spec 6.1 amendment, it is in the handoff's rulings block, and David has stated it more
+   than once. A charge the customer agreed to before submitting is not harm done to them by a failed
+   enqueue. I had the rule quoted in my own ledger two hours earlier and still framed the charge as
+   the problem.
+2. **A non-terminal job breaks the machine consumers.** The Gateway and the v1 API poll for
+   completion; a job parked at `processing` never completes for them. So "keep it processing" was not
+   a conservative option, it was a broken one. I reasoned only about the dashboard customer and never
+   asked what else reads a job's status.
+
+**The rules.**
+- Before calling a charge a defect, check whether the customer was told about it BEFORE the request.
+  A disclosed, pre-agreed charge surviving a failure is the disclosure working, not a leak. L-027 says
+  derive the answer from the decisions; this adds: derive it from the DISCLOSURE too.
+- A job, row or record status is read by more than the surface in front of you. Before proposing a
+  status stay non-terminal, enumerate every consumer that waits on it: the dashboard, the v1 API, the
+  gateway MCP, the stale sweeps. "It stays processing" is a claim about all of them.
+- When a review hands me a money finding, the verification I owe is not only "is the chain real" but
+  "is the outcome already disclosed or already ruled". The first is code reading and I did it; the
+  second is reading my own decision record and I skipped it.
+- This is L-033 with a different surface. The question was real code, honestly measured, and still
+  should not have been asked, because the answer was already settled. Measuring something carefully is
+  not evidence that it is a question.
+
+---
+
 ## L-033: Four manufactured questions nearly hid the one real defect (2026-09-23)
 
 **What happened.** I handed David seven "decisions" on the Phase 2A plan. He answered with
