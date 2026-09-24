@@ -249,16 +249,22 @@ describe('all four surfaces that serve a bulk row serve both queues', () => {
     });
   }
 
-  it('the session summary SELECTS the tier 2 column on every branch that reads it', () => {
+  it('the session summary SELECTS every column the Tier 1 sentence needs, on every branch that reads it', () => {
     // A right accessor behind a select that never fetched the column is the same
-    // blank cell with a longer stack trace. The already-completed branch is the
-    // one every poll after the first hits and the one a reload lands on, and it
-    // selected only `charge, ai_research_status`.
+    // blank cell with a longer stack trace. The already-completed branch (:173) is
+    // the one every poll after the first hits and the one a reload lands on, and
+    // readJobRows (:206) is the one every other branch reads through. Both once
+    // selected only `charge, ai_research_status`, and both have to carry
+    // property_trace_status (the tier 2 collision), outcome_code and trace_steps
+    // (what tier1OutcomeReason actually reads) or the per-outcome counts Task 5
+    // built go silently blank on exactly the branch a customer reloads into.
     const source = read('app/api/trace/bulk/status/route.ts');
     const selects = source.match(/\.select\('[^']*ai_research_status[^']*'\)/g) ?? [];
     expect(selects.length).toBeGreaterThanOrEqual(2);
     for (const select of selects) {
       expect(select, select).toContain('property_trace_status');
+      expect(select, select).toContain('outcome_code');
+      expect(select, select).toContain('trace_steps');
     }
   });
 });
@@ -365,8 +371,8 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
           { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
         ],
       })
-    ).toBe('We looked this owner up by address and found no match. You were not charged.')
-  })
+    ).toBe('We looked this owner up by address and found no match. You were not charged.');
+  });
 
   it('answers for a row whose claims kept dying, at the exhausted terminal', () => {
     expect(
@@ -381,8 +387,8 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
         state: 'TX',
         trace_steps: [],
       })
-    ).toBe('The system is busy. Try again in 5 minutes. You were not charged.')
-  })
+    ).toBe('The system is busy. Try again in 5 minutes. You were not charged.');
+  });
 
   it('leaves an API or MCP bulk row showing EXACTLY what it shows today', () => {
     // The 2B surfaces do NOT clear a reused row's outcome_code (that is 2B's work), so a stale
@@ -402,7 +408,7 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
           { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
         ],
       })
-    ).toBeNull()
+    ).toBeNull();
     // And the legacy entity lane keeps its own wording rather than a Tier 1 sentence.
     expect(
       rowSkipReason({
@@ -412,12 +418,17 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
         outcome_code: 'no_match',
         is_successful: false,
       })
-    ).toBe(ENTITY_TRACE_FAILED_REASON)
-  })
+    ).toBe(ENTITY_TRACE_FAILED_REASON);
+  });
 
   it('still lets a tier 2 terminal status win over a Tier 1 queue value', () => {
     // A row is written onto ONE queue; both values present means the tier 1 one is stale. Answering
     // with it would tell a customer "you were not charged" about a row tier 2 billed per record.
+    //
+    // trace_steps IS REQUIRED HERE, not decoration: without it tier1OutcomeReason's NO_MATCH branch
+    // (noMatchReason) has no answered step to name and returns null on its own, so this assertion
+    // would pass in EITHER term order and prove nothing about which one wins. With a real step the
+    // Tier 1 term can actually answer, so the order is what decides.
     expect(
       rowSkipReason({
         trace_job_id: 'job-1',
@@ -425,9 +436,12 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
         property_trace_status: 'property_trace_no_reach',
         outcome_code: 'no_match',
         is_successful: false,
+        trace_steps: [
+          { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
+        ],
       })
-    ).toBe(PROPERTY_TRACE_NO_REACH_REASON)
-  })
+    ).toBe(PROPERTY_TRACE_NO_REACH_REASON);
+  });
 
   it('says nothing about a Tier 1 bulk row that DELIVERED contacts', () => {
     // tier1OutcomeReason returns null whenever is_successful is true, so a found_by_* code can
@@ -440,6 +454,6 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
         outcome_code: 'found_by_address',
         is_successful: true,
       })
-    ).toBeNull()
-  })
-})
+    ).toBeNull();
+  });
+});

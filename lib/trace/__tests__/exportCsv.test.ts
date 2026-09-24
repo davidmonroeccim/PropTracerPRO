@@ -380,6 +380,9 @@ describe('the base columns', () => {
     );
     expect(cells(row({ found_by: 'parcel_id' })).outcome_code).toBe('');
     expect(EXPORT_COLUMNS).not.toContain('contact_vendor');
+    // trace_steps is "Internal; never in a customer payload" (types/index.ts), and this task reads
+    // it through rowSkipReason for every exported row. Nothing exports the log itself.
+    expect(EXPORT_COLUMNS).not.toContain('trace_steps');
   });
 
   it('exports the outcome code of a row that found nothing, beside its sentence', () => {
