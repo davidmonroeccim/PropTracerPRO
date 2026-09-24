@@ -237,7 +237,7 @@ describe('the CSV export column set', () => {
     const header = csv.split('\n')[0].split(',');
 
     expect(header).toEqual([...EXPORT_COLUMNS]);
-    expect(header).toHaveLength(103);
+    expect(header).toHaveLength(105);
     for (const key of BLOCKED_PROPERTY_RECORD_KEYS) {
       const column = `${DOSSIER_COLUMN_PREFIX}${key}`;
       expect(header, `${key} is a column in the customer's spreadsheet`).not.toContain(column);

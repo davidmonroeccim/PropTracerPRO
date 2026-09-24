@@ -185,7 +185,7 @@ describe("a skipped row in the results CSV", () => {
     // It USED to be conditional, and a conditional header is a header that
     // changes shape between two downloads of the same product. The column is now
     // always there and empty when there is nothing to explain -- which is also
-    // what lets the 103 be a stable set.
+    // what lets the 105 be a stable set.
     H.rows = [row(), row({ status: "no_match", trace_result: null, charge: 0 })];
     const { text } = await csv();
     const header = text.split("\n")[0].split(",");

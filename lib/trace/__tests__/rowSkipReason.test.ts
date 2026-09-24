@@ -343,3 +343,103 @@ describe('the Tier 1 sentence shows only on a row a single trace wrote (spec D33
     ).toBeNull();
   });
 });
+
+describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)', () => {
+  it('answers for a settled Tier 1 bulk row, although it carries a trace_job_id', () => {
+    // D33 gated the Tier 1 term on `trace_job_id === null` and recorded the other half as Phase 2
+    // code: the bulk submit paths must clear outcome_code, found_by and trace_steps on a reused
+    // row, and then a bulk row may surface its own. Task 3 did the clearing on the WEB path, so
+    // the gate opens for exactly the rows that path writes, which are the rows wearing a tier1_
+    // status. No other surface writes one.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: 'tier1_done',
+        property_trace_status: null,
+        outcome_code: 'no_match',
+        is_successful: false,
+        normalized_address: '100 MAIN ST|DALLAS|TX',
+        city: 'DALLAS',
+        state: 'TX',
+        trace_steps: [
+          { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
+        ],
+      })
+    ).toBe('We looked this owner up by address and found no match. You were not charged.')
+  })
+
+  it('answers for a row whose claims kept dying, at the exhausted terminal', () => {
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: 'tier1_failed',
+        property_trace_status: null,
+        outcome_code: 'busy_try_again',
+        is_successful: false,
+        normalized_address: '100 MAIN ST|DALLAS|TX',
+        city: 'DALLAS',
+        state: 'TX',
+        trace_steps: [],
+      })
+    ).toBe('The system is busy. Try again in 5 minutes. You were not charged.')
+  })
+
+  it('leaves an API or MCP bulk row showing EXACTLY what it shows today', () => {
+    // The 2B surfaces do NOT clear a reused row's outcome_code (that is 2B's work), so a stale
+    // single-trace sentence could otherwise answer for a bulk trace that charged. Those rows carry
+    // no tier1_ status, so the gate stays shut for them. This is the scope line of the whole change.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: null,
+        property_trace_status: null,
+        outcome_code: 'no_match',
+        is_successful: false,
+        normalized_address: '100 MAIN ST|DALLAS|TX',
+        city: 'DALLAS',
+        state: 'TX',
+        trace_steps: [
+          { kind: 'TRACERFY_INSTANT_NAMED', outcome: 'miss', cost: 0, at: '2026-09-23T00:00:00Z' },
+        ],
+      })
+    ).toBeNull()
+    // And the legacy entity lane keeps its own wording rather than a Tier 1 sentence.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: 'entity_trace_failed',
+        property_trace_status: null,
+        outcome_code: 'no_match',
+        is_successful: false,
+      })
+    ).toBe(ENTITY_TRACE_FAILED_REASON)
+  })
+
+  it('still lets a tier 2 terminal status win over a Tier 1 queue value', () => {
+    // A row is written onto ONE queue; both values present means the tier 1 one is stale. Answering
+    // with it would tell a customer "you were not charged" about a row tier 2 billed per record.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: 'tier1_done',
+        property_trace_status: 'property_trace_no_reach',
+        outcome_code: 'no_match',
+        is_successful: false,
+      })
+    ).toBe(PROPERTY_TRACE_NO_REACH_REASON)
+  })
+
+  it('says nothing about a Tier 1 bulk row that DELIVERED contacts', () => {
+    // tier1OutcomeReason returns null whenever is_successful is true, so a found_by_* code can
+    // never surface as a "reason". Nothing is invented for a row with nothing to explain.
+    expect(
+      rowSkipReason({
+        trace_job_id: 'job-1',
+        ai_research_status: 'tier1_done',
+        property_trace_status: null,
+        outcome_code: 'found_by_address',
+        is_successful: true,
+      })
+    ).toBeNull()
+  })
+})

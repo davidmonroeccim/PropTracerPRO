@@ -5,10 +5,10 @@ import entityHitAddress from "@/lib/tracerfy/__tests__/fixtures/entity-hit-addre
 
 /**
  * The single-record download. Without it the export is bulk-only in practice
- * and a customer who traced one address has to retype 103 facts.
+ * and a customer who traced one address has to retype 105 facts.
  *
  * What is actually tested here is the DOOR, not the file: who may open it, whose
- * row comes back, and that it is the same 103 columns the bulk button produces.
+ * row comes back, and that it is the same 105 columns the bulk button produces.
  * The contents of a row are the shared module's tests.
  */
 
@@ -78,7 +78,7 @@ beforeEach(() => {
 });
 
 describe("the single-record download", () => {
-  it("is the same 103 columns the bulk button produces", async () => {
+  it("is the same 105 columns the bulk button produces", async () => {
     // One module, one header. Two shapes would mean a customer's importer works
     // for one button and not the other, and they find out, not us.
     //
@@ -95,7 +95,7 @@ describe("the single-record download", () => {
     expect(parsed.errors).toEqual([]);
     expect(parsed.data).toHaveLength(2);
     expect(parsed.data[0]).toEqual([...EXPORT_COLUMNS]);
-    expect(parsed.data[1]).toHaveLength(103);
+    expect(parsed.data[1]).toHaveLength(105);
   });
 
   it("keeps a comma inside a value in its own cell", async () => {

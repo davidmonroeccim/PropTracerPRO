@@ -4,6 +4,22 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (b): Tier 1 Phase 2A, Task 5: a bulk row says why, and the CSV says which key.
+
+- rowSkipReason lets a TIER 1 QUEUE row serve its own outcome sentence. That is D33's recorded
+  other half: the web submit now clears a reused row's outcome_code, found_by and trace_steps
+  (Task 3), so on those rows the code can only belong to the trace the customer is looking at. API
+  and MCP bulk rows carry no tier1_ status and keep showing exactly what they show today.
+- The results CSV gains found_by and outcome_code as columns 104 and 105, at the very end of an
+  append-only header, after the 65 dossier columns. The dossier-tail assertion gained an upper bound
+  (slice(38, 103), because the dossier block stopped being the tail); every 103 became 105 across
+  THREE test files and four prose sites, the third test file being the single-record download
+  route's, which asserts the count because its point is that it matches the bulk button. The only
+  103s left in the repo are exportCsv.ts's true 39-103 dossier range and a phone number.
+- The bulk page's per-outcome counts needed no new component and no new string: summarizeSkips
+  already groups by sentence and appends "That happened to N of them", and it reaches the Tier 1
+  outcomes now that the gate is open and both selects carry the columns it reads.
+
 ## 2026-09-24 (a): Tier 1 Phase 2A, Task 4: the four seams a queued Tier 1 row touches.
 
 - app/api/trace/bulk/status: job completion and the match count now ask BOTH queue columns. A web

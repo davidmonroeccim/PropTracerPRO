@@ -18,7 +18,7 @@
  * the fence tests THIS FILE's column set directly instead.
  *
  * ------------------------------------------------------------------------
- * THE COLUMN SET IS APPEND-ONLY. 103 COLUMNS, THE FIRST 16 NEVER MOVE.
+ * THE COLUMN SET IS APPEND-ONLY. 105 COLUMNS, THE FIRST 16 NEVER MOVE.
  * ------------------------------------------------------------------------
  *
  * Every index that already existed keeps its index, so an importer keyed on
@@ -140,6 +140,20 @@ export const EXPORT_COLUMNS: readonly string[] = [
   'mailing_zip',
   // 39-103. The county dossier, in vendor order, every name prefixed.
   ...DOSSIER_EXPORT_COLUMNS,
+  // 104-105. WHICH KEY FOUND THE OWNER, AND WHAT THE OUTCOME WAS (spec 7.1, 7.2, D10).
+  //
+  // AT THE VERY END, AFTER THE DOSSIER BLOCK, because this header is append-only and an importer
+  // keyed on column position has to survive the change. Putting them beside `skip_reason`, where
+  // they belong logically, would shift 84 columns right.
+  //
+  // `found_by` is the KEY (address, parcel_id, company_name), never the vendor: the vendor lives in
+  // contact_vendor, which is internal and deliberately has no column here. `outcome_code` is the
+  // machine-readable twin of `skip_reason` at column 21, which carries the sentence.
+  //
+  // Blank on every row written before 2026-09-22 and on every tier 2 row, because both columns are
+  // NULL there. Blank, never a plausible guess (CLAUDE.md rule 7).
+  'found_by',
+  'outcome_code',
 ];
 
 /**
@@ -231,7 +245,7 @@ const FORMULA_LEAD = /^[=+\-@\t\r]/;
  * The dangerous forms are not arithmetic: `=HYPERLINK(...)` and the legacy DDE
  * `=cmd|...` are the ones that exfiltrate or execute.
  *
- * 65 of the 103 columns now carry vendor free text -- `lender_name`,
+ * 65 of the 105 columns now carry vendor free text -- `lender_name`,
  * `subdivision`, `roof_material`, `document_type`, `property_use` -- so this
  * phase grew the exposed surface roughly six-fold over the 16 columns that
  * existed before it.
@@ -320,7 +334,7 @@ export function renderCell(value: unknown, zeroMeansAbsent = false): string {
 }
 
 /**
- * One history row as the 103 values, in column order, UNRENDERED.
+ * One history row as the 105 values, in column order, UNRENDERED.
  *
  * Values stay raw here so the renderer owns every blank/Yes/No/zero decision.
  * Exported for the tests, which assert the mapping without parsing a CSV back
@@ -377,11 +391,13 @@ export function toExportValues(row: TraceHistory): unknown[] {
     ...appendedEmailColumns.map((_, i) => emails[i + LEGACY_EMAIL_COLUMNS] ?? null),
     result?.mailing_zip ?? null,
     ...DOSSIER_EXPORT_KEYS.map((key) => dossier[key] ?? null),
+    row.found_by ?? null,
+    row.outcome_code ?? null,
   ];
 }
 
 /**
- * One history row as the 103 rendered cells.
+ * One history row as the 105 rendered cells.
  *
  * THE COLUMN NAME IS THE MISSING ARGUMENT. Two rules cannot be decided from a
  * value alone -- whether a 0 means absent, and whether money renders bare -- so

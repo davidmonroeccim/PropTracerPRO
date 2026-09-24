@@ -1078,6 +1078,75 @@ describe("a job whose Tier 1 rows are on the queue", () => {
   });
 });
 
+describe("the job summary counts Tier 1 bulk rows by outcome", () => {
+  it("names each outcome and how many rows it covers", async () => {
+    H.job = { ...H.job, tracerfy_job_id: null, records_submitted: 6 };
+    H.jobRows = [
+      // Two rows that found nothing by address.
+      ...[1, 2].map((n) => ({
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "no_match",
+        is_successful: false,
+        outcome_code: "no_match",
+        normalized_address: `${n} MAIN ST|DALLAS|TX`,
+        city: "DALLAS",
+        state: "TX",
+        charge: 0,
+        trace_steps: [
+          { kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0, at: "2026-09-23T00:00:00Z" },
+        ],
+      })),
+      // Three rows with no city and no parcel id.
+      ...[3, 4, 5].map((n) => ({
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "no_match",
+        is_successful: false,
+        outcome_code: "no_lookup_key",
+        normalized_address: `${n} MAIN ST||TX`,
+        city: "",
+        state: "TX",
+        charge: 0,
+        trace_steps: [],
+      })),
+      // One row that delivered, which has nothing to explain and must not be counted.
+      {
+        trace_job_id: "job-1",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        status: "success",
+        is_successful: true,
+        outcome_code: "found_by_address",
+        found_by: "address",
+        normalized_address: "6 MAIN ST|DALLAS|TX",
+        city: "DALLAS",
+        state: "TX",
+        charge: 0.15,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+    // Only rows with a stated reason are counted, which is the rule BulkSkipSummary's own header
+    // insists on: the heading scopes itself to the rows we can EXPLAIN.
+    expect(body.records_skipped).toBe(5);
+    expect(body.skip_reason).toContain(
+      "We looked this owner up by address and found no match. You were not charged. That happened to 2 of them."
+    );
+    expect(body.skip_reason).toContain(
+      "This record is missing the city and the parcel ID, so it could not be looked up. You were not charged. Send it again with the city or the parcel ID. That happened to 3 of them."
+    );
+  });
+});
+
 /* ------------------------------------------------------------------ *
  * THE MIXED-JOB COMPLETION GATE ALSO HAS TO RECOGNISE A QUEUED TIER 1 ROW.
  *
