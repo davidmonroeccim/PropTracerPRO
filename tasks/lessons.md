@@ -4,6 +4,43 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-034: A disclosed charge is not a finding, and "leave it processing" is not available (2026-09-24)
+
+**What happened.** Task 3's review found that a bulk enqueue failing part-way marks the job `failed`
+while tier 2 rows already written keep running and get billed. I verified the chain (three separate
+upserts, `sweep-property-traces` reads `trace_jobs` only for `created_at` and never for `status`) and
+put it to David as a customer-harm decision, recommending that the job stay `processing` when billable
+rows survived. Both halves were wrong. David: "The customer is told before they make the request that
+Tier 2 is paid per request, not per success. So why are you asking me this question. You cannot leave
+the job processing because the Gateway and API will never complete."
+
+**Why it was wrong, and both reasons were already in my own record.**
+1. **The charge is disclosed up front.** Tier 2 bills per REQUEST, not per success. That is L-030, it
+   is in the spec 6.1 amendment, it is in the handoff's rulings block, and David has stated it more
+   than once. A charge the customer agreed to before submitting is not harm done to them by a failed
+   enqueue. I had the rule quoted in my own ledger two hours earlier and still framed the charge as
+   the problem.
+2. **A non-terminal job breaks the machine consumers.** The Gateway and the v1 API poll for
+   completion; a job parked at `processing` never completes for them. So "keep it processing" was not
+   a conservative option, it was a broken one. I reasoned only about the dashboard customer and never
+   asked what else reads a job's status.
+
+**The rules.**
+- Before calling a charge a defect, check whether the customer was told about it BEFORE the request.
+  A disclosed, pre-agreed charge surviving a failure is the disclosure working, not a leak. L-027 says
+  derive the answer from the decisions; this adds: derive it from the DISCLOSURE too.
+- A job, row or record status is read by more than the surface in front of you. Before proposing a
+  status stay non-terminal, enumerate every consumer that waits on it: the dashboard, the v1 API, the
+  gateway MCP, the stale sweeps. "It stays processing" is a claim about all of them.
+- When a review hands me a money finding, the verification I owe is not only "is the chain real" but
+  "is the outcome already disclosed or already ruled". The first is code reading and I did it; the
+  second is reading my own decision record and I skipped it.
+- This is L-033 with a different surface. The question was real code, honestly measured, and still
+  should not have been asked, because the answer was already settled. Measuring something carefully is
+  not evidence that it is a question.
+
+---
+
 ## L-033: Four manufactured questions nearly hid the one real defect (2026-09-23)
 
 **What happened.** I handed David seven "decisions" on the Phase 2A plan. He answered with
