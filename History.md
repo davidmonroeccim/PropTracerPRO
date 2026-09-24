@@ -4,6 +4,44 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (f): Tier 1 Phase 2A, Task 9 build half: gates green, mutation table, live runner fenced.
+
+- Suite gates: vitest 2040 passing / 87 files, 0 failing (Task 1 baseline 1902 / 84); tsc 0 errors;
+  eslint 45 problems, exactly the baseline, under the 46 ceiling and the 47 cap; next build compiles
+  clean. Eight gate greps: six print nothing, grep 7 prints only the one true `39-103` dossier range
+  at `lib/trace/exportCsv.ts:141`, and grep 3's four hits are all prose recording the removal of the
+  second price derivation, with `lib/api/pricing.ts` gone and no live reference anywhere.
+- Mutation table in `tasks/todo.md`: 115 mutations across Tasks 2 to 8, 104 RED in the final
+  measured state, every survivor written as such with its reason. **Three of the brief's own
+  predictions were stale and the measured results are recorded instead.** Task 7's mutation 3 was RED
+  in Task 7, not green and deferred. Task 7's mutations 4, 6, 7 and 8 were fenced in Task 7's OWN
+  file in its fix round, because Task 8 mocks `runTier1Record` and could never have killed them.
+  Task 8's run-budget line was UNFENCED in round 1 and KILLED in its fix round with fake timers.
+  Task 2's predicted unreached `record()` site does not exist: all seven were mutated separately and
+  all seven went red. Three things remain genuinely unfenced, and no more: the MCP `tier1: 0` call
+  site, the Tier 1 lane's try/catch placement, and `TIER1_RECORD_BUDGET_MS`.
+- Twenty records chosen, FOUR per path across the five paths, on David's 2026-09-24 override of the
+  plan's one per path. Thirteen states, four property types, no county or parcel from Phase 0, the
+  Phase 1 live check or the FastAppend probe. **Parcels came from the property-registry database
+  DIRECTLY, not the Suite Gateway**, which is mid-modification: read as the registry's own
+  SELECT-only `registry_readonly` role over `supabase db query --db-url`, which needs no project link
+  and so cannot touch this repo's own (confirmed still PropTracerPRO afterwards).
+- All twenty were verified against the real `planRoute` locally, free: B1 routes one Instant, B2 no
+  step at all, B3 one FastAppend, B4 the Instant then FastAppend ladder, B5 the tier 2 dossier, and
+  every owner name parses to the right first and last name. The name-order rule was met by
+  MEASUREMENT rather than by county label: the two Wisconsin counties store names naturally, and
+  elsewhere a three-token name with a trailing middle initial is read correctly by `splitPersonName`.
+- `tasks/research-scripts/phase2a/run-live.ts` computes its own worst case from the product's own
+  `VENDOR_COST` table, per ROW rather than per path label: **$4.40**, not the $4.00 the dispatch
+  estimated, because a city-less row is budgeted at the FastAppend figure it could still reach and a
+  tier 2 record is budgeted at three owners rather than two. Five refusals proven with PTP_LIVE_RUN
+  absent, nothing spent: no records file, a duplicate id, a path with no record, a tier 2 record
+  declaring no owner count, and `--live` without the token, which fires first and shadows both cap
+  checks. Rendered the 20-row upload.csv.
+- Nothing was spent and nothing was uploaded. The live check waits for David's dollar amount and his
+  own browser session, and the controller drains the queue. Task 9 and the Phase 2A line stay
+  unticked. Never pushed, merged or deployed.
+
 ## 2026-09-24 (e): Tier 1 Phase 2A, Task 8: sweep-entity-traces becomes the Tier 1 cron.
 
 - A second lane, beside the legacy entity lane, claiming only tier1_ statuses: atomic

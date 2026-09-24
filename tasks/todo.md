@@ -61,6 +61,224 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 
+## Phase 2A Task 9 review: suite gates and the mutation table (2026-09-24)
+
+**Task 9 is HALF done and the Phase 2A box stays open.** The build half is here: the gates, the
+mutation table, the 20 chosen records and the live runner with its refusals proven. The live check
+itself is not run. The web bulk route authenticates by session cookie, so David uploads
+`tasks/research-test/phase2a/upload.csv` himself and the controller drains the queue afterwards
+with his dollar amount (lesson L-031, and the Phase 1 split that kept the blast radius at $0.20).
+
+**Suite gates (Step 1).** `npx vitest run`: **2040 passed / 87 files, 0 failed** (Task 1 baseline was
+1902 / 84, so 138 more passing and none failing). `npx tsc --noEmit`: **exit 0**. `npx eslint app lib
+components`: **45 problems (40 errors, 5 warnings)**, exactly the measured baseline, under the 46
+ceiling and the 47 hard cap. `npx next build`: **compiles clean, exit 0**, 0 type or lint errors in
+the build.
+
+**The eight gate greps, every line accounted for.**
+
+| # | Grep | Result |
+|---|---|---|
+| 1 | `submitBulkTrace` in `app/api/trace/bulk/route.ts` | Nothing. The web surface no longer submits to Tracerfy at all. |
+| 2 | `tracerfyCanRunTier2` in `app lib` | Nothing. Task 6 renamed it to `tracerfyCanRun` at all three call sites and all four test files. |
+| 3 | `getChargePerTrace` or `lib/api/pricing` in `app lib` | **Four lines, all prose, zero live code.** `lib/constants.ts:191` is the comment recording the removal; `lib/api/__tests__/pricing.test.ts:9` and `:219` are that file's header and an inline note saying the module is gone; `lib/suite/pricing.ts:23` is the one surviving derivation naming the two dead twins it replaced. `lib/api/pricing.ts` does not exist, and a grep filtered to non-comment lines returns nothing. The L-030 fence holds: ONE derivation. |
+| 4 | `isLikelyBusiness` in `app/api/trace/bulk/route.ts` | Nothing. The web upload never had a second classifier and gains none; `planRoute` classifies. |
+| 5 | `tracerfy: 2` in `app/api/cron` | Nothing. No per-record reservation constant survives in either cron: the Tier 1 lane reserves per call, the Tier 2 lane once from `reservationForSteps(plan.steps)`. |
+| 6 | `date_trunc('minute'` in `supabase/migrations/20260923_vendor_rate_budget.sql` | Nothing. The window is `date_trunc('second')` plus a trailing-60-second sum, so the 900-calls-in-one-span defect is not back. |
+| 7 | `103` in `lib/trace/exportCsv.ts` and the two download routes | **Exactly one line**, `lib/trace/exportCsv.ts:141`, `// 39-103. The county dossier`, which is still true: the dossier block really does occupy columns 39 to 103 and the two new columns sit after it at 104 and 105. No other line printed, so no stale column count survived Task 5. |
+| 8 | `console.error('Failed to insert trace history batch` in the bulk route | Nothing. `insertHistoryRows` throws now, so a customer is never told their upload worked when no row was written. |
+
+### The mutation table, Tasks 2 to 8
+
+**115 mutations applied across the seven tasks. 104 RED in the final measured state.** Every row
+below is the MEASURED result from that task's own report, not the plan's prediction. Where a task ran
+a fix round, the fix round's measurement is the final state and the earlier one is carried beside it,
+because the change of verdict is itself the finding.
+
+**Task 2, the Tier 1 ladder and the two per-step hooks: 12 mutations, 12 RED.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| 1 | `tier1QueuedStatusFor` attempt 1 returns bare `'queued'` | `does NOT reuse attempt 1 as a bare queued`, `overlaps it NOWHERE` + 3 | RED |
+| 2 | `entityTraceAttempts.ts`: the `attempt >= MAX` terminal branch deleted | `walks one rung up per failed attempt and then gives up terminally` | RED |
+| 3-9 | **All SEVEN `record()` sites in `executeRoute.runStage`, mutated INDIVIDUALLY** (`await record` to `reports.push`): skip-after-hit, reused answer, request budget, `canSpend` refusal, our own refused request, vendor failure, answered | one named test per site, seven sites, no representative | RED, all seven |
+| 10 | `canSpend` refusal `break` becomes `continue` | `STOPS the ladder at the refused call` | RED. The brief's SECOND named test stayed green: with `canSpend` false unconditionally, step 2 is also skipped. A misprediction of which test, not a coverage gap. |
+| 11 | the `canSpend` block relocated above the reuse branch | `never asks the budget about a step that will be REPLAYED from the log` (33rd test, author-added) | RED. The brief-named test stayed green, which is why the 33rd was written. |
+| fix 1 | the `canSpend` block hoisted above the request-deadline branch | `never asks the budget about a call the request deadline already refused` | RED |
+
+**FINDING, against the brief's own list.** The brief asked for "any of the seven `record()` sites no
+case in the table reaches, with the reason". There is no such site. All seven were mutated
+separately and all seven went red, so the predicted gap did not occur and nothing is carried.
+
+**Task 3, the web upload enqueues: 12 mutations, 10 RED, 1 equivalent, 1 tsc only.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| 1 | the busy exemption deleted from `checkDuplicates` | `does NOT count a busy row as a duplicate` | RED |
+| 2 | the exemption widened to any `outcome_code` | `still counts every OTHER finished row as a duplicate` | RED |
+| 3 | `removeBatchDuplicates` hash reverted to `normalizeAddress` | `removeBatchDuplicates keys on traceKeyFor` | RED |
+| 4 | enqueue writes `'queued'` instead of `tier1QueuedStatusFor(1)` | `is ENQUEUED on the Tier 1 rung the cron claims` + 5 | RED (6 tests) |
+| 5 | the conditional D33 clear-on-reuse spread deleted | `clears the stale Tier 1 answer a reused row was carrying` | RED |
+| 6 | that spread made unconditional, wiping a busy row's step log | `does NOT clear the step log of a busy row it is resuming` | RED, the money half |
+| **7** | `traceKeyFor` reverted to `normalizeAddress` at the enqueue | none | **GREEN, EQUIVALENT MUTANT, as predicted.** Evidence: the two derivations agree on every record this surface can send, because street and city are always both present or both absent here and there is no parcel id column. The divergence is fenced instead in `lib/utils/__tests__/deduplication.test.ts`, by `removeBatchDuplicates keys on traceKeyFor` and the parcel case of `is traceKeyFor, so one record cannot land on two rows through two doors`. |
+| 8 | `insertHistoryRows`'s swallow restored (`throw` back to `console.error`) | `does NOT answer success, which is what hid this before` + 2 | RED. The mutation that matters most in the task: this is the one shape in the phase that silently loses customer rows. |
+| 9 | the `trace_jobs` failure update deleted from the catch, leaving the 500 | `writes the JOB failed with a reason` | RED |
+| **10** | the catch body moved to the outer handler catch | none | **tsc ONLY (L-020), NOT counted as a kill.** `TS2304: Cannot find name 'job'` and `'adminClient'`: `job` is declared inside the inner `try`, out of scope at the outer catch. Restored. |
+| fix 1 | `tracerfy_job_id: null` deleted from the enqueue | `goes on the TIER 1 QUEUE, not to Tracerfy` | RED |
+| fix 2 | `recordsWithHashes` reverted to 3-arg `normalizeAddress` | `checkDuplicates looks up the LOOKUP half on traceKeyFor too` | RED. Coverage defect only, no implementation change. |
+
+**Task 4, the four seams: 19 mutations, 15 RED, 4 survived.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| status 1 | `stillWorking` narrowed to the tier 2 column alone | `stays PROCESSING while a Tier 1 row is still queued` + 2 | RED |
+| status 2 | the `isTier1QueueRow` arm dropped from `recordsMatched` | `completes once every Tier 1 row is terminal, and COUNTS its matches` + 1 | RED |
+| status 3 | that arm changed to `isTier1QueuePending` | same two | RED |
+| **status 4** | `outcome_code` dropped from `readJobRows`'s select | none | **GREEN, exactly as predicted, and KILLED IN TASK 5 (mutation 7).** Task 5 is what starts reading `outcome_code`; its test is the fence Task 4 could not build. |
+| sweep 1 | the Tier 1 arm dropped from the stale-sweep queue guard | `is left entirely alone, not failed` | RED |
+| sweep 2 | `tier1QueueRows.length > 0` dropped from the completion branch | `COMPLETES such a job once the queue has drained` | RED |
+| live-work web | the `isTier1QueuePending` clause deleted in `app/api/trace/single/route.ts` | `refuses to touch a row the Tier 1 bulk queue is working` | RED (200 vs 503) |
+| live-work v1 | the same deletion in the v1 twin (L-018, both call sites) | same test, v1 | RED (200 vs 503) |
+| **live-work seed** | the clause still deleted, but the SEED changed to a FRESH `processing` row with no `trace_job_id` | same test, both files | **BOTH RESULTS, because the survival is the finding. GREEN on the fresh seed, RED on the aged seed.** A fresh row is already live work through `processingIsLive` whatever the clause says, so the brief's original seed fenced nothing. Both files restored to the aged seed (`created_at: hoursAgo(3)` with a `trace_job_id`, which is also the realistic shape since the upsert never rewrites `created_at`) and reverified 132/132 and 150/150. |
+| **preflight 1** | the `isTier1QueuePending` arm deleted from the reserve loop | none of the brief's tests | **SURVIVED, EQUIVALENT MUTANT, measured (30/30 green with the arm gone).** A Tier 1 queued row always carries `status: 'processing'`, so the pre-existing bare `else if (row.status === 'processing')` arm reserves the identical rate for the identical row. `fakeClient()` ignores `.or()` content, so no total-value assertion can tell them apart. Fenced instead by two author-added tests that assert the query STRING. |
+| preflight 2 | the three `else if`s became three plain `if`s | `prices a Tier 1 queue row ONCE, never at both rates` + 3 | RED (6 of 30) |
+| preflight 3 | the Tier 1 arm moved above the tier 2 arm | `reserves the TIER 2 rate when a row is somehow on both columns` | RED |
+| or-clause A | the `ai_research_status.in.(...)` branch dropped from the `.or()` | `puts the Tier 1 queue statuses in the OR clause` (author-added) | RED |
+| or-clause B | that branch wrapped in an `and(...)` with `created_at` | `does NOT bound the Tier 1 queue arm by age either` (author-added) | RED |
+| fix 1 | `ai_research_status` dropped from the stale sweep's stage 2 select | `selects ai_research_status alongside property_trace_status` | **GREEN first, then RED once the fence existed.** The harness returns its rows whatever columns are asked for, so the widened select was genuinely unfenced until a source-scan test was added. |
+| fix 4a | the stall filter narrowed to the tier 2 column | `does NOT fail the job while a Tier 1 row is still queued, with no tier 2 rows at all` | RED (failed vs processing) |
+| fix 4b | the same narrowing at the completion and `records_pending` sites | `stays processing over a queued Tier 1 row, even with no tier 2 rows at all` | RED (completed vs processing) |
+| fix 6 | sweep 1 re-run, printing the written payload | `is left entirely alone, not failed` | RED. Re-run to correct a false comment: the wrong verdict is a premature `{ completed, records_matched: 0 }`, not `failed`. |
+| fix 7 | `ai_research_status` dropped from `inFlightUnbilledCost`'s select | none | **Value-equivalent, for the same reason as preflight 1.** Fenced by the two `.or()`-string tests. |
+
+**Task 5, the D33 bulk half and the CSV: 11 mutations, 11 RED.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| 1 | `|| isTier1QueueRow(...)` dropped from `rowSkipReason` | `answers for a settled Tier 1 bulk row` + 1 | RED |
+| 2 | that term replaced by `|| true` | `leaves an API or MCP bulk row showing EXACTLY what it shows today` + 4 | RED (5) |
+| 3 | the Tier 1 term moved above `propertyTraceSkipReason` | killed by the PRE-EXISTING `lets a Tier 2 terminal status win over a stale Tier 1 outcome`, not the brief-named test | RED. The brief-named test's fixture carried no `trace_steps`, so `noMatchReason([])` returned null and the `??` chain fell through whatever the order. Fixture fixed in fix 2. |
+| 4 | the two appended columns swapped | `appends found_by and outcome_code at the very END` + 2 | RED (3) |
+| 5 | `row.outcome_code ?? null` deleted from `toExportValues` | `exports the outcome code of a row that found nothing` | RED (1), narrower than predicted: the two length assertions cannot see it, because `toExportCells` maps over `EXPORT_COLUMNS` so the rendered length never changes. |
+| 6 | the two columns inserted BEFORE the dossier block | `prefixes all 65 dossier columns and keeps vendor order` + 12 | RED (13) |
+| 7 | `outcome_code` dropped from `readJobRows`'s select | `names each outcome and how many rows it covers` | RED. **This is the kill for Task 4's green status-4 mutant.** |
+| 8 | `trace_steps` dropped from the same select | same test | RED |
+| fix 1a / 1b | `outcome_code, trace_steps` dropped from the `doneRows` select, and from `readJobRows`, separately | `the session summary SELECTS every column the Tier 1 sentence needs, on every branch that reads it` | RED both. The reviewer had measured the `doneRows` twin fully green before the fence was widened. |
+| fix 2 | mutation 3 re-run after the fixture gained `trace_steps` | both ordering tests | RED (2). The previously-insensitive test now goes red too. |
+
+**Task 6, the shared vendor rate budget: 23 mutations, 21 RED, 1 UNFENCED, 1 fenced only by a live probe.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| A1 | `if (data !== true)` weakened to `if (data === false)` | `REFUSES when the RPC answers no boolean at all` | RED |
+| A2 | the whole `if (error) return false` block deleted | `REFUSES when the RPC errors, rather than assuming capacity` | RED |
+| A3 | the Tracerfy limit 450 raised to 500 | `is 450 per 60 seconds for each vendor, 50 under the vendor limit` + 1 | RED |
+| A4 | `return true` after the first vendor grant | `grants nothing when either vendor refuses` + 1 | RED |
+| A5a / A5b / A6 | `POOL_BY_STEP` re-pointed for `DOSSIER_APN`, `DOSSIER_ADDRESS` and `FASTAPPEND_ENTITY`, each separately (L-018) | `counts every step against the pool it actually draws` + 1 | RED, all three |
+| A7 | `pruneVendorRateWindows` re-pointed at `trace_history` | `prunes the bucket table, and nothing else` | RED |
+| B1 | **the rejected design**: the per-record guard deleted and a per-call `canSpend` passed into the Tier 2 cron | `asks the budget ONCE PER RECORD` + 2 | RED (3). This is the mutant that proves a dossier is never bought twice. |
+| B2 | the reservation block moved BELOW the `executeRoute` call | `asks the budget BEFORE the dossier call, never after it` + 1 | **RED (2).** Round 1 misclassified this as equivalent-by-construction on an untested claim that it could not compile. Measured in fix round 2: tsc exit 0, 2 failed of 67. So it is RED, not equivalent. |
+| B3 | the release writes `onFailure.status` instead of the row's own rung | `releases a record refused BEFORE IT STARTS back to its OWN rung, unspent` | RED |
+| B4 | the guard inverted so a refused record runs anyway | the same test, by name, and 38 others | RED (39), the money half |
+| **B5** | `pruneVendorRateWindows` moved per claim | `prunes the bucket table once per run, not once per claim` | RED, **and only because the test seeds TWO rows.** With the brief's single-row seed the assertion is green under a per-claim prune and would fence nothing. |
+| B6 | `reservationForSteps(plan.steps)` replaced by a hard-coded `{ tracerfy: 2, fastappend: 1 }` | `asks the budget ONCE PER RECORD, for the steps the plan carries` | RED |
+| B7 | `throttled` dropped from the response object | 2 tests | RED |
+| C1 | the web call site passes `tier1: 0` | `DOES ask about a tier 1 only batch now` + 1 | RED |
+| C2 | the `queuedTier1` term dropped from `needed` | `counts the rows ALREADY queued on BOTH queues` | RED |
+| C3 | the `records.tier1 * TRACERFY_TIER1_CREDITS` term dropped | `sizes a tier 1 record at the person lookup it spends` + 3 | RED (4) |
+| C4 | the empty-batch short circuit restored to the old tier-2-only gap | `reads the balance for a tier-1-only batch` + 4 | RED (5) |
+| C5 | the Tier 1 count error returns false instead of throwing | `raises OUR failure on the Tier 1 count too, never answers it` | RED |
+| C6 | the v1 call site's `tier1: 0` changed | `is asked about the tier 2 records only` | RED |
+| **C7** | `tier1: 0` at the MCP call site in `lib/suite/mcp-tools.ts` | none | **SURVIVED, recorded UNFENCED, deliberately.** `lib/suite/__tests__/mcp-tools.test.ts` references the symbol exactly once, at line 54, inside its `vi.mock` factory; it never imports `tracerfyCanRun` and asserts that call's arguments in no test. Still unfenced after fix round 2, by decision, and carried here rather than papered over. It becomes the real Tier 1 record count in 2B when that surface stops posting to the batch endpoint. |
+| **RPC** | the sliding window changed to a minute-truncated bucket in `claim_vendor_rate` | none possible: every unit test stubs `rpc` | **UNKILLABLE BY ANY UNIT TEST. Fenced ONLY by Task 6 Step 3's live database probe**, measured: `fill` true at 11:57:05, `refused_now` false, `granted_after_61s` true at 11:58:11, 66 seconds apart. This is the named risk of the phase and the probe is the whole of its fence. |
+
+Task 6 also corrected an exhaustiveness overclaim of its own: `POOL_BY_STEP` has a proven mutant on
+3 of 5 keys and `VENDOR_RATE_LIMIT` on 1 of 2. `TRACERFY_INSTANT_NAMED`, `TRACERFY_PARCEL_APN` and
+`VENDOR_RATE_LIMIT.fastappend` are covered by assertion, not by a mutant.
+
+**Task 7, the one billing path: 13 mutations, 12 RED, 1 equivalent.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| **1** | `billable = hasContactData(result)` becomes `billable = execution.contactsFound` | none (33/33, 2001/2001) | **GREEN, EQUIVALENT, with evidence. The brief predicted RED.** Its premise, that `contactsFound` is true for an empty contacts object, is no longer true of `executeRoute`: `runStage` sets `hit` only on `call.hit && delivered`, `delivered` is `hasPhoneOrEmail(call.contacts)`, and `contacts` and `contactsFound` are assigned only as a pair. Not counted as a kill. |
+| 1b | `billable = true`, the gate deleted outright | `charges nothing for a matched owner with no phone and no email` + 14 | RED (15). Author-added, because mutation 1 turned out equivalent and a money gate must have a killing mutant. |
+| 2 | the ledger probe branch turned off | `records, and does not take again, a debit an earlier attempt booked but never wrote to the row` | RED |
+| **3** | `input.ledgerSince` to `null` in `collectedChargesFor` | `does not treat an OLD debit the row never recorded as this request's money` | **RED, and the brief is stale here.** The brief predicted GREEN and deferred it to Task 8. The single-trace suite kills it on its own: isolated, 1 failed of 33. It is NOT a mutant this task leaves unfenced. |
+| **4** | `...input.queueWrite` hard-coded to two nulls | `writes the queue columns it was given, on BOTH persist branches` | **SURVIVED round 1, RED in fix round 1, IN TASK 7'S OWN FILE.** |
+| 5 | the wrapper's `resumeFromStepLog` forced true | `runs a row that is NOT busy fresh, whatever its log says` | RED |
+| **6** | `onStep` deleted from the `executeRoute` options | `calls onStep as each answer arrives, so a killed run never re-buys an answered step` | **SURVIVED round 1, RED in fix round 1, IN TASK 7'S OWN FILE.** |
+| **7** | `if (execution.throttled) throw new VendorBudgetThrottledError()` deleted | `throws VendorBudgetThrottledError and judges, charges and persists NOTHING when the budget refuses` | **SURVIVED round 1, RED in fix round 1, IN TASK 7'S OWN FILE. The money one.** |
+| **8** | `canSpend` deleted from the `executeRoute` options | the test above AND `asks canSpend for the call it is about to make, and runs it when the budget allows` | **SURVIVED round 1, RED in fix round 1, IN TASK 7'S OWN FILE.** Two distinct killers, so 7 and 8 are separately proven and neither hides the other. |
+| 9 | the wrapper's `ledgerSince` window replaced by null | `does not treat an OLD debit...` | RED (author-added, L-018) |
+| 10 | the wrapper's `queueWrite` given tier 1 values | `charges once, at the rate it was given` + 1 | RED (author-added) |
+| 11 | the core's `resumeFromStepLog` flag replaced by the pre-extraction `outcome_code` predicate | `resumes from the step log whenever the FLAG says so, whatever the outcome_code` | RED |
+| 12 | `priorSteps` forced empty, so nothing ever resumes | `resumes a busy row: the answered Instant step is not bought again` + 2 | RED (3) |
+
+**FINDING, and it corrects the brief.** The brief's Step 2 list says Task 7's mutations 3, 4, 6, 7
+and 8 are "each GREEN on the single-trace suite and killed in Task 8, with the Task 8 test named".
+That is false in two ways, both measured. Mutation 3 was RED in Task 7 all along. And the deferral of
+4, 6, 7 and 8 to Task 8 was INVALID, because `task-8-brief.md:37` mocks `@/lib/trace/singleTier1`
+with `runTier1Record` as a `vi.fn`, so no Task 8 test ever executes that function body. Task 7's fix
+round closed all four with five new tests in `lib/trace/__tests__/singleTier1.test.ts`, in a describe
+block `runTier1Record: the five things only a queue passes`, which call the exported core directly and
+are the only tests in the repo that do. **Nothing is deferred and no Task 8 test is named, because
+none would have been a fence.** Zero mutations in this task were caught by `tsc` alone.
+
+**Task 8, the Tier 1 cron: 25 mutations, 23 RED, 1 equivalent from this file, 1 UNFENCED.**
+
+| # | Guard broken | Fence | Result |
+|---|---|---|---|
+| 1 | the claim compares against a literal instead of the status just read | `takes the claim with a compare-and-swap on the status it read` | RED |
+| 2 | `if (!claimed) return` deleted | `does nothing at all to a row another worker claimed first` | RED |
+| 3 | the Tier 1 claim window asks for the legacy entity statuses | `claims only tier1_ rows, and never a legacy entity row` + 1 | RED (17 failed). The lane-disjointness fence. |
+| 4 | the throttle release writes `onFailure.status` | `releases a record the rate budget refused back to its OWN rung, unspent` | RED |
+| 5 | the throttle branch moved below `out.errored++` | `errored` is 0 at route.test.ts:1249 | RED |
+| **5b** | **cron ARGUMENT:** `canSpend` deleted from the `runTier1Record` call | `hands runTier1Record a canSpend hook at all` + 1 | RED (2) |
+| **5b'** | the throw deleted INSIDE `runTier1Record` | none in this file | **EQUIVALENT FROM HERE (57/57), KILLED IN TASK 7'S FILE.** The brief predicted a kill here; it cannot happen, because the test drives `runTier1RecordMock.mockRejectedValueOnce(...)`, so the mock throws whether the real function would or not. The guard is fenced where it lives, and the mock was not unpicked to chase a prediction. |
+| 5c | one per-record reservation with a `canSpend` returning that single answer | `reserves each call it is about to make, ONE AT A TIME, never a per-record guess` | RED |
+| 6 | the stale revert targets rung 1 instead of one rung up | `reverts a stale claim ONE RUNG UP, never back to attempt 1` + 1 | RED (2). As the brief writes it the mutant does not compile; the import it needs was added so it was a behavioural mutant and not a compile error. |
+| 7 | the `.or(is.null, lt)` claim window replaced by a bare `.lt` | `treats a claim with NO timestamp as stale, because SQL < never matches NULL` | RED |
+| 8 | `charge: 0, tier: 1` added to the exhausted stale payload | `retires a row on its last rung terminally, free` | RED |
+| **9** | **cron ARGUMENT:** `queueWrite.ai_research_status` nulled | `writes the Tier 1 terminal status so the parent job can settle` + 1 | RED (2) |
+| **10** | **cron ARGUMENT:** `onStep` deleted from the call | `writes the step log as each answer arrives` + 1 | RED (2) |
+| **11** | **cron ARGUMENT:** `ledgerSince` widened to 24 hours | `bounds the crash probe to THIS row s bulk job` + 1 | RED (2) |
+| 12 | the no-profile fallback prices at `'pro'` | `prices a row whose profile cannot be read at the DEAREST column` | RED |
+| 13 | `chargePerTrace(profile)` replaced by a constant | `prices a pay-as-you-go caller with no grant at the wallet rate` | RED |
+| 14 | `TIER1_MAX_ROWS_PER_RUN` doubled to 240 | `works rows oldest first, at the sizing this phase pinned` + 1 | RED (2) |
+| **15** | **the run-budget line**, `if (Date.now() >= runDeadlineMs) return`, deleted | round 1 none; fix round `stops TAKING new records once the run is nearly out of time` | **UNFENCED in round 1 (57 passed), then KILLED in fix round 1: expected 20 to be 8.** |
+| 16 | `TIER1_CONCURRENCY` doubled to 16 | `is 120 rows at concurrency 8` | RED (author-added, L-018) |
+| fix C1 | `ownerName` deleted from `parcelForTier1Row` | `carries the owner name through, which is what makes the plan TIER 1 at all` + 3 | RED (4). **The worst mutant in the phase, and it was green across all 2029 tests before the direct `parcelForTier1Row` block existed**, because `runTier1Record` is a `vi.fn` and a mock does not care what parcel it is handed. |
+| fix C2 | the `isParcelKey` guard deleted | `never reads the literal APN out of a parcel-keyed row as the street (D38)` | RED |
+| fix C3 | `inputOwnerName: null` | `bills through runTier1Record and nowhere else` | RED |
+| fix C4 | `.toUpperCase()` dropped from the state | `upper-cases the state and puts it in BOTH fields planRoute reads` | RED |
+| fix C5 | a blank zip survives as `''` rather than null | `treats a blank zip, county or parcel_id_local as absent, never as an empty string` | RED |
+| fix placement | the Tier 1 lane moved back OUT of `GET`'s try/catch | none | **UNFENCED, self-reported and honestly so.** Nothing in the suite throws from inside the lane, so reverting the placement leaves all 2040 green. Fencing it would mean making the stub throw on a specific statement, which pins the stub's shape rather than the route's behaviour. |
+
+**FINDING, and it corrects the brief again.** The brief's Step 2 list asks for Task 8's run-budget
+line to be written as UNFENCED with its reason and rejected alternative. **It is UNFENCED only in
+round 1. Task 8's fix round killed it**, with `vi.useFakeTimers()`, 20 queued rows, and the first
+`runTier1RecordMock` call advancing the clock past `runStartedAt + TIER1_RUN_BUDGET_MS`: measured 8
+records taken with the guard and 20 without, and no new export. The round-1 reason ("a test would
+have to make 120 records take four minutes") and the rejected alternative ("injecting a clock into
+the lane, which means exporting `runTier1Lane` and its whole dependency surface for one assertion")
+are recorded because they are the history, not because the line is still unfenced.
+
+**The three things that are genuinely unfenced at the end of this phase, and nothing else.**
+
+1. **`tier1: 0` at the MCP call site** (`lib/suite/mcp-tools.ts`, Task 6 C7). No test asserts that
+   call's arguments. It becomes a real count in 2B.
+2. **The Tier 1 lane's try/catch placement** (Task 8 fix round). Reverting it leaves the suite green.
+3. **`TIER1_RECORD_BUDGET_MS`** (60 s). Never mutated, and recorded as genuinely unobservable from
+   the cron's own file, because the deadline is consumed inside the mocked core.
+
+And one thing is fenced by a LIVE probe rather than a test: the RPC's sliding-window predicate. No
+unit test can reach it, because every unit test stubs `rpc`.
+
+**One arithmetic defect in a source report, recorded because this table is the deliverable.** Task
+8's own headline says "18 mutations applied, 16 killed, 1 unfenced, 1 equivalent-from-here". Its
+round-1 table carries 19 rows, of which 17 are killed. The headline undercounts by one on both
+figures. The table above uses the rows, not the headline.
+
 ## Task 12 review: gates, then STOP (2026-09-22)
 
 **Suite gates (Step 1).** `npx vitest run`: **1795 passed / 83 files, 0 failed** (Task 1 baseline
