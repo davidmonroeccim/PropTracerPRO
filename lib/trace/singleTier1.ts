@@ -70,7 +70,7 @@ import type { TraceResult } from '@/types'
 export const TIER1_CHARGE_DESCRIPTION = 'Skip trace - successful match'
 
 /**
- * runSingleTier1 was handed a record with no owner name. planRoute answers that with a TIER 2
+ * runTier1Record was handed a record with no owner name. planRoute answers that with a TIER 2
  * plan -- the dossier -- which this settle would buy and then charge at the Tier 1 rate.
  */
 export class NotATier1PlanError extends Error {
@@ -131,8 +131,14 @@ export interface Tier1RecordInput {
    * Epoch ms after which no vendor call may start, or undefined for no bound. The single routes
    * pass request start + VENDOR_TIMEOUT.SINGLE_ROUTE_BUDGET_MS; the cron passes its own per-record
    * budget. Undefined leaves only the 25 s per-call ceiling in the vendor clients.
+   *
+   * REQUIRED BUT NULLABLE, NOT OPTIONAL, and the difference is the point (fix round 1). Declared
+   * `?: number` a caller could simply FORGET it and still compile, and get an unbounded ladder held
+   * only by that per-call ceiling. Written this way every caller has to state its intent, even when
+   * the intent is "no bound". SingleTier1Input narrows it back to a real number, so both single
+   * routes are still forced to pass one.
    */
-  deadlineMs?: number
+  deadlineMs: number | undefined
   deps: RouteDeps
   /**
    * The supplied owner name, exactly as the caller sent it, or null. Written into the SAME
@@ -223,9 +229,13 @@ export async function runTier1Record(input: Tier1RecordInput): Promise<Tier1Reco
   // no owner name: the $0.20 dossier would be bought here and then billed at the Tier 1 rate, or
   // not billed at all. Both single routes send an ownerless record down their own tier 2 branch,
   // so this cannot fire today. It is here so a future caller cannot make it fire quietly.
+  //
+  // The message names THIS function, not the wrapper: the cron reaches it without going anywhere
+  // near runSingleTier1, and naming a function the caller never called sends the reader to the
+  // wrong file.
   if (plan.tier !== 1) {
     throw new NotATier1PlanError(
-      'runSingleTier1 needs a record with an owner name: planRoute returned a Tier 2 plan.',
+      'runTier1Record needs a record with an owner name: planRoute returned a Tier 2 plan.',
     )
   }
 
@@ -300,7 +310,7 @@ export async function runTier1Record(input: Tier1RecordInput): Promise<Tier1Reco
 
   // RECEIPTS ARE MONOTONIC: folded onto what the row already carried, tier never downgraded.
   const billing = foldBillingWrite(input.row, { charge: collectedNow, tier: TRACE_TIER.PER_SUCCESSFUL_TRACE })
-  const status: SingleTier1Result['status'] =
+  const status: Tier1RecordResult['status'] =
     outcome === TIER1_OUTCOME.BUSY_TRY_AGAIN ? 'error' : billable ? 'success' : 'no_match'
   const skipReason = billable
     ? null
@@ -321,12 +331,14 @@ export async function runTier1Record(input: Tier1RecordInput): Promise<Tier1Reco
   // the row already names, so `input_owner_name` has to stay with it (D25): writing this trace's
   // owner over it would leave the row naming one owner while holding another's contacts.
   //
-  // Only the INTERNAL columns are written on that path: the step log, the contact vendor, and the
-  // queue columns this settle always nulls. `trace_result`, `input_owner_name`, the two counts,
-  // `is_successful`, `charge`, `cost` and `found_by` are left exactly as they are. The customer is
-  // still told THIS trace's own outcome, free: the returned SingleTier1Result is unchanged either
-  // way. Two columns on that path are written rather than left, and both are written BECAUSE the
-  // row keeps its stored result; see `preservedStatus` and `preservedOutcome` below.
+  // Only the INTERNAL columns are written on that path: the step log, the contact vendor, and
+  // whatever `queueWrite` carries -- null on both from a single trace, the record's own terminal
+  // status from the queue, because a queued record that finds nothing still has to release its
+  // parent bulk job. `trace_result`, `input_owner_name`, the two counts, `is_successful`, `charge`,
+  // `cost` and `found_by` are left exactly as they are. The caller is still told THIS attempt's own
+  // outcome, free: the returned Tier1RecordResult is unchanged either way. Two columns on that path
+  // are written rather than left, and both are written BECAUSE the row keeps its stored result; see
+  // `preservedStatus` and `preservedOutcome` below.
   const keepsPaidContacts = !billable && hasContactData(storedResultOf(input.row.trace_result))
 
   // The queue columns. A single trace nulls both, because a reused row can carry a stale value from

@@ -24,6 +24,14 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
   first, then run unchanged against the new. chargeReceipt.test.ts needed no edit, which is what
   proves the charge write is still folded and still in this file.
 - The file keeps its name: chargeReceipt.test.ts pins it by path. The rename goes on Phase 4's list.
+- FIX ROUND 1. The five queue behaviours are fenced HERE, by five tests that call runTier1Record
+  directly, because Task 8 mocks runTier1Record as a vi.fn and so can never execute this body: the
+  throttle throw, the canSpend hook both ways, the per-arrival onStep, the queue columns on BOTH
+  persist branches, and the core's resume flag. Six mutations, all RED, including deleting the
+  throttle line. Round 1 had deferred four of these to Task 8, which was wrong.
+- deadlineMs is `number | undefined`, required but nullable, not optional: a caller that omits it now
+  fails to compile (TS2741) instead of silently getting an unbounded ladder. SingleTier1Input still
+  narrows it to a real number for both single routes.
 
 ## 2026-09-24 (c): Tier 1 Phase 2A, Task 6: one shared vendor budget, sliding, claimed before the spend.
 
