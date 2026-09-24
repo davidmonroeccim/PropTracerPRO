@@ -4,6 +4,40 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-037: Context given to locate a problem is not a request to solve it (2026-09-24)
+
+**What happened.** David pasted the last message from the Suite Gateway session and said, in the next
+breath, that he was showing it "ONLY... to help possibly determine where the gateway is in it's
+update." I read it as a work item. I verified its claims against PropTracerPRO, which was useful, and
+then did two things he had not asked for: I recommended a course of action for a repo another session
+owns, and I endorsed that agent's proposed workaround.
+
+**Why the endorsement was wrong, and this is the sharper half.** The workaround manufactures a city by
+mapping a state to the raw attribute keys that carry one. **The APN path exists precisely because the
+city is often unavailable.** David: "that's the reason we went this route in the first place, and why
+we have the APN in case the city is not available." So the proposal was not a smaller fix, it was a
+return to the approach the current architecture replaced, one state at a time, forever. I read
+"small, in-repo, needs no PropTracerPRO change" as good engineering judgment. Those are the properties
+of a workaround that avoids the real fix, which here is ours: stop refusing an APN-bearing record that
+has no city.
+
+**The rules.**
+- **When the user supplies material to explain where something stands, answer where it stands.** Not
+  what to do about it. If a recommendation seems obviously useful, it is still a second question and
+  he did not ask it. L-033 is the same failure with manufactured questions; this is it with
+  manufactured answers.
+- **Before endorsing an alternative, ask what the current design already decided.** A fallback that
+  exists for condition X is evidence that X was considered and solved. A proposal that eliminates X by
+  hand is usually undoing that decision rather than honouring it. The tell is a fix that is smaller
+  because it avoids the seam rather than because the seam is simple.
+- **A verified chain of reasoning is not an endorsement of the conclusion.** I confirmed every factual
+  claim that agent made, all of which were correct, and let that carry me into agreeing with its
+  recommendation, which was a different judgement resting on decisions I had not checked.
+- **Another session's working tree is not mine to plan for.** Reading it to establish state is what was
+  asked. Proposing commits in it was not.
+
+---
+
 ## L-036: A mock creates a blind spot exactly the size of the thing it replaces (2026-09-24)
 
 **What happened, five times in one phase.** Tier 1 Phase 2A was planned carefully, reviewed against a

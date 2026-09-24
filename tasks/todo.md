@@ -57,7 +57,18 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 7: the one billing path, extracted
   - [x] Task 8: the Tier 1 cron
   - [x] Task 9: suite gates, then the live check
-- [ ] Phase 2B: API bulk and the gateway MCP onto the queue (plan written after 2A)
+- [ ] Phase 2B: API bulk and the gateway MCP onto the queue.
+      Plan: `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`.
+      8 tasks. Carried items 1-5 from the 2A plan, plus spec 6.3/D36 (align the bulk
+      surfaces on the duplicate key), plus the job-completion fix David named first.
+  - [ ] Task 1: one derivation for job completion, with a guarded terminal write
+  - [ ] Task 2: finalize a job when its queue drains, from both crons
+  - [ ] Task 3: the v1 status route learns the Tier 1 queue
+  - [ ] Task 4: the v1 API bulk submit goes on the Tier 1 queue
+  - [ ] Task 5: MCP bulk_status learns the Tier 1 queue
+  - [ ] Task 6: skip_trace_bulk goes on the Tier 1 queue
+  - [ ] Task 7: found_by and outcome_code reach every per-record payload
+  - [ ] Task 8: suite gates, then the live check
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 
