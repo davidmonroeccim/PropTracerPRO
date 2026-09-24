@@ -26,7 +26,35 @@
 >
 > 8. `98f3b19` the Tier 1 cron: a second lane beside the untouched legacy entity lane, one file, one column
 >
-> **EIGHT OF NINE COMPLETE. Gates at `98f3b19`: vitest 2040 passing / 87 files / 0 failed, tsc 0, eslint 45.**
+> 9. `068cad3` Task 9 BUILD HALF ONLY: suite gates, the mutation table into `tasks/todo.md`, 20 parcels picked,
+>    and `tasks/research-scripts/phase2a/run-live.ts` with its five refusals proven. **NO MONEY SPENT.**
+>
+> **THE ONLY THING LEFT IN PHASE 2A IS THE LIVE CHECK SPEND, AND IT NEEDS DAVID AT A BROWSER.** The web bulk
+> route authenticates by session cookie, so it cannot be scripted (plan review finding 11). Sequence: the
+> controller starts `npm run dev` with `NEXT_PUBLIC_SUITE_SIGNIN_ENABLED=true`, David signs in, opens
+> `/trace/bulk`, uploads `tasks/research-test/phase2a/upload.csv` and submits. **The page must show 20 records
+> ready to submit, not 12** — eight rows have no city and before this phase the browser dropped them silently.
+> Then the cron drains, the controller runs the runner with `PTP_LIVE_RUN=1` and `--max-dollars 6`, and writes
+> `tasks/phase2a-live-check.md` (counts only, no contact data).
+>
+> **DAVID AUTHORISED $10 on 2026-09-24 and said "pick parcels from the registry directly, skip the gateway".**
+> Both applied. Computed worst case **$4.40** (the runner derives it itself from `VENDOR_COST`; it corrected my
+> $4.00 in both directions, budgeting city-less rows at $0.10 because "spends nothing" is the thing under test,
+> and tier 2 at three owners). Cap **$6**: above the worst case, below his ceiling, so neither boundary is also
+> the live case (L-031). **Honest limit: the tier 2 owner count is a BUDGET, not a bound**, because that lane
+> reserves once and lets a started record finish by his own ruling; breaching $10 would need ~19 owners a
+> dossier.
+>
+> **AFTER the live check:** the whole-branch review (most capable model, per superpowers:requesting-code-review),
+> then superpowers:finishing-a-development-branch. **Then and only then does pushing/merging come to David.**
+>
+> **ONLY THREE THINGS ARE UNFENCED AT PHASE END**, corrected against the plan's own stale list: the MCP
+> `tier1: 0` call site (unfenced BY PLAN INSTRUCTION, recorded not papered over), the Tier 1 lane's try/catch
+> placement, and `TIER1_RECORD_BUDGET_MS`. Task 8's run-budget guard IS fenced (killed in its fix round with
+> fake timers, 8 with the guard and 20 without).
+>
+> **EIGHT OF NINE COMPLETE. Gates at `068cad3`: vitest 2040 passing / 87 files / 0 failed, tsc 0, eslint 45,
+> `next build` clean.**
 > The no-worker window is CLOSED, so the branch is coherent for the first time and the eventual deploy is
 > load-bearing. **Task 9 (suite gates, then the live check) has not started and stops for David twice: a
 > dollar amount, and whether to pick its parcels through the gateway or straight from the registry.**

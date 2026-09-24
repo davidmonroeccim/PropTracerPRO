@@ -4,6 +4,55 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-036: A mock creates a blind spot exactly the size of the thing it replaces (2026-09-24)
+
+**What happened, five times in one phase.** Tier 1 Phase 2A was planned carefully, reviewed against a
+scratch worktree, and corrected twice before Task 1. Five times a guard the plan named as fenced was not,
+and the test the plan named as its owner could not kill it:
+
+1. **Task 2.** The plan named a test to fence the reuse-vs-budget ordering. All 32 prescribed tests passed
+   with the gate hoisted above the reuse branch; only a 33rd test the implementer added on its own initiative
+   caught it.
+2. **Task 5.** Deleting the CSV's `outcome_code` value emission reddened ONE test, not the predicted three,
+   because `toExportCells` is index-safe: the 105-column count assertions fence the HEADER, not the VALUES.
+3. **Task 6.** A mutation was filed as "cannot compile" with the compiler never run on it. Run, it returned
+   exit 0 and killed two tests, one of them fencing "the budget is asked before any money moves" — a property
+   the report had recorded as unfenceable.
+4. **Task 7.** Four money behaviours were deferred to Task 8 tests that mock `runTier1Record`. The throttle
+   test made the MOCK throw, so deleting the real guard changed nothing. Without that line a throttled record
+   is judged `no_match` and files "We looked this owner up by address and found no match. You were not
+   charged." about a lookup nobody made.
+5. **Task 8.** `parcelForTier1Row` was extracted SPECIFICALLY so it could be fenced, its docblock cited L-020
+   for why, and it had zero tests. Deleting one line left `tsc` clean and all 2029 tests green while making
+   every Tier 1 record plan as ownerless, return a TIER 2 plan, throw, and settle `tier1_done`/`no_match`
+   free. The lane would have delivered nothing to every customer.
+
+**The common cause, in the words of the implementer who wrote both the docblock and the gap:** "The same mock
+that keeps these tests honest about the cron is what made the worst mutant in the phase invisible. I wrote the
+docblock that says precisely this and then did not act on it."
+
+Every one of the five sat at a seam where a test double stood in for the thing under test. In each case the
+seam was CORRECT and documented: Task 8's cron tests should mock the billing core, or they stop being cron
+tests. The failure was never the mock. It was not noticing that the mock creates a blind spot the exact shape
+of what it replaces, and that the blind spot needs its own test somewhere else.
+
+**The rules.**
+- **When you mock something, name what you just made invisible, and say where it is fenced instead.** A mock
+  is a coverage decision, not only a convenience. "Task N will cover it" is how a guard goes permanently
+  unfenced, and the last task has no Task N+1.
+- **A prescribed mutation is a hypothesis.** Five of this plan's predictions were wrong after two review
+  passes. Apply every one, and when the result differs from the prediction, the prediction was wrong.
+- **Fence a behaviour in the file that owns the code**, not in the file that happens to call it. Task 7's four
+  guards belonged in Task 7's tests; moving them to Task 8 would have meant unmocking the core and losing both
+  tests.
+- **Assert the CONSEQUENCE, not the field.** `parcelForTier1Row`'s fence works because it calls `planRoute()`
+  and asserts the resulting TIER. A test asserting `parcel.ownerName === 'x'` would have passed while the plan
+  silently became Tier 2.
+- **Never write that a mutation cannot be applied without trying to apply it.** Every row in a mutation table
+  is an observation or the table is worthless.
+
+---
+
 ## L-035: Say what the request SENDS, not what the call is for (2026-09-24)
 
 **What happened.** Describing the Tier 1 APN path to David I wrote that it goes "straight to the parcel
