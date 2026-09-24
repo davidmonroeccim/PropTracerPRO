@@ -4,6 +4,42 @@ Patterns captured after corrections from David. Review at session start.
 
 ---
 
+## L-035: Say what the request SENDS, not what the call is for (2026-09-24)
+
+**What happened.** Describing the Tier 1 APN path to David I wrote that it goes "straight to the parcel
+contact lookup... to ask for contacts directly." He came back with the exact right question: "does that
+mean you are looking for the email and phone for the name you already have? I ask because your record
+says the existing name was dropped." It does not. That endpoint takes `parcel_id`, `county` and `state`
+and has no name parameter; the owner name is used only to filter the `persons[]` array the vendor returns.
+He then said: "When we decided on whether to use Advanced or Instant Lookup, I was never told the owner
+name was dropped in the search... this defeats the purpose of the trace in most cases."
+
+**The accounting, which I owed him and which is mixed.** The fact appears once in the decision record, in
+D21's option text on 2026-09-21 ("search the owner's name at their mailing address instead of running the
+nameless APN lookup") with Phase 0 evidence noting "Shasta's lookup sent no name", and he acted on it
+there by choosing arm (c) for the dossier path. It is absent from D2, which set the rung order, and from
+D13, which is where he chose Instant over Advanced. So it surfaced once, in a different context, and was
+never carried back to the decision he was actually making.
+
+**The rules.**
+- When describing a vendor call to David, state the FIELDS the request carries. "Asks for contacts" is a
+  description of purpose and it silently implies inputs the request does not have. Purpose language is
+  where a missing parameter hides.
+- A material property of a call belongs in the decision that turns on it. Recording "the nameless APN
+  lookup" inside one option of D21 did not put it in front of him when he chose Instant at D13. If a fact
+  changes what an option is worth, restate it AT that option, even if it is already written down
+  somewhere else.
+- Before agreeing that a defect is widespread, size it. Here the honest answer narrowed it sharply: the
+  gateway's `recordSchema` requires `address` and `city`, so the named lookup is always planned first on
+  that path, and the web upload has no parcel column at all. The nameless rung is the ONLY rung solely
+  for a v1 caller sending a parcel id with no address. Agreeing "most cases" without checking would have
+  been as unhelpful as the original omission.
+- Check whether the alternative he is weighing would even fix the thing. Advanced is batch-only and still
+  requires a city; Enhanced requires address, city and state at 15 credits against Instant's 5. Neither
+  addresses the no-city case, so framing the fix as an endpoint swap would have wasted his time.
+
+---
+
 ## L-034: A disclosed charge is not a finding, and "leave it processing" is not available (2026-09-24)
 
 **What happened.** Task 3's review found that a bulk enqueue failing part-way marks the job `failed`
