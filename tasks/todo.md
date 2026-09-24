@@ -55,7 +55,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 5: the D33 bulk half, found_by and outcome_code in the CSV and the bulk summary
   - [x] Task 6: the shared vendor rate budget, and the Tier-1-only capacity gap
   - [x] Task 7: the one billing path, extracted
-  - [ ] Task 8: the Tier 1 cron
+  - [x] Task 8: the Tier 1 cron
   - [ ] Task 9: suite gates, then the live check
 - [ ] Phase 2B: API bulk and the gateway MCP onto the queue (plan written after 2A)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)

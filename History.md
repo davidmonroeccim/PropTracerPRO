@@ -4,6 +4,35 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (e): Tier 1 Phase 2A, Task 8: sweep-entity-traces becomes the Tier 1 cron.
+
+- A second lane, beside the legacy entity lane, claiming only tier1_ statuses: atomic
+  compare-and-swap on the status just read, claimed_at set with the flip, a shared cursor across 8
+  Promise.all workers, and a per-rung stale revert in which a dead claim SPENDS an attempt. Copied
+  from sweep-property-traces, which spec 3.2 names as the pattern to copy.
+- It bills through runTier1Record and nothing else: no gate, no probe and no fold is re-derived
+  (lessons L-030). One profile read per user per run, one derivation from lib/suite/pricing.ts, and
+  the dearest column when the profile cannot be read.
+- 120 rows a minute at concurrency 8: ~45 s a run and a 500-record job in 4.2 minutes, inside spec
+  3.2's target. Pinned by a test so a change to either is deliberate. The test asserts the LATENCY
+  relationship and no longer asserts 120 + 240 <= 450: that inequality reads like a proof and is not
+  one, because 240 is the tier 2 lane's FLOOR, not its ceiling. The rate ceiling is the budget.
+- The step log is written as each answer arrives, so a killed run does not re-buy what the row
+  already paid for. Every vendor call is reserved individually through the canSpend hook, and a
+  refused call comes back as VendorBudgetThrottledError: the row goes back to its OWN rung with no
+  attempt spent, nothing judged, nothing charged and nothing said to the customer. Checked before
+  out.errored++, so a throttle never reads as a fault.
+- DISCLOSED COST: on the D39 path a row settles tier1_done with BOTH new CSV columns empty while
+  is_successful stays true and records_matched counts it, because its contacts and charge belong to
+  an earlier trace and labelling them with this trace's key would be wrong. Blank, never wrong. The
+  comment at the queueWrite line spells out what the customer sees.
+- A VENDOR failure is not retried (D7, spec 5.1): runTier1Record settles the row busy_try_again,
+  free and terminal. The ladder is for a dead CLAIM only, and its last rung writes the row
+  tier1_failed with the same busy sentence, free, with no money columns in the payload.
+- The cron's test stub now evaluates `.in()`, `.limit()`, `.or()` and `.lt()` the way PostgREST
+  would, and snapshots update payloads with their arrays copied. A stub blind to `.in()` could not
+  tell the two lanes apart, which is the whole safety argument for sharing one column.
+
 ## 2026-09-24 (d): Tier 1 Phase 2A, Task 7: one Tier 1 settle for the routes and the cron.
 
 - lib/trace/singleTier1.ts exports runTier1Record. runSingleTier1 is now a wrapper that supplies
