@@ -202,9 +202,10 @@ describe("the Tracerfy capacity check", () => {
 
 describe("tracerfyCanRun and a TIER 1 batch", () => {
   it("reads the balance for a tier-1-only batch, which it used to skip entirely", async () => {
-    // THE GAP THIS STEP CLOSES. tracerfyCanRunTier2 returned true unconditionally for
-    // `newRecords <= 0`, so a 500-record all-tier-1 batch never read the balance at all. Its own
-    // docstring recorded that as deliberate, and it WAS, while tier 1 posted to the BATCH endpoint.
+    // THE GAP THIS STEP CLOSES. The old tier-2-only capacity check, which took a tier 2 count and
+    // nothing else, returned true unconditionally for `newRecords <= 0`, so a 500-record
+    // all-tier-1 batch never read the balance at all. Its own docstring recorded that as
+    // deliberate, and it WAS, while tier 1 posted to the BATCH endpoint.
     H.analytics = { success: true, data: { balance: 100 } };
     expect(await tracerfyCanRun(fakeClient(), { tier1: 500, tier2: 0 })).toBe(false);
     expect(getAnalytics).toHaveBeenCalled();

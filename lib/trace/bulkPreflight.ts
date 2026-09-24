@@ -128,11 +128,12 @@ interface UnsettledRow {
 /**
  * Can PTP's shared Tracerfy pool cover this batch, on both tiers?
  *
- * RENAMED FROM tracerfyCanRunTier2, AND THE NAME WAS THE BUG. It took a tier 2 record count and
- * short-circuited on `newRecords <= 0`, so a 500-record all-tier-1 batch never read the balance at
- * all. Its own docstring recorded that as deliberate and scoped out, which was true while tier 1
- * posted to the BATCH endpoint, a different bucket. Since Phase 2A the web upload's tier 1 rows are
- * worked per record against this very pool, so the gap is live and both legs are sized here.
+ * RENAMED FROM THE OLD TIER-2-ONLY CAPACITY CHECK, AND THAT NAME WAS THE BUG. The previous version
+ * took a tier 2 record count as its only argument and short-circuited on `newRecords <= 0`, so a
+ * 500-record all-tier-1 batch never read the balance at all. Its own docstring recorded that as
+ * deliberate and scoped out, which was true while tier 1 posted to the BATCH endpoint, a different
+ * bucket. Since Phase 2A the web upload's tier 1 rows are worked per record against this very pool,
+ * so the gap is live and both legs are sized here.
  *
  * SIZED AGAINST WHAT IS ALREADY QUEUED, NOT THE RAW BALANCE. The pool is shared across every
  * customer's jobs, so a check that looks only at the balance passes for two jobs that cannot both

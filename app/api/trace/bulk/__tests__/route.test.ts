@@ -559,10 +559,10 @@ describe("when PTP's own credit pool cannot cover the job", () => {
   });
 
   it("DOES ask about a tier 1 only batch now, because those records draw the pool per record", async () => {
-    // THE GAP THIS CLOSES. tracerfyCanRunTier2 short-circuited on a zero tier 2 count, so an
-    // all-tier-1 batch never read the balance at all. That was true while tier 1 posted to the
-    // BATCH endpoint; since Phase 2A the web upload's tier 1 rows are worked per record against
-    // this very pool, so a short pool must refuse them.
+    // THE GAP THIS CLOSES. The old tier-2-only capacity check short-circuited on a zero tier 2
+    // count, so an all-tier-1 batch never read the balance at all. That was true while tier 1
+    // posted to the BATCH endpoint; since Phase 2A the web upload's tier 1 rows are worked per
+    // record against this very pool, so a short pool must refuse them.
     H.canRunTier2 = false;
     const res = await post([rec("Jane Smith")]);
     expect(res.status).toBe(503);
