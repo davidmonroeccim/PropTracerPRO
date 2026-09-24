@@ -703,14 +703,6 @@ export async function GET(request: Request) {
 
   const adminClient = createAdminClient();
   const runStartedAt = Date.now();
-  // Housekeeping for the shared budget, once per run rather than once per claim.
-  await pruneVendorRateWindows(adminClient);
-
-  // THE TIER 1 LANE FIRST. It is the customer-visible one and the one with a throughput target
-  // (spec 3.2: a 500-record job inside 2 to 5 minutes); the legacy entity lane takes five rows a
-  // minute and Phase 4 deletes it.
-  const tier1 = await runTier1Lane(adminClient, runStartedAt + TIER1_RUN_BUDGET_MS);
-
   let processed = 0;
   let noMatch = 0;
   let fastAppendCredited = 0;
@@ -756,6 +748,21 @@ export async function GET(request: Request) {
   };
 
   try {
+    // INSIDE THE TRY, DELIBERATELY. The Tier 1 lane's stale-revert loop, its claim window and its
+    // `.or()` interpolation are database work, and anything that threw there would 500 the cron
+    // without the `{ success: false }` shape, skip the fatal-error log, and stop the legacy lane
+    // running at all. supabase-js returns `{ data, error }` rather than throwing and both budget
+    // helpers swallow their own errors, so this is a latch rather than a live bug, but the legacy
+    // lane's availability must not depend on that.
+    //
+    // Housekeeping for the shared budget, once per run rather than once per claim.
+    await pruneVendorRateWindows(adminClient);
+
+    // THE TIER 1 LANE FIRST. It is the customer-visible one and the one with a throughput target
+    // (spec 3.2: a 500-record job inside 2 to 5 minutes); the legacy entity lane takes five rows a
+    // minute and Phase 4 deletes it.
+    const tier1 = await runTier1Lane(adminClient, runStartedAt + TIER1_RUN_BUDGET_MS);
+
     // Stale-claim recovery: revert rows whose previous claim never finished
     // (cron killed mid-run by Vercel timeout, OOM, deploy restart, etc.) so
     // they're eligible to be re-claimed below.

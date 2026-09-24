@@ -7,7 +7,7 @@ import {
   MAX_ENTITY_TRACE_ATTEMPTS,
   isEntityTracePending,
 } from "@/lib/trace/entityTraceAttempts";
-import type { RouteStep, StepKind } from "@/lib/routing/ownerRoute";
+import { planRoute, type RouteStep, type StepKind } from "@/lib/routing/ownerRoute";
 import type { Tier1RecordResult } from "@/lib/trace/singleTier1";
 import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
 import { VENDOR_RATE_LIMIT } from "@/lib/trace/vendorRateBudget";
@@ -255,9 +255,13 @@ vi.mock("@/lib/trace/singleTier1", async (importOriginal) => ({
   runTier1Record: vi.fn(),
 }));
 
-const { GET, TIER1_MAX_ROWS_PER_RUN, TIER1_CONCURRENCY, TIER1_RUN_BUDGET_MS } = await import(
-  "@/app/api/cron/sweep-entity-traces/route"
-);
+const {
+  GET,
+  parcelForTier1Row,
+  TIER1_MAX_ROWS_PER_RUN,
+  TIER1_CONCURRENCY,
+  TIER1_RUN_BUDGET_MS,
+} = await import("@/app/api/cron/sweep-entity-traces/route");
 const { lookupBusinessTrace, submitSingleTrace, lookupPersonTrace } = await import(
   "@/lib/tracerfy/client"
 );
@@ -1123,6 +1127,16 @@ describe("the TIER 1 lane", () => {
     // REQUIRED BUT NULLABLE on Tier1RecordInput, so omitting it is a compile error and passing
     // `undefined` is not. An unbounded ladder is held only by the 25 s per-call vendor ceiling.
     expect(typeof arg.deadlineMs).toBe("number");
+    // THE OWNER NAME HAS TO REACH THE PLAN. Without it planRoute returns a TIER 2 plan,
+    // runTier1Record throws NotATier1PlanError, and every row in the queue settles tier1_done /
+    // no_match, free, delivering nothing. parcelForTier1Row's own describe block below pins the
+    // wiring; this pins that the cron passes the result of it.
+    expect(arg.parcel.ownerName).toBe("Jane Smith");
+    expect(arg.parcel.situsAddress).toBe("100 MAIN ST");
+    expect(arg.parcel.state).toBe("TX");
+    // D25: the name and the result it describes are written in ONE persist. A null here writes null
+    // over the owner name the customer submitted.
+    expect(arg.inputOwnerName).toBe("Jane Smith");
   });
 
   it("prices a grant holder at the PRO rate, through the one derivation", async () => {
@@ -1454,5 +1468,166 @@ describe("the Tier 1 lane s sizing, pinned", () => {
     // arm refuses it forever and the queue stops draining with no error anywhere.
     expect(1).toBeLessThanOrEqual(VENDOR_RATE_LIMIT.tracerfy);
     expect(1).toBeLessThanOrEqual(VENDOR_RATE_LIMIT.fastappend);
+  });
+});
+
+/**
+ * parcelForTier1Row, tested DIRECTLY: no cron, no stub, no mocks in the path.
+ *
+ * WHY THIS BLOCK EXISTS, and it is the same reason the tier 2 cron's parcelForRow has one
+ * (app/api/cron/sweep-property-traces/__tests__/route.test.ts). This function is the ONLY place the
+ * owner name and the address reach the vendor, and `ParcelInput` makes every field optional except
+ * `state`, so deleting a line of it leaves `tsc` at exit 0 and every cron test green. Measured:
+ * deleting the `ownerName` line compiles clean and passes all 2029 tests, while in production every
+ * record then plans as ownerless, planRoute returns a TIER 2 plan, runTier1Record throws
+ * NotATier1PlanError, and the whole queue settles tier1_done / no_match, free. The lane would deliver
+ * nothing to every customer with a fully green suite. Pinning it here closes that.
+ *
+ * planRoute() is called on the result rather than only the fields, because the TIER of the plan is
+ * the consequence that matters and it is one line away from the wiring.
+ */
+describe("parcelForTier1Row", () => {
+  const baseRow = {
+    id: "row-1",
+    user_id: "user-1",
+    trace_job_id: "job-1",
+    normalized_address: "100 MAIN ST|DALLAS|TX",
+    city: "DALLAS",
+    state: "TX",
+    zip: "75001",
+    parcel_id_local: null,
+    county: null,
+    input_owner_name: "Jane Smith",
+    ai_research_status: "tier1_queued",
+    charge: null,
+    tier: null,
+    trace_result: null,
+    trace_steps: null,
+    outcome_code: null,
+  };
+
+  it("carries the owner name through, which is what makes the plan TIER 1 at all", () => {
+    // THE WHOLE DIFFERENCE FROM TIER 2. parcelForFullTrace passes ownerName: null on purpose; a
+    // Tier 1 row HAS its owner. MUTATION: delete the ownerName line and this goes red on both the
+    // name and the tier, which is the difference between delivering contacts and delivering nothing.
+    const parcel = parcelForTier1Row({ ...baseRow });
+    expect(parcel.ownerName).toBe("Jane Smith");
+    const plan = planRoute(parcel, "wallet");
+    expect(plan.tier).toBe(1);
+    expect(plan.ownerName).toBe("Jane Smith");
+  });
+
+  it("plans TIER 2 for a row with no owner name, which is why the line above is load-bearing", () => {
+    // Not a defect: it is what runTier1Record refuses (NotATier1PlanError) so a $0.20 dossier can
+    // never be bought on this lane and billed at the tier 1 rate. It is recorded here so the cost of
+    // losing the owner name is visible next to the line that carries it.
+    const plan = planRoute(parcelForTier1Row({ ...baseRow, input_owner_name: null }), "wallet");
+    expect(plan.tier).toBe(2);
+  });
+
+  it("treats a blank or whitespace owner name as absent, never as an empty string", () => {
+    expect(parcelForTier1Row({ ...baseRow, input_owner_name: "   " }).ownerName).toBeNull();
+    expect(parcelForTier1Row({ ...baseRow, input_owner_name: "" }).ownerName).toBeNull();
+  });
+
+  it("trims the owner name rather than sending the vendor the customer's whitespace", () => {
+    expect(parcelForTier1Row({ ...baseRow, input_owner_name: "  Jane Smith  " }).ownerName).toBe(
+      "Jane Smith"
+    );
+  });
+
+  it("pulls the STREET out of the pipe-delimited dedup key and nothing else", () => {
+    // normalized_address is street|city|state with NO zip in it (migration 20260904); the zip lives
+    // in its own column. MUTATION: hand the whole key through and the vendor gets
+    // "100 MAIN ST|DALLAS|TX" as a street.
+    const parcel = parcelForTier1Row({ ...baseRow });
+    expect(parcel.situsAddress).toBe("100 MAIN ST");
+    expect(parcel.situsCity).toBe("DALLAS");
+    expect(parcel.situsZip).toBe("75001");
+  });
+
+  it("never reads the literal APN out of a parcel-keyed row as the street (D38)", () => {
+    // A row keyed APN|<parcel>|<COUNTY>|<STATE> has no street at all, so split('|')[0] on it is the
+    // word "APN", which would go to the vendor as an address. The web upload sends no parcel id (D5)
+    // so this cannot arrive today; the guard is here so 2B cannot start to quietly.
+    // MUTATION: drop the isParcelKey() arm and this goes red with situsAddress "APN".
+    const parcel = parcelForTier1Row({
+      ...baseRow,
+      normalized_address: "APN|0123-456|TRAVIS|TX",
+      city: null,
+      state: "TX",
+      parcel_id_local: "0123-456",
+      county: "Travis",
+    });
+    expect(parcel.situsAddress).toBe("");
+    // No street is '', never a fabricated one (CLAUDE.md rule 7).
+    expect(parcel.situsCity).toBe("");
+  });
+
+  it("falls back to the whole value when the key carries no pipe at all", () => {
+    const parcel = parcelForTier1Row({ ...baseRow, normalized_address: "100 MAIN ST" });
+    expect(parcel.situsAddress).toBe("100 MAIN ST");
+  });
+
+  it("upper-cases the state and puts it in BOTH fields planRoute reads", () => {
+    // `state` is the only field ParcelInput requires, and hasSitus() reads situsState. A lower-case
+    // state reaches the vendor as typed and reaches planRoute's own comparisons unnormalised.
+    // MUTATION: drop .toUpperCase() and this goes red on both lines.
+    const parcel = parcelForTier1Row({ ...baseRow, state: " tx " });
+    expect(parcel.state).toBe("TX");
+    expect(parcel.situsState).toBe("TX");
+  });
+
+  it("carries parcel_id_local and county when a row has them", () => {
+    const parcel = parcelForTier1Row({ ...baseRow, parcel_id_local: " R022901 ", county: " Mobile " });
+    expect(parcel.parcelIdLocal).toBe("R022901");
+    expect(parcel.county).toBe("Mobile");
+  });
+
+  it("treats a blank zip, county or parcel_id_local as absent, never as an empty string", () => {
+    // An empty string is a value the vendor would be asked about. Null is the honest answer.
+    const parcel = parcelForTier1Row({
+      ...baseRow,
+      zip: "   ",
+      county: "",
+      parcel_id_local: "  ",
+    });
+    expect(parcel.situsZip).toBeNull();
+    expect(parcel.county).toBeNull();
+    expect(parcel.parcelIdLocal).toBeNull();
+  });
+});
+
+describe("the Tier 1 lane's run budget", () => {
+  it("stops TAKING new records once the run is nearly out of time", async () => {
+    // WHAT THIS GUARDS. A worker that started a record the run could not finish would leave a live
+    // claim behind, and the next run's stale sweep SPENDS an attempt on it. Rows not taken are left
+    // queued and unmarked instead, which costs a minute and spends nothing.
+    //
+    // HOW IT IS OBSERVED WITHOUT EXPORTING THE LANE. The mocked billing core is the injection point:
+    // the FIRST settled record moves the system clock past runStartedAt + TIER1_RUN_BUDGET_MS. All
+    // eight workers take their first index and pass the deadline check synchronously, before any
+    // await, so exactly the first round is worked. Nothing in the stub uses timers -- every chain
+    // settles on Promise.resolve -- so microtask ordering is untouched.
+    // MUTATION: delete `if (Date.now() >= runDeadlineMs) return;` and this goes red at 20.
+    vi.useFakeTimers();
+    try {
+      runTier1RecordMock.mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + TIER1_RUN_BUDGET_MS + 1_000);
+        return okResult();
+      });
+      seedRows(
+        Array.from({ length: 20 }, (_, i) => ({
+          id: `row-${i}`,
+          ai_research_status: "tier1_queued",
+          input_owner_name: "Jane Smith",
+          user_id: "u1",
+        }))
+      );
+      const body = await runCron();
+      expect(body.tier1.processed).toBe(TIER1_CONCURRENCY);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

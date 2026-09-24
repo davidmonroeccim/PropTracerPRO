@@ -32,6 +32,23 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 - The cron's test stub now evaluates `.in()`, `.limit()`, `.or()` and `.lt()` the way PostgREST
   would, and snapshots update payloads with their arrays copied. A stub blind to `.in()` could not
   tell the two lanes apart, which is the whole safety argument for sharing one column.
+- Fix round 1. parcelForTier1Row had NO tests, which is the one thing its own docblock said it was
+  extracted to make possible. Deleting its `ownerName` line compiled clean and left all 2029 tests
+  green while making every record plan as TIER 2: runTier1Record would refuse each one, the whole
+  queue would settle tier1_done / no_match free, and the lane would deliver nothing to every customer
+  with a green suite. It now has a ten-test describe block called directly, modelled on the tier 2
+  cron's parcelForRow block, which calls planRoute on the result so the TIER is asserted and not just
+  the field. Six mutants in that function and at its call site now go red, including the owner name,
+  the isParcelKey street guard, the state upper-case, the blank-to-null trims, and inputOwnerName
+  changed to null.
+- Fix round 1. The run budget IS fenceable from this file after all: vi.useFakeTimers() with the
+  mocked billing core as the injection point, where the first settled record moves the clock past the
+  deadline. Eight workers pass the check synchronously before any await, so the guard gives 8 and its
+  deletion gives 20. The first report called it unfenceable on an incomplete list of alternatives.
+- Fix round 1. The Tier 1 lane and the budget prune moved INSIDE GET's try/catch. Anything that threw
+  in the lane's stale-revert loop, claim window or `.or()` interpolation would have 500'd the cron
+  without the `{ success: false }` shape, skipped the fatal-error log, and stopped the legacy lane
+  running at all.
 
 ## 2026-09-24 (d): Tier 1 Phase 2A, Task 7: one Tier 1 settle for the routes and the cron.
 
