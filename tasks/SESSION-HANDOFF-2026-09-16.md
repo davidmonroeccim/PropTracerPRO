@@ -1,5 +1,83 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-24 EVENING. **PHASE 2A IS COMPLETE, MERGED TO MAIN, PUSHED AND DEPLOYED.**
+>
+> **All nine tasks done, the live check RAN, and David chose to merge and deploy.** Report:
+> `tasks/phase2a-live-check.md` (counts only; raw pairs gitignored under `tasks/research-test/phase2a/`).
+> The ledger `.superpowers/sdd/2026-09-23-tier1-phase2a/progress.md` is gitignored, authoritative over
+> this block, and now carries rulings 1 to 42 plus the live-check record.
+>
+> **THE LIVE CHECK, 20 records in one web bulk upload, job `f406e591-0205-4403-876d-160331373a77`:**
+> vendor spend **$1.70** of a $4.40 computed worst case under a `--max-dollars 6` cap and David's $10;
+> customer charge **$2.10**, wallet $14.33 -> $12.23, **reconciled to the cent**, 12 ledger debits, one
+> per charged record. Priced in the PRO column through his gateway grant, which is the L-030 collapse
+> working on the one profile shape that used to carry two prices.
+> - **B2, the reason the phase exists: 4/4 city-less PERSON rows settled `no_lookup_key` with ZERO
+>   steps, $0.00 cost, $0.00 charge and NO ledger row.** Before 2A the browser discarded them silently.
+> - B3: a city-less COMPANY row traced on name and state alone. B1: 4/4 by address. B4: 4/4 hit rung
+>   one and **skipped** rung two.
+> - Rate budget EXACT: tracerfy reserved 8 for 8 calls, fastappend 4 for 4. A skipped rung claimed
+>   nothing. CSV: 105 columns, `found_by` and `outcome_code` at 104 and 105, no `APN|` anywhere.
+>
+> **WHAT THE CHECK DID NOT PROVE, exhaustive, and it is in the report:** the Tier 2 lane's Task 6
+> reservation (see contamination below), the parcel/APN path, throttling, the stale-claim ladder,
+> step-log resume, scale beyond 16 records, and job completion through this branch's own status route.
+>
+> **CONTAMINATION, and it bounds a claim.** A local server pointed at the PRODUCTION database races the
+> production crons. Production's own cron drained all four tier 2 rows 50 seconds after submit, on
+> `origin/main` code with none of Task 6's 99 lines (`vendor_rate_windows` shows zero tier 2
+> contribution). Those rows prove the Tier 1 queue did not disturb the Tier 2 queue and NOTHING about
+> this branch's tier 2 changes. Only `tier1_*` statuses are invisible to main, which is why the Tier 1
+> half survived untouched for 25 minutes and is the half this check actually proves.
+>
+> **DAVID DECLINED THE WHOLE-BRANCH REVIEW.** It was offered with the alternatives (branch-only push, or
+> review-then-deploy) and he chose merge-and-deploy now. The nine per-task reviews stand; **no
+> cross-task pass was ever made on these 23 commits.** Recorded because a future reader will assume one
+> happened.
+>
+> **GATES, all four measured by the controller at merge, never relayed:** vitest **2040 passing / 87
+> files / 0 failed** (exit 0), `npx tsc --noEmit` **exit 0**, `npx eslint app lib components` **45
+> problems** (the baseline; ceiling 46, hard cap 47, never bare `npm run lint`), `npx next build`
+> **exit 0**. BOTH migrations were already live in production BEFORE the deploy, verified by reading
+> `pg_indexes` and `pg_proc`: the two widened partial indexes and `claim_vendor_rate`. So the deploy was
+> CODE-ONLY, which is the safe ordering.
+>
+> **TWO THINGS CARRIED OUT OF 2A, both David's calls:**
+> 1. **Job completion latency -> PHASE 2B, FIRST ITEM (his answer: b).** Nothing finalizes a bulk job
+>    when its queue drains: only a polling tab, or `sweep-stale-traces` at 60 minutes. History is a
+>    SERVER component with no poll, and Download / Push-to-CRM are gated on `status === 'completed'`, so
+>    a customer who closes the tab (which the upload page invites) sees `Processing` with no export for
+>    up to an hour after the work is done and billed. MEASURED: last row settled 17:11, job read
+>    completed 17:50. **PRE-EXISTING, not a 2A regression** (`settleBulkJob` is called only from status
+>    routes on main too). **`CRON_TIMEOUT_MINUTES` STAYS 60** - David correctly recalled it is a "give up
+>    entirely" deadline (History.md:2577) sized to absorb queue depth. The fix is a POSITIVE trigger,
+>    `finalizeJobIfDrained`, extracted ONCE across all four completion sites, with a
+>    `.eq('status','processing')` guard so a concurrent last-row settle cannot fire the one-shot
+>    `bulk_job.completed` webhook twice. That webhook ALREADY fires from a cron (`sweep-stale-traces:462`),
+>    so this is the same event an hour earlier, not a new one.
+> 2. **THE TIER 2 LANE IS UNDERWATER AT THE PRO RATE. Never recorded anywhere before 2026-09-24.**
+>    Arithmetic from constants, NOT a sampled rate: cost = $0.20 dossier + $0.10 per owner lookup that
+>    HITS (a miss is free), against a FLAT price of $0.25 pro / $0.40 PAYG. So margin is `0.05 - 0.10N`
+>    at pro and `0.20 - 0.10N` at PAYG, and D21(c) with D40 put NO cap on N. Measured this run: tier 2
+>    cost $0.80 against $0.75 charged, **net -$0.05**, invisible inside a +$0.40 job total because the
+>    Tier 1 lane is healthy (+$0.05 per success). **NOT a 2A defect, NOT decided.** What is NOT
+>    established and must not be claimed: how many owners a dossier typically reaches. The cheap next
+>    step is a FREE read of the owner-count distribution over existing `property_trace_done` rows.
+>
+> **STILL OPEN, unchanged by this phase:** the cross-project Supabase default-privileges finding (amend
+> the CLAUDE.md table template, then audit the six suite projects; do NOT edit CLAUDE.md without his
+> go), the stale-owner-name options, the nameless APN lookup question (L-035), and todo 16, 17, 19,
+> 20's remainder, 21 and 23.
+>
+> **THREE THINGS UNFENCED AT PHASE END, and no more:** the MCP `tier1: 0` call site, the Tier 1 lane's
+> try/catch placement, and `TIER1_RECORD_BUDGET_MS`.
+>
+> **NEXT: PHASE 2B.** API bulk (`app/api/v1/trace/bulk/route.ts`) and the gateway MCP
+> `skip_trace_bulk` onto the same queue, plus item 1 above as its first task. The carried-item list is
+> the "Carried to Phase 2B and later" section of the 2A plan. **The gateway is mid-modification and
+> broken for the Tier 1/2 approach - establish its state BEFORE planning against it.**
+
+
 > # READ FIRST. STATE AS OF 2026-09-24. PHASE 2A IS 7 OF 9 TASKS DONE ON AN UNMERGED BRANCH. NOTHING IS PUSHED.
 >
 > **David approved the Phase 2A plan as written on 2026-09-23** in answer to a single gate question. Execution

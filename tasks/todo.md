@@ -45,7 +45,7 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
         live-work threshold, tier 2 warnings, the Tier 1 plan guard, TRS as a surname, the
         trace.completed header, the de-polling dead code). Report:
         `.superpowers/sdd/2026-09-21-tier1-phase1-single-traces/final-fix-report.md`.
-- [ ] Phase 2A: the Tier 1 queue, the cron, the shared rate budget and the WEB upload.
+- [x] Phase 2A: the Tier 1 queue, the cron, the shared rate budget and the WEB upload.
       Plan: `docs/superpowers/plans/2026-09-23-tier1-phase2a-queue-and-web-upload.md`.
       API bulk and the gateway MCP `skip_trace_bulk` are 2B and are NOT in it.
   - [x] Task 1: the queue index, widened
@@ -56,14 +56,35 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 6: the shared vendor rate budget, and the Tier-1-only capacity gap
   - [x] Task 7: the one billing path, extracted
   - [x] Task 8: the Tier 1 cron
-  - [ ] Task 9: suite gates, then the live check
+  - [x] Task 9: suite gates, then the live check
 - [ ] Phase 2B: API bulk and the gateway MCP onto the queue (plan written after 2A)
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 
 ## Phase 2A Task 9 review: suite gates and the mutation table (2026-09-24)
 
-**Task 9 is HALF done and the Phase 2A box stays open.** The build half is here: the gates, the
+**CLOSED 2026-09-24. The live check RAN and Phase 2A is merged and deployed.** Report:
+`tasks/phase2a-live-check.md`. 20 records, $1.70 vendor spend of a $4.40 worst case under a $6 cap,
+$2.10 charged and reconciled to the cent against the wallet ($14.33 -> $12.23). The city-less person
+rows settled `no_lookup_key` with ZERO steps and ZERO cost, which is the capability the phase exists
+for; a city-less COMPANY row traced on name and state alone; the trust ladder hit rung one and
+SKIPPED rung two; and the shared rate budget reserved exactly what the step logs spent on both
+vendors. David chose to merge and deploy WITHOUT the whole-branch review, which was offered and
+declined; the nine per-task reviews stand and no cross-task pass was made.
+
+**Two items carried OUT of this phase, both his calls, both recorded in the ledger:**
+1. **Job completion latency -> Phase 2B, first item (his answer: b).** Nothing finalizes a bulk job
+   when its queue drains; only a polling tab or the 60-minute stale sweep does. `CRON_TIMEOUT_MINUTES`
+   stays 60 (it is a give-up deadline, not a completion mechanism); the fix is a positive
+   evidence-based trigger, `finalizeJobIfDrained`, extracted once across all four completion sites.
+2. **The Tier 2 lane is underwater at the PRO rate.** Arithmetic, not a sampled rate:
+   cost = $0.20 dossier + $0.10 per owner lookup that hits, against a FLAT $0.25. So margin is
+   `0.05 - 0.10N` at pro and `0.20 - 0.10N` at PAYG, and D21(c)/D40 put no cap on N. Measured this
+   run: tier 2 cost $0.80 against $0.75 charged, net **-$0.05**, hidden inside a +$0.40 job total by
+   the healthy Tier 1 lane. NOT a 2A defect and NOT decided. The cheap next step is a free read of
+   the owner-count distribution over existing `property_trace_done` rows.
+
+**The original Task 9 note follows.** Task 9 WAS half done at `068cad3`; The build half is here: the gates, the
 mutation table, the 20 chosen records and the live runner with its refusals proven. The live check
 itself is not run. The web bulk route authenticates by session cookie, so David uploads
 `tasks/research-test/phase2a/upload.csv` himself and the controller drains the queue afterwards

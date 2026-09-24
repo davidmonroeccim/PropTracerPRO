@@ -4,6 +4,48 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (g): Tier 1 Phase 2A CLOSED: live check run, merged to main, pushed, deployed.
+
+- **The live check ran on 20 records in one web bulk upload** (job f406e591), a local server pointed
+  at production, David uploading in his own browser because that route authenticates by session
+  cookie. Vendor spend $1.70 of a $4.40 worst case the runner computed itself, under a --max-dollars 6
+  cap and his $10 authorisation. Customer charge $2.10, wallet $14.33 -> $12.23, reconciled to the
+  cent, 12 ledger debits, one per charged record.
+- **The capability the phase exists for is proved: four city-less PERSON rows settled no_lookup_key
+  with ZERO steps, $0.00 cost, $0.00 charge and no ledger row.** Before 2A the browser discarded those
+  rows silently. A city-less COMPANY row traced on name and state alone. The trust ladder hit rung one
+  and SKIPPED rung two. The shared rate budget reserved EXACTLY what the step logs spent on both
+  vendors, 8 tracerfy and 4 fastappend, and a skipped rung claimed nothing. CSV: 105 columns, found_by
+  and outcome_code at 104 and 105, no APN| anywhere. Priced in the PRO column through the gateway
+  grant, which exercises the L-030 collapse on the one profile shape that used to carry two prices.
+- **What it did NOT prove is written into the report as an exhaustive list:** the tier 2 lane's rate
+  reservation, the parcel/APN path, throttling, the stale-claim ladder, step-log resume, scale, and
+  job completion through this branch's own status route.
+- **A local server pointed at the production database RACES the production crons.** Production drained
+  all four tier 2 rows 50 seconds after submit, on main's code, so vendor_rate_windows carries zero
+  tier 2 contribution. Those rows prove the Tier 1 queue did not disturb the Tier 2 queue and nothing
+  about this branch's tier 2 changes. Only tier1_* statuses are invisible to main, which is why the
+  Tier 1 half survived untouched and is the half the check actually proves.
+- **Two defects found by the check, neither introduced by 2A, both carried out with David's rulings.**
+  (1) Nothing finalizes a bulk job when its queue drains: only a polling tab or the 60-minute stale
+  sweep, and History is a server component with no poll, so a customer who closes the tab sees
+  Processing with no export for up to an hour after being billed. Measured: last row 17:11, completed
+  17:50. Goes to Phase 2B as its first item; CRON_TIMEOUT_MINUTES stays 60 because it is a give-up
+  deadline, not a completion mechanism. (2) **The tier 2 lane is underwater at the PRO rate** and this
+  had never been recorded anywhere: cost is $0.20 plus $0.10 per owner lookup that hits, against a
+  flat $0.25, so margin is 0.05 - 0.10N with no cap on N. This run: tier 2 cost $0.80 against $0.75
+  charged, net -$0.05, hidden inside a +$0.40 job total by the healthy Tier 1 lane. Not decided.
+- **Merged to main, pushed and deployed on David's instruction. He was offered the whole-branch review
+  and declined it**, choosing merge-and-deploy over review-then-deploy and over a branch-only push.
+  The nine per-task reviews stand; no cross-task pass was made on the 23 commits. Recorded so a later
+  reader does not assume one happened.
+- Gates at merge, all four measured by the controller: vitest 2040 passing / 87 files / 0 failed, tsc
+  exit 0, eslint 45 (the baseline), next build exit 0. **Both migrations were already live in
+  production before the deploy**, verified by reading pg_indexes and pg_proc, so the deploy was
+  code-only, which is the safe ordering.
+
+---
+
 ## 2026-09-24 (f): Tier 1 Phase 2A, Task 9 build half: gates green, mutation table, live runner fenced.
 
 - Suite gates: vitest 2040 passing / 87 files, 0 failing (Task 1 baseline 1902 / 84); tsc 0 errors;
