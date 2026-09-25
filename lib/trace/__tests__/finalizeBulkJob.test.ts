@@ -285,12 +285,20 @@ describe('finalizeJobIfDrained: the compare-and-swap', () => {
  * rows, and key the trace_jobs write's CAS outcome by job id so one job's race result cannot leak
  * onto another's.
  *
- * `jobs` maps jobId -> { userId, rows, wins }. `wins` defaults to true (the write's CAS succeeds);
- * pass `wins: false` to simulate a caller that loses the race.
+ * `jobs` maps jobId -> { userId, rows, wins, readError, writeError }. `wins` defaults to true (the
+ * write's CAS succeeds); pass `wins: false` to simulate a caller that loses the race. `readError` /
+ * `writeError` simulate a Supabase error on the trace_history read or the trace_jobs write, the two
+ * outcomes finalizeTouchedJobs must count and log rather than drop (fix round 1, finding 2).
  */
-function stubAdminForJobs(
-  jobs: Map<string, { userId: string; rows: FinalizableRow[]; wins?: boolean }>
-) {
+interface JobConfig {
+  userId: string;
+  rows: FinalizableRow[];
+  wins?: boolean;
+  readError?: { message: string };
+  writeError?: { message: string };
+}
+
+function stubAdminForJobs(jobs: Map<string, JobConfig>) {
   const updateSpy = vi.fn();
   const admin = {
     from: (table: string) => {
@@ -300,6 +308,9 @@ function stubAdminForJobs(
             eq: (_col1: string, userId: string) => ({
               eq: (_col2: string, jobId: string) => {
                 const cfg = jobs.get(jobId);
+                if (cfg?.readError) {
+                  return Promise.resolve({ data: null, error: cfg.readError });
+                }
                 return Promise.resolve({
                   data: cfg && cfg.userId === userId ? cfg.rows : [],
                   error: null,
@@ -319,6 +330,7 @@ function stubAdminForJobs(
                   select: () => ({
                     maybeSingle: async () => {
                       const cfg = jobs.get(String(jobId));
+                      if (cfg?.writeError) return { data: null, error: cfg.writeError };
                       const wins = cfg?.wins !== false;
                       return wins
                         ? { data: { id: jobId }, error: null }
@@ -353,7 +365,10 @@ describe('finalizeTouchedJobs: one ask per job, not per row', () => {
     ];
     const result = await finalizeTouchedJobs(admin, rows);
     expect(updateSpy).toHaveBeenCalledTimes(1);
-    expect(result).toEqual([{ jobId: 'job-1', recordsMatched: 1 }]);
+    expect(result).toEqual({
+      finalized: [{ jobId: 'job-1', userId: 'u1', recordsMatched: 1 }],
+      failed: 0,
+    });
   });
 
   it('asks two distinct jobs, once each', async () => {
@@ -374,24 +389,25 @@ describe('finalizeTouchedJobs: one ask per job, not per row', () => {
     ];
     const result = await finalizeTouchedJobs(admin, rows);
     expect(updateSpy).toHaveBeenCalledTimes(2);
-    expect(result).toHaveLength(2);
-    expect(result).toEqual(
-      expect.arrayContaining([
-        { jobId: 'job-1', recordsMatched: 1 },
-        { jobId: 'job-2', recordsMatched: 0 },
-      ])
-    );
+    expect(result.finalized).toHaveLength(2);
+    expect(result).toEqual({
+      finalized: expect.arrayContaining([
+        { jobId: 'job-1', userId: 'u1', recordsMatched: 1 },
+        { jobId: 'job-2', userId: 'u2', recordsMatched: 0 },
+      ]),
+      failed: 0,
+    });
   });
 
   // MUTATION: drop the `.filter((id): id is string => Boolean(id))` guard and this goes red --
   // the null trace_job_id would be asked about as a literal job id.
   it('skips a row with no parent job, asking nothing', async () => {
-    const jobs = new Map<string, { userId: string; rows: FinalizableRow[] }>();
+    const jobs = new Map<string, JobConfig>();
     const { admin, updateSpy } = stubAdminForJobs(jobs);
     const rows = [{ trace_job_id: null, user_id: 'u1' }];
     const result = await finalizeTouchedJobs(admin, rows);
     expect(updateSpy).not.toHaveBeenCalled();
-    expect(result).toEqual([]);
+    expect(result).toEqual({ finalized: [], failed: 0 });
   });
 
   // MUTATION: return finalizeJobIfDrained's outcome regardless of `finalized`, and this test goes
@@ -419,6 +435,51 @@ describe('finalizeTouchedJobs: one ask per job, not per row', () => {
       { trace_job_id: 'job-3', user_id: 'u1' },
     ];
     const result = await finalizeTouchedJobs(admin, rows);
-    expect(result).toEqual([{ jobId: 'job-3', recordsMatched: 1 }]);
+    // still_working and already_terminal are correct, expected answers, not failures.
+    expect(result).toEqual({
+      finalized: [{ jobId: 'job-3', userId: 'u1', recordsMatched: 1 }],
+      failed: 0,
+    });
+  });
+
+  // Fix round 1, finding 2: a read or write failure must be COUNTED and LOGGED, never dropped
+  // silently -- dropping it makes "every finalize errored" indistinguishable, in the response body
+  // AND in the logs, from "nothing was drainable this run".
+  // MUTATION: drop the `else if` branch (or stop incrementing `failed`) and this goes red: `failed`
+  // reads 0 and neither job's id reaches console.error.
+  it('counts and logs a read_failed and a write_failed job, without finalizing either', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const jobs = new Map([
+      ['job-read', { userId: 'u1', rows: [], readError: { message: 'read timeout' } }],
+      [
+        'job-write',
+        {
+          userId: 'u1',
+          rows: [row({ ai_research_status: 'tier1_done', is_successful: true })],
+          writeError: { message: 'connection reset' },
+        },
+      ],
+      ['job-win', { userId: 'u1', rows: [row({ ai_research_status: 'tier1_done', is_successful: true })] }],
+    ]);
+    const { admin } = stubAdminForJobs(jobs);
+    const rows = [
+      { trace_job_id: 'job-read', user_id: 'u1' },
+      { trace_job_id: 'job-write', user_id: 'u1' },
+      { trace_job_id: 'job-win', user_id: 'u1' },
+    ];
+    const result = await finalizeTouchedJobs(admin, rows);
+
+    expect(result.failed).toBe(2);
+    expect(result.finalized).toEqual([{ jobId: 'job-win', userId: 'u1', recordsMatched: 1 }]);
+
+    const logged = errorSpy.mock.calls.map((args) => args.join(' '));
+    expect(logged.some((line) => line.includes('job-read') && line.includes('read timeout'))).toBe(
+      true
+    );
+    expect(
+      logged.some((line) => line.includes('job-write') && line.includes('connection reset'))
+    ).toBe(true);
+
+    errorSpy.mockRestore();
   });
 });

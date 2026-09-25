@@ -26,6 +26,17 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * records_matched / timestamp. Not inventing new copy (global constraint): these are the same keys,
  * same event name, an integrator already receives from the other two copies.
  *
+ * RULED: FOUR KEYS, DELIBERATELY, NOT THE V1 SITE'S SIX (fix round 1, ruling 4). The v1 status
+ * route's copy of this webhook also sends `total_charge` and a per-record `results` array; this one
+ * does not, and that is not an oversight. This module's callers -- the two crons -- are exactly the
+ * jobs that used to be finalized by sweep-stale-traces at the 60-minute mark, and that copy has
+ * always sent the same four keys this one does, so no integrator's handler sees a shape change.
+ * `results` cannot honestly be built here: it is v1's own per-record enrichment (business-trace
+ * pending flags looked up against a different table), not data a cron finalizing on queue-drain has
+ * in hand, and fabricating it would be exactly the fallback data CLAUDE.md rule 7 forbids. Adding
+ * `total_charge` alone, with no `results`, would just invent a third payload shape matching neither
+ * existing site. So: match sweep-stale-traces' shape, not v1's.
+ *
  * NEVER TREAT A FAILED READ AS AN EMPTY JOB (the same amendment finalizeJobIfDrained carries). A
  * Supabase error reading trace_jobs or user_profiles is not "there is no webhook to fire" -- it is
  * "we do not know" -- so both are logged and this function returns without firing, rather than

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { PRICE, planRoute } from "@/lib/routing/ownerRoute";
 import {
@@ -201,6 +201,13 @@ function recordingClient() {
         // `.update(...).eq(id).eq(property_trace_status).select('id').maybeSingle()`.
         // Also reached by finalizeJobIfDrained's own trace_jobs CAS write (Task 2), which shares
         // this same generic path; applyUpdate is a no-op there (it only ever touches trace_history).
+        // SHARED QUEUE, NOT SHARED TABLES: this CAS also consumes an entry from H.claimOutcomes, the
+        // SAME shift-queue the row claim above draws from. Harmless today because no test in the
+        // "finalizing the parent job" describe block below seeds a trailing `false`, but a future
+        // test that does would see a job silently fail to finalize for a reason that has nothing to
+        // do with its own CAS -- an earlier row claim consumed the `false` meant for it, or vice
+        // versa. Keep `H.claimOutcomes` sized to exactly the row claims a test needs when a test in
+        // that block also needs to control the job CAS outcome.
         if (rec?.op === "update") {
           const allowed = H.claimOutcomes.length ? H.claimOutcomes.shift() : true;
           if (allowed) applyUpdate();
@@ -287,10 +294,21 @@ vi.mock("next/server", async (importOriginal) => ({
   },
 }));
 
+/**
+ * Fix round 1, finding 1: triggerAutoRebillIfNeeded creates its OWN admin client internally
+ * (lib/utils/auto-rebill.ts does not take one as a parameter) and runs a multi-step RPC-plus-Stripe
+ * flow that has nothing to do with this cron. Mocked here the same way reserveVendorCalls and
+ * pruneVendorRateWindows are above: a spy this file asserts against, not a path this file re-verifies.
+ */
+vi.mock("@/lib/utils/auto-rebill", () => ({
+  triggerAutoRebillIfNeeded: vi.fn(async () => {}),
+}));
+
 const { GET, parcelForRow } = await import("@/app/api/cron/sweep-property-traces/route");
 const { lookupDossier } = await import("@/lib/tracerfy/dossier");
 const { lookupBusinessTrace, lookupPersonTrace } = await import("@/lib/tracerfy/client");
 const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
+const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
 const { pruneVendorRateWindows, reserveVendorCalls } = await import(
   "@/lib/trace/vendorRateBudget"
 );
@@ -299,6 +317,9 @@ const { pruneVendorRateWindows, reserveVendorCalls } = await import(
 async function flushDeferred(): Promise<void> {
   while (H.scheduled.length > 0) await H.scheduled.shift()!();
 }
+
+/** The webhook fetch notifyBulkJobCompleted fires, stubbed globally so it never reaches a network. */
+let fetchMock: ReturnType<typeof vi.fn>;
 
 /** When the bulk job holding ROW was created, and two instants either side of it. */
 const JOB_CREATED_AT = "2026-09-18T10:00:00.000Z";
@@ -452,11 +473,23 @@ beforeEach(() => {
   vi.mocked(reserveVendorCalls).mockResolvedValue(true);
   vi.mocked(pruneVendorRateWindows).mockReset();
   vi.mocked(pruneVendorRateWindows).mockResolvedValue(undefined);
+  vi.mocked(triggerAutoRebillIfNeeded).mockClear();
+  fetchMock = vi.fn().mockResolvedValue({ ok: true });
+  vi.stubGlobal("fetch", fetchMock);
   // mockClear AFTER the spy, not instead of it: vi.spyOn returns the SAME spy on
   // a second call, so without this the log assertions below read every previous
   // test's output as well as their own.
+  //
+  // MUTED, DELIBERATELY, FOR THE WHOLE FILE. A test whose only visible signal was "console stayed
+  // clean" would pass just as well if the code under test silently did nothing at all -- see the
+  // notify/auto-rebill fencing in "finalizing the parent job" below, which asserts the mocked fetch
+  // and triggerAutoRebillIfNeeded calls directly rather than trusting an absence of log noise.
   vi.spyOn(console, "error").mockImplementation(() => {}).mockClear();
   vi.spyOn(console, "log").mockImplementation(() => {}).mockClear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 /**
@@ -1651,6 +1684,16 @@ describe("the shared vendor rate budget (spec 5.3)", () => {
  * `finalizeReadRanFor` / `anyFinalizeReadHappened` exist for the same reason as their twin in
  * sweep-entity-traces: "no trace_jobs update happened" is also true when the finalize code never
  * runs at all, so two of these tests would otherwise pass vacuously.
+ *
+ * FIX ROUND 1, FINDING 3: the notify/auto-rebill loop needs its OWN fence, separate from the
+ * trace_jobs write above. Before this, `H.jobRow` carried only `created_at` and `H.profile` had no
+ * `webhook_url`, so notifyBulkJobCompleted's own read found a job with no `user_id` and bailed at
+ * its `!job` guard as soon as `job.user_id` came back `undefined` -- its `console.error` was
+ * invisible because `beforeEach` mutes console for the whole file. The suite was green because the
+ * path never ran, not because it worked. "finalizes the parent job..." now gives `H.jobRow` a real
+ * `user_id`/`records_submitted` and the profile a webhook URL, and asserts the stubbed global
+ * `fetch` and the mocked `triggerAutoRebillIfNeeded` were actually called; "does NOT finalize..."
+ * asserts neither was.
  */
 describe("finalizing the parent job when the tier 2 queue drains", () => {
   const finalizeReadRanFor = (jobId: string): boolean =>
@@ -1680,9 +1723,11 @@ describe("finalizing the parent job when the tier 2 queue drains", () => {
 
   const traceJobsUpdate = () => H.ops.find((o) => o.table === "trace_jobs" && o.op === "update");
 
-  it("finalizes the parent job once its last queued row settles", async () => {
+  it("finalizes the parent job once its last queued row settles, and fires the webhook and the auto-rebill check", async () => {
     // One job, one row, and the row settles in this run (a real dossier hit, a real contact hit,
     // through the cron's own settle write). The job must come out completed.
+    H.jobRow = { created_at: JOB_CREATED_AT, user_id: "user-1", records_submitted: 3 };
+    H.profile = { ...H.profile, webhook_url: "https://example.com/hook" };
     const body = await (await run()).json();
     const jobUpdate = traceJobsUpdate();
     expect(jobUpdate?.payload).toMatchObject({
@@ -1690,15 +1735,31 @@ describe("finalizing the parent job when the tier 2 queue drains", () => {
       records_matched: expect.any(Number),
     });
     expect(body.jobsFinalized).toBe(1);
+
+    // Fix round 1, finding 3: the notify loop is exercised for real, not bailed out early.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://example.com/hook");
+    const payload = JSON.parse(init.body);
+    expect(payload).toMatchObject({
+      event: "bulk_job.completed",
+      job_id: "job-1",
+      records_submitted: 3,
+    });
+
+    // Fix round 1, finding 1: auto-rebill restored, mirroring sweep-stale-traces:451.
+    expect(triggerAutoRebillIfNeeded).toHaveBeenCalledWith("user-1");
   });
 
   // MUTATION: delete the finalizeTouchedJobs call after the Promise.all and this goes red. Without
   // it the job sits at 'processing' until a tab polls it or the 60-minute sweep runs.
-  it("does NOT finalize while another row of the same job is still queued", async () => {
+  it("does NOT finalize while another row of the same job is still queued, and fires neither the webhook nor auto-rebill", async () => {
     H.queuedRows = [
       { ...ROW, id: "row-1", trace_job_id: "job-1" },
       { ...ROW, id: "sibling", trace_job_id: "job-1", property_trace_status: "queued_2" },
     ];
+    H.jobRow = { created_at: JOB_CREATED_AT, user_id: "user-1", records_submitted: 3 };
+    H.profile = { ...H.profile, webhook_url: "https://example.com/hook" };
     // row-1's claim succeeds; the sibling's loses -- another worker (or a past run) has it -- so it
     // is NOT settled by this run and stays on the queue when finalizeJobIfDrained reads the job.
     H.claimOutcomes = [true, false];
@@ -1707,6 +1768,8 @@ describe("finalizing the parent job when the tier 2 queue drains", () => {
     // than never running at all (both would otherwise leave `traceJobsUpdate()` undefined).
     expect(finalizeReadRanFor("job-1")).toBe(true);
     expect(traceJobsUpdate()).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(triggerAutoRebillIfNeeded).not.toHaveBeenCalled();
   });
 
   it("guards the terminal write on status=processing", async () => {

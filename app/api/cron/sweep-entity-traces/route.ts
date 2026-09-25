@@ -43,6 +43,7 @@ import {
 import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
 import { finalizeTouchedJobs } from '@/lib/trace/finalizeBulkJob';
 import { notifyBulkJobCompleted } from '@/lib/trace/notifyBulkJobCompleted';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import {
   pruneVendorRateWindows,
   reservationForSteps,
@@ -321,6 +322,8 @@ interface Tier1LaneResult {
   exhausted: number;
   /** Bulk jobs this run finalized because their queue drained (Task 2, spec: no more waiting on a poll). */
   jobsFinalized: number;
+  /** Jobs this run could not even judge -- a read or write inside finalizeJobIfDrained errored. */
+  finalizeFailed: number;
 }
 
 /**
@@ -343,6 +346,7 @@ async function runTier1Lane(
     staleReverted: 0,
     exhausted: 0,
     jobsFinalized: 0,
+    finalizeFailed: 0,
   };
 
   /**
@@ -698,23 +702,35 @@ async function runTier1Lane(
   );
 
   /**
-   * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED.
+   * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED. See finalizeTouchedJobs' own docblock
+   * (lib/trace/finalizeBulkJob.ts) for why this is one shared call rather than a loop written twice:
+   * it dedupes to one ask per job, hands back only the jobs it actually won, and counts (and logs)
+   * the ones it could not even judge.
    *
-   * The settle above is what MAKES a job finishable; nothing before Phase 2B ever noticed. A job
-   * reached 'completed' only when a browser tab polled it or when sweep-stale-traces caught it at
-   * the 60-minute cutoff, so a customer who closed the tab saw 'Processing' with no export for up
-   * to an hour after the work was done and billed.
+   * THE CUSTOMER DEFECT THIS CLOSES. A job reached 'completed' only when a browser tab polled it or
+   * when sweep-stale-traces caught it at the 60-minute cutoff, so a customer who closed the tab saw
+   * 'Processing' with no export for up to an hour after the work was done and billed.
    *
-   * finalizeTouchedJobs asks ONCE PER JOB, not per row: a 120-row run of a single job is one
-   * question, not 120. It re-reads each touched job's rows and writes nothing unless every one is
-   * settled, so a job with rows this run did not claim is simply left for the next run a minute
-   * later. Only the jobs it actually finalized come back, and the webhook fires for those and no
-   * others -- the compare-and-swap inside finalizeJobIfDrained is what makes this one-shot.
+   * AUTO-REBILL, RESTORED (fix round 1, finding 1). sweep-stale-traces' own finalize path has always
+   * called triggerAutoRebillIfNeeded right after marking a job completed (:451). This cron is now
+   * ALSO a place a job reaches 'completed' -- for most jobs, the FIRST and only place -- so it needs
+   * the same call or a customer whose wallet crosses the rebill threshold mid-run gets no top-up
+   * until their next trace attempt instead of one within the run that just finished. Mirrors
+   * sweep-stale-traces:451 exactly: fire-and-forget, one call per job this run actually finalized.
+   *
+   * THE DEADLINE CHECK. This lane budgets TIER1_RUN_BUDGET_MS of the cron's 300s maxDuration and the
+   * legacy entity lane still has to run after this returns, so a run that finalized many jobs stops
+   * notifying/rebilling once the budget is spent rather than eating the legacy lane's time. A job
+   * left un-notified this way is simply picked up by the next run a minute later -- the same
+   * tolerance finalizeTouchedJobs itself already relies on for a job this run didn't finish claiming.
    */
-  const finalized = await finalizeTouchedJobs(adminClient, rows);
+  const { finalized, failed } = await finalizeTouchedJobs(adminClient, rows);
   out.jobsFinalized = finalized.length;
-  for (const { jobId, recordsMatched } of finalized) {
+  out.finalizeFailed = failed;
+  for (const { jobId, userId, recordsMatched } of finalized) {
+    if (Date.now() >= runDeadlineMs) break;
     await notifyBulkJobCompleted(adminClient, jobId, recordsMatched);
+    triggerAutoRebillIfNeeded(userId).catch(() => {});
   }
 
   return out;

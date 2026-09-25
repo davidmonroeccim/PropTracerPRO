@@ -167,6 +167,27 @@ export async function finalizeJobIfDrained(
   return { finalized: true, recordsMatched, totalCharge };
 }
 
+/** A job finalizeTouchedJobs actually won the compare-and-swap for. */
+export interface TouchedJobFinalized {
+  jobId: string;
+  userId: string;
+  recordsMatched: number;
+}
+
+/**
+ * finalizeTouchedJobs' result: the jobs it finalized, plus a COUNT of jobs it could not even judge.
+ *
+ * `failed` exists so a run where every finalize read or write errors is NOT indistinguishable from
+ * a run with nothing drainable (fix round 1, finding 2). Both would otherwise report
+ * `jobsFinalized: 0` and log nothing, which is the exact silent-processing defect this phase exists
+ * to close, just moved one layer down. still_working and already_terminal are NOT failures -- they
+ * are correct, expected answers -- so they are not counted here.
+ */
+export interface FinalizeTouchedJobsResult {
+  finalized: TouchedJobFinalized[];
+  failed: number;
+}
+
 /**
  * ONE ASK PER JOB, NOT PER ROW. The shared wiring both of Task 2's crons need: dedupe a run's
  * claimed rows down to the distinct bulk jobs they touched, ask finalizeJobIfDrained about each
@@ -182,16 +203,18 @@ export async function finalizeJobIfDrained(
  * rows enqueued outside a bulk submit (a single trace reusing the row), and those carry
  * `trace_job_id: null`.
  *
- * ONLY WINNERS COME BACK. finalizeJobIfDrained's non-finalizing outcomes (still_working,
- * already_terminal, read_failed, write_failed) are dropped here rather than surfaced, because the
- * only thing a caller does with a winner is count it and fire the one-shot webhook -- and firing
- * that on anything but `finalized: true` is the exact bug this phase exists to prevent (see the
- * FinalizeOutcome docblock above).
+ * ONLY WINNERS GO IN `finalized`. still_working and already_terminal are dropped, because the only
+ * thing a caller does with a winner is count it, fire the one-shot webhook and trigger auto-rebill
+ * -- and doing any of those on anything but `finalized: true` is the exact bug this phase exists to
+ * prevent (see the FinalizeOutcome docblock above). read_failed and write_failed are NOT dropped:
+ * they are counted in `failed` and logged here, with the job id and the underlying error, so a run
+ * that could not judge a job is visible in both the response body and the logs rather than reading
+ * identically to a quiet, healthy run.
  */
 export async function finalizeTouchedJobs(
   admin: SupabaseClient,
   rows: Array<{ trace_job_id: string | null; user_id: string }>
-): Promise<Array<{ jobId: string; recordsMatched: number }>> {
+): Promise<FinalizeTouchedJobsResult> {
   const touchedJobs = new Map<string, string>();
   for (const r of rows) {
     if (r.trace_job_id && !touchedJobs.has(r.trace_job_id)) {
@@ -199,10 +222,16 @@ export async function finalizeTouchedJobs(
     }
   }
 
-  const finalized: Array<{ jobId: string; recordsMatched: number }> = [];
+  const finalized: TouchedJobFinalized[] = [];
+  let failed = 0;
   for (const [jobId, userId] of touchedJobs) {
     const outcome = await finalizeJobIfDrained(admin, { jobId, userId });
-    if (outcome.finalized) finalized.push({ jobId, recordsMatched: outcome.recordsMatched });
+    if (outcome.finalized) {
+      finalized.push({ jobId, userId, recordsMatched: outcome.recordsMatched });
+    } else if (outcome.reason === 'read_failed' || outcome.reason === 'write_failed') {
+      failed++;
+      console.error(`[finalizeTouchedJobs] job ${jobId} ${outcome.reason}: ${outcome.error}`);
+    }
   }
-  return finalized;
+  return { finalized, failed };
 }

@@ -20,6 +20,7 @@ import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { isParcelKey } from '@/lib/trace/historyDisplay';
 import { finalizeTouchedJobs } from '@/lib/trace/finalizeBulkJob';
 import { notifyBulkJobCompleted } from '@/lib/trace/notifyBulkJobCompleted';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import {
   pruneVendorRateWindows,
   reservationForSteps,
@@ -825,23 +826,20 @@ export async function GET(request: Request) {
     );
 
     /**
-     * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED.
+     * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED. See sweep-entity-traces' copy of this block
+     * for the full rationale (the customer defect it closes, why auto-rebill is restored here, why
+     * the webhook is one-shot) and finalizeTouchedJobs' own docblock (lib/trace/finalizeBulkJob.ts)
+     * for why the dedup and the failure count live in one shared module rather than two loops.
      *
-     * The settle above is what MAKES a job finishable; nothing before Phase 2B ever noticed. A job
-     * reached 'completed' only when a browser tab polled it or when sweep-stale-traces caught it at
-     * the 60-minute cutoff, so a customer who closed the tab saw 'Processing' with no export for up
-     * to an hour after the work was done and billed.
-     *
-     * finalizeTouchedJobs asks ONCE PER JOB, not per row. It re-reads each touched job's rows and
-     * writes nothing unless every one is settled, so a job with rows this run did not claim is
-     * simply left for the next run a minute later. Only the jobs it actually finalized come back,
-     * and the webhook fires for those and no others -- the compare-and-swap inside
-     * finalizeJobIfDrained is what makes this one-shot.
+     * Mirrors sweep-stale-traces:451 for auto-rebill: fire-and-forget, one call per job this run
+     * actually finalized, never for one still working or one this run could not judge.
      */
-    const finalized = await finalizeTouchedJobs(adminClient, rows);
+    const { finalized, failed } = await finalizeTouchedJobs(adminClient, rows);
     const jobsFinalized = finalized.length;
-    for (const { jobId, recordsMatched } of finalized) {
+    const finalizeFailed = failed;
+    for (const { jobId, userId, recordsMatched } of finalized) {
       await notifyBulkJobCompleted(adminClient, jobId, recordsMatched);
+      triggerAutoRebillIfNeeded(userId).catch(() => {});
     }
 
     return NextResponse.json({
@@ -858,6 +856,7 @@ export async function GET(request: Request) {
       exhausted,
       staleReverted,
       jobsFinalized,
+      finalizeFailed,
     });
   } catch (error) {
     console.error('[sweep-property-traces] fatal error:', error);
