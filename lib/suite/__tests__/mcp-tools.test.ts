@@ -507,7 +507,13 @@ describe("skip_trace_quote", () => {
           { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
           { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
           { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
-          { address: "4 D St", city: "X", state: "TX", zip: "75001" }, // entity: no owner_name -> FastAppend
+          // THE CITY IS A REAL ONE NOW, AND IT HAS TO BE. This fixture said `city: "X"`, and a
+          // one-character city fails validateAddressInput ("City is required", which wants 2+).
+          // That made this record UNLOOKUPABLE, which contradicts the premise the comment below
+          // states: it was never a tier 2 record at all, and the submit files it no-key and free.
+          // The quote only agreed with the fixture because it did not ask the question. Every
+          // assertion below is unchanged; only the record now means what the test says it means.
+          { address: "4 D St", city: "Dallas", state: "TX", zip: "75001" }, // no owner_name -> tier 2
         ],
       }),
     );
@@ -520,6 +526,150 @@ describe("skip_trace_quote", () => {
     // And it costs the tier 2 per-record rate on top of the three tier 1 records, where it used
     // to cost nothing. MUTATION: drop the blank arm from worstCaseCost and this goes red.
     expect(out.worst_case_cost).toBeCloseTo(3 * PRICING.CHARGE_PER_SUCCESS_WALLET + 0.4);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * THE QUOTE MUST NOT PROMISE A TRACE THAT WILL NOT RUN.
+   *
+   * `full_property_trace` was computed from isBlankOwnerRecord alone -- validateAddressInput
+   * appeared NOWHERE in skipTraceQuote -- so a record with no owner AND no usable address was
+   * counted as a full property trace that WILL run and WILL be billed. The submit files exactly
+   * that record no-key, free, and never traces it.
+   *
+   * This is not a missing number, it is a false one, and it is on the surface the tool description
+   * calls the mandatory first step, next to the words "those records are billed whether or not
+   * anything is found". Before Phase 2B the submit refused the whole batch for such a record, so
+   * the claim was never contradicted by a submit that accepted it; it is now.
+   * ------------------------------------------------------------------ */
+  const quoteProfile = { id: "p1", subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"], wallet_balance: 100 };
+  /** Blank owner, no street, no state: the record the submit files no-key, free. */
+  const noKeyRecord = { address: "", city: "Dallas", state: "", zip: "75001" };
+  const namedRecord = { owner_name: "Jane Smith", address: "1 Main St", city: "Dallas", state: "TX", zip: "75001" };
+  /** Blank owner WITH a usable address: the record that genuinely does run a full property trace. */
+  const tier2Record = { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" };
+
+  it("does not promise a full property trace for a record that cannot be looked up", async () => {
+    // MUTATION: revert the classification to isBlankOwnerRecord alone and this goes red.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [namedRecord, noKeyRecord],
+      }),
+    );
+    expect(out.full_property_trace).toBe(0);
+  });
+
+  it("does not let the unlookupable record fall into the person count instead", async () => {
+    // THE REGRESSION THIS FIX COULD EASILY INTRODUCE, and it would be worse than the bug: `persons`
+    // is derived by subtraction, so narrowing the blank bucket without narrowing the subtrahend
+    // would quietly reclassify a record with NO owner name as a person.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [namedRecord, noKeyRecord],
+      }),
+    );
+    expect(out.persons).toBe(1);
+    expect(out.entities).toBe(0);
+    expect(out.after_dedup).toBe(2);
+  });
+
+  it("still quotes a blank-owner record WITH a usable address as a full property trace", async () => {
+    // The other direction, so the fix cannot be "delete the blank arm". This record has no owner
+    // either, and it DOES run and IS billed per record submitted.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [namedRecord, tier2Record],
+      }),
+    );
+    expect(out.full_property_trace).toBe(1);
+    expect(out.worst_case_cost).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET + 0.4);
+  });
+
+  it("still quotes a full property trace when only the ZIP is mangled", async () => {
+    // NO ZIP ARGUMENT, and this is the test that makes that load-bearing rather than incidental.
+    // The submit asks validateAddressInput ONE question -- can a vendor be asked about this row --
+    // and deliberately leaves the ZIP out of it, because Excel strips a leading zero on export and
+    // a row with a perfectly good street, city and state must not be filed unlookupable over it.
+    //
+    // Adding `r.zip` here would make this quote say the record is free and will not run, while the
+    // submit queues and BILLS it: an UNDER-quote, which is the one direction that is never
+    // defensible. MUTATION: pass r.zip as the fourth argument and this goes red.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [{ address: "2 B St", city: "Dallas", state: "TX", zip: "2139" }],
+      }),
+    );
+    expect(out.full_property_trace).toBe(1);
+    expect(out.worst_case_cost).toBeCloseTo(0.4);
+  });
+
+  it("treats a one-character city as unlookupable, exactly as the submit does", async () => {
+    // FOUND BY THIS FIX, and pinned so it is not lost. validateAddressInput wants a city of at
+    // least two characters, so a blank-owner record carrying `city: "X"` is no-key, not tier 2 --
+    // and the submit has always filed it that way. The quote disagreed only because it never asked.
+    // A terse test fixture elsewhere in this file relied on the old answer and had to be corrected.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
+      }),
+    );
+    expect(out.full_property_trace).toBe(0);
+    expect(out.worst_case_cost).toBe(0);
+    // And it is NOT silently promoted to a person: it has no owner of record.
+    expect(out.persons).toBe(0);
+    expect(out.entities).toBe(0);
+  });
+
+  it("stops charging for the record it stopped promising to trace", async () => {
+    // MUTATION: price the quote over `unique` instead of the billable subset and this goes red at
+    // 0.65 against 0.25.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [namedRecord, noKeyRecord],
+      }),
+    );
+    expect(out.worst_case_cost).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
+
+  it("PROOF: never quotes less than the submit will commit for the same batch", async () => {
+    // THE PROOF OBLIGATION for lowering a number named as a ceiling. The quote feeds no gate -- it
+    // is returned to the model and nothing reads it back -- so the only question that matters is
+    // whether the quote can now promise LESS than the submit will actually reserve and bill. It
+    // cannot, and the reason is structural: both derive from the same billable split through the
+    // same worstCaseCost, and the quote dedups only INTERNALLY while the submit also drops 90-day
+    // history duplicates, so the quote's set is always a superset of the submit's.
+    const batch = [namedRecord, tier2Record, noKeyRecord];
+    const quoted = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", { records: batch }),
+    );
+    const { admin } = submitAdminStub({ profile: quoteProfile });
+    const submitted = (await skipTraceBulk(admin, "sub-1", {
+      records: batch,
+      confirm: true,
+    })) as { committed_worst_case: number };
+    expect(quoted.worst_case_cost).toBeGreaterThanOrEqual(submitted.committed_worst_case);
+    // And they AGREE exactly when nothing is dropped by history dedup, which is the common case.
+    expect(quoted.worst_case_cost).toBeCloseTo(submitted.committed_worst_case);
+  });
+
+  it("PROOF: the inequality is not vacuous when history dedup drops a record", async () => {
+    // The superset arm, exercised rather than asserted in prose: the submit sees one fewer record
+    // than the quote did, so it commits strictly less and the quote still covers it.
+    const batch = [namedRecord, tier2Record];
+    const quoted = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", { records: batch }),
+    );
+    vi.mocked(checkDuplicates).mockResolvedValueOnce({
+      newRecords: [namedRecord],
+      duplicates: [tier2Record],
+      cachedResults: [],
+    } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
+    const { admin } = submitAdminStub({ profile: quoteProfile });
+    const submitted = (await skipTraceBulk(admin, "sub-1", {
+      records: batch,
+      confirm: true,
+    })) as { committed_worst_case: number };
+    expect(submitted.committed_worst_case).toBeLessThan(quoted.worst_case_cost);
+    expect(quoted.worst_case_cost).toBeGreaterThanOrEqual(submitted.committed_worst_case);
   });
 
   it("counts no full property traces when every record has an owner", () => {
@@ -880,6 +1030,31 @@ describe("skip_trace_bulk", () => {
     expect(JSON.stringify(out)).not.toMatch(/not charged/i);
     expect(JSON.stringify(out)).not.toMatch(/[—–]/);
     expect(out.records_failed).toBe(0);
+  });
+
+  it("PROOF: the wallet gate reserves what the submit will bill, and not the rows it will not", async () => {
+    // THE GATE-SIDE HALF OF THE PROOF for lowering the quote. The submit's reserve is computed
+    // INDEPENDENTLY of the quote, from billableRecords, and this pins the boundary exactly: one
+    // tier 1 record at 0.25 plus one tier 2 record at 0.40 is 0.65, and the no-key record beside
+    // them adds nothing. A wallet holding exactly 0.65 is let through; one cent less is refused.
+    //
+    // It is also the fence against the opposite mistake. If the gate priced the no-key row like the
+    // quote used to, the reserve would be 1.05 and the 0.65 wallet would be refused a job it can
+    // afford. MUTATION: price the gate over newRecords instead of billableRecords and this goes red.
+    const batch = [
+      rec("Jane Smith", 1),
+      rec(undefined, 2),
+      rec(undefined, 3, { address: "", state: "" }),
+    ];
+    const exact = submitAdminStub({ profile: { ...linked, wallet_balance: 0.65 } });
+    const accepted = await skipTraceBulk(exact.admin, "sub-1", { records: batch, confirm: true });
+    expect(accepted).not.toHaveProperty("error");
+    expect((accepted as { committed_worst_case: number }).committed_worst_case).toBeCloseTo(0.65);
+
+    const short = submitAdminStub({ profile: { ...linked, wallet_balance: 0.64 } });
+    const refused = await skipTraceBulk(short.admin, "sub-1", { records: batch, confirm: true });
+    expect(refused).toMatchObject({ error: "insufficient_balance" });
+    expect(short.captured.traceHistoryUpserts).toHaveLength(0);
   });
 
   it("sizes the wallet gate against work already accepted and not yet billed", async () => {

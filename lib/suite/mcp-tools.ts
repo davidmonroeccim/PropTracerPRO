@@ -250,22 +250,62 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   const { unique, internalDuplicates } = removeBatchDuplicates(
     records.map((record) => ({ ...record, city: record.city ?? "" })),
   );
-  const cost = worstCaseCost(unique, profile);
-  const blanks = unique.filter((r) => isBlankOwnerRecord(r.owner_name)).length;
-  const entities = unique.filter(
-    (r) => isEntityRecord(r.owner_name) && !isBlankOwnerRecord(r.owner_name),
-  ).length;
+  // THE SUBMIT'S OWN SPLIT, ASKED IN THE SUBMIT'S OWN ORDER, so the two surfaces cannot drift
+  // again. skipTraceBulk asks exactly these two questions: a record with an owner of record is
+  // tier 1, and a BLANK-owner record is tier 2 only if validateAddressInput says a vendor can be
+  // asked about it at all. Otherwise it is no-key: terminal at submit, FREE, and never traced.
+  //
+  // `validateAddressInput` used to appear NOWHERE in this function, and that was the bug. This
+  // quote counted every blank-owner record as a full property trace, so it told the caller that a
+  // record with no owner AND no usable address WILL run and WILL be billed, about a record that
+  // does neither. The tool description tells the caller to show that count to the user beside the
+  // words "those records are billed whether or not anything is found", so the falsehood was
+  // repeated to the user in the one place that exists to tell them what a batch will cost.
+  //
+  // It only became observable in Phase 2B: before it, the submit refused the whole batch over such
+  // a record, so no submit ever accepted one to contradict the quote.
+  //
+  // NO ZIP ARGUMENT, matching the submit exactly. A malformed ZIP must never make a row unlookable.
+  const tier1Records = unique.filter((r) => !isBlankOwnerRecord(r.owner_name));
+  const blankOwnerRecords = unique.filter((r) => isBlankOwnerRecord(r.owner_name));
+  const tier2Records = blankOwnerRecords.filter(
+    (r) => validateAddressInput(r.address, r.city, r.state).valid,
+  );
+  const billableRecords = [...tier1Records, ...tier2Records];
+  // PRICED OVER THE RECORDS THAT WILL ACTUALLY RUN, which is the same set skipTraceBulk reserves
+  // from, through the same one price derivation. A no-key record is in neither term, because
+  // nobody is ever asked about it and nothing is ever charged for it.
+  //
+  // LOWERING A NUMBER NAMED AS A CEILING IS SAFE HERE, AND THE REASON IS STRUCTURAL RATHER THAN A
+  // MATTER OF JUDGEMENT. This value feeds no gate: it is returned to the caller and nothing reads
+  // it back. The money gate is skipTraceBulk's own, computed independently from its own
+  // billableRecords. And this quote can never promise LESS than that gate reserves, because the
+  // two derive the same way from sets in a fixed relation: this one dedups INTERNALLY only, while
+  // the submit also drops 90-day history duplicates, so the submit's set is always a subset of
+  // this one. Both directions are pinned by tests in skip_trace_quote.
+  const cost = worstCaseCost(billableRecords, profile);
+  const entities = tier1Records.filter((r) => isEntityRecord(r.owner_name)).length;
   return {
     submitted: records.length,
     after_dedup: unique.length,
     duplicates_removed: internalDuplicates,
-    persons: unique.length - entities - blanks,
+    // Derived from the TIER 1 set, never by subtracting the tier 2 count from the total. Narrowing
+    // the blank-owner bucket above without narrowing the subtrahend would quietly reclassify a
+    // record with no owner name at all as a person, which is a worse falsehood than the one this
+    // change removes. Same arithmetic the submit uses for the same two keys.
+    persons: tier1Records.length - entities,
     entities,
-    // Records with no owner of record. They run a Full Property Trace, which is charged per RECORD
-    // SUBMITTED rather than per successful trace, so they carry the tier 2 share of
-    // worst_case_cost. The key is named for what happens to them rather than what does not: it
-    // replaced `skipped`, which said they were free, and that stopped being true in phase 5c.
-    full_property_trace: blanks,
+    // Records with no owner of record THAT A VENDOR CAN BE ASKED ABOUT. They run a Full Property
+    // Trace, which is charged per RECORD SUBMITTED rather than per successful trace, so they carry
+    // the tier 2 share of worst_case_cost. The key is named for what happens to them rather than
+    // what does not: it replaced `skipped`, which said they were free, and that stopped being true
+    // in phase 5c.
+    //
+    // A blank-owner record with no usable address is in NO count here. That is an omission, and a
+    // deliberate one: reporting it needs a new key, which is a payload addition and a separate
+    // decision. Saying nothing about a record is honest; saying it will be traced and billed is
+    // not, and that is what this used to do.
+    full_property_trace: tier2Records.length,
     worst_case_cost: Number(cost.total.toFixed(2)),
     wallet_balance: profile.wallet_balance,
     over_cap: unique.length > MAX_RECORDS,
