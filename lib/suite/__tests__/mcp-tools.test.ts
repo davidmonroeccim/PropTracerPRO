@@ -14,7 +14,18 @@ import {
 } from "@/lib/suite/mcp-tools";
 import { PRICING } from "@/lib/constants";
 import { chargePerRecord } from "@/lib/suite/pricing";
-import { queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
+import {
+  PROPERTY_TRACE_NO_KEY_STATUS,
+  queuedStatusFor,
+} from "@/lib/trace/propertyTraceAttempts";
+import { TIER1_QUEUED_STATUSES, tier1QueuedStatusFor } from "@/lib/trace/tier1Queue";
+import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
+import { tracerfyCanRun } from "@/lib/trace/bulkPreflight";
+import {
+  createAddressHash,
+  normalizeAddress,
+  traceKeyFor,
+} from "@/lib/utils/address-normalizer";
 import { checkDuplicates } from "@/lib/utils/deduplication";
 import { submitBulkTrace } from "@/lib/tracerfy/client";
 import { settleBulkJob } from "@/lib/trace/settleBulkJob";
@@ -48,12 +59,23 @@ vi.mock("@/lib/trace/bulkPreflight", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/trace/bulkPreflight")>();
   return {
     ...actual,
-    // Faithful to the real contract: a batch empty on BOTH tiers asks no vendor and can never be
-    // refused. This surface always passes tier1: 0 until 2B. Without that short circuit a submit
-    // passing the wrong count would still look correct.
-    tracerfyCanRun: vi.fn(async (_admin: unknown, n: { tier1: number; tier2: number }) =>
-      n.tier1 <= 0 && n.tier2 <= 0 ? true : H.canRunTier2,
-    ),
+    // THE `tier1 <= 0 && tier2 <= 0 ? true` SHORT CIRCUIT IS GONE, and removing it is part of
+    // Phase 2B. It was labelled "faithful to the real contract" and it is -- lib/trace/bulkPreflight.ts
+    // returns true for an empty batch without spending a vendor round trip, fenced directly by
+    // lib/trace/__tests__/bulkPreflight.test.ts. But this surface passed a hardcoded `tier1: 0`, so
+    // EVERY tier-1-only batch arrived here as 0/0 and took the short circuit: the count was
+    // structurally invisible, and a submit passing the wrong tier 1 number still looked correct.
+    // Now the lever answers for every batch, so a tier-1-only batch is genuinely refusable and the
+    // count it is asked about is fenced by an explicit toHaveBeenCalledWith below.
+    //
+    // WHAT THAT MAKES INVISIBLE: this double CAN refuse a batch the real function never would
+    // (0 tier 1 and 0 tier 2). Nothing here submits an empty batch -- the schema demands at least
+    // one record and the all-duplicates path returns before the pool question -- and the real 0/0
+    // answer is fenced in bulkPreflight.test.ts.
+    // It takes no parameters because it reads none: the lever answers every call the same way.
+    // vi.fn still records the arguments it was handed, which is what the toHaveBeenCalledWith
+    // assertion on the tier 1 count reads.
+    tracerfyCanRun: vi.fn(async () => H.canRunTier2),
     inFlightUnbilledCost: vi.fn(async () => H.inFlight),
   };
 });
@@ -449,6 +471,24 @@ describe("skip_trace_quote", () => {
     const out = await skipTraceQuote(admin, "sub-x", { records: [{ owner_name: "A", address: "1", city: "X", state: "TX", zip: "1" }] });
     expect(JSON.stringify(out)).toMatch(/Sign into PropTracerPRO/i);
   });
+  it("quotes the city-less parcel record the SUBMIT now accepts", async () => {
+    // THE QUOTE IS THE MANDATORY FIRST STEP, so a shape skip_trace_bulk takes and this one throws
+    // on is no unblock at all: the gateway would fail before it ever reached the submit. `city`
+    // became optional on the shared recordSchema, and removeBatchDuplicates takes AddressInput,
+    // which declares it required -- so the absent key has to be normalised here too.
+    // MUTATION: drop the `city: record.city ?? ""` normalisation and this goes red.
+    const admin = adminStub({ profile: { id: "p1", subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"], wallet_balance: 5 } });
+    const out = expectQuote(
+      await skipTraceQuote(admin, "sub-1", {
+        records: [
+          { address: "", state: "TX", owner_name: "Jane Smith", apn: "R-123", county: "Travis" },
+        ],
+      }),
+    );
+    expect(out.after_dedup).toBe(1);
+    expect(out.persons).toBe(1);
+    expect(out.worst_case_cost).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET);
+  });
   it("collapses duplicate addresses before pricing (real dedup, not a pass-through)", async () => {
     const admin = adminStub({ profile: { id: "p1", subscription_tier: "wallet", is_acquisition_pro_member: false, gateway_products: ["prop-tracer-pro"], wallet_balance: 5 } });
     const dupe = { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" };
@@ -504,8 +544,23 @@ function submitAdminStub(opts: {
   profile: unknown;
   jobId?: string;
   jobInsertError?: { message: string } | null;
+  /** The trace_history upsert's own error. It is a lever of its own because as of Phase 2B that
+   *  write IS the submit on this surface: there is no vendor call left to fail, so a swallowed
+   *  upsert error is the one way a caller can be told their batch is running when nothing was
+   *  written. */
+  upsertError?: { message: string } | null;
+  /** The trace_jobs UPDATE's own error. Its own lever because it is the write that makes a failed
+   *  submit terminal: if it fails too, the job is parked at 'processing' and polls forever for the
+   *  Suite Gateway, and an operator reading the log is the only party who can ever find it. */
+  jobUpdateError?: { message: string } | null;
 }) {
-  const { profile, jobId = "job-1", jobInsertError = null } = opts;
+  const {
+    profile,
+    jobId = "job-1",
+    jobInsertError = null,
+    upsertError = null,
+    jobUpdateError = null,
+  } = opts;
   const captured = {
     traceJobsInsert: undefined as Record<string, unknown> | undefined,
     traceJobsUpdates: [] as unknown[],
@@ -529,7 +584,7 @@ function submitAdminStub(opts: {
       },
       upsert: async (batch: Array<Record<string, unknown>>, upsertOpts: unknown) => {
         if (table === "trace_history") captured.traceHistoryUpserts.push({ batch, opts: upsertOpts });
-        return { error: null };
+        return { error: table === "trace_history" ? upsertError : null };
       },
       single: async () =>
         table === "trace_jobs" && op === "insert"
@@ -539,7 +594,8 @@ function submitAdminStub(opts: {
           : { data: null, error: null },
       maybeSingle: async () =>
         table === "user_profiles" ? { data: profile, error: null } : { data: null, error: null },
-      then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: null }),
+      then: (resolve: (v: unknown) => unknown) =>
+        resolve({ data: null, error: table === "trace_jobs" ? jobUpdateError : null }),
     };
     return chain;
   };
@@ -598,7 +654,7 @@ describe("skip_trace_bulk", () => {
     expect(submitBulkTrace).not.toHaveBeenCalled();
   });
 
-  it("writes source:'mcp' on the trace_jobs insert AND the trace_history rows, then submits", async () => {
+  it("writes source:'mcp' on the trace_jobs insert AND the trace_history rows, then enqueues", async () => {
     const { admin, captured } = submitAdminStub({ profile: linked });
     const out = await skipTraceBulk(admin, "sub-1", {
       records: [
@@ -612,7 +668,13 @@ describe("skip_trace_bulk", () => {
     const allRows = captured.traceHistoryUpserts.flatMap((u) => u.batch);
     expect(allRows.length).toBeGreaterThan(0);
     for (const r of allRows) expect(r).toMatchObject({ source: "mcp" });
-    expect(submitBulkTrace).toHaveBeenCalledTimes(1);
+    // NOTHING GOES TO A VENDOR FROM HERE ANY MORE (Phase 2B, spec 3.3). The record is enqueued for
+    // app/api/cron/sweep-entity-traces, which is what lets a city-less or parcel-keyed record trace
+    // at all: the CSV took a street, a city and a state and nothing else.
+    expect(submitBulkTrace).not.toHaveBeenCalled();
+    expect(allRows[0]).toMatchObject({ ai_research_status: tier1QueuedStatusFor(1) });
+    // `persons` and `entities` still describe the owner names the caller sent. They no longer
+    // select a route: planRoute() decides person, company or trust inside the cron.
     expect(out).toMatchObject({ job_id: "job-1", accepted: 1, persons: 1, entities: 0 });
   });
 
@@ -658,9 +720,13 @@ describe("skip_trace_bulk", () => {
     expect(rows[0].ai_research_status ?? null).toBeNull();
   });
 
-  it("still queues a NAMED entity for the business trace", async () => {
-    // The other half of the split: a company name is a real owner of record, so it keeps its
-    // route and keeps reserving one tier 1 charge.
+  it("still queues a NAMED entity, on the TIER 1 rung rather than the legacy entity one", async () => {
+    // The other half of the split: a company name is a real owner of record, so it keeps a tier 1
+    // route and keeps reserving one tier 1 charge. What changed is the RUNG. It used to write a
+    // bare 'queued', which is the LEGACY entity ladder's attempt 1 on this column: a row wearing it
+    // is claimed by the entity lane and handed to FastAppend on its owner name with no route
+    // planned at all. The Tier 1 lane claims .in(TIER1_QUEUED_STATUSES), and the two value sets are
+    // disjoint by design, so the value here decides which engine owns the row.
     const { admin, captured } = submitAdminStub({ profile: linked });
     const out = await skipTraceBulk(admin, "sub-1", {
       records: [{ owner_name: "Acme Holdings LLC", address: "100 Main St", city: "Dallas", state: "TX", zip: "75001" }],
@@ -668,7 +734,11 @@ describe("skip_trace_bulk", () => {
     });
     expect(out).toMatchObject({ accepted: 1, persons: 0, entities: 1, full_property_trace: 0 });
     const rows = captured.traceHistoryUpserts.flatMap((u) => u.batch) as Array<Record<string, unknown>>;
-    expect(rows[0]).toMatchObject({ ai_research_status: "queued", status: "processing" });
+    expect(rows[0]).toMatchObject({
+      ai_research_status: tier1QueuedStatusFor(1),
+      status: "processing",
+    });
+    expect(rows[0].ai_research_status).not.toBe("queued");
     // On the ENTITY queue only. A named owner is tier 1 work: the FastAppend
     // business trace bills per successful trace and a miss is free. Landing it on
     // the tier 2 queue as well would bill it per record submitted, by a second
@@ -720,80 +790,64 @@ describe("skip_trace_bulk", () => {
     expect((out as { error: string }).error).not.toBe("insufficient_balance");
   });
 
-  it("does not ask the pool about a batch with no blank-owner records", async () => {
-    // A tier 1 only batch draws nothing from the dossier pool, so a short pool must not refuse
-    // it. MUTATION: pass newRecords.length instead of tier2Records.length and this goes red.
+  it("DOES ask the pool about a batch with no blank-owner records, and can be refused", async () => {
+    // THIS TEST INVERTED IN PHASE 2B, AND IT INVERTED FOR THE RIGHT REASON. It used to assert that
+    // a tier-1-only batch could never be refused, and that was true: its records went to the
+    // Tracerfy BATCH endpoint, a different credit bucket from the per-record instant lookups this
+    // check sizes, so this surface passed a hardcoded `tier1: 0` and the batch drew nothing here.
+    //
+    // Tier 1 records are on the per-record queue now and draw the same credits every instant lookup
+    // draws, so a batch of 500 named records can exhaust the pool. Being unable to refuse it would
+    // be accepting -- and later billing -- a job PTP cannot run, which is the one outcome this check
+    // exists to prevent. Nothing is written when it refuses.
+    // MUTATION: pass `tier1: 0` again and this goes red.
     H.canRunTier2 = false;
-    const { admin } = submitAdminStub({ profile: linked });
+    const { admin, captured } = submitAdminStub({ profile: linked });
     const out = await skipTraceBulk(admin, "sub-1", {
       records: [{ owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" }],
       confirm: true,
     });
-    expect(out).not.toMatchObject({ error: "capacity_unavailable" });
+    expect(out).toMatchObject({ error: "capacity_unavailable" });
+    expect(captured.traceHistoryUpserts).toHaveLength(0);
   });
 
-  it("does NOT fail the job when the person submit fails but tier 2 rows are queued", async () => {
-    // The guard was written when the third bucket did not exist, so it asked
-    // only whether the ENTITY queue still had work. sweep-property-traces never
-    // reads the parent job, so failing it here stops nothing: it works every
-    // tier 2 row and bills each one, against a caller told the submit failed.
-    // MUTATION: drop the `&& tier2Records.length === 0` term and this goes red.
-    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+  /* ---------------------------------------------------------------- *
+   * THE SIX TESTS THAT USED TO LIVE HERE FENCED THE TRACERFY PERSON CSV SUBMIT FAILING while other
+   * work survived: which counts were corrected, which job was failed, and which sentence the
+   * caller got. Phase 2B deletes that submit (spec 3.3), so there is no vendor call at submit to
+   * fail and no partial survival to describe. Each one is rewritten below rather than dropped,
+   * repointed at the contract that replaced it -- the counting rule, and the ONE failure this
+   * surface has left, which is the row write. Four of them moved into "when the rows cannot be
+   * written" at the end of this describe, where that failure is fenced together.
+   * ---------------------------------------------------------------- */
+
+  it("counts and prices only the records a vendor is asked about", async () => {
+    // HEIR TO "stops counting and pricing the errored person records". Its subject -- a person half
+    // that died at the vendor -- is gone, but the rule it protected is the same one and now has a
+    // new population to protect it from: a record nobody can be asked about at all. It is written
+    // terminal and free, so counting it in `accepted` would claim work that is not running, and
+    // pricing it in `committed_worst_case` would quote a charge for a vendor call nobody makes.
+    // MUTATION: quote worstCaseCost over newRecords instead of the billable records, or count the
+    // no-key rows in `accepted`, and this goes red.
     const { admin, captured } = submitAdminStub({ profile: linked });
-    const out = await skipTraceBulk(admin, "sub-1", {
-      records: [
-        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
-        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
-      ],
-      confirm: true,
-    });
-    expect(out).not.toMatchObject({ error: "submit_failed" });
-    expect(
-      captured.traceJobsUpdates.filter(
-        (u) => (u as Record<string, unknown>)?.status === "failed",
-      ),
-    ).toHaveLength(0);
-  });
-
-  it("stops counting and pricing the errored person records", async () => {
-    // THE HALF THAT WAS MISSED. The billing hole was closed but the payload
-    // still described the dead half as accepted and priced it.
-    // MUTATION: report personRecords.length or the pre-failure worst case and
-    // this goes red.
-    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
-    const { admin } = submitAdminStub({ profile: linked });
     const out = (await skipTraceBulk(admin, "sub-1", {
       records: [
         { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
         { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
+        { address: "", city: "", state: "", zip: "75001" },
       ],
       confirm: true,
     })) as Record<string, unknown>;
 
-    expect(out.persons).toBe(0);
-    expect(out.accepted).toBe(1);
-    // Only the surviving tier 2 record is committed, at the tier 2 rate.
-    expect(out.committed_worst_case).toBeCloseTo(0.4);
-  });
-
-  it("carries the failure as a FIELD, because a model reads this payload", async () => {
-    // Prose can be summarised away by the model consuming this. A named count it
-    // can compare against `accepted` cannot be dropped silently.
-    // MUTATION: delete records_failed and leave only the message, and this goes red.
-    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
-    const { admin } = submitAdminStub({ profile: linked });
-    const out = (await skipTraceBulk(admin, "sub-1", {
-      records: [
-        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
-        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
-      ],
-      confirm: true,
-    })) as Record<string, unknown>;
-
-    expect(out.records_failed).toBe(1);
-    expect(typeof out.records_failed).toBe("number");
-    expect(String(out.message)).toContain("not charged");
-    expect(String(out.message)).not.toMatch(/[—–*]/);
+    expect(out.accepted).toBe(2);
+    expect(out.persons).toBe(1);
+    expect(out.full_property_trace).toBe(1);
+    // One tier 1 record at the per-success rate plus one tier 2 record at the per-record rate. The
+    // third record is in neither term.
+    expect(out.committed_worst_case).toBeCloseTo(PRICING.CHARGE_PER_SUCCESS_WALLET + 0.4);
+    // And the match-rate denominator agrees: three rows were written, two are being worked.
+    expect(captured.traceHistoryUpserts.flatMap((u) => u.batch)).toHaveLength(3);
+    expect(captured.traceJobsInsert).toMatchObject({ records_submitted: 2, total_records: 3 });
   });
 
   it("keeps the field present and zero when nothing failed", async () => {
@@ -808,34 +862,24 @@ describe("skip_trace_bulk", () => {
     expect(out.persons).toBe(1);
   });
 
-  it("corrects the job's records_submitted, the match-rate denominator", async () => {
-    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
-    const { admin, captured } = submitAdminStub({ profile: linked });
-    await skipTraceBulk(admin, "sub-1", {
-      records: [
-        { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
-        { address: "2 B St", city: "Dallas", state: "TX", zip: "75001" },
-      ],
-      confirm: true,
-    });
-    const corrected = captured.traceJobsUpdates.filter(
-      (u) => (u as Record<string, unknown>)?.records_submitted !== undefined,
-    );
-    expect(corrected).toHaveLength(1);
-    expect(corrected[0]).toMatchObject({ records_submitted: 1 });
-  });
-
-  it("STILL fails a job where the person submit failed and nothing else was queued", async () => {
-    // The guard must not become a blanket refusal to ever fail a job.
-    vi.mocked(submitBulkTrace).mockResolvedValue({ success: false, error: "Tracerfy 503" });
+  it("makes no claim about charges on a submit that succeeded", async () => {
+    // HEIR TO "carries the failure as a FIELD, because a model reads this payload". That test
+    // fenced two things: that a failure is a structured field a model cannot summarise away, and
+    // that the sentence beside it carries no formatting artifacts. The field half moved to
+    // "does NOT answer success" below, where the failure now lives. This half is what is left of
+    // the sentence: there is no partial-failure message any more, so the happy-path payload must
+    // not carry a leftover claim about what was or was not charged -- the caller is charged per
+    // successful tier 1 trace and per tier 2 record submitted, settled later by bulk_status.
     const { admin } = submitAdminStub({ profile: linked });
-    const out = await skipTraceBulk(admin, "sub-1", {
+    const out = (await skipTraceBulk(admin, "sub-1", {
       records: [
         { owner_name: "John Smith", address: "1 A St", city: "Dallas", state: "TX", zip: "75001" },
       ],
       confirm: true,
-    });
-    expect(out).toMatchObject({ error: "submit_failed" });
+    })) as Record<string, unknown>;
+    expect(JSON.stringify(out)).not.toMatch(/not charged/i);
+    expect(JSON.stringify(out)).not.toMatch(/[—–]/);
+    expect(out.records_failed).toBe(0);
   });
 
   it("sizes the wallet gate against work already accepted and not yet billed", async () => {
@@ -850,6 +894,471 @@ describe("skip_trace_bulk", () => {
     });
     expect(out).toMatchObject({ error: "insufficient_balance" });
     expect(captured.traceHistoryUpserts).toHaveLength(0);
+  });
+
+  /* ================================================================== *
+   * PHASE 2B: PER-RECORD JUDGING, THE TIER 1 ENQUEUE, AND THE CLAMPS.
+   *
+   * Everything below mirrors the fences app/api/v1/trace/bulk/route.ts
+   * grew in the same phase. That route is the source of truth this
+   * surface mirrors, so a rule fenced there and not here is a rule the
+   * two surfaces are free to disagree about.
+   * ================================================================== */
+
+  /** One submitted record. `extra` overrides any field, because the cases worth fencing now are
+   *  the malformed ones -- no city, no street, a ZIP Excel mangled, a parcel id instead of a
+   *  street, a value the column cannot hold -- and they have to be expressible here. */
+  const rec = (owner_name?: string, n = 1, extra: Record<string, unknown> = {}) => ({
+    owner_name,
+    address: `${n} Main St`,
+    city: "Dallas",
+    state: "TX",
+    zip: "75001",
+    ...extra,
+  });
+
+  /** Submits through the real skipTraceBulk() and returns every trace_history row it upserted. */
+  async function submit(records: unknown[]) {
+    const { admin, captured } = submitAdminStub({ profile: linked });
+    const out = await skipTraceBulk(admin, "sub-1", { records, confirm: true });
+    return {
+      out: out as Record<string, unknown>,
+      rows: captured.traceHistoryUpserts.flatMap((u) => u.batch),
+      captured,
+    };
+  }
+
+  describe("recordSchema stops refusing the Suite Gateway's parcel request", () => {
+    it("accepts a record with no city key at all, which is what blocked the gateway", () => {
+      // THE ACTUAL BLOCKER, AND IT WAS NEVER THE VALIDATOR. `city: z.string()` refused an
+      // APN-bearing parcel request -- parcel id, county and state, no city -- before
+      // skipTraceBulk ran a line, so no guard inside it could ever have been reached.
+      expect(
+        recordSchema.safeParse({ address: "", state: "TX", apn: "R-123", county: "Travis" })
+          .success,
+      ).toBe(true);
+    });
+
+    it("still refuses a record that OMITS address, and that is not this task's to fix", () => {
+      // RECORDED FOR THE GATEWAY HANDOFF, not fixed here. `address: z.string()` is still
+      // required, so `address: ''` is accepted and an absent `address` key is refused by Zod
+      // before any guard runs. A gateway caller must send the key, empty when it has no street.
+      expect(recordSchema.safeParse({ city: "Austin", state: "TX" }).success).toBe(false);
+      expect(recordSchema.safeParse({ address: "", city: "Austin", state: "TX" }).success).toBe(
+        true,
+      );
+    });
+
+    it("accepts a record with no city when it carries a parcel key", async () => {
+      const { out } = await submit([
+        {
+          address: "",
+          city: "",
+          state: "TX",
+          owner_name: "Jane Smith",
+          apn: "R-123",
+          county: "Travis",
+        },
+      ]);
+      expect(out).not.toHaveProperty("error");
+    });
+
+    it("runs the whole batch when the city key is ABSENT rather than empty", async () => {
+      // An absent key and an empty one say the identical thing -- the caller gave us no city --
+      // and the gateway's parcel request omits it entirely.
+      const { out, rows } = await submit([
+        { address: "", state: "TX", owner_name: "Jane Smith", apn: "R-123", county: "Travis" },
+        rec("John Doe", 2),
+      ]);
+      expect(out).not.toHaveProperty("error");
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.ai_research_status === tier1QueuedStatusFor(1))).toBe(true);
+      expect(rows.find((r) => r.input_owner_name === "Jane Smith")!.city).toBe("");
+    });
+
+    // The APN has been stored on every row since before 2A and read by nothing on the tier 1
+    // lane, because MCP rows never wore a tier1_ status. This is the assertion that it is now
+    // reachable: the cron's own parcelForTier1Row is what consumes it.
+    it("puts the stored parcel key within reach of the Tier 1 cron", async () => {
+      const { rows } = await submit([
+        {
+          address: "1 Main St",
+          city: "Austin",
+          state: "TX",
+          owner_name: "Jane Smith",
+          apn: "R-123",
+          county: "Travis",
+        },
+      ]);
+      expect(rows[0].parcel_id_local).toBe("R-123");
+      expect(TIER1_QUEUED_STATUSES).toContain(rows[0].ai_research_status);
+    });
+  });
+
+  describe("per-record judging replaces the whole-batch refusal", () => {
+    // MUTATION: restore the `if (invalidRecords.length > 0) return { error: 'invalid_records' }`
+    // block and every test in this describe goes red.
+    it("runs the good records when one record has no city", async () => {
+      const { out, rows } = await submit([rec("Jane Smith", 1), rec("John Doe", 2, { city: "" })]);
+      expect(out).not.toHaveProperty("error");
+      expect(out.accepted).toBe(2);
+      expect(rows).toHaveLength(2);
+    });
+
+    // The ZIP is the sharpest case: Excel strips a leading zero on export, so the four-argument
+    // validate killed entire New England and Puerto Rico files.
+    it("does not reject a batch over a malformed ZIP", async () => {
+      const { out, rows } = await submit([rec("Jane Smith", 1, { zip: "2139" })]);
+      expect(out).not.toHaveProperty("error");
+      // THE CONSEQUENCE, not the acceptance: the row runs, and the mangled ZIP is dropped at the
+      // write by usableZip rather than stored and sent to a vendor to contradict its own street.
+      // MUTATION: put the old `(record.zip || '').substring(0, 5)` back and this goes red.
+      expect(rows[0].ai_research_status).toBe(tier1QueuedStatusFor(1));
+      expect(rows[0].zip).toBe("");
+    });
+
+    it("files a BLANK-OWNER record with no street and no state as no-key, free, without queueing it", async () => {
+      // Blank owner, because the no-key bucket is only ever reachable from a blank owner: a
+      // record with an owner name is Tier 1 whatever its address, and settles inside the cron.
+      const { rows } = await submit([rec(undefined, 1, { address: "", state: "" })]);
+      expect(rows[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+      expect(rows[0].ai_research_status).toBeNull();
+      expect(rows[0].status).toBe("no_match");
+      expect(rows[0].charge ?? 0).toBe(0);
+    });
+
+    it("never files a NAMED record as no-key, however broken its address (D4)", async () => {
+      // A company traces on name and state alone, and a person with no lookup key settles
+      // no_lookup_key, free, with a sentence, INSIDE the cron. Filing it no-key here would deny
+      // both of them the route that exists for them.
+      const { rows } = await submit([rec("Jane Smith", 1, { address: "", state: "" })]);
+      expect(rows[0].ai_research_status).toBe(tier1QueuedStatusFor(1));
+      expect(rows[0].property_trace_status).toBeNull();
+    });
+
+  });
+
+  /* ---------------------------------------------------------------- *
+   * A VALUE THE COLUMN CANNOT HOLD IS THE LAST DOOR WHOLE-BATCH REJECTION HAD.
+   *
+   * trace_history.state is VARCHAR(2) (supabase/schema.sql:69). Once records are judged one at a
+   * time a record carrying "Texas" reaches the insert as "TEXAS", Postgres raises 22001, the
+   * write throws, and the WHOLE BATCH dies -- whole-batch rejection through a different door, in
+   * the change whose purpose is deleting it. Until this phase the only thing protecting this
+   * surface was the whole-batch refusal that is now gone.
+   *
+   * WHAT THESE TESTS CANNOT SEE, SAID PLAINLY. submitAdminStub mocks Supabase, so it enforces no
+   * column width: the 22001 cannot happen here. `tsc` cannot catch it either, because
+   * lib/supabase/admin.ts builds the client with NO `Database` generic, so neither column names
+   * nor widths are typed. These assert the CLAMP; the overflow it prevents is fenced by
+   * supabase/schema.sql, lib/utils/__tests__/address-normalizer.test.ts and a live check.
+   * ---------------------------------------------------------------- */
+  describe("a value the column cannot hold is treated as absent, not as a dead batch", () => {
+    it("does not let one record saying Texas kill the batch, and keys it on what it STORED", async () => {
+      // THE PLACEMENT IS THE WHOLE TEST. Clamping at the row write instead of before the key is
+      // derived would store "" while keying on "TEXAS", which is precisely the D36 divergence
+      // spec 6.3 exists to close.
+      // MUTATION: drop the state clamp and this goes red on the stored value.
+      const { out, rows } = await submit([
+        rec("Jane Smith", 1, { state: "Texas" }),
+        rec("John Doe", 2),
+      ]);
+      expect(out).not.toHaveProperty("error");
+      expect(rows).toHaveLength(2);
+      const texan = rows.find((r) => r.input_owner_name === "Jane Smith")!;
+      expect(texan.state).toBe("");
+      expect(texan.ai_research_status).toBe(tier1QueuedStatusFor(1));
+      // ONE VALUE, seen by the key derivation and by the row write alike (spec 6.3, D36).
+      expect(texan.normalized_address).toBe("1 MAIN ST|DALLAS|");
+      expect(String(texan.normalized_address)).not.toContain("TEXAS");
+      expect(texan.address_hash).toBe(createAddressHash("1 MAIN ST|DALLAS|"));
+    });
+
+    it("keeps a padded two-letter state, which the column CAN hold", async () => {
+      // The clamp measures the TRIMMED value, and it has to: "  tx  " is six characters and two
+      // letters. It also closes a second latent overflow, because the row write upcases whatever
+      // it is given and "  TX  " does not fit VARCHAR(2) either.
+      const { rows } = await submit([rec("Jane Smith", 1, { state: "  tx  " })]);
+      expect(rows[0].state).toBe("TX");
+    });
+
+    it("does not let an over-long city kill the batch", async () => {
+      // MUTATION: drop the city clamp and this goes red.
+      const { rows } = await submit([
+        rec("Jane Smith", 1, { city: "C".repeat(101) }),
+        rec("John Doe", 2),
+      ]);
+      expect(rows).toHaveLength(2);
+      expect(rows.find((r) => r.input_owner_name === "Jane Smith")!.city).toBe("");
+    });
+
+    it("does not let an over-long parcel id kill the batch", async () => {
+      // MUTATION: drop the parcel id clamp and this goes red.
+      const { rows } = await submit([
+        rec("Jane Smith", 1, { address: "", city: "", apn: "R".repeat(65), county: "Travis" }),
+        rec("John Doe", 2),
+      ]);
+      const row = rows.find((r) => r.input_owner_name === "Jane Smith")!;
+      expect(row.parcel_id_local).toBeNull();
+      // And the key does not take the APN branch, because there is no storable parcel id to key on.
+      expect(row.normalized_address).toBe("||TX");
+    });
+
+    it("does not let an over-long county kill the batch", async () => {
+      // MUTATION: drop the county clamp and this goes red.
+      const { rows } = await submit([
+        rec("Jane Smith", 1, { address: "", city: "", apn: "R-123", county: "T".repeat(65) }),
+        rec("John Doe", 2),
+      ]);
+      const row = rows.find((r) => r.input_owner_name === "Jane Smith")!;
+      expect(row.county).toBeNull();
+      expect(row.normalized_address).toBe("||TX");
+    });
+  });
+
+  describe("the Tier 1 enqueue", () => {
+    // ASSERT THE CONSEQUENCE, NOT THE FIELD: tier1_queued is the value the cron's
+    // .in(TIER1_QUEUED_STATUSES) claim actually matches. A bare 'queued' is the LEGACY entity
+    // ladder's attempt 1 on the same column, and a row wearing it is handed to FastAppend on its
+    // owner name with no route planned at all.
+    it("queues a named record onto the TIER 1 queue, not the legacy entity ladder", async () => {
+      const { rows } = await submit([rec("Acme Holdings Llc", 1)]);
+      expect(rows[0].ai_research_status).toBe(tier1QueuedStatusFor(1));
+      expect(TIER1_QUEUED_STATUSES).toContain(rows[0].ai_research_status);
+      expect(rows[0].ai_research_status).not.toBe("queued");
+      expect(rows[0].status).toBe("processing");
+      // WRITTEN null, not omitted: the upsert reuses this row, and a stale CSV-era
+      // tracerfy_job_id -- every named record on this surface went to the batch endpoint until
+      // this change -- would let the CSV settle paths bill a row the Tier 1 cron also owns.
+      expect(Object.keys(rows[0])).toContain("tracerfy_job_id");
+      expect(rows[0].tracerfy_job_id).toBeNull();
+    });
+
+    it("makes no person/entity distinction at submit any more", async () => {
+      const { rows } = await submit([rec("Acme Holdings Llc", 1), rec("Jane Smith", 2)]);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.ai_research_status === tier1QueuedStatusFor(1))).toBe(true);
+    });
+
+    it("never builds a Tracerfy person CSV", async () => {
+      await submit([rec("Jane Smith", 1)]);
+      expect(submitBulkTrace).not.toHaveBeenCalled();
+    });
+
+    it("writes tracerfy_job_id null on EVERY row, tier 2 and no-key included", async () => {
+      // WRITTEN, NOT OMITTED, on all three buckets. The upsert is
+      // onConflict: 'user_id,address_hash', so the row is REUSED and an omitted key leaves whatever
+      // it already carried. A CSV-era row from this very surface can carry a live tracerfy_job_id --
+      // every named record here went to the Tracerfy batch endpoint until this change -- and both
+      // CSV settle paths find their billable rows by that column. A stale value on a tier 2 row has
+      // it billed the tier 1 rate by an engine that does not know it is tier 2; on a terminal,
+      // FREE no-key row it hands a finished row to a settle path that bills; and it surfaces in the
+      // OLD job's results either way.
+      // MUTATION: omit the key from any one of the three buckets and this goes red.
+      const { rows } = await submit([
+        rec("Jane Smith", 1),
+        rec(undefined, 2),
+        rec(undefined, 3, { address: "", state: "" }),
+      ]);
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(Object.keys(row)).toContain("tracerfy_job_id");
+        expect(row.tracerfy_job_id).toBeNull();
+      }
+    });
+
+    it("never sets tracerfy_job_id on the job row either", async () => {
+      // There is no Tracerfy batch job to point at any more, and a job id here is what both CSV
+      // settle paths find their billable rows by.
+      const { captured } = await submit([rec("Jane Smith", 1)]);
+      for (const update of captured.traceJobsUpdates) {
+        expect(Object.keys(update as Record<string, unknown>)).not.toContain("tracerfy_job_id");
+      }
+      expect(Object.keys(captured.traceJobsInsert ?? {})).not.toContain("tracerfy_job_id");
+    });
+
+    // MUTATION: change `tier1: tier1Records.length` back to `tier1: 0` and this goes red. It is
+    // the FIRST assertion in this file on tracerfyCanRun's arguments: the only
+    // toHaveBeenCalledWith calls here were against limitFn, so the hardcoded 0 was unfenced.
+    it("sizes the credit pool against the real Tier 1 count", async () => {
+      await submit([rec("Jane Smith", 1), rec(undefined, 2)]);
+      expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 1, tier2: 1 });
+    });
+
+    it("asks the pool for NOTHING when nobody can be asked about the batch", async () => {
+      // A no-key row draws no credits from either pool, and the real tracerfyCanRun short circuits
+      // 0/0 to true without spending a vendor round trip -- so such a batch can never be refused
+      // for capacity. THAT half is fenced in lib/trace/__tests__/bulkPreflight.test.ts, not here:
+      // this file replaces the function with a lever, and the lever answers every call, so it can
+      // refuse a 0/0 batch the real one never would. What THIS surface controls is what it ASKS,
+      // which is what this asserts.
+      await submit([rec(undefined, 1, { address: "", state: "" })]);
+      expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 0, tier2: 0 });
+    });
+  });
+
+  describe("the duplicate key aligns with the single surfaces (spec 6.3, D36)", () => {
+    // MUTATION: put normalizeAddress back in buildHistoryRow and this goes red. The dedup hash
+    // and the stored hash would then disagree for any parcel-keyed record, and the same record
+    // sent through single and bulk would land on two rows.
+    it("keys a city-less record on its parcel, exactly as traceKeyFor does", async () => {
+      const record = {
+        address: "",
+        city: "",
+        state: "TX",
+        owner_name: "Jane Smith",
+        apn: "R-123",
+        county: "Travis",
+      };
+      const { rows } = await submit([record]);
+      expect(rows[0].normalized_address).toBe(traceKeyFor(record));
+      expect(rows[0].normalized_address).toBe("APN|R-123|TRAVIS|TX");
+      expect(rows[0].address_hash).toBe(createAddressHash(traceKeyFor(record)));
+      // THE DIVERGENCE THIS EXISTS TO STOP. checkDuplicates already hashes with traceKeyFor; the
+      // row builder stored normalizeAddress. For a parcel-keyed record those are two different
+      // keys, so the row dedup looked for is not the row that was written, and every street-less
+      // parcel in one batch collided on one row.
+      expect(rows[0].address_hash).not.toBe(createAddressHash(normalizeAddress("", "", "TX")));
+    });
+
+    it("stores the parcel id and county it was given (D23)", async () => {
+      const { rows } = await submit([rec("Jane Smith", 1, { apn: "R-123", county: "Travis" })]);
+      expect(rows[0].parcel_id_local).toBe("R-123");
+      expect(rows[0].county).toBe("Travis");
+    });
+  });
+
+  describe("D33: a reused row does not answer with a stale outcome", () => {
+    it("clears outcome_code, found_by and trace_steps on a reused row", async () => {
+      // A trace_history row is REUSED (UNIQUE(user_id, address_hash)), and this surface never
+      // cleared the Tier 1 answer on it, so a sentence written for an earlier trace could answer
+      // for this one: "You were not charged" over a row this job is about to charge.
+      const { rows } = await submit([rec("Jane Smith", 1)]);
+      expect(rows[0]).toMatchObject({ outcome_code: null, found_by: null, trace_steps: null });
+    });
+
+    it("does NOT clear them on a busy resume, which needs the step log", async () => {
+      // The one exemption, and it is money: a busy row's step log is what stops the resend buying
+      // the answers this record already paid for.
+      vi.mocked(checkDuplicates).mockResolvedValueOnce({
+        newRecords: [rec("Jane Smith", 1)],
+        duplicates: [],
+        cachedResults: [
+          {
+            address_hash: createAddressHash(traceKeyFor(rec("Jane Smith", 1))),
+            outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+          },
+        ],
+      } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
+      const { rows } = await submit([rec("Jane Smith", 1)]);
+      expect(Object.keys(rows[0])).not.toContain("outcome_code");
+      expect(Object.keys(rows[0])).not.toContain("trace_steps");
+    });
+  });
+
+  describe("when the rows cannot be written", () => {
+    // THE ROW WRITE IS THE SUBMIT NOW. There is no vendor call left at submit, so nothing stands
+    // between the caller and this upsert. The old code awaited it and discarded its error: the
+    // caller would be told their batch was accepted, bulk_status would find no pending rows on
+    // its first poll and finalize the job `completed` with records_matched 0, and its own early
+    // return makes that verdict permanent. The customer sent 500 rows, was told it worked, and
+    // reads an empty results array.
+    //
+    // THREE OF THE FOUR TESTS HERE ARE REWRITES of the person-submit-failure tests deleted above,
+    // repointed from the vendor failure that no longer exists to the write failure that replaced
+    // it: "does NOT answer success" inherits the structured-failure fence, "writes the job
+    // terminal" inherits the trace_jobs correction, and "stops at the FIRST failed bucket"
+    // inherits the partial-survival rule.
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    it("stops at the FIRST failed bucket rather than writing rows it cannot report on", async () => {
+      // The buckets are written one statement at a time, and insertHistoryRows THROWS on the first
+      // failure rather than logging and continuing. So a batch whose no-key bucket fails never
+      // attempts the Tier 1 bucket: the caller is told the submit failed and no row is left queued
+      // and running behind a failure they were told about.
+      // MUTATION: swallow the error inside insertHistoryRows and all three buckets get written
+      // under a job answering success.
+      const { admin, captured } = submitAdminStub({
+        profile: linked,
+        upsertError: { message: "boom" },
+      });
+      const out = await skipTraceBulk(admin, "sub-1", {
+        records: [rec(undefined, 1, { address: "", state: "" }), rec("Jane Smith", 2)],
+        confirm: true,
+      });
+      expect(out).toMatchObject({ error: "submit_failed" });
+      expect(captured.traceHistoryUpserts).toHaveLength(1);
+    });
+
+    it("does NOT answer success, which is what hid this before", async () => {
+      // MUTATION: swallow the upsert error (drop insertHistoryRows' throw, or catch and ignore)
+      // and this goes red.
+      const { admin } = submitAdminStub({
+        profile: linked,
+        upsertError: { message: 'value too long for type character varying(2)' },
+      });
+      const out = await skipTraceBulk(admin, "sub-1", {
+        records: [rec("Jane Smith", 1)],
+        confirm: true,
+      });
+      expect(out).toMatchObject({ error: "submit_failed" });
+      expect(out).not.toHaveProperty("job_id");
+    });
+
+    it("writes the job terminal, so bulk_status cannot finalize it as an empty success", async () => {
+      const { admin, captured } = submitAdminStub({
+        profile: linked,
+        upsertError: { message: "boom" },
+      });
+      await skipTraceBulk(admin, "sub-1", { records: [rec("Jane Smith", 1)], confirm: true });
+      const failed = captured.traceJobsUpdates.filter(
+        (u) => (u as Record<string, unknown>)?.status === "failed",
+      );
+      expect(failed).toHaveLength(1);
+    });
+
+    it("keeps the raw database text out of the caller's payload", async () => {
+      // trace_jobs.error_message is returned verbatim by bulk_status, and the thrown message
+      // names a table and raw Postgres text. The caller-facing sentence is the fixed generic one
+      // both REST routes already write; the detail goes to the server log.
+      const { admin, captured } = submitAdminStub({
+        profile: linked,
+        upsertError: { message: "duplicate key value violates unique constraint trace_history_pkey" },
+      });
+      const out = await skipTraceBulk(admin, "sub-1", {
+        records: [rec("Jane Smith", 1)],
+        confirm: true,
+      });
+      expect(JSON.stringify(out)).not.toContain("trace_history_pkey");
+      const failed = captured.traceJobsUpdates.find(
+        (u) => (u as Record<string, unknown>)?.status === "failed",
+      ) as Record<string, unknown>;
+      expect(String(failed.error_message)).not.toContain("trace_history_pkey");
+      expect(String(failed.error_message)).not.toMatch(/[—–*]/);
+      expect(console.error).toHaveBeenCalled();
+    });
+
+    it("logs the job id when it cannot even write the job terminal, so it stays findable", async () => {
+      // THE SECOND WRITE CAN FAIL TOO, and its error may not be swallowed either. The caller is
+      // already being told this failed, so there is no success to withdraw and a log is the only
+      // action left -- but the job is then parked at 'processing' and polls forever for the Suite
+      // Gateway, and an operator is the only party who can find it. Not logging the id is how an
+      // orphaned job becomes undiscoverable.
+      // MUTATION: drop the `if (failWriteError)` log and this goes red.
+      const { admin } = submitAdminStub({
+        profile: linked,
+        upsertError: { message: "boom" },
+        jobUpdateError: { message: "trace_jobs is unreachable" },
+      });
+      const out = await skipTraceBulk(admin, "sub-1", {
+        records: [rec("Jane Smith", 1)],
+        confirm: true,
+      });
+      expect(out).toMatchObject({ error: "submit_failed" });
+      expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("job-1");
+    });
   });
 });
 
