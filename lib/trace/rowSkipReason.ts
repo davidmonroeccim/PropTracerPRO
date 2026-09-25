@@ -92,10 +92,25 @@ export type SkipReasonRow = Tier1OutcomeRow & {
  *                                         outcome_code can only belong to the trace the customer
  *                                         is looking at.
  *
- * NOTHING ELSE. An API or MCP bulk row carries no tier1_ status, because those two surfaces still
- * build a Tracerfy person CSV and still do not clear a reused row's outcome (2B). They keep
- * showing exactly what they show today, which is what D33 decided and what stops a stale "You were
- * not charged" answering for a bulk trace that charged.
+ * AS OF PHASE 2B THAT BRANCH COVERS EVERY BULK SURFACE, AND THE INTERLOCK RELEASED ITSELF.
+ * The branch above says WEB BULK because the web upload was the only bulk submit writing a tier1_
+ * status when D33 was written. Tasks 4 and 6 put the other two on the same queue. All three bulk
+ * submits (app/api/trace/bulk, app/api/v1/trace/bulk, lib/suite/mcp-tools skipTraceBulk) now write
+ * `ai_research_status: tier1QueuedStatusFor(1)` on their Tier 1 records, none of them submits a
+ * Tracerfy person CSV any more, and all three clear outcome_code, found_by and trace_steps on every
+ * reused row except a busy resume. So the second branch opens for their rows BY CONSTRUCTION, and
+ * that is exactly why this file needed no edit in Phase 2B: the condition D33 wrote in advance
+ * became true underneath it. lib/trace/__tests__/rowSkipReason.test.ts fences the claim from both
+ * ends -- the gate accepts the statuses the lifecycle produces, AND the two submits Tasks 4 and 6
+ * moved really write one -- because without the second half a revert would silently re-close the
+ * gate while the first half stayed green.
+ *
+ * THE GATE IS STILL THE THING DOING THE WORK, which is what the previous version of this paragraph
+ * was protecting even though every factual clause in it had gone false. A row reaches the Tier 1
+ * sentence only once it is ON the Tier 1 queue, so a reused row carrying nothing but a stale
+ * outcome_code from an earlier single trace still stays silent. That is what stops a stale "You
+ * were not charged" answering for a bulk trace that charged, which would be a false statement
+ * about a customer's own money, in their favour, on a charge they can see on their wallet.
  *
  * `=== null`, not merely falsy, on trace_job_id: a caller that did not select the column gets
  * `undefined`, and that row gets NO Tier 1 sentence either. Blank, never wrong (CLAUDE.md rule 7).

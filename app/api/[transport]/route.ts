@@ -106,7 +106,7 @@ const handler = createMcpHandler(
     );
     server.tool(
       "list_traces",
-      "List the caller's own past skip-traces (results already paid for), most recent first, including each trace's resolved owner_contact_name. Use to reuse prior contacts without tracing again. A trace that ran as a Full Property Trace carries tier 2 and a property_record, the county record for that address at up to 65 fields; both are null on a tier 1 trace. Reading a stored record here is free, because the customer has already paid for it.",
+      "List the caller's own past skip-traces (results already paid for), most recent first, including each trace's resolved owner_contact_name. Use to reuse prior contacts without tracing again. A trace that ran as a Full Property Trace carries tier 2 and a property_record, the county record for that address at up to 65 fields; both are null on a tier 1 trace. A trace that ran against an owner of record carries outcome_code, which says how it ended, and found_by, which names the key that found the owner and reads address, parcel_id or company_name. The codes are found_by_address, found_by_parcel_id, found_by_company_name, no_match, owner_name_not_matched, no_lookup_key and busy_try_again. A row that came back with no contacts also carries skip_reason, the sentence explaining it, and that sentence states what happened to the money on that trace. Read skip_reason out as it stands and never call such a row a no match, because the sentence itself says which of those it was. Reading a stored record here is free, because the customer has already paid for it.",
       listTracesSchema.shape,
       tool((admin, sub, args) => listTraces(admin, sub, args)),
     );
