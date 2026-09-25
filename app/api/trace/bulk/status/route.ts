@@ -169,15 +169,13 @@ export async function GET(request: Request) {
 
       const rows = (doneRows || []) as JobRow[];
 
-      const doneTotal = rows.reduce((sum, r) => sum + (r.charge || 0), 0);
-
       return NextResponse.json({
         success: true,
         status: traceJob.status,
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
-        total_charge: Number(doneTotal.toFixed(4)),
+        total_charge: totalChargeFor(rows),
         // This is the branch every poll after the first one hits, and the one a
         // user who reloads the page lands on, so it has to carry the skip
         // summary too.
@@ -202,6 +200,24 @@ export async function GET(request: Request) {
       return (data || []) as JobRow[];
     };
 
+    /**
+     * The ONE terminal write this route performs, called from both places that finalize a job
+     * below. Still NOT lib/trace/finalizeBulkJob's CAS: this route already holds `rows` in memory
+     * from readJobRows() (or its own Tracerfy-poll loop) and must not re-read, which is exactly
+     * why this task does not switch it to finalizeJobIfDrained. What this route shares with that
+     * module is the ARITHMETIC (recordsMatchedFor / totalChargeFor); the write itself only needed
+     * to stop being copied twice in this file.
+     */
+    const writeJobCompleted = (recordsMatched: number) =>
+      adminClient
+        .from('trace_jobs')
+        .update({
+          status: 'completed',
+          records_matched: recordsMatched,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', traceJob.id);
+
     // A JOB WITH NO TRACERFY JOB ID IS THE NORMAL SHAPE OF A WEB JOB NOW. Before Phase 2A it meant
     // either an empty submit or an all-tier-2 job; since the web upload enqueues its Tier 1 rows
     // too (spec 3.2), no web job ever gets a tracerfy_job_id again. The gate below is what stops
@@ -225,14 +241,7 @@ export async function GET(request: Request) {
       }
       const recordsMatched = recordsMatchedFor(rows, 0);
       const totalCharge = totalChargeFor(rows);
-      await adminClient
-        .from('trace_jobs')
-        .update({
-          status: 'completed',
-          records_matched: recordsMatched,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', traceJob.id);
+      await writeJobCompleted(recordsMatched);
       return NextResponse.json({
         success: true,
         status: 'completed',
@@ -557,14 +566,7 @@ export async function GET(request: Request) {
 
     recordsMatched = recordsMatchedFor(jobRows, recordsMatched);
     totalCharge = totalChargeFor(jobRows);
-    await adminClient
-      .from('trace_jobs')
-      .update({
-        status: 'completed',
-        records_matched: recordsMatched,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', traceJob.id);
+    await writeJobCompleted(recordsMatched);
 
     const skips = summarizeSkips(jobRows);
 

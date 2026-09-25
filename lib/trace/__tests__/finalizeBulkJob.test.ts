@@ -17,6 +17,11 @@ const row = (o: Partial<FinalizableRow>): FinalizableRow => ({
 });
 
 describe('isRowStillWorking: BOTH queues, one question', () => {
+  // MUTATION: drop the isTier1QueuePending arm and these two go red. That arm's absence is exactly
+  // what makes the v1 and MCP surfaces finalize over live Tier 1 work today. (Moved here from
+  // above the settled-row test below, which stays green under this mutation: dropping the arm
+  // makes a queued/processing row read as NOT still working, which these two tests catch and the
+  // settled-row test, which expects false either way, does not.)
   it('is true for a queued Tier 1 row', () => {
     expect(isRowStillWorking(row({ ai_research_status: 'tier1_queued' }))).toBe(true);
   });
@@ -29,8 +34,6 @@ describe('isRowStillWorking: BOTH queues, one question', () => {
     expect(isRowStillWorking(row({ property_trace_status: 'queued' }))).toBe(true);
   });
 
-  // MUTATION: drop the isTier1QueuePending arm and this goes red. That arm's absence is
-  // exactly what makes the v1 and MCP surfaces finalize over live Tier 1 work today.
   it('is FALSE for a settled Tier 1 row', () => {
     expect(isRowStillWorking(row({ ai_research_status: 'tier1_done' }))).toBe(false);
   });
@@ -113,42 +116,75 @@ describe('matchedRowCount: the flat count finalizeJobIfDrained uses (Ruling A)',
   });
 });
 
-/** Minimal PostgREST-shaped stub. `jobUpdateResult` is what the .eq('status','processing') chain returns. */
-function stubAdmin(rows: FinalizableRow[], jobUpdateResult: { id: string } | null) {
+/**
+ * Minimal PostgREST-shaped stub. `jobUpdateResult` is what the .eq('status','processing') chain
+ * returns on a clean update (a lost race returns null with no error). `readError` / `writeError`
+ * let a test simulate a Supabase error on the trace_history read or the trace_jobs write.
+ *
+ * THE FALLBACK BRANCH MATCHES 'trace_jobs' EXPLICITLY, not "anything that is not trace_history": a
+ * writer that moved to the wrong table would otherwise still get a working stub and every test
+ * would stay green while production wrote nowhere real.
+ */
+function stubAdmin(
+  rows: FinalizableRow[],
+  jobUpdateResult: { id: string } | null,
+  opts: { readError?: { message: string }; writeError?: { message: string } } = {}
+) {
   const updateSpy = vi.fn();
+  const selectSpy = vi.fn();
   const eqCalls: Array<[string, unknown]> = [];
+  const readEqCalls: Array<[string, unknown]> = [];
   const admin = {
     from: (table: string) => {
       if (table === 'trace_history') {
         return {
-          select: () => ({
-            eq: () => ({
-              eq: async () => ({ data: rows }),
-            }),
-          }),
+          select: (cols: string) => {
+            selectSpy(cols);
+            return {
+              eq: (col: string, val: unknown) => {
+                readEqCalls.push([col, val]);
+                return {
+                  eq: (col2: string, val2: unknown) => {
+                    readEqCalls.push([col2, val2]);
+                    return opts.readError
+                      ? Promise.resolve({ data: null, error: opts.readError })
+                      : Promise.resolve({ data: rows, error: null });
+                  },
+                };
+              },
+            };
+          },
         };
       }
-      return {
-        update: (payload: unknown) => {
-          updateSpy(payload);
-          return {
-            eq: (col: string, val: unknown) => {
-              eqCalls.push([col, val]);
-              return {
-                eq: (col2: string, val2: unknown) => {
-                  eqCalls.push([col2, val2]);
-                  return {
-                    select: () => ({ maybeSingle: async () => ({ data: jobUpdateResult }) }),
-                  };
-                },
-              };
-            },
-          };
-        },
-      };
+      if (table === 'trace_jobs') {
+        return {
+          update: (payload: unknown) => {
+            updateSpy(payload);
+            return {
+              eq: (col: string, val: unknown) => {
+                eqCalls.push([col, val]);
+                return {
+                  eq: (col2: string, val2: unknown) => {
+                    eqCalls.push([col2, val2]);
+                    return {
+                      select: () => ({
+                        maybeSingle: async () =>
+                          opts.writeError
+                            ? { data: null, error: opts.writeError }
+                            : { data: jobUpdateResult, error: null },
+                      }),
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`stubAdmin: unexpected table "${table}"`);
     },
   };
-  return { admin: admin as never, updateSpy, eqCalls };
+  return { admin: admin as never, updateSpy, eqCalls, readEqCalls, selectSpy };
 }
 
 describe('finalizeJobIfDrained: the compare-and-swap', () => {
@@ -157,6 +193,25 @@ describe('finalizeJobIfDrained: the compare-and-swap', () => {
     const out = await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
     expect(out).toEqual({ finalized: false, reason: 'still_working', pending: 1 });
     expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  // SECURITY BRANCH: tenant scoping. Delete the .eq('user_id', ...) from the module's read and
+  // this goes red -- every other test in this file stays green while records_matched would be fed
+  // by a cross-tenant row count, because none of them can see WHICH rows were read, only how many.
+  it('scopes the read to this user and this job, both, not just the job', async () => {
+    const { admin, readEqCalls } = stubAdmin([], { id: 'j1' });
+    await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
+    expect(readEqCalls).toEqual([['user_id', 'u1'], ['trace_job_id', 'j1']]);
+  });
+
+  // Guards against a dropped column reading as undefined in production while every other test,
+  // which only cares about the VALUES on `rows`, stays green regardless of what was selected.
+  it('selects exactly the columns isRowStillWorking / matchedRowCount / totalChargeFor need', async () => {
+    const { admin, selectSpy } = stubAdmin([], { id: 'j1' });
+    await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
+    expect(selectSpy).toHaveBeenCalledWith(
+      'property_trace_status, ai_research_status, is_successful, charge'
+    );
   });
 
   // MUTATION: delete the .eq('status','processing') link and this goes red. Without it a second
@@ -176,11 +231,36 @@ describe('finalizeJobIfDrained: the compare-and-swap', () => {
     expect(out).toEqual({ finalized: true, recordsMatched: 1, totalCharge: 0.15 });
   });
 
-  // THE ONE THAT MATTERS FOR THE WEBHOOK. A loser must be distinguishable from a winner.
+  // THE ONE THAT MATTERS FOR THE WEBHOOK. A loser must be distinguishable from a winner. This is
+  // the "cleanly lost the race, no error" half of that distinction; the "errored outright" half is
+  // the write_failed test below -- both must produce different `reason` values, never the same one.
   it('returns finalized:false when it LOSES the swap', async () => {
     const { admin } = stubAdmin([row({ ai_research_status: 'tier1_done', is_successful: true })], null);
     const out = await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
     expect(out).toEqual({ finalized: false, reason: 'already_terminal' });
+  });
+
+  // CRITICAL FIX. A failed read is not an empty job: falling through would read pending as 0 and
+  // CAS the job terminal with records_matched: 0, a fabricated result under the one-shot token.
+  // MUTATION: drop the read's error check so a failed read falls through to the CAS -- this goes
+  // red (both the `reason` and the "no write happened" assertion below).
+  it('returns read_failed, and performs NO write, when the trace_history read errors', async () => {
+    const { admin, updateSpy } = stubAdmin([], null, { readError: { message: 'read timeout' } });
+    const out = await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
+    expect(out).toEqual({ finalized: false, reason: 'read_failed', error: 'read timeout' });
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  // CRITICAL FIX, the write-side half. A failed UPDATE is not "someone else finished the job" --
+  // nothing was written and the job is still 'processing'. Collapsing this into already_terminal
+  // (see the LOSES-the-swap test above) is exactly the plan-mandated bug the controller ordered
+  // fixed: no caller would ever finalize the job again and the webhook would never fire.
+  // MUTATION: collapse write_failed back into already_terminal (drop the writeError check) -- red.
+  it('returns write_failed, distinct from already_terminal, when the trace_jobs update itself errors', async () => {
+    const rows = [row({ ai_research_status: 'tier1_done', is_successful: true })];
+    const { admin } = stubAdmin(rows, null, { writeError: { message: 'connection reset' } });
+    const out = await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
+    expect(out).toEqual({ finalized: false, reason: 'write_failed', error: 'connection reset' });
   });
 
   // RULING A, FENCED. finalizeJobIfDrained must use matchedRowCount, not recordsMatchedFor, or a

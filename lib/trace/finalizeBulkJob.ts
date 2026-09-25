@@ -99,6 +99,8 @@ export const totalChargeFor = (rows: FinalizableRow[]): number =>
 export type FinalizeOutcome =
   | { finalized: false; reason: 'still_working'; pending: number }
   | { finalized: false; reason: 'already_terminal' }
+  | { finalized: false; reason: 'read_failed'; error: string }
+  | { finalized: false; reason: 'write_failed'; error: string }
   | { finalized: true; recordsMatched: number; totalCharge: number };
 
 /**
@@ -106,16 +108,39 @@ export type FinalizeOutcome =
  *
  * `finalized: true` is returned to exactly one caller, ever, for a given job. Fire
  * bulk_job.completed on that and nothing else.
+ *
+ * NEVER TREAT A FAILED READ AS AN EMPTY JOB. A Supabase error on the trace_history select is not
+ * "zero rows" -- it is "we do not know". Falling through to `rows = []` would read `pending` as 0
+ * and CAS the job terminal with records_matched: 0, which is a fabricated result standing in for
+ * an unknown one (CLAUDE.md rule 7), and because the write is a CAS the wrong number is
+ * unrecoverable: `finalized: true` is the one-shot token bulk_job.completed fires on. So a read
+ * error returns `read_failed` and performs NO write at all.
+ *
+ * A FAILED WRITE IS NOT "ALREADY TERMINAL". `won === null` from a clean CAS genuinely means some
+ * other caller won the race -- the job IS terminal, just not by this call. `won === null` from a
+ * FAILED update means nothing was written and the job is still 'processing': claiming
+ * already_terminal there is a false statement that some other caller finished the job, and the
+ * result is that no caller ever finalizes it and bulk_job.completed never fires. So the write path
+ * checks the error FIRST and only reads a null `won` as already_terminal when there was no error.
+ *
+ * THIS FUNCTION DOES NOT THROW, ON PURPOSE. Its callers are Task 2's crons, which finalize several
+ * jobs in one run; one job's failed read or write must not abort the loop and strand every other
+ * job in that batch unfinalized. Returning a non-finalizing outcome the caller can count and log is
+ * how this fails loudly to the CALLER without destroying unrelated work. Do not "simplify" this
+ * back to throwing -- that trades a many-job cron for a one-job cron.
  */
 export async function finalizeJobIfDrained(
   admin: SupabaseClient,
   opts: { jobId: string; userId: string }
 ): Promise<FinalizeOutcome> {
-  const { data } = await admin
+  const { data, error: readError } = await admin
     .from('trace_history')
     .select('property_trace_status, ai_research_status, is_successful, charge')
     .eq('user_id', opts.userId)
     .eq('trace_job_id', opts.jobId);
+
+  if (readError) return { finalized: false, reason: 'read_failed', error: readError.message };
+
   const rows = (data || []) as FinalizableRow[];
 
   const pending = rows.filter(isRowStillWorking).length;
@@ -125,7 +150,7 @@ export async function finalizeJobIfDrained(
   const totalCharge = totalChargeFor(rows);
 
   // THE COMPARE-AND-SWAP. Only the caller that flips 'processing' to 'completed' gets true back.
-  const { data: won } = await admin
+  const { data: won, error: writeError } = await admin
     .from('trace_jobs')
     .update({
       status: 'completed',
@@ -137,6 +162,7 @@ export async function finalizeJobIfDrained(
     .select('id')
     .maybeSingle();
 
+  if (writeError) return { finalized: false, reason: 'write_failed', error: writeError.message };
   if (!won) return { finalized: false, reason: 'already_terminal' };
   return { finalized: true, recordsMatched, totalCharge };
 }
