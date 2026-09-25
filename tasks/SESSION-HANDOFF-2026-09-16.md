@@ -1,5 +1,66 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-25 (latest). **PHASE 2B: TASKS 1 TO 6 COMPLETE. TASK 7 RUNNING. NOTHING PUSHED.**
+>
+> **Branch `feat/tier1-phase2b-api-and-mcp-queue`, cut from main at `31ddcdd`.** Executing subagent-driven:
+> a per-task review, a scoped re-review per fix round, and every gate number and several mutations
+> re-measured by the controller rather than relayed.
+>
+> **THE LEDGER IS AUTHORITATIVE OVER THIS BLOCK:**
+> `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md` (gitignored). It holds
+> **30 numbered rulings**, each with what it costs if wrong, the pre-flight table, every measured gate, and
+> every mutation run.
+>
+> **COMMITS:** T1 `c6b61a3` `f98ab91` | T2 `da9202c` `3d0dc2c` `72b30dd` `9658a5e` | docs `d26b689` |
+> T3 `f5e31f2` | T4 `4077f8d` `adf7a5f` `c9a8db1` | T5 `e4939fa` `c030263` |
+> T6 `64a3853` `f703d37` `9f01f31` `1233c7a` `6b46518`.
+> **Gates at T6: vitest 2164 / 89 files / 0 failed, tsc 0, eslint 45 (the floor; the 46 ceiling was never
+> approached across 18 commits), `next build` clean.**
+>
+> **STILL OPEN AND BLOCKING NOTHING ELSE: the only two things left that need David.**
+> 1. **T7 Step 1: THREE tool description strings**, not two. The plan named `skip_trace_bulk` (`:91`) and
+>    `bulk_status` (`:97`); Task 6 found `skip_trace_quote` is stale too and it is in NO task's file list.
+>    All three go to him in one approval round.
+> 2. **T8 Step 5: the live-check dollar amount.**
+>
+> **DAVID'S SEVEN DECISIONS THIS SESSION, all wired into the briefs:**
+> (a) `records_matched` on v1 + MCP: **option C**, gate fix only, flat count kept. The plan's three-arm
+> count would have scored a matched Tracerfy-CSV row and a matched legacy row **0**.
+> (b) `bulk_job.completed` fires **from the crons** (option A).
+> (c) apn/county tool copy **INSTRUCTS, does not offer** — and PTP having no registry access is the
+> **design**: a PTP-app trace never calls the suite; a suite/registry caller reaches PTP through Claude and
+> already holds the parcel.
+> (d) `recordsSkipped`/`skippedReason` **back** on the v1 submit response.
+> (e) Three docs-page copy pairs **approved verbatim**; the stale `estimatedCost: 13.80` **deliberately
+> left**.
+> (f) The "1 records" plural bug fixed in **both** routes so they stay byte-identical.
+> (g) The MCP no-key count is named **`no_lookup_key`**, NOT `records_skipped`, because this surface retired
+> a `skipped` key for claiming such rows were free.
+>
+> **THE THREE DEFECTS THIS PHASE FOUND THAT THE PLAN ITSELF CAUSED OR MISSED:**
+> 1. **The plan's own sample code swallowed Supabase errors** — a failed read became "job finished, zero
+>    matched", CAS'd permanently, firing the one-shot webhook at a customer. Every brief now carries a
+>    never-swallow amendment.
+> 2. **`"Texas"` killed a 500-record batch** (`trace_history.state` is VARCHAR(2), and a record with an
+>    owner name is never validated). Fixed with `storableValue`, clamped BEFORE the key is derived or D36
+>    breaks. **Task 6 would have recreated it** — its protection was the whole-batch 400 it deleted.
+> 3. **The auto-rebill trigger vanished from the common path** when the crons started finalizing.
+>
+> **WHY NO GATE CAN CATCH A WIDTH PROBLEM, and it is worth remembering beyond this phase:**
+> `lib/supabase/admin.ts:16` builds the client with **no `Database` generic**, so `tsc` checks neither column
+> names nor widths, and the test doubles carry none. Column constraints are fenced by migrations and a live
+> check, and by nothing else.
+>
+> **CARRIED TO TASK 8'S HANDOFF (in its brief as Amendments 8 and 9):** key-must-be-present-value-may-be-
+> empty (omitted `address` still refused); **a parcel-keyed record must carry an `owner_name` or it is filed
+> free and never traced**; and the live check must read the four real column widths from production, because
+> the new width test pins the CHECKED-IN DDL, not the live database.
+>
+> **PARKED FOR THE FINAL WHOLE-BRANCH REVIEW:** the MCP `bulk_status` finalize is a bare update with no
+> error check (a failed write leaves the gateway polling forever); a pre-existing swallowed error on the v1
+> webhook-URL update; one invariant now documented in four places.
+
+
 > # READ FIRST. STATE AS OF 2026-09-25 (later session, same day). **PHASE 2B IS IN EXECUTION. TASKS 1 TO 3 DONE, TASK 4 RUNNING.**
 >
 > **Branch `feat/tier1-phase2b-api-and-mcp-queue`, cut from main at `31ddcdd`, NOTHING PUSHED.** The two
