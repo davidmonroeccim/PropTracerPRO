@@ -8,7 +8,7 @@ import { chargePerTrace } from '@/lib/suite/pricing';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
-import { rowSkipReason } from '@/lib/trace/rowSkipReason';
+import { rowSkipReason, tier1MaySpeak } from '@/lib/trace/rowSkipReason';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
@@ -419,6 +419,9 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // THE NAME ONLY. owner_contact_source is ours, not the customer's, and it was wrong on
   // every tier 2 FastAppend row until contact_vendor existed. See the MCP twin.
   const { owner_contact_name } = resolveOwnerContact(row);
+  // Computed ONCE from the same exported predicate rowSkipReason gates on, so the pair below and
+  // the sentence can never disagree about whether this row's outcome is trustworthy.
+  const tier1Speaks = tier1MaySpeak(row);
   return {
     // D38: never the internal `APN|...` duplicate key. Same line as the MCP bulk_status twin.
     address: propertyAddressLabel(row),
@@ -452,10 +455,18 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // stays internal on contact_vendor. Both are null on a tier 2 row and on a
     // row written before migration 20260922, because an absence is an absence.
     //
+    // GATED ON tier1MaySpeak, THE SAME PREDICATE AS skip_reason, and that is a
+    // money-disclosure fence rather than tidiness. Echoed raw, a gate-closed row
+    // came back as outcome_code 'no_match' beside skip_reason null, and this
+    // tool's own approved description tells the caller that no_match means the
+    // record was not charged. So the raw code handed over the exact claim the
+    // gate withholds from a bulk trace that charged. The three outcome fields
+    // speak together or stay silent together.
+    //
     // ADDED TO BOTH TWINS IN ONE COMMIT. payloadParity compares the two key sets
     // by source scan, so either one alone goes red.
-    found_by: row.found_by ?? null,
-    outcome_code: row.outcome_code ?? null,
+    found_by: tier1Speaks ? row.found_by ?? null : null,
+    outcome_code: tier1Speaks ? row.outcome_code ?? null : null,
     // Why a row came back with no contacts. Asked of BOTH queues: serving only
     // the tier 1 accessor left every tier 2 terminal value speaking as a bare
     // no_match, including the billed row whose contact vendor never answered.

@@ -2470,16 +2470,68 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
       expect(out.traces[0].skip_reason).toContain("found no match");
     });
 
-    it("reports the outcome code and the key that found the owner", async () => {
+    /**
+     * THE THREE OUTCOME FIELDS SPEAK TOGETHER OR STAY SILENT TOGETHER, fenced BOTH ways.
+     *
+     * skip_reason was gated on tier1MaySpeak while outcome_code and found_by were echoed raw, so a
+     * gate-closed row came back as outcome_code 'no_match' beside skip_reason null. That is not a
+     * quieter version of the sentence: the approved bulk_status description tells the caller that
+     * no_match means the record was not charged, so the bare code hands over the exact charge claim
+     * the gate exists to withhold from a bulk trace that charged.
+     *
+     * Both directions are asserted because a one-sided test cannot tell a working gate from a
+     * missing field. list_traces is the sharpest case, having no date floor: a pre-Phase-2B bulk row
+     * carrying a stale outcome_code stays re-pollable forever.
+     */
+    it("reports all three outcome fields on a row whose outcome it trusts", async () => {
+      // trace_job_id: null is a row a SINGLE trace wrote, so the gate is open.
       const admin = adminStub({
         profile: { id: "p1", wallet_balance: 0 },
-        traces: [tier1Row({ outcome_code: TIER1_OUTCOME.FOUND_BY_PARCEL_ID, found_by: "parcel_id" })],
+        traces: [
+          tier1Row({
+            trace_job_id: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+            found_by: "parcel_id",
+          }),
+        ],
       });
       const out = (await listTraces(admin, "sub-1", {})) as {
-        traces: Array<{ outcome_code: string | null; found_by: string | null }>;
+        traces: Array<{ outcome_code: string | null; found_by: string | null; skip_reason: string | null }>;
       };
-      expect(out.traces[0].outcome_code).toBe(TIER1_OUTCOME.FOUND_BY_PARCEL_ID);
+      expect(out.traces[0].outcome_code).toBe(TIER1_OUTCOME.BUSY_TRY_AGAIN);
       expect(out.traces[0].found_by).toBe("parcel_id");
+      expect(out.traces[0].skip_reason).toBe(BUSY_TRY_AGAIN_REASON);
+    });
+
+    it("withholds all three on a row whose outcome it does NOT trust, not just the sentence", async () => {
+      // The reachable population: a bulk row the v1 or MCP submit wrote BEFORE Tasks 4 and 6 added
+      // the reuse clear. trace_job_id is set and no tier1_ status was ever written, so the
+      // outcome_code can only be stale, left by some earlier single trace on the same address_hash.
+      // MUTATION: ungate either of the two and this goes red while skip_reason stays null, which is
+      // exactly the shape that shipped.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [
+          tier1Row({
+            trace_job_id: "job-old",
+            ai_research_status: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.NO_MATCH,
+            found_by: "address",
+            trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0 }],
+          }),
+        ],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ outcome_code: string | null; found_by: string | null; skip_reason: string | null }>;
+      };
+      expect(out.traces[0].skip_reason).toBeNull();
+      expect(out.traces[0].outcome_code).toBeNull();
+      expect(out.traces[0].found_by).toBeNull();
+      // POSITIVE CONTROL: the row really was returned and really was built, so the three nulls
+      // above are a withholding rather than an empty result.
+      expect(out.traces[0]).toHaveProperty("owner_contact_name");
     });
 
     it("emits null rather than a guess on a row written before the outcome columns existed", async () => {
@@ -2495,10 +2547,16 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
       expect(out.traces[0].found_by).toBeNull();
     });
 
-    it("keeps the three gate columns internal", async () => {
+    it("keeps all four internal columns out of the payload", async () => {
       // They are selected to answer rowSkipReason, not to be handed out. Same treatment as
       // parcel_id_local and county: destructured OUT of the spread rather than trusted to be
       // overwritten. A gateway that saw ai_research_status would be reading our queue.
+      //
+      // trace_steps is the one that actually costs something if it leaks: the step log carries our
+      // per-step vendor `cost`, so leaving it in `...rest` puts internal economics into a payload
+      // the Suite Gateway maps into a customer's CRM. The comment in mcp-tools.ts calls the
+      // destructure the guard for all four; this array is what makes that claim fail when it stops
+      // being true, and it covered only three until this round.
       const admin = adminStub({
         profile: { id: "p1", wallet_balance: 0 },
         traces: [
@@ -2507,12 +2565,17 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
             ai_research_status: TIER1_SETTLED_STATUS,
             property_trace_status: null,
             outcome_code: TIER1_OUTCOME.NO_MATCH,
+            // EVERY internal column is present on the fixture on purpose. projectRow only copies
+            // keys the row actually carries, so a column absent from the fixture would make its
+            // "did not leak" assertion pass for the wrong reason -- the same trap this file already
+            // records for contact_vendor. trace_steps carries our per-step vendor cost.
+            trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0.07 }],
           }),
         ],
       });
       const out = (await listTraces(admin, "sub-1", {})) as { traces: Array<unknown> };
       const serialized = JSON.stringify(out.traces[0]);
-      for (const key of ["trace_job_id", "ai_research_status", "property_trace_status"]) {
+      for (const key of ["trace_job_id", "ai_research_status", "property_trace_status", "trace_steps"]) {
         expect(serialized, `${key} reached the gateway`).not.toContain(`"${key}"`);
       }
       // POSITIVE CONTROL: the payload really was built, so the absences above are removals.
@@ -2535,6 +2598,58 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
       records_submitted: 2,
       records_matched: 2,
     };
+
+    // THE SAME TWO-WAY GATE FENCE AS list_traces, on the OTHER surface that reports a record.
+    // bulk_status selects '*', so nothing here turns on the select; what is fenced is that
+    // outcome_code and found_by ride the same tier1MaySpeak predicate as skip_reason on this twin
+    // too. Ungating the pair in ONE twin is a divergence payloadParity's key-set comparison cannot
+    // see, so it has to be asserted behaviourally here as well as literally there.
+    it("reports all three outcome fields on a row whose outcome it trusts", async () => {
+      const { admin } = statusAdminStub({
+        profile,
+        job: completedJob,
+        rows: [
+          tier1Row({
+            trace_job_id: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+            found_by: "address",
+          }),
+        ],
+      });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ outcome_code: string | null; found_by: string | null; skip_reason: string | null }>;
+      };
+      expect(out.results[0].outcome_code).toBe(TIER1_OUTCOME.BUSY_TRY_AGAIN);
+      expect(out.results[0].found_by).toBe("address");
+      expect(out.results[0].skip_reason).toBe(BUSY_TRY_AGAIN_REASON);
+    });
+
+    it("withholds all three on a row whose outcome it does NOT trust, not just the sentence", async () => {
+      // MUTATION: ungate either of the pair in this twin and this goes red while skip_reason
+      // stays null, which is the money-disclosure shape that shipped.
+      const { admin } = statusAdminStub({
+        profile,
+        job: completedJob,
+        rows: [
+          tier1Row({
+            trace_job_id: "job-old",
+            ai_research_status: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.NO_MATCH,
+            found_by: "address",
+            trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0 }],
+          }),
+        ],
+      });
+      const out = (await bulkStatus(admin, "sub-1", { job_id: "job-1" })) as {
+        results: Array<{ outcome_code: string | null; found_by: string | null; skip_reason: string | null }>;
+      };
+      expect(out.results[0].skip_reason).toBeNull();
+      expect(out.results[0].outcome_code).toBeNull();
+      expect(out.results[0].found_by).toBeNull();
+      expect(out.results[0]).toHaveProperty("owner_contact_name");
+    });
 
     it("emits the 65 public keys and none of the 21 blocked ones on a tier 2 row", async () => {
       const { admin } = statusAdminStub({ profile, job: completedJob, rows: [tier2Row()] });

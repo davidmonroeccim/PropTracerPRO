@@ -102,10 +102,18 @@ describe('the v1 and MCP per-record payloads', () => {
     // four outcomes with different money attached. Asserted as literals in BOTH
     // files because the parity assertion above only proves the key SETS match:
     // two twins that both dropped these keys would agree with each other.
+    //
+    // THE GATE IS PART OF THE LITERAL, deliberately. Both keys are emitted through
+    // tier1Speaks, the same predicate rowSkipReason gates the sentence on, because
+    // a raw outcome_code beside a silenced skip_reason hands the caller the very
+    // charge claim the gate withholds: the approved bulk_status copy says no_match
+    // means the record was not charged. One twin ungating the pair is the
+    // divergence this assertion exists to catch, and a key-set comparison cannot
+    // see it.
     for (const path of [V1, MCP]) {
       const source = readFileSync(join(ROOT, path), 'utf8');
-      expect(source, path).toContain('found_by: row.found_by ?? null');
-      expect(source, path).toContain('outcome_code: row.outcome_code ?? null');
+      expect(source, path).toContain('found_by: tier1Speaks ? row.found_by ?? null : null');
+      expect(source, path).toContain('outcome_code: tier1Speaks ? row.outcome_code ?? null : null');
     }
   });
 });

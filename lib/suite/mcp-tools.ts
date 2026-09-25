@@ -5,7 +5,7 @@ import type { PtpProfile } from "@/lib/suite/mcp-shared";
 import { chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import { isLikelyBusiness } from "@/lib/trace/ownerClassification";
 import { propertyAddressLabel } from "@/lib/trace/historyDisplay";
-import { rowSkipReason } from "@/lib/trace/rowSkipReason";
+import { rowSkipReason, tier1MaySpeak } from "@/lib/trace/rowSkipReason";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import {
   PROPERTY_TRACE_NO_KEY_STATUS,
@@ -151,6 +151,26 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
     // `rest` on pain of leaking, to influence a value this tool never returns. The label is
     // read from the column where it is needed, which is trace_history itself.
     const { owner_contact_name } = resolveOwnerContact({ trace_result, ai_research });
+    // The row read down to what the outcome helpers need, built ONCE and used for both the gate
+    // and the sentence.
+    const skipRow = {
+      outcome_code,
+      trace_steps,
+      is_successful: rest.is_successful as boolean | null,
+      // THE RAW COLUMN, not the friendly label written into the payload below. A parcel-keyed row
+      // holds `APN|...` here and streetOf() reads that prefix to decide the row has no street;
+      // handing it "Parcel 0123-456, Travis County" would make it look like one, and a
+      // no_lookup_key row would then name the wrong missing field.
+      normalized_address: rest.normalized_address as string | null,
+      city: rest.city as string | null,
+      state: rest.state as string | null,
+      parcel_id_local,
+      county,
+      ai_research_status,
+      property_trace_status,
+      trace_job_id,
+    };
+    const tier1Speaks = tier1MaySpeak(skipRow);
     return {
       ...rest,
       // D38: a row keyed on a parcel carries an INTERNAL key in normalized_address. It is never
@@ -172,27 +192,17 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
       // that found the owner ('address', 'parcel_id', 'company_name'), never the vendor.
       // Emitted explicitly rather than left to ride the spread, so a row written before
       // migration 20260922 reads as null rather than as a missing key.
-      found_by: found_by ?? null,
-      outcome_code: outcome_code ?? null,
-      // The sentence behind the code, asked of BOTH queues. Built from the four columns
-      // destructured out above; see the select string for why dropping one of them is silent.
-      skip_reason: rowSkipReason({
-        outcome_code,
-        trace_steps,
-        is_successful: rest.is_successful as boolean | null,
-        // THE RAW COLUMN, not the friendly label written into the payload above. A parcel-keyed
-        // row holds `APN|...` here and streetOf() reads that prefix to decide the row has no
-        // street; handing it "Parcel 0123-456, Travis County" would make it look like one, and
-        // a no_lookup_key row would then name the wrong missing field.
-        normalized_address: rest.normalized_address as string | null,
-        city: rest.city as string | null,
-        state: rest.state as string | null,
-        parcel_id_local,
-        county,
-        ai_research_status,
-        property_trace_status,
-        trace_job_id,
-      }),
+      //
+      // GATED ON tier1MaySpeak, exactly as skip_reason is, and for the money rather than for
+      // tidiness: echoed raw, a gate-closed row came back as outcome_code 'no_match' beside
+      // skip_reason null, and the approved bulk_status copy tells a caller that no_match means the
+      // record was not charged. list_traces is the worst place for that, because it has no date
+      // floor, so a pre-Phase-2B bulk row carrying a stale outcome_code stays re-pollable forever.
+      found_by: tier1Speaks ? found_by ?? null : null,
+      outcome_code: tier1Speaks ? outcome_code ?? null : null,
+      // The sentence behind the code, asked of BOTH queues. Same row object as the gate above, so
+      // the pair and the sentence cannot disagree.
+      skip_reason: rowSkipReason(skipRow),
     };
   });
   return { traces };
@@ -1006,6 +1016,9 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // REMOVED FROM BOTH TWINS IN ONE CHANGE. lib/trace/__tests__/payloadParity.test.ts
   // compares the two key sets, so dropping it here alone would go red.
   const { owner_contact_name } = resolveOwnerContact(row);
+  // Computed ONCE from the same exported predicate rowSkipReason gates on, so the pair below and
+  // the sentence can never disagree about whether this row's outcome is trustworthy.
+  const tier1Speaks = tier1MaySpeak(row);
   return {
     // D38: never the internal `APN|...` duplicate key. Same line as the v1 bulk status twin.
     address: propertyAddressLabel(row),
@@ -1031,9 +1044,16 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // 'parcel_id', 'company_name'), never the vendor, which stays internal on contact_vendor.
     // Both null on a tier 2 row and on a row written before migration 20260922.
     //
+    // GATED ON tier1MaySpeak, THE SAME PREDICATE AS skip_reason, and that is a money-disclosure
+    // fence rather than tidiness. Echoed raw, a gate-closed row came back as outcome_code
+    // 'no_match' beside skip_reason null, and this tool's own approved description tells the caller
+    // that no_match means the record was not charged. So the raw code handed over the exact claim
+    // the gate withholds from a bulk trace that charged. The three outcome fields speak together or
+    // stay silent together.
+    //
     // ADDED TO BOTH TWINS IN ONE COMMIT, same line as the v1 bulk status twin.
-    found_by: row.found_by ?? null,
-    outcome_code: row.outcome_code ?? null,
+    found_by: tier1Speaks ? row.found_by ?? null : null,
+    outcome_code: tier1Speaks ? row.outcome_code ?? null : null,
     // Why a row came back with no contacts. Asked of BOTH queues through
     // rowSkipReason(): serving only the tier 1 accessor left every tier 2
     // terminal value speaking as a bare no_match, including the billed row whose

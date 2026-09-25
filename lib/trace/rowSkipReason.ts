@@ -83,10 +83,10 @@ export type SkipReasonRow = Tier1OutcomeRow & {
  *   trace_job_id === null                 a row a SINGLE trace itself wrote (spec D33). Such a row
  *                                         clears both queue columns when it settles, so a queue
  *                                         value on it can only be stale.
- *   isTier1QueueRow(ai_research_status)   a row the WEB BULK upload wrote and the Tier 1 cron
+ *   isTier1QueueRow(ai_research_status)   a row a BULK upload wrote (web, API or MCP) and the cron
  *                                         settled (Phase 2A). D33 chose to gate the sentence
  *                                         rather than clear the stale columns, and recorded the
- *                                         clearing as "(Phase 2 code)". The web submit now clears
+ *                                         clearing as "(Phase 2 code)". All three now clear
  *                                         outcome_code, found_by and trace_steps on every reused
  *                                         row except a busy resume, so on THESE rows the
  *                                         outcome_code can only belong to the trace the customer
@@ -115,11 +115,37 @@ export type SkipReasonRow = Tier1OutcomeRow & {
  * `=== null`, not merely falsy, on trace_job_id: a caller that did not select the column gets
  * `undefined`, and that row gets NO Tier 1 sentence either. Blank, never wrong (CLAUDE.md rule 7).
  */
+/**
+ * Whether this row's Tier 1 outcome is one we TRUST, and therefore one any surface may report.
+ *
+ * EXPORTED BECAUSE THREE PAYLOADS NEED THE SAME ANSWER, AND ONE DERIVATION IS THE POINT.
+ * `skip_reason` was gated here while `outcome_code` and `found_by` were echoed raw next to it, so
+ * a gate-closed row came back as `outcome_code: "no_match"` beside `skip_reason: null`. That is not
+ * a smaller version of the sentence, it is the same claim by another route: the approved bulk_status
+ * description tells the caller "no_match means we looked this owner up and found no match, and the
+ * record was not charged", so the raw code hands over the exact "not charged" claim this gate exists
+ * to withhold from a bulk trace that charged.
+ *
+ * So the three outcome fields speak together or stay silent together, and the predicate they agree
+ * on lives HERE, once. Copying `trace_job_id === null || isTier1QueueRow(...)` into each payload
+ * would be three places for a money-safety rule to drift apart, which is the same mistake as a
+ * second price derivation.
+ *
+ * Null is the honest answer for a row whose outcome we do not trust (CLAUDE.md rule 7). Nothing a
+ * current writer produces is affected: the reuse clear nulls all three columns, and a busy resume is
+ * re-queued with a tier1_ status, so its gate is open. The population this silences is rows the v1
+ * and MCP bulk submits wrote BEFORE Tasks 4 and 6 added that clear -- trace_job_id set, no tier1_
+ * status, a stale outcome_code left by some earlier single trace on the same address_hash. list_traces
+ * has no date floor, so those rows stay re-pollable indefinitely.
+ */
+export function tier1MaySpeak(row: SkipReasonRow): boolean {
+  return row.trace_job_id === null || isTier1QueueRow(row.ai_research_status);
+}
+
 export function rowSkipReason(row: SkipReasonRow): string | null {
-  const tier1MaySpeak = row.trace_job_id === null || isTier1QueueRow(row.ai_research_status);
   return (
     propertyTraceSkipReason(row.property_trace_status) ??
-    (tier1MaySpeak ? tier1OutcomeReason(row) : null) ??
+    (tier1MaySpeak(row) ? tier1OutcomeReason(row) : null) ??
     skipReasonFor(row.ai_research_status)
   );
 }

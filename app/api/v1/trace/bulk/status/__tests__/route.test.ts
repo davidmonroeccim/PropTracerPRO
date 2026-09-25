@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { chargePerTrace } from "@/lib/suite/pricing";
+import { TIER1_SETTLED_STATUS } from "@/lib/trace/tier1Queue";
 
 // Mutation fence for the route -> settleBulkJob money SEAM: proves the v1 bulk
 // status route passes chargePerTrace(profile) as the personRate, not 0, a hardcoded constant,
@@ -827,7 +828,12 @@ describe("the v1 bulk_job.completed webhook reports the outcome", () => {
     state: "TX",
     charge: 0.15,
     is_successful: true,
-    ai_research_status: null,
+    // ON THE TIER 1 QUEUE, which is what Task 4 made this submit write, and what opens the
+    // tier1MaySpeak gate for a bulk row. A fixture with no trace_job_id and no tier1_ status is a
+    // pre-Phase-2B row whose outcome is not trusted, so the pair below would correctly come back
+    // null and this test would be asserting the gate rather than the payload.
+    trace_job_id: "job-1",
+    ai_research_status: TIER1_SETTLED_STATUS,
     property_trace_status: "property_trace_done",
     tier: 1,
     outcome_code: "found_by_parcel_id",
@@ -881,5 +887,38 @@ describe("the v1 bulk_job.completed webhook reports the outcome", () => {
     // MUTATION: remove found_by from buildPerRecordResult and this goes red alongside parity.
     expect(record.found_by).toBe("parcel_id");
     expect(record.outcome_code).toBe("found_by_parcel_id");
+  });
+
+  it("withholds the outcome on a row whose outcome it does not trust, webhook included", async () => {
+    // THE GATE REACHES THE WEBHOOK TOO, which is worth asserting separately: the webhook body is
+    // built from buildPerRecordResult, so a caller who never polls the endpoint and only consumes
+    // the webhook is exactly as exposed to a stale charge claim as one who does.
+    //
+    // A bulk row the v1 submit wrote BEFORE Task 4 added the reuse clear: trace_job_id set, no
+    // tier1_ status, so its outcome_code can only be stale.
+    // MUTATION: ungate the pair in buildPerRecordResult and this goes red while skip_reason
+    // stays null.
+    H.rows = [
+      {
+        ...tier1Row,
+        is_successful: false,
+        ai_research_status: null,
+        outcome_code: "no_match",
+        found_by: "address",
+        trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0 }],
+      },
+    ] as never;
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    const posted = bodies.find((b) => b.event === "bulk_job.completed");
+    expect(posted, "no bulk_job.completed webhook was dispatched").toBeDefined();
+    const record = (posted!.results as Array<Record<string, unknown>>)[0];
+    expect(record.skip_reason).toBeNull();
+    expect(record.outcome_code).toBeNull();
+    expect(record.found_by).toBeNull();
+    // POSITIVE CONTROL: the record really was built and really did reach the webhook.
+    expect(record).toHaveProperty("owner_contact_name");
   });
 });
