@@ -365,6 +365,11 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       job_id: null,
       accepted: 0,
       duplicates_removed: duplicatesRemoved,
+      // PRESENT HERE TOO, or the claim the main response makes about this key is false on exactly
+      // one path. A caller branching on it would get undefined from the one response that is
+      // otherwise the simplest to handle. Nothing reached the split on this path, so nothing
+      // lacked a lookup key. See the main return for why the key is named this.
+      no_lookup_key: 0,
       message: "All records are duplicates of previous traces.",
     };
   }
@@ -758,6 +763,29 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     // happens to them rather than what does not: the `skipped` key it replaces said they were
     // free, and that stopped being true in phase 5c.
     full_property_trace: tier2Records.length,
+    // ROWS NOBODY CAN BE ASKED ABOUT AT ALL: no owner name AND no street, city or state to look a
+    // property up by. Terminal at submit and FREE, which is what separates them from every other
+    // count here. ADDITIVE, by the owner's ruling of 2026-09-25: no key above changed what it
+    // counts, and this is the count that did not exist.
+    //
+    // IT WAS COMPLETELY INVISIBLE BEFORE, not merely inconvenient. Such a row is in none of
+    // `accepted`, `full_property_trace` or `records_failed`, and unlike the v1 route's response
+    // this payload carries no total to subtract from -- a caller sending 3 records and reading
+    // `accepted: 2` could not tell whether the third was a duplicate or unlookupable.
+    //
+    // WHY `no_lookup_key` AND NOT `skipped` OR `records_skipped`, AND DO NOT "HARMONISE" IT WITH
+    // THE v1 ROUTE'S `recordsSkipped` LATER. `skipped` is the exact key `full_property_trace`
+    // above replaced, because it said those records were free and phase 5c made that false; reusing
+    // the word here would walk that fix back and re-teach a caller that a skipped row is a free row,
+    // on the one payload where a tier 2 row sits beside it being billed. `no_lookup_key` is instead
+    // the outcome code the row actually settles with (TIER1_OUTCOME.NO_LOOKUP_KEY,
+    // lib/trace/tier1Outcome.ts) and the vocabulary the customer-facing sentence already uses, so
+    // the count and the row agree on what happened. The two surfaces differ ON PURPOSE.
+    //
+    // The REASON reaches the caller through bulk_status's per-record `skip_reason`, served by
+    // rowSkipReason() from PROPERTY_TRACE_NO_KEY_REASON. These rows are terminal at birth, so the
+    // very first poll carries it.
+    no_lookup_key: noKeyRecords.length,
     // ALWAYS 0 NOW, AND KEPT RATHER THAN DELETED. It counted records accepted and then dropped
     // because the Tracerfy person CSV submit failed. There is no vendor call at submit any more, so
     // there is nothing left to drop: a write failure fails the whole submit above, with an error

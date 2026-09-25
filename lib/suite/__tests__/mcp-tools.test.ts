@@ -1027,6 +1027,59 @@ describe("skip_trace_bulk", () => {
       expect(rows[0].charge ?? 0).toBe(0);
     });
 
+    /* ---------------------------------------------------------------- *
+     * THE no_lookup_key COUNT. Owner ruling, 2026-09-25.
+     *
+     * A row nobody can be asked about was in NONE of this payload's counts -- not `accepted`, not
+     * `full_property_trace`, not `records_failed` -- and unlike the v1 route's response there is no
+     * total here to subtract from, so it could not even be derived. It was completely invisible: a
+     * caller sending 3 records and reading `accepted: 2` could not tell whether the third was a
+     * duplicate or unlookupable.
+     * ---------------------------------------------------------------- */
+    it("counts the rows nobody can be asked about, which were invisible before", async () => {
+      // THE TWO NO-KEY RECORDS MUST DIFFER IN THEIR STREET, and that is a fact about the key rather
+      // than about this test. traceKeyFor falls back to STREET||STATE when there is no street AND
+      // city pair, so two records with no street and no state hash IDENTICALLY and
+      // removeBatchDuplicates collapses them into one -- the collision the spec records for that
+      // fallback rather than solves. Written with two blank ones this asserted 2 and measured 1.
+      // So: one with no street at all, one with a street too short to look anything up by. Both are
+      // no-key, and they key apart.
+      // MUTATION: drop no_lookup_key from the response and this goes red.
+      const { out } = await submit([
+        rec(undefined, 1, { address: "", state: "" }),
+        rec(undefined, 2, { address: "A", state: "" }),
+        rec("Jane Smith", 3),
+      ]);
+      expect(out.no_lookup_key).toBe(2);
+      // ADDITIVE, so every other count still says exactly what it said before.
+      expect(out.accepted).toBe(1);
+      expect(out.persons).toBe(1);
+      expect(out.full_property_trace).toBe(0);
+      expect(out.records_failed).toBe(0);
+    });
+
+    it("keeps no_lookup_key present and zero when every record has a key", async () => {
+      // A key that appears only when it is non-zero is one nobody writes a branch for, which is the
+      // same rule `records_failed` is held to.
+      const { out } = await submit([rec("Jane Smith", 1)]);
+      expect(out.no_lookup_key).toBe(0);
+      expect(Object.keys(out)).toContain("no_lookup_key");
+    });
+
+    it("carries no_lookup_key on the all-duplicates path too, where nothing was judged", async () => {
+      // The other exit this tool can succeed through. Nothing reached the split on this path, so
+      // nothing lacked a lookup key -- and a caller branching on the key would otherwise get
+      // undefined from the one response that is otherwise the simplest to handle.
+      vi.mocked(checkDuplicates).mockResolvedValueOnce({
+        newRecords: [],
+        duplicates: [rec("Jane Smith", 1)],
+        cachedResults: [],
+      } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
+      const { out } = await submit([rec("Jane Smith", 1)]);
+      expect(out).toMatchObject({ job_id: null, accepted: 0, no_lookup_key: 0 });
+      expect(Object.keys(out)).toContain("no_lookup_key");
+    });
+
     it("never files a NAMED record as no-key, however broken its address (D4)", async () => {
       // A company traces on name and state alone, and a person with no lookup key settles
       // no_lookup_key, free, with a sentence, INSIDE the cron. Filing it no-key here would deny
