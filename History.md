@@ -4,6 +4,47 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-24 (h): Tier 1 Phase 2B PLANNED. 8 tasks. Nothing built.
+
+- Plan committed: `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`.
+  Scope is the 2A plan's carried items 1 to 5, plus spec 6.3/D36, plus the job-completion fix
+  David named as 2B's first item. Four parallel research agents mapped the v1 route, the MCP
+  surface, the job-completion surface and the spec before a line was written.
+- **Research found three things the carried list did not name.** (1) The Suite Gateway's blocker is
+  `recordSchema` making `city` a REQUIRED Zod field, so a parcel-keyed record is refused before any
+  guard runs; it is not the validator. (2) Spec 6.3/D36 requires the bulk surfaces to align on the
+  duplicate key, and that cannot be split from the validation change: `checkDuplicates` hashes with
+  `traceKeyFor` while the row builder stores `normalizeAddress`, and the two agree ONLY while the
+  whole-batch 400 guarantees every record has a street and a city. (3) Both the v1 and MCP status
+  gates ask `isEntityTracePending`, the LEGACY predicate holding no `tier1_` value, and
+  `lib/trace/tier1Queue` is not imported into `lib/suite/mcp-tools.ts` at all, so either surface
+  would have finalized a job over live, billable Tier 1 work the moment 2B enqueued one.
+- **That last finding sets the task order: for each surface the CONSUMER is fixed before the
+  PRODUCER exists** (T3 before T4, T5 before T6). Phase 2A shipped those in the other order and its
+  own plan review caught the consequence; 2B removes the window rather than reviewing it later.
+- Tasks 1 and 2 are the job-completion fix. `lib/trace/finalizeBulkJob.ts` becomes the ONE answer to
+  "is this job still working" and "how many matched", replacing five divergent copies, and its
+  terminal write is a compare-and-swap on `status='processing'` copying the row-claim primitive the
+  crons already use three times. Its non-null result is the fire-once token `bulk_job.completed` has
+  never had. **`CRON_TIMEOUT_MINUTES` stays 60**: it is a give-up deadline, not a completion
+  mechanism.
+- Seven line references in the 2A plan and the spec had drifted. The plan carries a correction table
+  and is written against measured values throughout.
+- **Three hard stops are built in, all David's:** the `bulk_job.completed` webhook change (presented
+  A/B with the risk), the two MCP tool descriptions as old-text/new-text (L-028), and the live check
+  dollar amount (L-031).
+- **One thing 2B must design around that 2A got for free.** The 2A live check was protected by
+  accident: production could not see `tier1_*` statuses, so its crons left the Tier 1 rows alone
+  while draining the tier 2 half on main's code. Once 2B merges, main knows `tier1_*` too and that
+  protection is gone, so a local server pointed at production would race the production crons on
+  BOTH lanes. Task 8 forces that decision before any spend.
+- Lesson L-037 written after a correction: context supplied to locate a problem is not a request to
+  solve it, and a proposal that is smaller because it avoids the seam is usually undoing a decision
+  rather than honouring it.
+- Nothing is built. The plan awaits David's go.
+
+---
+
 ## 2026-09-24 (g): Tier 1 Phase 2A CLOSED: live check run, merged to main, pushed, deployed.
 
 - **The live check ran on 20 records in one web bulk upload** (job f406e591), a local server pointed

@@ -1,5 +1,95 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-25. **PHASE 2A IS LIVE IN PRODUCTION. PHASE 2B IS PLANNED AND AWAITS DAVID'S GO.**
+>
+> **PHASE 2A: merged, pushed, deployed, verified.** Merge commit `2982627` (a single `--no-ff`
+> commit, so one `git revert` undoes the phase). Deployed and aliased to proptracerpro.com. Gates at
+> merge, all four measured by the controller: vitest **2040 / 87 files / 0 failed**, tsc **0**,
+> eslint **45**, `next build` **0**. Both migrations were already live BEFORE the deploy, so it was
+> code-only. Live check report: `tasks/phase2a-live-check.md`. **David was offered the whole-branch
+> review and DECLINED it**; the nine per-task reviews stand and no cross-task pass was ever made on
+> those 24 commits. Recorded so nobody assumes one happened.
+>
+> **PHASE 2B: PLANNED, NOT STARTED, NOTHING BUILT.**
+> `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`, commit `ba4696b`.
+> 8 tasks. Task list is ticked in `tasks/todo.md`. **Confirm the plan stands before Task 1.**
+>
+> **THE TASK ORDER IS THE SAFETY ARGUMENT AND MUST NOT BE REARRANGED.** For each surface the
+> CONSUMER is fixed before the PRODUCER exists: T3 (v1 status gate) before T4 (v1 enqueue), T5 (MCP
+> bulk_status gate) before T6 (MCP enqueue). Both status gates today ask `isEntityTracePending`,
+> the LEGACY predicate that holds no `tier1_` value, and `lib/trace/tier1Queue` is not imported into
+> `lib/suite/mcp-tools.ts` at all. Either surface would finalize a job over live, billable Tier 1
+> work the moment something enqueued one, and each route's top-of-handler early return makes that
+> verdict permanent. 2A shipped this pair in the other order and its own review caught it.
+>
+> **T4 AND T6 ARE EACH INDIVISIBLE, and the reason is spec 6.3 / D36.** `checkDuplicates` hashes with
+> `traceKeyFor` (APN-aware); the row builders store `normalizeAddress`. They agree ONLY because the
+> whole-batch 400 guarantees every record has a street and a city. Relax the validation without
+> switching the key in the same change and the same record sent through single and bulk lands on two
+> rows. **Not in the 2A carried list; found in research and added.**
+>
+> **THE GATEWAY'S ACTUAL BLOCKER IS ONE LINE**, and it is not the validator: `recordSchema`
+> (`lib/suite/mcp-tools.ts:124-144`) makes `city` a REQUIRED Zod field, so a parcel-keyed record is
+> refused before any guard runs. T6 makes it optional. **The gateway repo is NOT touched by this
+> phase** and is another session's working tree; spec Section 10 puts its own city guard in
+> **Phase 3**. 2B ends with PTP ready and a written handoff, never a claim that the path works end
+> to end.
+>
+> **THREE HARD STOPS, all David's, all written into the plan:**
+> 1. **T2 Step 1** the `bulk_job.completed` webhook change, presented A/B with the risk stated.
+>    Today an integrator whose job drains in 90 seconds hears nothing for an hour, and the web
+>    route's most common finalize path fires no webhook at all.
+> 2. **T7 Step 1** the two MCP tool descriptions (`app/api/[transport]/route.ts:91`, `:97`) as exact
+>    old text and new text, for approval BEFORE they are written (L-028).
+> 3. **T8 Step 5** the live check dollar amount. The runner refuses without `PTP_LIVE_RUN=1` AND a
+>    cap STRICTLY above the computed worst case. **The CONTROLLER runs the spend, never an
+>    implementer** (L-031).
+>
+> **WHAT 2B MUST DESIGN AROUND THAT 2A GOT FOR FREE.** 2A's live check was protected by accident:
+> production could not see `tier1_*` statuses, so its crons left the Tier 1 rows alone while draining
+> the tier 2 half on main's code (that is why `vendor_rate_windows` showed zero tier 2 contribution
+> and why those four rows prove nothing about 2A's tier 2 changes). **Once 2B merges, main knows
+> `tier1_*` too and that protection is gone.** A local server pointed at the production database
+> would race the production crons on BOTH lanes. T8 Step 1 forces the decision before any spend.
+>
+> **A TRAP IN T7 THAT WOULD SHIP GREEN.** `listTraces` projects through a literal SELECT string
+> (`mcp-tools.ts:66`). Adding `found_by`/`outcome_code` without ALSO adding `ai_research_status`,
+> `property_trace_status` and `trace_job_id` gives `rowSkipReason`'s gate `undefined`, and **every row
+> returns a blank reason with a green suite.**
+>
+> **GATES, the 2B baseline, measured on main at `2982627`:** vitest **2040 passed / 87 files / 0
+> failed**, `npx tsc --noEmit` **exit 0**, `npx eslint app lib components` **45 problems**, ceiling
+> 46, hard cap 47, **never bare `npm run lint`**, `npx next build` clean. **eslint exits non-zero on
+> main; judge by the COUNT, never the exit code.**
+>
+> **TWO ITEMS CARRIED OUT OF 2A, both David's rulings, neither a 2A defect:**
+> 1. **Job completion latency** is 2B's FIRST work (his answer: b). Nothing finalized a bulk job when
+>    its queue drained; only a polling tab or the 60-minute sweep did. **`CRON_TIMEOUT_MINUTES` STAYS
+>    60** - he correctly recalled it is a give-up deadline, not a completion mechanism
+>    (`History.md:2577`). Tasks 1 and 2.
+> 2. **The Tier 2 lane is underwater at the PRO rate**, and this had never been recorded anywhere
+>    before 2026-09-24. Arithmetic, not a sampled rate: cost `$0.20 + $0.10N` against a FLAT `$0.25`,
+>    so margin is `0.05 - 0.10N` at pro and `0.20 - 0.10N` at PAYG, with no cap on N (D21(c), D40).
+>    The 2A live check measured tier 2 at cost $0.80 against $0.75 charged, **net -$0.05**, hidden
+>    inside a +$0.40 job total by the healthy Tier 1 lane. **NOT decided.** The cheap next step is a
+>    FREE read of the owner-count distribution over existing `property_trace_done` rows. **What is
+>    NOT established and must not be claimed: how many owners a dossier typically reaches.**
+>
+> **STILL OPEN FOR DAVID, none blocking 2B:** the cross-project Supabase default-privileges finding
+> (amend the CLAUDE.md table template then audit the six suite projects; **do NOT edit CLAUDE.md
+> without his go**), the stale-owner-name options, and the nameless APN lookup question (L-035).
+> **L-035 is NOT blocking**: his 2026-09-24 correction settled that the APN rung is the designed
+> fallback for a missing city, so 2B ships it as-is and only the disclosure question stays open.
+> Todo 16, 17, 19, 20's remainder, 21 and 23 are untouched by this phase.
+>
+> **THREE THINGS STILL UNFENCED FROM 2A, and no more:** the MCP `tier1: 0` call site (**T6 fences
+> it**), the Tier 1 lane's try/catch placement, and `TIER1_RECORD_BUDGET_MS`.
+>
+> **READ L-037 FIRST**, then L-036. L-037 is the newest correction: context supplied to locate a
+> problem is not a request to solve it, and a proposal that is smaller because it avoids the seam is
+> usually undoing a decision rather than honouring it.
+
+
 > # READ FIRST. STATE AS OF 2026-09-24 EVENING. **PHASE 2A IS COMPLETE, MERGED TO MAIN, PUSHED AND DEPLOYED.**
 >
 > **All nine tasks done, the live check RAN, and David chose to merge and deploy.** Report:
