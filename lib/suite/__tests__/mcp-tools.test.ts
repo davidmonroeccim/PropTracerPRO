@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePtpProfile } from "@/lib/suite/mcp-shared";
 import {
   walletBalance,
@@ -20,7 +20,7 @@ import {
 } from "@/lib/trace/propertyTraceAttempts";
 import { TIER1_QUEUED_STATUSES, tier1QueuedStatusFor } from "@/lib/trace/tier1Queue";
 import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
-import { tracerfyCanRun } from "@/lib/trace/bulkPreflight";
+import { inFlightUnbilledCost, tracerfyCanRun } from "@/lib/trace/bulkPreflight";
 import {
   createAddressHash,
   normalizeAddress,
@@ -96,6 +96,24 @@ beforeEach(() => {
   // already accepted. Both are reset per test so one refusal cannot leak forward.
   H.canRunTier2 = true;
   H.inFlight = 0;
+  // AND THE RECORDED CALLS ARE CLEARED, WHICH IS A DIFFERENT THING FROM THE LEVERS ABOVE.
+  //
+  // The two lines above reset what these functions RETURN. They do not touch what vi.fn has
+  // RECORDED, and there is no `clearMocks` in vitest.config.ts and no setup file, so without this
+  // every call accumulates for the whole file. That made the only toHaveBeenCalledWith assertions
+  // on tracerfyCanRun's arguments -- the ones Amendment 5 exists to add, because the tier 1 count
+  // was previously unfenced -- satisfiable by ANY matching call recorded by an earlier test. Two
+  // earlier tests already produce { tier1: 1, tier2: 1 } and { tier1: 0, tier2: 0 } on their own.
+  //
+  // The fence still measured RED under its mutation, because changing the count corrupts every
+  // call in the file at once. But it was file-global rather than test-local, and it would stop
+  // biting the moment the count became conditional on anything. A spy that is never cleared is a
+  // fence that cannot fail.
+  //
+  // mockClear, never mockReset: these two carry their implementations from the vi.mock factory
+  // above, and mockReset would strip them and make every submit throw.
+  vi.mocked(tracerfyCanRun).mockClear();
+  vi.mocked(inFlightUnbilledCost).mockClear();
 });
 
 /** POSTGREST COLUMN PROJECTION, EMULATED. A column the query never asked for does not come
@@ -1199,7 +1217,18 @@ describe("skip_trace_bulk", () => {
       expect(rows[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
       expect(rows[0].ai_research_status).toBeNull();
       expect(rows[0].status).toBe("no_match");
-      expect(rows[0].charge ?? 0).toBe(0);
+      // FREE MEANS THE KEY IS NEVER WRITTEN, not that it is written as zero. `charge ?? 0` passed
+      // either way, so it could not detect a row that started carrying a charge it should not. The
+      // row is REUSED on an upsert, so writing 0 would also overwrite a real charge from an earlier
+      // paid trace; absent is the only correct state. Same form this file uses for the tier 2 row.
+      for (const paid of ["charge", "ai_research_charge", "tier"]) {
+        expect(Object.keys(rows[0])).not.toContain(paid);
+      }
+      // AND THE OUTCOME COLUMN IS NULL, NEVER 'no_lookup_key'. This row is terminal at birth and no
+      // cron ever claims it, so it never acquires the TIER 1 outcome code that shares this key's
+      // name. The count reported as `no_lookup_key` is named for the shared vocabulary, not for a
+      // value this row carries; see the comment on that key.
+      expect(rows[0].outcome_code).toBeNull();
     });
 
     /* ---------------------------------------------------------------- *
@@ -1278,8 +1307,18 @@ describe("skip_trace_bulk", () => {
    * WHAT THESE TESTS CANNOT SEE, SAID PLAINLY. submitAdminStub mocks Supabase, so it enforces no
    * column width: the 22001 cannot happen here. `tsc` cannot catch it either, because
    * lib/supabase/admin.ts builds the client with NO `Database` generic, so neither column names
-   * nor widths are typed. These assert the CLAMP; the overflow it prevents is fenced by
-   * supabase/schema.sql, lib/utils/__tests__/address-normalizer.test.ts and a live check.
+   * nor widths are typed.
+   *
+   * SO BE EXACT ABOUT WHAT IS FENCED WHERE, because an earlier draft of this comment cited a unit
+   * test suite that does not exist:
+   *   - The CLAMP'S BEHAVIOUR on this surface is fenced by the four tests below plus the padded
+   *     state one, and by their twins on app/api/v1/trace/bulk.
+   *   - storableValue() ITSELF has NO direct unit tests anywhere in the repo. Every assertion on it
+   *     is indirect, through these two bulk surfaces.
+   *   - The WIDTH VALUES are facts about the table, from supabase/schema.sql:68-69 and
+   *     supabase/migrations/20260919_trace_history_parcel_key.sql:19-22, mirrored in
+   *     TRACE_HISTORY_WIDTH. Nothing in the suite checks that mirror still matches the DDL.
+   *   - The OVERFLOW ITSELF can only be caught by a live check.
    * ---------------------------------------------------------------- */
   describe("a value the column cannot hold is treated as absent, not as a dead batch", () => {
     it("does not let one record saying Texas kill the batch, and keys it on what it STORED", async () => {
@@ -1479,7 +1518,13 @@ describe("skip_trace_bulk", () => {
         ],
       } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
       const { rows } = await submit([rec("Jane Smith", 1)]);
+      // ALL THREE FIELDS THE SPREAD CLEARS TOGETHER. Asserting two of them let the third be
+      // deleted from the exemption unnoticed, and `found_by` is the one carrying the disclosed cost
+      // this exemption exists to avoid paying twice: it is the label on a row that may already hold
+      // paid contacts.
+      // MUTATION: delete found_by from the exemption spread and this goes red.
       expect(Object.keys(rows[0])).not.toContain("outcome_code");
+      expect(Object.keys(rows[0])).not.toContain("found_by");
       expect(Object.keys(rows[0])).not.toContain("trace_steps");
     });
   });
@@ -1497,8 +1542,15 @@ describe("skip_trace_bulk", () => {
     // it: "does NOT answer success" inherits the structured-failure fence, "writes the job
     // terminal" inherits the trace_jobs correction, and "stops at the FIRST failed bucket"
     // inherits the partial-survival rule.
+    // SILENCED HERE AND RESTORED AFTERWARDS. Without the restore the spy outlives this describe --
+    // there is no `restoreMocks` in vitest.config.ts -- so every later describe in the file,
+    // bulk_status included, ran with console.error swallowed. Nothing depended on it, and that is
+    // the point: a real error in those tests would have vanished silently.
     beforeEach(() => {
       vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.mocked(console.error).mockRestore();
     });
 
     it("stops at the FIRST failed bucket rather than writing rows it cannot report on", async () => {

@@ -143,8 +143,9 @@ export const recordSchema = z.object({
    *
    *  Nothing needs a city. D4: a company traces on its name and state alone. The dossier's second
    *  lookup key is `apn` + `county` + `state` (see below), which has no city term at all. And
-   *  hasSitus already requires a city independently wherever a situs address IS the key, so
-   *  nothing could have sent a partial address here by mistake.
+   *  where a situs address IS the key, the routing gates on hasSitus (lib/routing/ownerRoute.ts:346),
+   *  which requires street AND city AND state TOGETHER -- so making this field optional cannot let a
+   *  partial address be sent as a situs key: the route simply does not take that branch.
    *
    *  Same reasoning as `zip` below, one field over: requiring a field nothing downstream reads
    *  rejects records at the door for no gain. A record that genuinely has no lookup key at all is
@@ -279,10 +280,23 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   // LOWERING A NUMBER NAMED AS A CEILING IS SAFE HERE, AND THE REASON IS STRUCTURAL RATHER THAN A
   // MATTER OF JUDGEMENT. This value feeds no gate: it is returned to the caller and nothing reads
   // it back. The money gate is skipTraceBulk's own, computed independently from its own
-  // billableRecords. And this quote can never promise LESS than that gate reserves, because the
-  // two derive the same way from sets in a fixed relation: this one dedups INTERNALLY only, while
-  // the submit also drops 90-day history duplicates, so the submit's set is always a subset of
-  // this one. Both directions are pinned by tests in skip_trace_quote.
+  // billableRecords. And this quote can never promise LESS than that gate reserves, because
+  // EXACTLY TWO mechanisms separate the two sets and both run one way:
+  //
+  //   1. DEDUP. This function drops internal batch duplicates only; the submit drops those AND
+  //      90-day history duplicates, so its set is a subset of this one.
+  //   2. THE WIDTH CLAMP. The submit passes every record through storableValue for the four
+  //      constrained columns BEFORE it classifies, and this function classifies the raw record.
+  //      A clamp can only empty a value, never lengthen one, so it can only move a record from
+  //      billable to no-key -- never the reverse -- and in the key it can only collapse two
+  //      records into one, never split one into two.
+  //
+  // Both directions therefore subtract, so quoted >= committed for every record shape, not merely
+  // for the ones anyone has tried. The one observable consequence is a blank-owner record whose
+  // city exceeds VARCHAR(100): this quote prices it tier 2 and the submit files it no-key and free.
+  // That over-states, which is the safe direction. Both are pinned by tests in skip_trace_quote,
+  // including one where history dedup drops a record so the inequality is STRICT rather than an
+  // equality dressed as a proof.
   const cost = worstCaseCost(billableRecords, profile);
   const entities = tier1Records.filter((r) => isEntityRecord(r.owner_name)).length;
   return {
@@ -817,10 +831,23 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
     // THE v1 ROUTE'S `recordsSkipped` LATER. `skipped` is the exact key `full_property_trace`
     // above replaced, because it said those records were free and phase 5c made that false; reusing
     // the word here would walk that fix back and re-teach a caller that a skipped row is a free row,
-    // on the one payload where a tier 2 row sits beside it being billed. `no_lookup_key` is instead
-    // the outcome code the row actually settles with (TIER1_OUTCOME.NO_LOOKUP_KEY,
-    // lib/trace/tier1Outcome.ts) and the vocabulary the customer-facing sentence already uses, so
-    // the count and the row agree on what happened. The two surfaces differ ON PURPOSE.
+    // on the one payload where a tier 2 row sits beside it being billed. The two surfaces differ ON
+    // PURPOSE.
+    //
+    // `no_lookup_key` is the name because it is the phrase BOTH lanes already use for this one
+    // fact: we were given nothing to look this record up by. Tier 1 settles an owner-bearing row
+    // that way inside the cron (TIER1_OUTCOME.NO_LOOKUP_KEY, lib/trace/tier1Outcome.ts); tier 2
+    // says it at submit with PROPERTY_TRACE_NO_KEY_STATUS and reads it back as
+    // PROPERTY_TRACE_NO_KEY_REASON. So the name is the shared vocabulary, not a borrowed column
+    // value.
+    //
+    // BE PRECISE ABOUT WHICH ROWS THESE ARE, because the obvious reading is wrong. Every
+    // owner-bearing record goes to tier 1 unconditionally in the split above, so the rows counted
+    // here are STRICTLY blank-owner. They are written property_trace_status =
+    // PROPERTY_TRACE_NO_KEY_STATUS with status 'no_match' and, via the D33 spread in
+    // buildHistoryRow, outcome_code NULL -- and they are terminal at birth, so no cron ever claims
+    // them and they NEVER acquire outcome_code 'no_lookup_key'. That column is the TIER 1 lane's,
+    // and a row that reaches it is counted in `accepted` and `persons`/`entities`, never here.
     //
     // The REASON reaches the caller through bulk_status's per-record `skip_reason`, served by
     // rowSkipReason() from PROPERTY_TRACE_NO_KEY_REASON. These rows are terminal at birth, so the
