@@ -12,6 +12,7 @@ import { rowSkipReason } from '@/lib/trace/rowSkipReason';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isRowStillWorking } from '@/lib/trace/finalizeBulkJob';
 import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -246,36 +247,26 @@ export async function GET(request: Request) {
 
     // --- Decide overall bulk job state ------------------------------------
 
-    // A bulk job is not finished while any row is still awaiting its business
-    // trace or its Tracerfy result. `ai_research_status` is still the entity
-    // state machine (sweep-entity-traces drives it); only the engine behind it
-    // changed. Pendingness is asked of lib/trace/entityTraceAttempts.ts rather
-    // than compared against two literals, because a retried row carries its
-    // attempt number in that column. A row skipped for having no owner name,
-    // and a row whose attempts ran out, are NOT pending: both carry a terminal
-    // status, which is what stops them holding a job open forever.
-    //
-    // AND WHILE ANY ROW STILL OWES ITS FULL PROPERTY TRACE. Same shape as the
-    // entity gate above and deliberately not a different one: that gate is
-    // already load-bearing and correct, and two near-identical checks that
-    // differ slightly is how one of them rots. Asked of
-    // lib/trace/propertyTraceAttempts.ts rather than compared against literals,
-    // because a retried row carries its attempt number in the column.
-    //
-    // A tier 2 row is written `status: 'processing'` at submit, so the arm below
-    // catches it too. That overlap is not a reason to drop this one: the cron
-    // writes the row's delivery status the moment the dossier answers, while the
-    // queue column is what says whether the ROW is finished, and the two part
-    // company on exactly the row that matters. Without this the job finalizes
-    // over rows the customer is about to be billed for, and a completed job is
-    // never polled again.
-    const anyPendingResearch = rows.some((r) => isEntityTracePending(r.ai_research_status));
-    const anyPendingProperty = rows.some((r) =>
-      isPropertyTracePending(r.property_trace_status)
+    // THREE POPULATIONS, and until Phase 4 a job can hold all three at once.
+    //   isEntityTracePending  the LEGACY entity ladder, bare queued/processing on ai_research_status.
+    //   isRowStillWorking     the tier 2 queue AND the Tier 1 queue (spec 3.2), the shared predicate.
+    //   status === 'processing'  a row the Tracerfy CSV half still owns.
+    // Asking only the first is how this route would finalize over live Tier 1 work, and the
+    // early return at the top of this handler would then make that verdict permanent.
+    const anyPendingLegacyEntity = rows.some((r) => isEntityTracePending(r.ai_research_status));
+    // TraceHistoryRow's property_trace_status is optional (string | null | undefined);
+    // FinalizableRow requires string | null. Narrowed inline rather than widening
+    // FinalizableRow itself, which the crons and the web status route also depend on.
+    const anyPendingQueue = rows.some((r) =>
+      isRowStillWorking({
+        property_trace_status: r.property_trace_status ?? null,
+        ai_research_status: r.ai_research_status,
+        is_successful: r.is_successful,
+      })
     );
     const anyPendingTrace = rows.some((r) => r.status === 'processing');
 
-    if (anyPendingResearch || anyPendingProperty || anyPendingTrace) {
+    if (anyPendingLegacyEntity || anyPendingQueue || anyPendingTrace) {
       return NextResponse.json({
         success: true,
         status: 'processing',

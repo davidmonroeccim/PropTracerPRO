@@ -357,6 +357,137 @@ describe("the tier 2 queue holds the job open too", () => {
 });
 
 /**
+ * THE TIER 1 QUEUE HOLDS THE JOB OPEN TOO, and it is not this route's own gate
+ * that used to do it. `isEntityTracePending` is the LEGACY predicate and holds
+ * no `tier1_` value at all, and the `status === 'processing'` arm catches a
+ * queued Tier 1 row only incidentally: the Tier 1 cron writes the row's
+ * delivery `status` before it clears the queue column, so the overlap ends on
+ * exactly the row that matters. Without `isRowStillWorking` in the disjunction
+ * this route finalizes over live, billable Tier 1 work, and the
+ * top-of-handler early return for a completed/failed job makes that verdict
+ * permanent.
+ */
+describe("the Tier 1 queue holds the job open too", () => {
+  beforeEach(() => {
+    H.profile = { id: "user-abc", subscription_tier: "wallet", is_acquisition_pro_member: false };
+  });
+
+  it("reports processing while a Tier 1 row is queued", async () => {
+    // MUTATION: drop the isRowStillWorking arm from the disjunction and this goes red. Neither
+    // remaining arm recognizes a tier1_ value, so this job would read as finished and the
+    // top-of-handler early return would make that verdict permanent.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 2,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_queued",
+        property_trace_status: null,
+        is_successful: true,
+      },
+      {
+        id: "row-2",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(H.updates.find((u) => u.table === "trace_jobs")).toBeUndefined();
+  });
+
+  it("stays processing even after the cron has flipped status off processing", async () => {
+    // The incidental status === 'processing' arm cannot be what holds this row open: the Tier 1
+    // cron writes the row's delivery status before it clears ai_research_status, so a poll that
+    // lands in between sees a terminal `status` next to a still-queued Tier 1 value.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "no_match",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_queued_3",
+        property_trace_status: null,
+        is_successful: false,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+  });
+
+  it("completes once every Tier 1 row is settled, and counts the successes", async () => {
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 2,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+        charge: 0,
+      },
+      {
+        id: "row-2",
+        status: "no_match",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: false,
+        charge: 0,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+  });
+});
+
+/**
  * THE SIZE FENCE ON THE v1 PAYLOAD, AND IT IS ADDITIVE.
  *
  * Restoring parity with the MCP twin in 5c-3B put a 65-key `property_record` on
