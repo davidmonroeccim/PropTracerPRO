@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
+  TRACE_HISTORY_WIDTH,
   normalizeAddress,
   createAddressHash,
+  storableValue,
   traceKeyFor,
   usableZip,
   validateAddressInput,
@@ -209,5 +213,144 @@ describe('traceKeyFor (spec 6.3, D9)', () => {
 
   it('falls back to street and state with neither a city nor a whole parcel key', () => {
     expect(traceKeyFor({ address: '1 A St', state: 'OH', apn: '100' })).toBe('1 A ST||OH');
+  });
+});
+
+/*
+ * storableValue and TRACE_HISTORY_WIDTH, added 2026-09-25.
+ *
+ * WHY THESE EXIST AT ALL, AND WHY A UNIT TEST IS THE ONLY FENCE AVAILABLE.
+ *
+ * Phase 2B stopped the bulk surfaces rejecting a whole batch over one bad record. That removed the
+ * last thing standing between a caller's typo and the INSERT: `trace_history.state` is VARCHAR(2),
+ * so a record carrying "Texas" reached the write as "TEXAS", Postgres raised 22001, the batch write
+ * threw, and all 500 records died on one routine integrator mistake. That is whole-batch rejection
+ * through a different door, in the change whose purpose was deleting it.
+ *
+ * NOTHING ELSE IN THIS REPO CAN CATCH A WIDTH PROBLEM. lib/supabase/admin.ts builds the service-role
+ * client with NO `Database` generic, so `tsc` checks neither column names nor widths, and every test
+ * double for Supabase carries no widths either. A green suite proves nothing about whether a write
+ * fits. Until this block, storableValue -- the function that whole guard rests on -- had no direct
+ * test anywhere in the repo, and TRACE_HISTORY_WIDTH was an unchecked copy of the schema.
+ */
+describe('storableValue', () => {
+  it('keeps a value that is exactly as long as the column', () => {
+    // THE BOUNDARY, and it is the one a "tidy-up" is most likely to move.
+    // MUTATION: change the comparison to `>=` and this goes red.
+    expect(storableValue('ab', 2)).toBe('ab');
+    expect(storableValue('C'.repeat(100), 100)).toBe('C'.repeat(100));
+  });
+
+  it('drops a value one character too long, rather than storing part of it', () => {
+    expect(storableValue('abc', 2)).toBe('');
+    expect(storableValue('C'.repeat(101), 100)).toBe('');
+  });
+
+  it('NEVER truncates, which is the whole design decision', () => {
+    // The single most likely "optimisation": `return trimmed.substring(0, maxLength)`. It looks
+    // like it saves the record and it does the opposite -- "Te" is a state the caller never sent,
+    // and a WRONG value is worse than none, exactly as usableZip argues for a mangled zip. '' is
+    // the row honestly saying it has no usable value, and the engines already have somewhere to
+    // put that: tier1Outcome settles such a row free, asking for "a valid two-letter state".
+    // MUTATION: return a substring instead and this goes red.
+    for (const [value, width] of [['Texas', 2], ['Houston', 3], ['abcdef', 5]] as const) {
+      const out = storableValue(value, width);
+      expect(out).toBe('');
+      expect(out).not.toBe(value.substring(0, width));
+    }
+  });
+
+  it('trims BEFORE it measures, so a padded value that fits is kept', () => {
+    // '  tx  ' is six characters and two letters. Measuring it raw would drop a perfectly good
+    // state, which is the same harm in the opposite direction. Returning the TRIMMED form also
+    // closes a second latent overflow, because callers upcase this into the column and '  TX  '
+    // does not fit VARCHAR(2) either.
+    // MUTATION: drop the .trim() and this goes red.
+    expect(storableValue('  tx  ', 2)).toBe('tx');
+    expect(storableValue('  Dallas  ', 100)).toBe('Dallas');
+  });
+
+  it('still drops a padded value that does not fit once trimmed', () => {
+    // The other half of the same rule: trimming is not a way to sneak an over-long value in.
+    expect(storableValue('  Texas  ', 2)).toBe('');
+  });
+
+  it('answers empty for a value that simply is not there', () => {
+    expect(storableValue('', 2)).toBe('');
+    expect(storableValue(null, 2)).toBe('');
+    expect(storableValue(undefined, 2)).toBe('');
+    expect(storableValue('   ', 2)).toBe('');
+  });
+
+  it('does what the defect that created it needed, at the real column widths', () => {
+    // The concrete case, in the real numbers rather than in the abstract.
+    expect(storableValue('Texas', TRACE_HISTORY_WIDTH.state)).toBe('');
+    expect(storableValue('TX', TRACE_HISTORY_WIDTH.state)).toBe('TX');
+    expect(storableValue('C'.repeat(101), TRACE_HISTORY_WIDTH.city)).toBe('');
+    expect(storableValue('R'.repeat(65), TRACE_HISTORY_WIDTH.parcelIdLocal)).toBe('');
+    expect(storableValue('T'.repeat(65), TRACE_HISTORY_WIDTH.county)).toBe('');
+  });
+});
+
+/*
+ * TRACE_HISTORY_WIDTH is a COPY of the schema, and this is what checks the copy.
+ *
+ * The constants are facts about the table, kept here so every surface that writes it agrees. But a
+ * copy drifts: widen a column in a migration and nothing in the suite notices this file still says
+ * the old number, and the clamp then drops values the column could now hold -- or, far worse,
+ * NARROW a column and the clamp keeps passing values that no longer fit, which is the 22001 this
+ * whole mechanism exists to prevent, silently restored.
+ *
+ * It reads the checked-in DDL from disk. No database, no vendor, no network.
+ */
+describe('TRACE_HISTORY_WIDTH matches the checked-in DDL', () => {
+  const ROOT = process.cwd();
+  const SCHEMA = 'supabase/schema.sql';
+  const PARCEL_MIGRATION = 'supabase/migrations/20260919_trace_history_parcel_key.sql';
+
+  /** The `trace_history` CREATE TABLE body ALONE, so a column of the same name declared on another
+   *  table can never answer for this one. */
+  function traceHistoryTable(): string {
+    const source = readFileSync(join(ROOT, SCHEMA), 'utf8');
+    const start = source.indexOf('CREATE TABLE IF NOT EXISTS trace_history');
+    expect(start, `trace_history CREATE TABLE not found in ${SCHEMA}`).toBeGreaterThan(-1);
+    const end = source.indexOf('\n);', start);
+    expect(end, `could not find the end of the trace_history table in ${SCHEMA}`).toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  function sqlOf(path: string): string {
+    return readFileSync(join(ROOT, path), 'utf8');
+  }
+
+  /** The width `VARCHAR(n)` declares for `column`, or null when it is not declared in this SQL. */
+  function declaredWidth(sql: string, column: string): number | null {
+    const found = new RegExp(`\\b${column}\\s+VARCHAR\\((\\d+)\\)`, 'i').exec(sql);
+    return found ? Number(found[1]) : null;
+  }
+
+  const PINNED = [
+    { key: 'state', column: 'state', sql: () => traceHistoryTable(), where: SCHEMA },
+    { key: 'city', column: 'city', sql: () => traceHistoryTable(), where: SCHEMA },
+    { key: 'parcelIdLocal', column: 'parcel_id_local', sql: () => sqlOf(PARCEL_MIGRATION), where: PARCEL_MIGRATION },
+    { key: 'county', column: 'county', sql: () => sqlOf(PARCEL_MIGRATION), where: PARCEL_MIGRATION },
+  ] as const;
+
+  it.each(PINNED)('pins $key to the $column column declared in $where', ({ key, column, sql, where }) => {
+    const declared = declaredWidth(sql(), column);
+    // FAILS LOUDLY RATHER THAN VACUOUSLY. If someone reformats the schema or moves a column to a
+    // new migration, this must say which column it could not find, not quietly match nothing and
+    // pass. A test that cannot locate its subject has not verified it.
+    expect(declared, `no VARCHAR(n) declaration for \`${column}\` found in ${where}`).not.toBeNull();
+    expect(
+      declared,
+      `TRACE_HISTORY_WIDTH.${key} is ${TRACE_HISTORY_WIDTH[key]} but ${where} declares ${column} VARCHAR(${declared}). The constant is a copy of the DDL; update it.`,
+    ).toBe(TRACE_HISTORY_WIDTH[key]);
+  });
+
+  it('pins EVERY width in the constant, so a new one cannot be added unchecked', () => {
+    // The anti-vacuity floor for the table above: without this, adding a fifth column to
+    // TRACE_HISTORY_WIDTH would leave it silently unpinned while every test here still passed.
+    expect(Object.keys(TRACE_HISTORY_WIDTH).sort()).toEqual(PINNED.map((p) => p.key).sort());
   });
 });
