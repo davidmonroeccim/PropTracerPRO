@@ -570,7 +570,7 @@ export async function POST(request: Request) {
         ...noKeyFields,
         cached_count: dedupeResult.cachedResults.length,
         estimated_cost: 0,
-        message: `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`,
+        message: `${noKeyRecords.length} ${noKeyRecords.length === 1 ? 'record' : 'records'} could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`,
       });
     }
 
@@ -599,7 +599,7 @@ export async function POST(request: Request) {
       estimated_cost: estimatedCost,
       message:
         noKeyRecords.length > 0
-          ? `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
+          ? `${noKeyRecords.length} ${noKeyRecords.length === 1 ? 'record' : 'records'} could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
           : undefined,
     });
   } catch (error) {

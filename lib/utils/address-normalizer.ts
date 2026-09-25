@@ -99,6 +99,51 @@ export function usableZip(zip?: string | null): string {
 }
 
 /**
+ * The widths `trace_history` actually declares, in ONE place, for the columns a caller can
+ * overflow. `state` and `city` are supabase/schema.sql:69-70; `parcel_id_local` and `county` are
+ * supabase/migrations/20260919_trace_history_parcel_key.sql.
+ *
+ * They live here rather than in a route because they are facts about the TABLE, and because the
+ * answer has to be the same for every surface that writes it.
+ */
+export const TRACE_HISTORY_WIDTH = {
+  state: 2,
+  city: 100,
+  parcelIdLocal: 64,
+  county: 64,
+} as const;
+
+/**
+ * The value a row can actually be STORED with, or '' when what arrived cannot fit the column.
+ *
+ * THE SAME RULE AS usableZip ABOVE, APPLIED TO THE OTHER CONSTRAINED COLUMNS, and it exists because
+ * of the same class of caller mistake. `trace_history.state` is VARCHAR(2), a bulk record carrying
+ * an owner name is never validated at all, and "Texas" therefore reached the insert as "TEXAS":
+ * Postgres raises 22001, the whole batch write throws, and one routine integrator typo answers 500
+ * for all 500 records. That is whole-batch rejection wearing a different hat.
+ *
+ * TOO LONG BECOMES ABSENT, NEVER TRUNCATED. Truncating "Texas" to "Te" would invent a state the
+ * caller never sent and quietly send it to a vendor; a WRONG state is worse than none, exactly as
+ * usableZip argues for a mangled ZIP. '' is the row saying it has no usable value, which is the
+ * truth, and it is not a fabricated one (CLAUDE.md rule 7). The record still lands, and the engines
+ * already have somewhere to put it: lib/trace/tier1Outcome.ts settles a row with no usable state
+ * free, with a sentence asking for "a valid two-letter state".
+ *
+ * IT MEASURES THE TRIMMED VALUE, AND IT MUST. '  tx  ' is six characters and two letters, so
+ * measuring it raw would drop a perfectly good state -- the same harm in the opposite direction.
+ * Returning the trimmed form also closes a second latent overflow, because callers upcase this
+ * value into the column and '  TX  ' does not fit VARCHAR(2) either.
+ *
+ * CALL IT BEFORE THE DUPLICATE KEY IS DERIVED, never at the row write. traceKeyFor and the stored
+ * columns have to see ONE value: clamping at the write would store '' while the key still said
+ * 'TEXAS', which is the exact hash divergence spec 6.3 and D36 exist to prevent.
+ */
+export function storableValue(value: string | null | undefined, maxLength: number): string {
+  const trimmed = (value ?? '').trim();
+  return trimmed.length > maxLength ? '' : trimmed;
+}
+
+/**
  * Validates that an address has the minimum required fields.
  *
  * ZIP is OPTIONAL as of 2026-09-04. It is validated when supplied and never demanded.

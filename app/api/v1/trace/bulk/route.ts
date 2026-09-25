@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { validateApiKey, isAuthError } from '@/lib/api/auth';
 import {
+  TRACE_HISTORY_WIDTH,
   createAddressHash,
+  storableValue,
   traceKeyFor,
   usableZip,
   validateAddressInput,
@@ -100,11 +102,31 @@ export async function POST(request: Request) {
     // rescued by this: with no street, city or state it still lands in the no-key bucket, free,
     // with the reason that tells the caller exactly which component to send. What changes is that
     // the OTHER 499 records run.
+    //
+    // AND A VALUE THE COLUMN CANNOT HOLD IS NORMALISED IN THE SAME BREATH, FOR THE SAME REASON.
+    //
+    // `trace_history.state` is VARCHAR(2), and a record carrying an owner name is pushed to tier 1
+    // below without being validated at all, so "Texas" used to reach the insert as "TEXAS":
+    // Postgres raises 22001, the batch write throws, and one routine integrator typo answered 500
+    // for all 500 records with the job written failed. Same door, same harm. storableValue() treats
+    // an unstorable value as absent rather than truncating it, because "Te" would be a state the
+    // caller never sent; see its docblock for the full argument and for why the trim matters.
+    //
+    // BOTH NORMALISATIONS HAPPEN HERE, BEFORE THE KEY IS DERIVED, AND THAT PLACEMENT IS LOAD-BEARING
+    // (spec 6.3, D36). removeBatchDuplicates on the next line, checkDuplicates after it, and
+    // buildHistoryRow below must all see ONE value. Clamping at the row write instead would store ''
+    // while the dedup hash still said 'TEXAS', which is the divergence this whole task exists to
+    // close.
     const submitted: AddressInput[] = records.map((record) => ({
       ...record,
       address: record?.address ?? '',
-      city: record?.city ?? '',
-      state: record?.state ?? '',
+      city: storableValue(record?.city, TRACE_HISTORY_WIDTH.city),
+      state: storableValue(record?.state, TRACE_HISTORY_WIDTH.state),
+      // The two parcel-key columns, which this is the only bulk surface that writes. An unstorable
+      // one drops the APN branch of traceKeyFor rather than the whole row: the record keys on its
+      // address instead, exactly as one that never sent a parcel id does.
+      apn: storableValue(record?.apn, TRACE_HISTORY_WIDTH.parcelIdLocal),
+      county: storableValue(record?.county, TRACE_HISTORY_WIDTH.county),
     }));
 
     // Step 1: Remove internal batch duplicates
@@ -123,6 +145,15 @@ export async function POST(request: Request) {
         totalRecords: records.length,
         duplicatesRemoved: totalDeduped,
         recordsToProcess: 0,
+        // PRESENT HERE TOO, or the claim the main response makes about them is false on exactly one
+        // path. A caller branching on recordsSkipped got undefined from the one response that is
+        // otherwise the simplest to handle. Nothing was judged on this path, so nothing was skipped.
+        //
+        // This early return still omits recordsDirectTrace, recordsPendingResearch, recordsQueued
+        // and recordsFailed. That is pre-existing and deliberately left alone: re-shaping a response
+        // this task did not touch is not this task's to do.
+        recordsSkipped: 0,
+        skippedReason: undefined,
         estimatedCost: 0,
         status: 'completed',
         message: 'All records are duplicates of previous traces',
@@ -417,15 +448,22 @@ export async function POST(request: Request) {
             ...buildHistoryRow(r),
             property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
             status: 'no_match' as const,
+            // Written for the same reason as the two queued writes below: this row is terminal, and
+            // a stale job id left on a REUSED row would hand a finished, free row to a CSV settle
+            // path that bills.
+            tracerfy_job_id: null,
           }))
         );
       }
 
       // TIER 2 ROWS, ONTO THEIR OWN QUEUE. Attempt 1 of the ladder, which is the bare 'queued' that
       // sweep-property-traces claims on. `status: 'processing'` because the row genuinely is in
-      // flight. It carries no tracerfy_job_id, which is what keeps every tier 1 settle path away
-      // from it: bulk/status finds its billable rows by that column, and a tier 2 row settled there
-      // would be billed the tier 1 rate by the wrong engine.
+      // flight. `tracerfy_job_id: null` is what keeps every tier 1 settle path away from it:
+      // bulk/status finds its billable rows by that column, and a tier 2 row settled there would be
+      // billed the tier 1 rate by the wrong engine. It is WRITTEN, for the reason the Tier 1 block
+      // below sets out in full -- this comment used to claim the row "carries no tracerfy_job_id"
+      // while the payload merely OMITTED the key, which on an onConflict upsert leaves whatever the
+      // reused row already had. A CSV-era row rewritten as tier 2 kept a live job id.
       if (tier2Records.length > 0) {
         await insertHistoryRows(
           adminClient,
@@ -433,6 +471,7 @@ export async function POST(request: Request) {
             ...buildHistoryRow(r),
             property_trace_status: queuedStatusFor(1),
             status: 'processing' as const,
+            tracerfy_job_id: null,
           }))
         );
       }
@@ -541,9 +580,11 @@ export async function POST(request: Request) {
       recordsQueued: tier2Records.length,
       // Rows nobody can be asked about at all: no owner name AND no street, city or state to look a
       // property up by. Terminal at submit and FREE, which is what separates them from every other
-      // count here. Always present, 0 when there are none, because a key that appears only when
-      // something went wrong is one nobody writes a branch for. The reason is the approved constant
-      // and is undefined when there is nothing to explain, exactly as the dashboard route does it.
+      // count here. Present on BOTH exits this handler can succeed through, 0 when there are none,
+      // because a key that appears only when something went wrong is one nobody writes a branch for
+      // -- the all-duplicates early return above carries it for that reason. The reason string is
+      // the approved constant and is undefined when there is nothing to explain, exactly as the
+      // dashboard route does it.
       recordsSkipped: noKeyRecords.length,
       skippedReason: noKeyRecords.length > 0 ? PROPERTY_TRACE_NO_KEY_REASON : undefined,
       // Records accepted and then dropped because the vendor could not be reached. Always 0 now:
@@ -568,7 +609,7 @@ export async function POST(request: Request) {
         // for them. They are excluded from recordsToProcess and from the quote, so without this the
         // caller would have to subtract to discover they existed.
         noKeyRecords.length > 0
-          ? `${noKeyRecords.length} records could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
+          ? `${noKeyRecords.length} ${noKeyRecords.length === 1 ? 'record' : 'records'} could not be looked up. ${PROPERTY_TRACE_NO_KEY_REASON}`
           : null,
       ]
         .filter(Boolean)

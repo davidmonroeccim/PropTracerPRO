@@ -455,7 +455,7 @@ export default function ApiDocsPage() {
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional. A row without one still runs, as a full property trace on a different billing model, which the note below covers.
+                <strong>What to send:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code> and <code className="bg-blue-100 px-1 rounded">state</code> for every row you can, with <code className="bg-blue-100 px-1 rounded">state</code> as the two-letter code. Nothing is rejected at the door any more: records are judged one at a time, a state we cannot read is treated as no state, and a row nobody can be asked about at all is left untraced and costs nothing. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional too, and a row without one still runs as a full property trace on a different billing model, which the note below covers.
               </p>
             </div>
 

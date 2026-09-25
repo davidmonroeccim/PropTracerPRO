@@ -403,6 +403,22 @@ describe("the three-way split", () => {
     expect(historyRows()[0].property_trace_status).toBeNull();
   });
 
+  it("writes tracerfy_job_id null on EVERY row, tier 2 and no-key included", async () => {
+    // The tier 2 write's own comment claimed it "carries no tracerfy_job_id", but it OMITTED the
+    // key, and the Tier 1 comment twenty lines below explains at length why an omitted key on an
+    // onConflict upsert leaves whatever the REUSED row already carried. A CSV-era row rewritten as
+    // tier 2 therefore kept a live tracerfy_job_id, and both CSV settle paths find their rows by
+    // that column: the CSV engine would settle a row the tier 2 cron owns, at the tier 1 rate.
+    // MUTATION: omit the key on any of the three writes and this goes red.
+    await post([rec("Jane Smith", 1), rec(undefined, 2), rec(undefined, 3, { state: "" })]);
+    const rows = historyRows();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(Object.keys(row)).toContain("tracerfy_job_id");
+      expect(row.tracerfy_job_id).toBeNull();
+    }
+  });
+
   it("never sends a blank-owner record to the person CSV", async () => {
     // It has no owner to put in it: the dossier is what discovers one.
     vi.mocked(submitBulkTrace).mockClear();
@@ -632,6 +648,22 @@ describe("what the caller is told", () => {
     expect(String(body.message)).not.toContain("not charged");
   });
 
+  it("carries recordsSkipped on the all-duplicates path too, where the key claimed to be always present", async () => {
+    // "Always present, 0 when there are none" was false on exactly one path: the early return for a
+    // batch that was entirely duplicates omitted it, so a caller branching on the key got undefined
+    // from the one response that is otherwise the simplest to handle.
+    // MUTATION: drop either key from that early return and this goes red.
+    vi.mocked(checkDuplicates).mockResolvedValueOnce({
+      newRecords: [],
+      duplicates: [rec("Jane Smith", 1)],
+      cachedResults: [],
+    } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
+    const body = await (await post([rec("Jane Smith", 1)])).json();
+    expect(body.jobId).toBeNull();
+    expect(body.recordsSkipped).toBe(0);
+    expect(body.skippedReason).toBeUndefined();
+  });
+
   it("counts the rows nobody could be asked about, and says why", async () => {
     // THE OWNER'S RULING. A no-key row appears in totalRecords and in no other count, so before
     // this the only way to learn it existed was to subtract. recordsSkipped and skippedReason carry
@@ -678,9 +710,21 @@ describe("what the caller is told", () => {
     const body = await (
       await post([rec(undefined, 1, { address: "", state: "" }), rec("Jane Smith", 2)])
     ).json();
-    expect(body.message).toContain("1 records could not be looked up.");
+    // SINGULAR FOR ONE ROW. It read "1 records could not be looked up" beside a follow-on sentence
+    // that was already singular ("This row was missing..."), so one message disagreed with itself.
+    // Fixed in BOTH bulk routes at once so the two stay byte-identical.
+    expect(body.message).toContain("1 record could not be looked up.");
+    expect(body.message).not.toContain("1 records");
     expect(body.message).toContain("Send it again with the full property address");
     expect(body.message).not.toMatch(/[—–*]/);
+  });
+
+  it("says records, plural, when there is more than one", async () => {
+    // The other half of the same fix: singular must not become a blanket "record".
+    const body = await (
+      await post([rec(undefined, 1, { state: "" }), rec(undefined, 2, { state: "" })])
+    ).json();
+    expect(body.message).toContain("2 records could not be looked up.");
   });
 });
 
@@ -769,6 +813,93 @@ describe("per-record judging replaces the whole-batch 400", () => {
     const body = await res.json();
     expect(body.recordsSkipped).toBe(1);
     expect(body.recordsToProcess).toBe(1);
+  });
+
+  /* ---------------------------------------------------------------- *
+   * A VALUE THE COLUMN CANNOT HOLD IS THE LAST DOOR WHOLE-BATCH REJECTION HAD.
+   *
+   * trace_history.state is VARCHAR(2) (supabase/schema.sql:69). A record WITH an owner name is
+   * pushed to tier1Records and never validated at all, so "Texas" reached the write as "TEXAS",
+   * Postgres raised 22001, insertHistoryRows threw, and one routine integrator mistake answered
+   * 500 for all 500 records with the job written failed.
+   *
+   * The precedent is usableZip: a value the column cannot hold is treated as ABSENT, which is the
+   * row honestly saying it has no usable value rather than a fabricated or truncated one. "Te" for
+   * "Texas" would be a fabricated state, and a wrong state is worse than none.
+   *
+   * The design already expects this: lib/trace/tier1Outcome.ts defines the state resend sentence
+   * "a valid two-letter state", and that path was unreachable because the row could not be stored.
+   * ---------------------------------------------------------------- */
+
+  it("does not let one record saying Texas kill the batch, and keys it on what it STORED", async () => {
+    // THE PLACEMENT IS THE WHOLE TEST. Clamping at the row write instead of before the key is
+    // derived would store "" while keying on "TEXAS", which is precisely the D36 divergence this
+    // task exists to close.
+    //
+    // WHAT THIS TEST CANNOT SEE, SAID PLAINLY. The recording client mocks Supabase, so it enforces
+    // no column width: the 22001 that makes this a 500 in production cannot happen here, and
+    // `tsc` cannot catch it either, because lib/supabase/admin.ts builds the client with NO
+    // `Database` generic, so neither column names nor widths are typed. This asserts the CLAMP;
+    // the overflow it prevents is fenced only by supabase/schema.sql and a live check.
+    // MUTATION: drop the state clamp and this goes red on the stored value.
+    const res = await post([rec("Jane Smith", 1, { state: "Texas" }), rec("John Doe", 2)]);
+    expect(res.status).toBe(200);
+    const rows = historyRows();
+    expect(rows).toHaveLength(2);
+    const texan = rows.find((r) => r.input_owner_name === "Jane Smith")!;
+    // Treated as absent, so the row is storable and the cron can settle it free with the sentence
+    // tier1Outcome already has for it.
+    expect(texan.state).toBe("");
+    expect(texan.ai_research_status).toBe(tier1QueuedStatusFor(1));
+    // ONE VALUE, seen by the key derivation and by the row write alike (spec 6.3, D36).
+    expect(texan.normalized_address).toBe("1 MAIN ST|DALLAS|");
+    expect(String(texan.normalized_address)).not.toContain("TEXAS");
+    expect(texan.address_hash).toBe(createAddressHash("1 MAIN ST|DALLAS|"));
+  });
+
+  it("keeps a padded two-letter state, which the column CAN hold", async () => {
+    // The clamp measures the TRIMMED value, and it has to: "  tx  " is six characters and two
+    // letters. Measuring it raw would drop a perfectly good state, which is the same harm in the
+    // opposite direction. It also fixes a second latent overflow, because the row write upcases
+    // whatever it is given and "  TX  " does not fit VARCHAR(2) either.
+    await post([rec("Jane Smith", 1, { state: "  tx  " })]);
+    expect(historyRows()[0].state).toBe("TX");
+  });
+
+  it("does not let an over-long city kill the batch", async () => {
+    // MUTATION: drop the city clamp and this goes red.
+    const res = await post([
+      rec("Jane Smith", 1, { city: "C".repeat(101) }),
+      rec("John Doe", 2),
+    ]);
+    expect(res.status).toBe(200);
+    expect(historyRows()).toHaveLength(2);
+    expect(historyRows().find((r) => r.input_owner_name === "Jane Smith")!.city).toBe("");
+  });
+
+  it("does not let an over-long parcel id kill the batch", async () => {
+    // MUTATION: drop the parcel id clamp and this goes red.
+    const res = await post([
+      rec("Jane Smith", 1, { address: "", city: "", apn: "R".repeat(65), county: "Travis" }),
+      rec("John Doe", 2),
+    ]);
+    expect(res.status).toBe(200);
+    const row = historyRows().find((r) => r.input_owner_name === "Jane Smith")!;
+    expect(row.parcel_id_local).toBeNull();
+    // And the key does not use the APN branch, because there is no storable parcel id to key on.
+    expect(row.normalized_address).toBe("||TX");
+  });
+
+  it("does not let an over-long county kill the batch", async () => {
+    // MUTATION: drop the county clamp and this goes red.
+    const res = await post([
+      rec("Jane Smith", 1, { address: "", city: "", apn: "R-123", county: "T".repeat(65) }),
+      rec("John Doe", 2),
+    ]);
+    expect(res.status).toBe(200);
+    const row = historyRows().find((r) => r.input_owner_name === "Jane Smith")!;
+    expect(row.county).toBeNull();
+    expect(row.normalized_address).toBe("||TX");
   });
 
   it("charges nothing for a no-key row and still bills the survivors beside it", async () => {
