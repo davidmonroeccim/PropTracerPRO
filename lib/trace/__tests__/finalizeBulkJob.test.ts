@@ -5,6 +5,7 @@ import {
   matchedRowCount,
   totalChargeFor,
   finalizeJobIfDrained,
+  finalizeTouchedJobs,
   type FinalizableRow,
 } from '@/lib/trace/finalizeBulkJob';
 
@@ -274,5 +275,150 @@ describe('finalizeJobIfDrained: the compare-and-swap', () => {
     const { admin } = stubAdmin(rows, { id: 'j1' });
     const out = await finalizeJobIfDrained(admin, { jobId: 'j1', userId: 'u1' });
     expect(out).toEqual({ finalized: true, recordsMatched: 2, totalCharge: 0 });
+  });
+});
+
+/**
+ * A multi-job stub for finalizeTouchedJobs, distinct from stubAdmin above because
+ * finalizeTouchedJobs asks about MORE THAN ONE job in a single call: it has to key the
+ * trace_history read by (user_id, trace_job_id) so two jobs in the same run see only their OWN
+ * rows, and key the trace_jobs write's CAS outcome by job id so one job's race result cannot leak
+ * onto another's.
+ *
+ * `jobs` maps jobId -> { userId, rows, wins }. `wins` defaults to true (the write's CAS succeeds);
+ * pass `wins: false` to simulate a caller that loses the race.
+ */
+function stubAdminForJobs(
+  jobs: Map<string, { userId: string; rows: FinalizableRow[]; wins?: boolean }>
+) {
+  const updateSpy = vi.fn();
+  const admin = {
+    from: (table: string) => {
+      if (table === 'trace_history') {
+        return {
+          select: () => ({
+            eq: (_col1: string, userId: string) => ({
+              eq: (_col2: string, jobId: string) => {
+                const cfg = jobs.get(jobId);
+                return Promise.resolve({
+                  data: cfg && cfg.userId === userId ? cfg.rows : [],
+                  error: null,
+                });
+              },
+            }),
+          }),
+        };
+      }
+      if (table === 'trace_jobs') {
+        return {
+          update: (payload: unknown) => {
+            updateSpy(payload);
+            return {
+              eq: (_col1: string, jobId: string) => ({
+                eq: () => ({
+                  select: () => ({
+                    maybeSingle: async () => {
+                      const cfg = jobs.get(String(jobId));
+                      const wins = cfg?.wins !== false;
+                      return wins
+                        ? { data: { id: jobId }, error: null }
+                        : { data: null, error: null };
+                    },
+                  }),
+                }),
+              }),
+            };
+          },
+        };
+      }
+      throw new Error(`stubAdminForJobs: unexpected table "${table}"`);
+    },
+  };
+  return { admin: admin as never, updateSpy };
+}
+
+describe('finalizeTouchedJobs: one ask per job, not per row', () => {
+  it('asks a job with three rows exactly once', async () => {
+    const jobs = new Map([
+      [
+        'job-1',
+        { userId: 'u1', rows: [row({ ai_research_status: 'tier1_done', is_successful: true })] },
+      ],
+    ]);
+    const { admin, updateSpy } = stubAdminForJobs(jobs);
+    const rows = [
+      { trace_job_id: 'job-1', user_id: 'u1' },
+      { trace_job_id: 'job-1', user_id: 'u1' },
+      { trace_job_id: 'job-1', user_id: 'u1' },
+    ];
+    const result = await finalizeTouchedJobs(admin, rows);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(result).toEqual([{ jobId: 'job-1', recordsMatched: 1 }]);
+  });
+
+  it('asks two distinct jobs, once each', async () => {
+    const jobs = new Map([
+      [
+        'job-1',
+        { userId: 'u1', rows: [row({ ai_research_status: 'tier1_done', is_successful: true })] },
+      ],
+      [
+        'job-2',
+        { userId: 'u2', rows: [row({ ai_research_status: 'tier1_done', is_successful: false })] },
+      ],
+    ]);
+    const { admin, updateSpy } = stubAdminForJobs(jobs);
+    const rows = [
+      { trace_job_id: 'job-1', user_id: 'u1' },
+      { trace_job_id: 'job-2', user_id: 'u2' },
+    ];
+    const result = await finalizeTouchedJobs(admin, rows);
+    expect(updateSpy).toHaveBeenCalledTimes(2);
+    expect(result).toHaveLength(2);
+    expect(result).toEqual(
+      expect.arrayContaining([
+        { jobId: 'job-1', recordsMatched: 1 },
+        { jobId: 'job-2', recordsMatched: 0 },
+      ])
+    );
+  });
+
+  // MUTATION: drop the `.filter((id): id is string => Boolean(id))` guard and this goes red --
+  // the null trace_job_id would be asked about as a literal job id.
+  it('skips a row with no parent job, asking nothing', async () => {
+    const jobs = new Map<string, { userId: string; rows: FinalizableRow[] }>();
+    const { admin, updateSpy } = stubAdminForJobs(jobs);
+    const rows = [{ trace_job_id: null, user_id: 'u1' }];
+    const result = await finalizeTouchedJobs(admin, rows);
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(result).toEqual([]);
+  });
+
+  // MUTATION: return finalizeJobIfDrained's outcome regardless of `finalized`, and this test goes
+  // red: a still-working job and a job that lost its CAS would both show up as "finalized".
+  it('returns only the jobs that actually finalized, never a still-working or losing one', async () => {
+    const jobs = new Map([
+      ['job-1', { userId: 'u1', rows: [row({ ai_research_status: 'tier1_queued' })] }], // still working
+      [
+        'job-2',
+        {
+          userId: 'u1',
+          rows: [row({ ai_research_status: 'tier1_done', is_successful: true })],
+          wins: false,
+        },
+      ], // loses the CAS
+      [
+        'job-3',
+        { userId: 'u1', rows: [row({ ai_research_status: 'tier1_done', is_successful: true })] },
+      ], // wins
+    ]);
+    const { admin } = stubAdminForJobs(jobs);
+    const rows = [
+      { trace_job_id: 'job-1', user_id: 'u1' },
+      { trace_job_id: 'job-2', user_id: 'u1' },
+      { trace_job_id: 'job-3', user_id: 'u1' },
+    ];
+    const result = await finalizeTouchedJobs(admin, rows);
+    expect(result).toEqual([{ jobId: 'job-3', recordsMatched: 1 }]);
   });
 });

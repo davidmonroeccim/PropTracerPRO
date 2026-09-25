@@ -41,6 +41,8 @@ import {
   tier1ProcessingStatusFor,
 } from '@/lib/trace/tier1Queue';
 import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
+import { finalizeTouchedJobs } from '@/lib/trace/finalizeBulkJob';
+import { notifyBulkJobCompleted } from '@/lib/trace/notifyBulkJobCompleted';
 import {
   pruneVendorRateWindows,
   reservationForSteps,
@@ -317,6 +319,8 @@ interface Tier1LaneResult {
   errored: number;
   staleReverted: number;
   exhausted: number;
+  /** Bulk jobs this run finalized because their queue drained (Task 2, spec: no more waiting on a poll). */
+  jobsFinalized: number;
 }
 
 /**
@@ -338,6 +342,7 @@ async function runTier1Lane(
     errored: 0,
     staleReverted: 0,
     exhausted: 0,
+    jobsFinalized: 0,
   };
 
   /**
@@ -691,6 +696,26 @@ async function runTier1Lane(
   await Promise.all(
     Array.from({ length: Math.min(TIER1_CONCURRENCY, rows.length) }, () => worker())
   );
+
+  /**
+   * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED.
+   *
+   * The settle above is what MAKES a job finishable; nothing before Phase 2B ever noticed. A job
+   * reached 'completed' only when a browser tab polled it or when sweep-stale-traces caught it at
+   * the 60-minute cutoff, so a customer who closed the tab saw 'Processing' with no export for up
+   * to an hour after the work was done and billed.
+   *
+   * finalizeTouchedJobs asks ONCE PER JOB, not per row: a 120-row run of a single job is one
+   * question, not 120. It re-reads each touched job's rows and writes nothing unless every one is
+   * settled, so a job with rows this run did not claim is simply left for the next run a minute
+   * later. Only the jobs it actually finalized come back, and the webhook fires for those and no
+   * others -- the compare-and-swap inside finalizeJobIfDrained is what makes this one-shot.
+   */
+  const finalized = await finalizeTouchedJobs(adminClient, rows);
+  out.jobsFinalized = finalized.length;
+  for (const { jobId, recordsMatched } of finalized) {
+    await notifyBulkJobCompleted(adminClient, jobId, recordsMatched);
+  }
 
   return out;
 }

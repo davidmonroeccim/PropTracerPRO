@@ -107,6 +107,17 @@ const H = vi.hoisted(() => ({
   maxInFlight: 0,
   /** When true the dossier mock defers across a macrotask so overlap is observable. */
   slowDossier: false,
+  /**
+   * A row's post-settle columns, keyed by id, LAYERED ONTO `H.queuedRows` by every plain select.
+   *
+   * Populated automatically (see recordingClient's applyUpdate below) whenever an update targets a
+   * row by `.eq('id', ...)`, so a read that happens LATER IN THE SAME RUN -- finalizeJobIfDrained's
+   * own trace_history read, added by Task 2, right after this cron's Promise.all -- sees the row as
+   * this run actually left it, the way a second statement against a real database would. Empty by
+   * default, so every pre-Task-2 test, whose claim window read is the only trace_history select in
+   * the whole run, is completely unaffected.
+   */
+  settledOverrides: new Map<string, Record<string, unknown>>(),
 }));
 
 /** Records every read and write and resolves each chain the way PostgREST would. */
@@ -131,6 +142,21 @@ function recordingClient() {
       for (const m of ["select", "eq", "lt", "or", "order", "limit", "in", "is"])
         node[m] = add(m);
 
+      /**
+       * Merge an update's payload into the OVERLAY for the row it targeted by `.eq('id', ...)`,
+       * cumulatively (a later write's columns win, columns it did not touch keep whatever an
+       * earlier write in this run left them as). Bulk statements (the stale-claim revert) carry no
+       * id filter and are silently skipped -- see the H.settledOverrides docblock for why this
+       * exists at all.
+       */
+      const applyUpdate = () => {
+        if (!rec || rec.table !== "trace_history" || !rec.payload) return;
+        const idFilter = rec.filters.find((f) => f[0] === "eq" && f[1] === "id");
+        if (!idFilter) return;
+        const id = String(idFilter[2]);
+        H.settledOverrides.set(id, { ...(H.settledOverrides.get(id) || {}), ...rec.payload });
+      };
+
       const settle = () => {
         if (table === "user_profiles") return { data: H.profile, error: null };
         if (table === "trace_jobs") return { data: H.jobRow, error: null };
@@ -140,7 +166,21 @@ function recordingClient() {
         // off one read, so a stub that pre-filtered here would hide whether it
         // does.
         if (table === "wallet_transactions") return { data: H.priorDebits, error: null };
-        if (rec?.op === "select") return { data: H.queuedRows, error: null };
+        if (rec?.op === "select") {
+          // Every seeded row, LAYERED with whatever this run has already written to it (empty by
+          // default -- see the H.settledOverrides docblock). `.eq()` filters narrow the result the
+          // way PostgREST would; the claim window carries none, so it still gets everything.
+          const merged = H.queuedRows.map((r) => {
+            const id = r.id as string | undefined;
+            const override = id ? H.settledOverrides.get(id) : undefined;
+            return override ? { ...r, ...override } : r;
+          });
+          const eqs = rec.filters.filter((f) => f[0] === "eq");
+          const rows = eqs.length
+            ? merged.filter((r) => eqs.every((f) => r[String(f[1])] === f[2]))
+            : merged;
+          return { data: rows, error: null };
+        }
         // An update that asked for `.select('id')` and is awaited directly is
         // the stale-claim revert; it wants an array back, and WHICH array
         // depends on the rung it swept.
@@ -150,6 +190,7 @@ function recordingClient() {
           );
           return { data: H.staleRevertsByStatus[String(rung?.[2])] ?? [], error: null };
         }
+        if (rec?.op === "update") applyUpdate();
         return { data: null, error: null };
       };
 
@@ -158,8 +199,11 @@ function recordingClient() {
       node.maybeSingle = async () => {
         // The atomic claim:
         // `.update(...).eq(id).eq(property_trace_status).select('id').maybeSingle()`.
+        // Also reached by finalizeJobIfDrained's own trace_jobs CAS write (Task 2), which shares
+        // this same generic path; applyUpdate is a no-op there (it only ever touches trace_history).
         if (rec?.op === "update") {
           const allowed = H.claimOutcomes.length ? H.claimOutcomes.shift() : true;
+          if (allowed) applyUpdate();
           return { data: allowed ? { id: "claimed" } : null, error: null };
         }
         return { data: null, error: null };
@@ -396,6 +440,7 @@ beforeEach(() => {
   H.slowDossier = false;
   H.pushResult = { success: true, contactId: "hl-1", action: "created" };
   H.scheduled = [];
+  H.settledOverrides = new Map();
   vi.mocked(pushTraceToHighLevel).mockClear();
   vi.mocked(lookupDossier).mockClear();
   vi.mocked(lookupBusinessTrace).mockClear();
@@ -1590,5 +1635,105 @@ describe("the shared vendor rate budget (spec 5.3)", () => {
     H.queuedRows = [{ ...ROW }, { ...ROW, id: "row-2" }];
     await run();
     expect(pruneVendorRateWindows).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Task 2: finalize a bulk job when its tier 2 queue drains, in THIS run, rather than waiting for a
+ * browser tab to poll or for sweep-stale-traces' 60-minute cutoff.
+ *
+ * Unlike its twin in sweep-entity-traces, this cron's settle write is NOT hidden behind a fully
+ * mocked function -- it is the cron's own `adminClient.from('trace_history').update(...)` call, and
+ * the stub's `applyUpdate` (see H.settledOverrides above) captures it automatically. So these tests
+ * need no special mock implementation: the default mocked vendors (a dossier hit, a contact hit)
+ * settle the row for real, through the same code path every other test in this file exercises.
+ *
+ * `finalizeReadRanFor` / `anyFinalizeReadHappened` exist for the same reason as their twin in
+ * sweep-entity-traces: "no trace_jobs update happened" is also true when the finalize code never
+ * runs at all, so two of these tests would otherwise pass vacuously.
+ */
+describe("finalizing the parent job when the tier 2 queue drains", () => {
+  const finalizeReadRanFor = (jobId: string): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        ) &&
+        o.filters.some((f) => f[0] === "eq" && f[1] === "trace_job_id" && f[2] === jobId)
+    );
+
+  const anyFinalizeReadHappened = (): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        )
+    );
+
+  const traceJobsUpdate = () => H.ops.find((o) => o.table === "trace_jobs" && o.op === "update");
+
+  it("finalizes the parent job once its last queued row settles", async () => {
+    // One job, one row, and the row settles in this run (a real dossier hit, a real contact hit,
+    // through the cron's own settle write). The job must come out completed.
+    const body = await (await run()).json();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.payload).toMatchObject({
+      status: "completed",
+      records_matched: expect.any(Number),
+    });
+    expect(body.jobsFinalized).toBe(1);
+  });
+
+  // MUTATION: delete the finalizeTouchedJobs call after the Promise.all and this goes red. Without
+  // it the job sits at 'processing' until a tab polls it or the 60-minute sweep runs.
+  it("does NOT finalize while another row of the same job is still queued", async () => {
+    H.queuedRows = [
+      { ...ROW, id: "row-1", trace_job_id: "job-1" },
+      { ...ROW, id: "sibling", trace_job_id: "job-1", property_trace_status: "queued_2" },
+    ];
+    // row-1's claim succeeds; the sibling's loses -- another worker (or a past run) has it -- so it
+    // is NOT settled by this run and stays on the queue when finalizeJobIfDrained reads the job.
+    H.claimOutcomes = [true, false];
+    await run();
+    // Non-vacuous: proves the finalize read for job-1 actually ran and correctly declined, rather
+    // than never running at all (both would otherwise leave `traceJobsUpdate()` undefined).
+    expect(finalizeReadRanFor("job-1")).toBe(true);
+    expect(traceJobsUpdate()).toBeUndefined();
+  });
+
+  it("guards the terminal write on status=processing", async () => {
+    await run();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.filters).toContainEqual(["eq", "id", "job-1"]);
+    expect(jobUpdate?.filters).toContainEqual(["eq", "status", "processing"]);
+  });
+
+  it("asks about each touched job exactly once, not once per row", async () => {
+    H.queuedRows = [
+      { ...ROW, id: "row-1", trace_job_id: "job-1" },
+      { ...ROW, id: "row-2", trace_job_id: "job-1" },
+      { ...ROW, id: "row-3", trace_job_id: "job-2" },
+    ];
+    await run();
+    const jobUpdates = H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+    expect(jobUpdates).toHaveLength(2);
+  });
+
+  // MUTATION: drop the `.filter((id): id is string => Boolean(id))` guard on touchedJobs and this
+  // goes red -- a null trace_job_id would be asked about as a literal job id, and
+  // anyFinalizeReadHappened() would flip to true.
+  it("ignores a row with no parent job", async () => {
+    H.queuedRows = [{ ...ROW, id: "row-1", trace_job_id: null }];
+    await run();
+    expect(traceJobsUpdate()).toBeUndefined();
+    expect(anyFinalizeReadHappened()).toBe(false);
   });
 });

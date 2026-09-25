@@ -75,6 +75,17 @@ const H = vi.hoisted(() => ({
   profiles: new Map<string, Record<string, unknown> | null>(),
   /** trace_jobs rows, keyed by id. The Tier 1 lane reads created_at off one to bound its probe. */
   jobs: new Map<string, Record<string, unknown>>(),
+  /**
+   * A row's post-settle columns, keyed by id, LAYERED ONTO `H.queuedRows` by every read.
+   *
+   * runTier1Record is fully mocked in this file (see below), so its real persist -- the write that
+   * actually moves a row from tier1_queued to tier1_done -- never reaches this stub on its own. A
+   * test that needs finalizeJobIfDrained's OWN read (added by Task 2, after the lane's Promise.all)
+   * to see a row as settled sets this from inside runTier1RecordMock's implementation, at the exact
+   * moment the real function would have persisted. Empty by default, so every pre-Task-2 test is
+   * completely unaffected: `rowsMatching` merges nothing in and returns the seeded row unchanged.
+   */
+  settledOverrides: new Map<string, Record<string, unknown>>(),
   /** Every deduct_wallet_balance the route asked the database for, as a spy. */
   deductWallet: vi.fn(),
   businessTrace: { success: true, hit: false, contacts: null } as Record<string, unknown>,
@@ -108,7 +119,11 @@ function orMatches(expr: string, row: Record<string, unknown>): boolean {
  * whether or not that held.
  */
 function rowsMatching(filters: Filter[]): Array<Record<string, unknown>> {
-  let rows = H.queuedRows;
+  let rows = H.queuedRows.map((r) => {
+    const id = r.id as string | undefined;
+    const override = id ? H.settledOverrides.get(id) : undefined;
+    return override ? { ...r, ...override } : r;
+  });
   for (const f of filters) {
     const column = String(f[1]);
     if (f[0] === "in") {
@@ -427,6 +442,7 @@ beforeEach(() => {
   };
   H.profiles = new Map();
   H.jobs = new Map();
+  H.settledOverrides = new Map();
   H.businessTrace = { success: true, hit: false, contacts: null };
   H.submit = { success: true, jobId: "tf-person-1" };
   vi.mocked(lookupBusinessTrace).mockClear();
@@ -1435,6 +1451,121 @@ describe("the TIER 1 lane", () => {
     expect(body.noMatch).toBe(1);
     expect(body.tier1.processed).toBe(0);
     expect(runTier1RecordMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 2: finalize a bulk job when its Tier 1 queue drains, in THIS run, rather than waiting for a
+ * browser tab to poll or for sweep-stale-traces' 60-minute cutoff.
+ *
+ * WHY THE MOCK IMPLEMENTATION SETS H.settledOverrides. runTier1Record is fully mocked in this file
+ * (its own persist is fenced in lib/trace/__tests__/singleTier1.test.ts), so the ONLY way a row can
+ * read back settled from finalizeJobIfDrained's fresh trace_history read -- which happens AFTER
+ * this run's own Promise.all, using the SAME stubbed admin client -- is for the test itself to say
+ * so, at the moment the real function would have persisted. See the H.settledOverrides docblock.
+ *
+ * `finalizeReadRanFor` and `anyFinalizeReadHappened` exist because two of these tests would
+ * otherwise pass VACUOUSLY: "no trace_jobs update happened" is also true when the finalize code
+ * does not run at all, so on its own it cannot tell "asked and correctly declined" apart from
+ * "never asked". Both helpers detect finalizeJobIfDrained's OWN read by its distinctive shape (the
+ * four named columns, never `*`), which nothing else in this cron selects.
+ */
+describe("finalizing the parent job when the Tier 1 queue drains", () => {
+  const settleAsDone = (isSuccessful: boolean) => {
+    runTier1RecordMock.mockImplementation(async (input) => {
+      H.settledOverrides.set(input.row.id, {
+        ai_research_status: "tier1_done",
+        is_successful: isSuccessful,
+      });
+      return okResult();
+    });
+  };
+
+  const finalizeReadRanFor = (jobId: string): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        ) &&
+        o.filters.some((f) => f[0] === "eq" && f[1] === "trace_job_id" && f[2] === jobId)
+    );
+
+  const anyFinalizeReadHappened = (): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        )
+    );
+
+  const traceJobsUpdate = () => H.ops.find((o) => o.table === "trace_jobs" && o.op === "update");
+
+  it("finalizes the parent job once its last queued row settles", async () => {
+    // One job, one row, and the row settles in this run. The job must come out completed.
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    const body = await runCron();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.payload).toMatchObject({ status: "completed", records_matched: expect.any(Number) });
+    expect(body.tier1.jobsFinalized).toBe(1);
+  });
+
+  // MUTATION: delete the finalizeTouchedJobs call after the Promise.all and this goes red. Without
+  // it the job sits at 'processing' until a tab polls it or the 60-minute sweep runs.
+  it("does NOT finalize while another row of the same job is still queued", async () => {
+    settleAsDone(true);
+    seedRows([
+      { id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "sibling", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued_2" },
+    ]);
+    // The sibling loses its claim -- another worker (or a past run) has it -- so it is NOT settled
+    // by this run and stays on the queue when finalizeJobIfDrained reads the job's rows.
+    failTheClaim("sibling");
+    await runCron();
+    // Non-vacuous: proves the finalize read for job-1 actually ran and correctly declined, rather
+    // than never running at all (both would otherwise leave `traceJobsUpdate()` undefined).
+    expect(finalizeReadRanFor("job-1")).toBe(true);
+    expect(traceJobsUpdate()).toBeUndefined();
+  });
+
+  it("guards the terminal write on status=processing", async () => {
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    await runCron();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.filters).toContainEqual(["eq", "id", "job-1"]);
+    expect(jobUpdate?.filters).toContainEqual(["eq", "status", "processing"]);
+  });
+
+  it("asks about each touched job exactly once, not once per row", async () => {
+    settleAsDone(true);
+    seedRows([
+      { id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "r2", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "r3", trace_job_id: "job-2", user_id: "u1", ai_research_status: "tier1_queued" },
+    ]);
+    await runCron();
+    const jobUpdates = H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+    expect(jobUpdates).toHaveLength(2);
+  });
+
+  // MUTATION: drop the `.filter((id): id is string => Boolean(id))` guard on touchedJobs and this
+  // goes red -- a null trace_job_id would be asked about as a literal job id, and
+  // anyFinalizeReadHappened() would flip to true.
+  it("ignores a row with no parent job", async () => {
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: null, user_id: "u1", ai_research_status: "tier1_queued" }]);
+    await runCron();
+    expect(traceJobsUpdate()).toBeUndefined();
+    expect(anyFinalizeReadHappened()).toBe(false);
   });
 });
 

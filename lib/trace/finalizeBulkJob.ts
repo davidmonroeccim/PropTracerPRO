@@ -166,3 +166,43 @@ export async function finalizeJobIfDrained(
   if (!won) return { finalized: false, reason: 'already_terminal' };
   return { finalized: true, recordsMatched, totalCharge };
 }
+
+/**
+ * ONE ASK PER JOB, NOT PER ROW. The shared wiring both of Task 2's crons need: dedupe a run's
+ * claimed rows down to the distinct bulk jobs they touched, ask finalizeJobIfDrained about each
+ * ONCE, and hand back only the jobs that actually finalized.
+ *
+ * WHY THIS LIVES HERE AND NOT AS TWO INLINE COPIES (controller ruling). A 120-row run of one job
+ * asking 120 times is not merely wasteful, it is 120 attempts at the SAME compare-and-swap, and the
+ * plan's own architecture sentence is "one new shared module ... replacing five divergent copies" --
+ * a sixth and seventh copy of the same dedup loop in the two crons would be exactly the defect this
+ * phase exists to close.
+ *
+ * A ROW WITH NO PARENT JOB IS SKIPPED, not asked about as a literal job id. Both crons can claim
+ * rows enqueued outside a bulk submit (a single trace reusing the row), and those carry
+ * `trace_job_id: null`.
+ *
+ * ONLY WINNERS COME BACK. finalizeJobIfDrained's non-finalizing outcomes (still_working,
+ * already_terminal, read_failed, write_failed) are dropped here rather than surfaced, because the
+ * only thing a caller does with a winner is count it and fire the one-shot webhook -- and firing
+ * that on anything but `finalized: true` is the exact bug this phase exists to prevent (see the
+ * FinalizeOutcome docblock above).
+ */
+export async function finalizeTouchedJobs(
+  admin: SupabaseClient,
+  rows: Array<{ trace_job_id: string | null; user_id: string }>
+): Promise<Array<{ jobId: string; recordsMatched: number }>> {
+  const touchedJobs = new Map<string, string>();
+  for (const r of rows) {
+    if (r.trace_job_id && !touchedJobs.has(r.trace_job_id)) {
+      touchedJobs.set(r.trace_job_id, r.user_id);
+    }
+  }
+
+  const finalized: Array<{ jobId: string; recordsMatched: number }> = [];
+  for (const [jobId, userId] of touchedJobs) {
+    const outcome = await finalizeJobIfDrained(admin, { jobId, userId });
+    if (outcome.finalized) finalized.push({ jobId, recordsMatched: outcome.recordsMatched });
+  }
+  return finalized;
+}
