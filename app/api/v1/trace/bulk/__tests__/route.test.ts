@@ -3,6 +3,7 @@ import { PRICING } from "@/lib/constants";
 import { BLANK_OWNER_SKIP_STATUS } from "@/lib/trace/blankOwnerSkip";
 import { TRACE_SOURCE, chargePerRecord, chargePerTrace } from "@/lib/suite/pricing";
 import {
+  PROPERTY_TRACE_NO_KEY_REASON,
   PROPERTY_TRACE_NO_KEY_STATUS,
   isPropertyTracePending,
   queuedStatusFor,
@@ -621,10 +622,39 @@ describe("what the caller is told", () => {
   it("no longer claims a blank-owner row was skipped and not charged", async () => {
     // It is neither. Saying so would be a false statement about money in the
     // direction that matters: the customer WILL be billed for this row.
+    //
+    // recordsSkipped is asserted WITHOUT `?? 0` now. It used to be absent from this response, so
+    // `?? 0` was satisfied by the key not existing; it is always present since the owner's ruling,
+    // and 0 has to be a number this route wrote rather than a hole a reader fills in.
     const body = await (await post([rec(undefined, 1)])).json();
-    expect(body.recordsSkipped ?? 0).toBe(0);
+    expect(body.recordsSkipped).toBe(0);
     expect(body.skippedReason).toBeUndefined();
     expect(String(body.message)).not.toContain("not charged");
+  });
+
+  it("counts the rows nobody could be asked about, and says why", async () => {
+    // THE OWNER'S RULING. A no-key row appears in totalRecords and in no other count, so before
+    // this the only way to learn it existed was to subtract. recordsSkipped and skippedReason carry
+    // the dashboard route's meaning exactly, and the reason is the approved constant rather than a
+    // sentence written here. MUTATION: drop either field from the response and this goes red.
+    // TWO no-key rows, and they need DISTINCT streets to stay two rows. A record with no street and
+    // no state keys on `||` whatever its city, so two of those are one record by the time dedup has
+    // finished -- today's recorded collision risk for the fallback key (spec 6.3), not a defect of
+    // this change. A file whose state column never got mapped is the realistic shape anyway.
+    const body = await (
+      await post([
+        rec(undefined, 1, { state: "" }),
+        rec(undefined, 2, { state: "" }),
+        rec("Jane Smith", 3),
+      ])
+    ).json();
+    expect(body.recordsSkipped).toBe(2);
+    expect(body.skippedReason).toBe(PROPERTY_TRACE_NO_KEY_REASON);
+    // It is a count of rows NOT being worked, so it must not leak into the ones that are, nor into
+    // the quote: a skipped row is free.
+    expect(body.recordsToProcess).toBe(1);
+    expect(body.totalRecords).toBe(3);
+    expect(body.estimatedCost).toBeCloseTo(TIER1);
   });
 
   it("keeps recordsQueued meaning the TIER 2 queue, and reports Tier 1 in its own key", async () => {
@@ -641,11 +671,10 @@ describe("what the caller is told", () => {
     expect(historyRows()[0].ai_research_status).toBe(tier1QueuedStatusFor(1));
   });
 
-  it("tells a caller about rows nobody could be looked up, which are not in any count", async () => {
-    // A no-key row is excluded from recordsToProcess and from the quote, so with nothing said the
-    // caller would have to subtract totalRecords to discover it existed. The sentence is the one the
-    // dashboard route already uses, and it is the one reason allowed to invite a resend, because
-    // supplying the missing street or state genuinely changes the key and produces a new record.
+  it("tells a caller IN WORDS about rows nobody could be looked up, not only in a count", async () => {
+    // The sentence is the one the dashboard route already uses, and it is the one reason allowed to
+    // invite a resend, because supplying the missing street or state genuinely changes the key and
+    // produces a record that runs. recordsSkipped carries the number; this carries the fix.
     const body = await (
       await post([rec(undefined, 1, { address: "", state: "" }), rec("Jane Smith", 2)])
     ).json();
@@ -709,6 +738,37 @@ describe("per-record judging replaces the whole-batch 400", () => {
     const row = historyRows()[0];
     expect(row.ai_research_status).toBe(tier1QueuedStatusFor(1));
     expect(row.property_trace_status).toBeNull();
+  });
+
+  it("treats an ABSENT field as an empty one, so one missing key cannot kill the batch", async () => {
+    // WHOLE-BATCH REJECTION THROUGH A DIFFERENT DOOR, in the task that exists to delete it. The key
+    // derivation is the only place that disagreed: traceKeyFor takes `state: string` and threw on an
+    // absent one inside removeBatchDuplicates, before any per-record judging happened, so one record
+    // omitting a key returned a 500 for all 500. That told an integrator WE broke rather than that
+    // their record was unusable.
+    //
+    // Absent and empty are the same fact -- the caller gave us no state -- and this route already
+    // treats them the same everywhere else (`record.state || ''` in the row builder). Normalising is
+    // not fabricating a value: the row still lands no-key, free, with a reason.
+    // MUTATION: drop the normalisation and this goes red with a 500.
+    const res = await post([
+      { owner_name: "", address: "1 Main St", city: "Dallas" },
+      rec("Jane Smith", 2),
+    ]);
+    expect(res.status).toBe(200);
+    const rows = historyRows();
+    expect(rows).toHaveLength(2);
+    // The survivor runs.
+    const named = rows.find((r) => r.input_owner_name === "Jane Smith");
+    expect(named!.ai_research_status).toBe(tier1QueuedStatusFor(1));
+    // The record that omitted `state` is judged exactly as one sending state: "" would be.
+    const stateless = rows.find((r) => r.input_owner_name === null);
+    expect(stateless!.property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+    expect(stateless!.status).toBe("no_match");
+    expect(stateless!.state).toBe("");
+    const body = await res.json();
+    expect(body.recordsSkipped).toBe(1);
+    expect(body.recordsToProcess).toBe(1);
   });
 
   it("charges nothing for a no-key row and still bills the survivors beside it", async () => {

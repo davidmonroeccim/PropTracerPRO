@@ -82,16 +82,33 @@ export async function POST(request: Request) {
     // filed no-key, free, with a reason. A malformed ZIP is dropped at the row write by usableZip
     // rather than allowed to veto its own row.
     //
-    // WHAT IS STILL REJECTED, AND IT IS NOT THIS ROUTE'S CHOICE. An EMPTY street, city or state is
-    // judged per record below. An ABSENT one (the key missing from the JSON object rather than
-    // blank) throws inside removeBatchDuplicates on the next line, because traceKeyFor takes
-    // `state: string` and a caller omitting it has broken the contract; it surfaces as the outer
-    // catch's 500. That is what app/api/trace/bulk/route.ts already does and what its buildHistoryRow
-    // comment records: a genuinely absent field throws there first. Fabricating a value for it to
-    // produce a tidier answer is exactly what CLAUDE.md rule 7 forbids.
+    // AN ABSENT FIELD IS THE SAME FACT AS AN EMPTY ONE, AND IT IS NORMALISED HERE SO IT IS JUDGED
+    // THE SAME WAY.
+    //
+    // This closes the last door whole-batch rejection had left. An EMPTY street, city or state was
+    // already judged per record below, but an ABSENT one -- the key missing from the JSON object
+    // rather than blank -- threw inside removeBatchDuplicates on the next line: traceKeyFor guards
+    // `address` and `city` with `?? ''` and passes `state` through raw, so one record omitting it
+    // returned the outer catch's 500 for all 500 records. That is whole-batch rejection through a
+    // different door, in the change whose whole purpose is deleting it, and a 500 tells an
+    // integrator WE broke rather than that their record was unusable.
+    //
+    // THIS IS NOT FABRICATING DATA (CLAUDE.md rule 7). Absent and blank say the identical thing --
+    // the caller gave us no state -- and every other line of this route already reads them as one:
+    // `record.state || ''` and `(record.state || '').toUpperCase()` in the row builder below, and
+    // `!address` inside validateAddressInput. Only the key derivation disagreed. The record is not
+    // rescued by this: with no street, city or state it still lands in the no-key bucket, free,
+    // with the reason that tells the caller exactly which component to send. What changes is that
+    // the OTHER 499 records run.
+    const submitted: AddressInput[] = records.map((record) => ({
+      ...record,
+      address: record?.address ?? '',
+      city: record?.city ?? '',
+      state: record?.state ?? '',
+    }));
 
     // Step 1: Remove internal batch duplicates
-    const { unique, internalDuplicates } = removeBatchDuplicates(records);
+    const { unique, internalDuplicates } = removeBatchDuplicates(submitted);
 
     // Step 2: Check against 90-day history
     const dedupeResult = await checkDuplicates(profile.id, unique);
@@ -494,13 +511,22 @@ export async function POST(request: Request) {
     // finishes it when both queues have drained, including a job whose only rows were no-key: those
     // are terminal at birth, so nothing is still working and the first poll finalizes it.
     //
-    // THE RESPONSE KEEPS EVERY KEY IT HAD. Integrators read these, so none is removed and none is
-    // added; what changed is what two of them can honestly say. `recordsDirectTrace` counted the
-    // rows sent straight to the Tracerfy person CSV, and there is no such submit on this surface any
-    // more, so it is 0 -- kept rather than deleted so a caller's branch keeps reading a number it
-    // understands instead of undefined. `recordsPendingResearch` counted the entity half of a split
-    // that no longer happens at submit; every Tier 1 record is now queued for the research cron, so
-    // it is the Tier 1 count. `recordsQueued` keeps its documented meaning, the tier 2 queue.
+    // THE RESPONSE KEEPS EVERY KEY IT HAD, AND THE ONLY ADDITIONS ARE ADDITIVE. Integrators read
+    // these, so nothing is removed and nothing is re-pointed; what changed is what two of them can
+    // honestly say. `recordsDirectTrace` counted the rows sent straight to the Tracerfy person CSV,
+    // and there is no such submit on this surface any more, so it is 0 -- kept rather than deleted
+    // so a caller's branch keeps reading a number it understands instead of undefined.
+    // `recordsPendingResearch` counted the entity half of a split that no longer happens at submit;
+    // every Tier 1 record is now queued for the research cron, so it is the Tier 1 count.
+    // `recordsQueued` keeps its documented meaning, the tier 2 queue.
+    //
+    // `recordsSkipped` and `skippedReason` are BACK, by David's decision. They were removed when the
+    // whole-batch 400 meant this endpoint could never skip anything. Per-record judging brings the
+    // case back for real: a batch can now hold rows nobody can be asked about ALONGSIDE rows that
+    // run, and without these two the only way to learn the skipped ones existed was to subtract
+    // recordsToProcess from totalRecords. Same meaning and same shape as the dashboard route's
+    // records_skipped / skipped_reason, down to leaving the reason undefined when there is nothing
+    // to explain, so the two surfaces cannot drift into describing one thing two ways.
     return NextResponse.json({
       success: true,
       jobId: job.id,
@@ -513,6 +539,13 @@ export async function POST(request: Request) {
       recordsPendingResearch: tier1Records.length,
       // Rows with no owner of record, queued for a Full Property Trace rather than skipped.
       recordsQueued: tier2Records.length,
+      // Rows nobody can be asked about at all: no owner name AND no street, city or state to look a
+      // property up by. Terminal at submit and FREE, which is what separates them from every other
+      // count here. Always present, 0 when there are none, because a key that appears only when
+      // something went wrong is one nobody writes a branch for. The reason is the approved constant
+      // and is undefined when there is nothing to explain, exactly as the dashboard route does it.
+      recordsSkipped: noKeyRecords.length,
+      skippedReason: noKeyRecords.length > 0 ? PROPERTY_TRACE_NO_KEY_REASON : undefined,
       // Records accepted and then dropped because the vendor could not be reached. Always 0 now:
       // there is no vendor call at submit to fail. Kept at 0 rather than removed because a key that
       // appears only when something went wrong is one nobody writes a branch for.
