@@ -31,9 +31,13 @@ type SkipRow = SkipReasonRow;
  * and the row is not finished then.
  *
  * BOTH QUEUE COLUMNS ARE REQUIRED HERE, narrower than SkipRow's optional declaration, because
- * every select building a JobRow explicitly lists both columns and lib/trace/finalizeBulkJob's
- * FinalizableRow (which isRowStillWorking, recordsMatchedFor and totalChargeFor all take) requires
- * them non-optional. No behaviour change: the columns were always selected.
+ * every select building a JobRow explicitly lists both columns -- no behaviour change, they were
+ * always selected. This is now narrower than lib/trace/finalizeBulkJob's FinalizableRow (which
+ * isRowStillWorking, recordsMatchedFor and totalChargeFor all take) as well: FinalizableRow still
+ * requires ai_research_status, but Task 5 widened property_trace_status to optional there so the
+ * shared predicate could be called point-free instead of through a per-row object literal at each
+ * call site. JobRow keeps both required regardless, since a required field is always assignable
+ * to an optional one.
  */
 type JobRow = SkipRow & {
   charge: number | null;
