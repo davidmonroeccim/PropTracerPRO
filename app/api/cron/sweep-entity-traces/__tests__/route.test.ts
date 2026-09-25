@@ -11,6 +11,11 @@ import { planRoute, type RouteStep, type StepKind } from "@/lib/routing/ownerRou
 import type { Tier1RecordResult } from "@/lib/trace/singleTier1";
 import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
 import { VENDOR_RATE_LIMIT } from "@/lib/trace/vendorRateBudget";
+// Namespace import, spied on for exactly one test (fix round 2): proves the CRON reads `failed`
+// off finalizeTouchedJobs' return and puts it in the response body as finalizeFailed. The counting
+// logic itself is fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts; a shared helper's
+// own tests cannot prove any of its callers actually wire its result anywhere.
+import * as finalizeBulkJobModule from "@/lib/trace/finalizeBulkJob";
 
 /**
  * Money fences for the entity sweep, the cron that resolves the entity-owned
@@ -1620,6 +1625,24 @@ describe("finalizing the parent job when the Tier 1 queue drains", () => {
     await runCron();
     expect(traceJobsUpdate()).toBeUndefined();
     expect(anyFinalizeReadHappened()).toBe(false);
+  });
+
+  // Fix round 2: a WIRING test, not a re-test of finalizeTouchedJobs' own counting logic (that is
+  // fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts, and stays there per the
+  // controller's ruling). This proves the CRON reads the `failed` count off whatever
+  // finalizeTouchedJobs returns and puts it in the response body as finalizeFailed -- something no
+  // test of the shared helper itself can prove about either of its callers.
+  //
+  // MUTATION: delete `finalizeFailed: number` from Tier1LaneResult, or delete
+  // `out.finalizeFailed = failed;`, and this goes red: `body.tier1.finalizeFailed` reads `undefined`.
+  it("puts finalizeTouchedJobs' failed count into the response as finalizeFailed", async () => {
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    const spy = vi
+      .spyOn(finalizeBulkJobModule, "finalizeTouchedJobs")
+      .mockResolvedValueOnce({ finalized: [], failed: 2 });
+    const body = await runCron();
+    expect(body.tier1.finalizeFailed).toBe(2);
+    spy.mockRestore();
   });
 });
 

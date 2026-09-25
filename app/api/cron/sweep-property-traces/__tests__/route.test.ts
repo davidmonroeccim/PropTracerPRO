@@ -10,6 +10,11 @@ import {
   isPropertyTracePending,
   propertyTraceSkipReason,
 } from "@/lib/trace/propertyTraceAttempts";
+// Namespace import, spied on for exactly one test (fix round 2): proves the CRON reads `failed`
+// off finalizeTouchedJobs' return and puts it in the response body as finalizeFailed. The counting
+// logic itself is fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts; a shared helper's
+// own tests cannot prove any of its callers actually wire its result anywhere.
+import * as finalizeBulkJobModule from "@/lib/trace/finalizeBulkJob";
 
 /**
  * Money and claim fences for the TIER 2 bulk worker.
@@ -1798,5 +1803,22 @@ describe("finalizing the parent job when the tier 2 queue drains", () => {
     await run();
     expect(traceJobsUpdate()).toBeUndefined();
     expect(anyFinalizeReadHappened()).toBe(false);
+  });
+
+  // Fix round 2: a WIRING test, not a re-test of finalizeTouchedJobs' own counting logic (that is
+  // fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts, and stays there per the
+  // controller's ruling). This proves the CRON reads the `failed` count off whatever
+  // finalizeTouchedJobs returns and puts it in the response body as finalizeFailed -- something no
+  // test of the shared helper itself can prove about either of its callers.
+  //
+  // MUTATION: delete `const finalizeFailed = failed;` or drop `finalizeFailed` from the
+  // NextResponse.json body, and this goes red: `body.finalizeFailed` reads `undefined`.
+  it("puts finalizeTouchedJobs' failed count into the response as finalizeFailed", async () => {
+    const spy = vi
+      .spyOn(finalizeBulkJobModule, "finalizeTouchedJobs")
+      .mockResolvedValueOnce({ finalized: [], failed: 2 });
+    const body = await (await run()).json();
+    expect(body.finalizeFailed).toBe(2);
+    spy.mockRestore();
   });
 });
