@@ -31,7 +31,18 @@ import { isTier1QueuePending, isTier1QueueRow } from './tier1Queue';
  */
 
 export interface FinalizableRow {
-  property_trace_status: string | null;
+  // OPTIONAL (`?:`), not required `string | null`: TraceHistoryRow (settleBulkJob.ts, the type
+  // both the v1 status route and the MCP bulk_status tool actually carry) declares this column
+  // optional, because it postdates migration 20260917 and every existing test fixture constructs
+  // the type by hand. A required property typed `string | null | undefined` is NOT satisfied by
+  // an optional one -- TS still demands the key be present -- so this has to be `?:`, not just a
+  // wider union. Widened (2026-09-25 controller ruling, Task 5 Amendment 6) so both callers can
+  // pass `isRowStillWorking` their own rows point-free instead of building a fresh object literal
+  // per row to satisfy a narrower type. Safe for every consumer: isPropertyTracePending already
+  // accepts undefined (propertyTraceAttempts.ts:219), recordsMatchedFor's tier 2 arm uses bare
+  // truthiness where undefined and null are equally falsy, and matchedRowCount never reads this
+  // field at all.
+  property_trace_status?: string | null;
   ai_research_status: string | null;
   is_successful: boolean | null;
   charge?: number | null;

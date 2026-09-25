@@ -1240,6 +1240,113 @@ describe("bulk_status", () => {
     // only the ones that resolved somebody.
     expect(fountain).not.toHaveProperty("owner_contact_source");
   });
+
+  /**
+   * THE TIER 1 QUEUE HOLDS THE JOB OPEN TOO, and it is not this tool's own gate that used to do
+   * it. `lib/trace/tier1Queue` is not imported into mcp-tools.ts at all: isPendingResearch asks
+   * isEntityTracePending, the LEGACY predicate, which holds no tier1_ value, and the
+   * status === 'processing' arm catches a queued Tier 1 row only incidentally -- the Tier 1 cron
+   * writes the row's delivery `status` before it clears the queue column, so the overlap ends on
+   * exactly the row that matters. Without `isRowStillWorking` in the disjunction this tool
+   * finalizes over live, billable Tier 1 work, and would report `completed` while the job's
+   * trace_jobs row is still 'processing'. Mirrors Task 3's twin in
+   * app/api/v1/trace/bulk/status/__tests__/route.test.ts. Per the 2026-09-25 controller ruling
+   * this task takes only the pending-gate fix -- records_matched stays the flat is_successful
+   * count, so only three of that file's four tests are mirrored here; a fourth asserting a
+   * matched LEGACY row does NOT count as a Tier 1 match would assert the wrong behaviour under
+   * this ruling.
+   */
+  describe("the Tier 1 queue holds the job open too", () => {
+    it("reports processing while a Tier 1 row is queued", async () => {
+      // MUTATION: drop the isRowStillWorking arm from the disjunction and this goes red. Neither
+      // remaining arm recognizes a tier1_ value, so this job would read as finished and get
+      // written 'completed' while row r1's Tier 1 work is still live.
+      const { admin, captured } = statusAdminStub({
+        profile,
+        job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 2 },
+        rows: [
+          {
+            id: "r1",
+            status: "success",
+            tracerfy_job_id: null,
+            is_successful: true,
+            charge: 0,
+            ai_research_status: "tier1_queued",
+            property_trace_status: null,
+          },
+          {
+            id: "r2",
+            status: "success",
+            tracerfy_job_id: null,
+            is_successful: true,
+            charge: 0,
+            ai_research_status: "tier1_done",
+            property_trace_status: null,
+          },
+        ],
+      });
+      const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+      expect(out).toMatchObject({ status: "processing" });
+      // And the job row is NOT written completed, which is what would stop it ever being
+      // polled again.
+      expect(captured.traceJobsUpdates).toHaveLength(0);
+    });
+
+    it("stays processing even after the cron has flipped status off processing", async () => {
+      // The incidental status === 'processing' arm cannot be what holds this row open: the Tier 1
+      // cron writes the row's delivery status before it clears ai_research_status, so a poll that
+      // lands in between sees a terminal `status` next to a still-queued Tier 1 value.
+      const { admin } = statusAdminStub({
+        profile,
+        job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 1 },
+        rows: [
+          {
+            id: "r1",
+            status: "no_match",
+            tracerfy_job_id: null,
+            is_successful: false,
+            charge: 0,
+            ai_research_status: "tier1_queued_3",
+            property_trace_status: null,
+          },
+        ],
+      });
+      const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+      expect(out).toMatchObject({ status: "processing" });
+    });
+
+    it("completes once every Tier 1 row is settled, and counts the successes", async () => {
+      // The other side of the fence: a terminal tier1_done value must read as NOT pending, or the
+      // job is held open forever and never reports at all. records_matched is the pre-existing
+      // flat is_successful count (Amendment 1: left untouched), not recordsMatchedFor.
+      const { admin } = statusAdminStub({
+        profile,
+        job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 2 },
+        rows: [
+          {
+            id: "r1",
+            status: "success",
+            tracerfy_job_id: null,
+            is_successful: true,
+            charge: 0,
+            ai_research_status: "tier1_done",
+            property_trace_status: null,
+          },
+          {
+            id: "r2",
+            status: "no_match",
+            tracerfy_job_id: null,
+            is_successful: false,
+            charge: 0,
+            ai_research_status: "tier1_done",
+            property_trace_status: null,
+          },
+        ],
+      });
+      const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+      expect(out).toMatchObject({ status: "completed", records_matched: 1 });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

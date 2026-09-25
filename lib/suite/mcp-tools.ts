@@ -8,6 +8,7 @@ import { propertyAddressLabel } from "@/lib/trace/historyDisplay";
 import { rowSkipReason } from "@/lib/trace/rowSkipReason";
 import { isEntityTracePending } from "@/lib/trace/entityTraceAttempts";
 import { isPropertyTracePending, queuedStatusFor } from "@/lib/trace/propertyTraceAttempts";
+import { isRowStillWorking } from "@/lib/trace/finalizeBulkJob";
 import { TIER2_CAPACITY_REFUSAL, inFlightUnbilledCost, tracerfyCanRun } from "@/lib/trace/bulkPreflight";
 import { toPublicPropertyRecord } from "@/lib/trace/publicPropertyRecord";
 import { resolveOwnerContact } from "@/lib/ai-research/contacts";
@@ -763,7 +764,15 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   const anyPendingResearch = rows.some(isPendingResearch);
   const anyPendingProperty = rows.some(isPendingProperty);
   const anyPendingTrace = rows.some((r) => r.status === "processing");
-  if (anyPendingResearch || anyPendingProperty || anyPendingTrace) {
+  // lib/trace/tier1Queue is not imported into this file at all, so without this arm a queued
+  // Tier 1 row (ai_research_status: 'tier1_queued...') would not hold the job open here:
+  // isPendingResearch asks the LEGACY entity ladder, which holds no tier1_ value, and status
+  // reads as a terminal 'success'/'no_match' the moment the Tier 1 cron delivers its outcome,
+  // before it clears the queue column. isRowStillWorking is the shared tier 2 + Tier 1 predicate
+  // (lib/trace/finalizeBulkJob.ts). Point-free: FinalizableRow.property_trace_status was widened
+  // to accept TraceHistoryRow's optional (string | null | undefined) shape directly.
+  const anyPendingQueue = rows.some(isRowStillWorking);
+  if (anyPendingResearch || anyPendingProperty || anyPendingTrace || anyPendingQueue) {
     return {
       status: "processing",
       job_id: job.id,

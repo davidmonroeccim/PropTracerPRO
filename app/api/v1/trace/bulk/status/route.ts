@@ -254,16 +254,13 @@ export async function GET(request: Request) {
     // Asking only the first is how this route would finalize over live Tier 1 work, and the
     // early return at the top of this handler would then make that verdict permanent.
     const anyPendingLegacyEntity = rows.some((r) => isEntityTracePending(r.ai_research_status));
-    // TraceHistoryRow's property_trace_status is optional (string | null | undefined);
-    // FinalizableRow requires string | null. Narrowed inline rather than widening
-    // FinalizableRow itself, which the crons and the web status route also depend on.
-    const anyPendingQueue = rows.some((r) =>
-      isRowStillWorking({
-        property_trace_status: r.property_trace_status ?? null,
-        ai_research_status: r.ai_research_status,
-        is_successful: r.is_successful,
-      })
-    );
+    // FinalizableRow.property_trace_status was widened to accept TraceHistoryRow's optional
+    // (string | null | undefined) shape directly (2026-09-25 controller ruling, Task 5
+    // Amendment 6), so this reads point-free instead of building a fresh object literal per row.
+    // Safe for every consumer: isPropertyTracePending already accepts undefined, recordsMatchedFor's
+    // tier 2 arm uses bare truthiness (undefined and null are equally falsy), and matchedRowCount
+    // never reads this field at all.
+    const anyPendingQueue = rows.some(isRowStillWorking);
     const anyPendingTrace = rows.some((r) => r.status === 'processing');
 
     if (anyPendingLegacyEntity || anyPendingQueue || anyPendingTrace) {
