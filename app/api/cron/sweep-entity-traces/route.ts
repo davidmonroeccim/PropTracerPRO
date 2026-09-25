@@ -719,10 +719,13 @@ async function runTier1Lane(
    * sweep-stale-traces:451 exactly: fire-and-forget, one call per job this run actually finalized.
    *
    * THE DEADLINE CHECK. This lane budgets TIER1_RUN_BUDGET_MS of the cron's 300s maxDuration and the
-   * legacy entity lane still has to run after this returns, so a run that finalized many jobs stops
-   * notifying/rebilling once the budget is spent rather than eating the legacy lane's time. A job
-   * left un-notified this way is simply picked up by the next run a minute later -- the same
-   * tolerance finalizeTouchedJobs itself already relies on for a job this run didn't finish claiming.
+   * legacy entity lane still has to run after this returns, so this loop stops once the budget is
+   * spent rather than eating the legacy lane's time. A job the break skips is NOT retried later: its
+   * CAS already ran, above, so it is already 'completed' with no claimable rows, and no future run's
+   * touchedJobs will ever contain it again -- the break drops that job's webhook and auto-rebill
+   * permanently, not temporarily. Accepted anyway: overrunning maxDuration would lose the same two
+   * calls and risks the invocation being killed mid-work, and both are already fire-and-forget with
+   * no retry, so a plain network failure drops either one today with no recovery either.
    */
   const { finalized, failed } = await finalizeTouchedJobs(adminClient, rows);
   out.jobsFinalized = finalized.length;
