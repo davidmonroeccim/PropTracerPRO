@@ -445,6 +445,17 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // record submitted. Null on a row written before migration 20260917. Never
     // 0 and never a guess, because an unknown tier is an absence.
     tier: row.tier ?? null,
+    // HOW the record ended and WHICH KEY found the owner. skip_reason below is
+    // the sentence; these two are the machine-readable pair behind it, so a
+    // caller can branch on the outcome without parsing English. found_by is the
+    // KEY ('address', 'parcel_id', 'company_name'), never the vendor, which
+    // stays internal on contact_vendor. Both are null on a tier 2 row and on a
+    // row written before migration 20260922, because an absence is an absence.
+    //
+    // ADDED TO BOTH TWINS IN ONE COMMIT. payloadParity compares the two key sets
+    // by source scan, so either one alone goes red.
+    found_by: row.found_by ?? null,
+    outcome_code: row.outcome_code ?? null,
     // Why a row came back with no contacts. Asked of BOTH queues: serving only
     // the tier 1 accessor left every tier 2 terminal value speaking as a bare
     // no_match, including the billed row whose contact vendor never answered.

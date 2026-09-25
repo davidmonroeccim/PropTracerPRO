@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { chargePerTrace } from "@/lib/suite/pricing";
 
@@ -800,5 +800,86 @@ describe("v1 bulk status never pushes to HighLevel", () => {
     expect(body.success).toBe(true);
     expect(body.status).toBe("completed");
     expect(body.results).toHaveLength(2);
+  });
+});
+
+/**
+ * THE WEBHOOK CARRIES THE OUTCOME, ASSERTED RATHER THAN INFERRED.
+ *
+ * `bulk_job.completed` sends `results: enrichedResults`, which spreads
+ * buildPerRecordResult, so adding a key to that function reaches the webhook with no
+ * change here. "So it gains both keys automatically" is exactly the kind of claim that
+ * is true until someone rebuilds the webhook body from the raw rows, and nothing would
+ * have gone red. This test is what makes that claim fail out loud.
+ *
+ * RECORDED, NOT FIXED HERE: the WEB route's webhook (app/api/trace/bulk) builds
+ * `successfulResults` from the raw Tracerfy result rather than from trace_history, so it
+ * gains nothing from this phase. That asymmetry is deliberate for now.
+ */
+describe("the v1 bulk_job.completed webhook reports the outcome", () => {
+  const tier1Row = {
+    id: "row-1",
+    address_hash: "hash-1",
+    status: "success",
+    tracerfy_job_id: null,
+    normalized_address: "500 MAIN ST",
+    city: "Austin",
+    state: "TX",
+    charge: 0.15,
+    is_successful: true,
+    ai_research_status: null,
+    property_trace_status: "property_trace_done",
+    tier: 1,
+    outcome_code: "found_by_parcel_id",
+    found_by: "parcel_id",
+  };
+
+  let bodies: Array<Record<string, unknown>>;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    bodies = [];
+    H.profile = {
+      id: "user-abc",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      webhook_url: "https://customer.example.com/hook",
+    };
+    // 'processing', NOT 'completed'. A job whose STORED status is already completed returns
+    // early at the top of the route and never dispatches a webhook, because the webhook fires
+    // on the TRANSITION. A fixture that said 'completed' would make this test pass or fail for
+    // a reason that has nothing to do with the payload.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      records_matched: 1,
+      error_message: null,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [tier1Row] as never;
+    // The network is the ONE thing mocked here. Everything that builds the body stays real:
+    // a stub of buildPerRecordResult would make this test assert on itself.
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(String((init as RequestInit).body)));
+      return new Response("{}", { status: 200 });
+    }) as never;
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("puts found_by and outcome_code on a record in the webhook body", async () => {
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    const posted = bodies.find((b) => b.event === "bulk_job.completed");
+    expect(posted, "no bulk_job.completed webhook was dispatched").toBeDefined();
+    const record = (posted!.results as Array<Record<string, unknown>>)[0];
+    // MUTATION: remove found_by from buildPerRecordResult and this goes red alongside parity.
+    expect(record.found_by).toBe("parcel_id");
+    expect(record.outcome_code).toBe("found_by_parcel_id");
   });
 });

@@ -61,8 +61,13 @@ describe('the v1 and MCP per-record payloads', () => {
   it('parses both payloads at all, so a broken scan cannot pass silently', () => {
     // A regex that matched nothing would make the comparison below vacuously
     // true, which is the way a parity test quietly stops being one.
-    expect(v1Keys.length).toBeGreaterThanOrEqual(12);
-    expect(mcpKeys.length).toBeGreaterThanOrEqual(12);
+    //
+    // 17 as of Phase 2B: the 15 keys both twins carried through 5c-3B, plus
+    // found_by and outcome_code. Raised WITH the keys, in the same commit,
+    // because a floor left at 12 would let a future edit delete five keys from
+    // both twins at once and still pass.
+    expect(v1Keys.length).toBeGreaterThanOrEqual(17);
+    expect(mcpKeys.length).toBeGreaterThanOrEqual(17);
   });
 
   it('carry exactly the same keys', () => {
@@ -87,6 +92,20 @@ describe('the v1 and MCP per-record payloads', () => {
     for (const path of [V1, MCP]) {
       const source = readFileSync(join(ROOT, path), 'utf8');
       expect(source, path).toContain('tier: row.tier ?? null');
+    }
+  });
+
+  it('both report how the record ended and which key found the owner', () => {
+    // The Tier 1 outcome is the thing this phase made visible. A surface that
+    // reports a record without it leaves the caller to guess whether a row with
+    // no contacts was a miss, a stale name, a missing key or a busy vendor --
+    // four outcomes with different money attached. Asserted as literals in BOTH
+    // files because the parity assertion above only proves the key SETS match:
+    // two twins that both dropped these keys would agree with each other.
+    for (const path of [V1, MCP]) {
+      const source = readFileSync(join(ROOT, path), 'utf8');
+      expect(source, path).toContain('found_by: row.found_by ?? null');
+      expect(source, path).toContain('outcome_code: row.outcome_code ?? null');
     }
   });
 });

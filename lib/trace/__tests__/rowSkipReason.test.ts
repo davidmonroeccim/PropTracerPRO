@@ -8,6 +8,11 @@ import {
   BLANK_OWNER_SKIP_STATUS,
 } from '@/lib/trace/blankOwnerSkip';
 import {
+  TIER1_FAILED_STATUS,
+  TIER1_SETTLED_STATUS,
+  tier1QueuedStatusFor,
+} from '@/lib/trace/tier1Queue';
+import {
   ENTITY_TRACE_FAILED_REASON,
   ENTITY_TRACE_FAILED_STATUS,
 } from '@/lib/trace/entityTraceAttempts';
@@ -455,5 +460,62 @@ describe('a TIER 1 QUEUE row serves its own outcome sentence (the D33 bulk half)
         is_successful: true,
       })
     ).toBeNull();
+  });
+});
+
+/**
+ * THE D33 INTERLOCK RELEASES ITSELF, PROVEN RATHER THAN ASSERTED.
+ *
+ * D33 deliberately gated the Tier 1 sentence on `trace_job_id === null ||
+ * isTier1QueueRow(ai_research_status)` so that an API or MCP bulk row, which at the time
+ * still built a Tracerfy person CSV and did not clear a reused row's outcome, kept its old
+ * behaviour rather than risking a stale "You were not charged" on a row that charged.
+ *
+ * Phase 2B Tasks 4 and 6 put both of those submit paths onto the Tier 1 queue, so their
+ * rows now arrive carrying a tier1_ status and the SECOND branch of the gate opens for them
+ * by construction. That is the whole reason rowSkipReason needs no edit in this phase, and
+ * it is a claim about two OTHER files, so it is fenced from both ends here:
+ *
+ *   (1) the gate accepts the statuses the Tier 1 lifecycle actually produces, and
+ *   (2) both submit paths actually write one of them.
+ *
+ * Fence (2) is the one that matters. Without it, a future change that reverts either submit
+ * to a bare Tracerfy CSV would silently re-close the gate, every API and MCP bulk row would
+ * go back to a blank reason, and (1) would still be perfectly green.
+ */
+describe('the D33 gate opens for an API or MCP bulk row without editing rowSkipReason', () => {
+  const bulkTier1Row = (ai_research_status: string) => ({
+    // A BULK row: it belongs to a job, so the `trace_job_id === null` branch is closed and
+    // only isTier1QueueRow can open the gate. This is the exact shape Tasks 4 and 6 write.
+    trace_job_id: 'job-1',
+    ai_research_status,
+    outcome_code: 'busy_try_again',
+    is_successful: false,
+  });
+
+  it('(1) serves the Tier 1 sentence on a queued row and on a settled one', () => {
+    // tier1QueuedStatusFor(1) is what the submit writes; TIER1_SETTLED_STATUS is what the
+    // cron leaves behind once the row is done and its outcome_code is worth reading.
+    expect(rowSkipReason(bulkTier1Row(tier1QueuedStatusFor(1)))).toBe(BUSY_TRY_AGAIN_REASON);
+    expect(rowSkipReason(bulkTier1Row(TIER1_SETTLED_STATUS))).toBe(BUSY_TRY_AGAIN_REASON);
+    expect(rowSkipReason(bulkTier1Row(TIER1_FAILED_STATUS))).toBe(BUSY_TRY_AGAIN_REASON);
+  });
+
+  it('(1b) still says nothing for a bulk row that never reached the Tier 1 queue', () => {
+    // The half of D33 that must NOT have changed. A reused row carrying a stale outcome_code
+    // and no tier1_ status stays silent, which is what stops a false "not charged".
+    expect(rowSkipReason(bulkTier1Row(''))).toBeNull();
+    expect(
+      rowSkipReason({ trace_job_id: 'job-1', outcome_code: 'busy_try_again', is_successful: false })
+    ).toBeNull();
+  });
+
+  it('(2) both the v1 API and the MCP bulk submit put their Tier 1 rows on the Tier 1 queue', () => {
+    // MUTATION: revert either submit to a bare Tracerfy CSV and this goes red, which is the
+    // only thing standing between (1) above and a gate that quietly closed again.
+    for (const path of ['app/api/v1/trace/bulk/route.ts', 'lib/suite/mcp-tools.ts']) {
+      const code = codeOnly(read(path));
+      expect(code, path).toContain('ai_research_status: tier1QueuedStatusFor(1)');
+    }
   });
 });

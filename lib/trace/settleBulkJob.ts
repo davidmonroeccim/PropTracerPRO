@@ -80,6 +80,16 @@ export type TraceHistoryRow = {
   // above: every reader loads with select('*'), and the fixtures build this type by hand.
   parcel_id_local?: string | null;
   county?: string | null;
+  // The Tier 1 outcome (migration 20260922): one of the seven TIER1_OUTCOME codes, and the KEY
+  // that found the owner ('address' | 'parcel_id' | 'company_name') when one did. Written only by
+  // the Tier 1 path (lib/trace/singleTier1.ts); every other writer sets both to null explicitly,
+  // so a tier 2 row carries null rather than a stale value. rowSkipReason already read
+  // outcome_code structurally through Tier1OutcomeRow; both are declared here because Phase 2B
+  // makes them part of the per-record payload both buildPerRecordResult twins return. Optional
+  // for the same reason as the columns above: every reader loads with select('*'), and the
+  // fixtures build this type by hand.
+  outcome_code?: string | null;
+  found_by?: string | null;
   // `highlevel_pushed_at` was declared here for the v1 bulk status route, which
   // used it to skip a row the property-trace cron had already pushed. Both the
   // automatic pushes and that skip are gone: PTP never calls HighLevel unless a

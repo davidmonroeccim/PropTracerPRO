@@ -16,10 +16,23 @@ import { PRICING } from "@/lib/constants";
 import { chargePerRecord } from "@/lib/suite/pricing";
 import {
   PROPERTY_TRACE_NO_KEY_STATUS,
+  PROPERTY_TRACE_NO_REACH_REASON,
+  PROPERTY_TRACE_NO_REACH_STATUS,
   queuedStatusFor,
 } from "@/lib/trace/propertyTraceAttempts";
-import { TIER1_QUEUED_STATUSES, tier1QueuedStatusFor } from "@/lib/trace/tier1Queue";
-import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
+import {
+  TIER1_QUEUED_STATUSES,
+  TIER1_SETTLED_STATUS,
+  tier1QueuedStatusFor,
+} from "@/lib/trace/tier1Queue";
+// The approved sentences are IMPORTED, never retyped. A hand-copied sentence in a test cannot
+// fail when the approved copy changes, which is the only thing an assertion on customer-facing
+// wording is for.
+import {
+  BUSY_TRY_AGAIN_REASON,
+  OWNER_NAME_NOT_MATCHED_REASON,
+  TIER1_OUTCOME,
+} from "@/lib/trace/tier1Outcome";
 import { inFlightUnbilledCost, tracerfyCanRun } from "@/lib/trace/bulkPreflight";
 import {
   createAddressHash,
@@ -2356,6 +2369,154 @@ describe("the property record and tier on the gateway-facing MCP surface", () =>
       expect(out.traces[0].property_record).not.toBeNull();
       expect(Object.keys(out.traces[0].property_record!)).toHaveLength(PUBLIC_KEY_COUNT);
       expect(out.traces[0].tier).toBe(2);
+    });
+
+    /**
+     * THE TRAP THIS PHASE WOULD OTHERWISE HAVE SHIPPED GREEN.
+     *
+     * rowSkipReason gates the Tier 1 sentence on
+     * `trace_job_id === null || isTier1QueueRow(ai_research_status)`, and answers tier 2
+     * from property_trace_status. listTraces projects through a literal select string, so a
+     * gate column missing from that string arrives as `undefined` -- and `undefined === null`
+     * is false while `isTier1QueueRow(undefined)` is false, so EVERY row would return a blank
+     * reason with nothing red anywhere. Adding outcome_code and found_by to the select without
+     * the three gate columns buys a payload that reports the outcome and never explains it.
+     *
+     * Each of the three tests below is pinned to ONE gate column, so deleting that column from
+     * the select alone turns exactly one of them red rather than all three at once.
+     */
+    it("SELECT FENCE (trace_job_id): explains a Tier 1 row a single trace wrote", async () => {
+      // trace_job_id === null is the whole gate for this row: ai_research_status is null, so
+      // isTier1QueueRow is false and the sentence can only come through the first branch.
+      // MUTATION: delete trace_job_id from the select string alone and this goes red.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [
+          tier1Row({
+            trace_job_id: null,
+            ai_research_status: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.BUSY_TRY_AGAIN,
+          }),
+        ],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ skip_reason: string | null }>;
+      };
+      // The APPROVED sentence, not merely something non-null: a blank reason and a wrong
+      // reason are both failures and only the exact string separates them.
+      expect(out.traces[0].skip_reason).toBe(BUSY_TRY_AGAIN_REASON);
+    });
+
+    it("SELECT FENCE (ai_research_status): explains a Tier 1 row the web bulk queue settled", async () => {
+      // This row HAS a trace_job_id, so the first branch is closed and only
+      // isTier1QueueRow(ai_research_status) can open the gate.
+      // MUTATION: delete ai_research_status from the select alone and this goes red.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [
+          tier1Row({
+            trace_job_id: "job-1",
+            ai_research_status: TIER1_SETTLED_STATUS,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.OWNER_NAME_NOT_MATCHED,
+          }),
+        ],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ skip_reason: string | null }>;
+      };
+      expect(out.traces[0].skip_reason).toBe(OWNER_NAME_NOT_MATCHED_REASON);
+    });
+
+    it("SELECT FENCE (property_trace_status): explains a billed tier 2 row the vendor never reached", async () => {
+      // The row this whole helper exists for: CHARGED per record submitted, no contacts, and
+      // the tier 1 accessor alone would have called it a bare no match.
+      // MUTATION: delete property_trace_status from the select alone and this goes red.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier2Row({ is_successful: false, property_trace_status: PROPERTY_TRACE_NO_REACH_STATUS })],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ skip_reason: string | null }>;
+      };
+      expect(out.traces[0].skip_reason).toBe(PROPERTY_TRACE_NO_REACH_REASON);
+    });
+
+    it("SELECT FENCE (trace_steps): explains a no_match row, whose sentence names the keys tried", async () => {
+      // no_match is the ONLY outcome whose sentence is built rather than constant: noMatchReason
+      // reads the step log to name the keys that answered, and with no step log it returns null.
+      // So without trace_steps in the select this row reports outcome_code "no_match" and a blank
+      // reason, while bulk_status, which selects '*', explains the very same row. That asymmetry
+      // between two surfaces over one row is the reason trace_steps is selected here.
+      // MUTATION: delete trace_steps from the select alone and this goes red.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [
+          tier1Row({
+            trace_job_id: null,
+            ai_research_status: null,
+            is_successful: false,
+            outcome_code: TIER1_OUTCOME.NO_MATCH,
+            trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0 }],
+          }),
+        ],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ skip_reason: string | null }>;
+      };
+      // Names the key that was actually tried. A constant would not have needed the step log.
+      expect(out.traces[0].skip_reason).toContain("by address");
+      expect(out.traces[0].skip_reason).toContain("found no match");
+    });
+
+    it("reports the outcome code and the key that found the owner", async () => {
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier1Row({ outcome_code: TIER1_OUTCOME.FOUND_BY_PARCEL_ID, found_by: "parcel_id" })],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ outcome_code: string | null; found_by: string | null }>;
+      };
+      expect(out.traces[0].outcome_code).toBe(TIER1_OUTCOME.FOUND_BY_PARCEL_ID);
+      expect(out.traces[0].found_by).toBe("parcel_id");
+    });
+
+    it("emits null rather than a guess on a row written before the outcome columns existed", async () => {
+      // CLAUDE.md rule 7: absent is absent. tier1Row carries neither column.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [tier1Row()],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as {
+        traces: Array<{ outcome_code: unknown; found_by: unknown }>;
+      };
+      expect(out.traces[0].outcome_code).toBeNull();
+      expect(out.traces[0].found_by).toBeNull();
+    });
+
+    it("keeps the three gate columns internal", async () => {
+      // They are selected to answer rowSkipReason, not to be handed out. Same treatment as
+      // parcel_id_local and county: destructured OUT of the spread rather than trusted to be
+      // overwritten. A gateway that saw ai_research_status would be reading our queue.
+      const admin = adminStub({
+        profile: { id: "p1", wallet_balance: 0 },
+        traces: [
+          tier1Row({
+            trace_job_id: "job-1",
+            ai_research_status: TIER1_SETTLED_STATUS,
+            property_trace_status: null,
+            outcome_code: TIER1_OUTCOME.NO_MATCH,
+          }),
+        ],
+      });
+      const out = (await listTraces(admin, "sub-1", {})) as { traces: Array<unknown> };
+      const serialized = JSON.stringify(out.traces[0]);
+      for (const key of ["trace_job_id", "ai_research_status", "property_trace_status"]) {
+        expect(serialized, `${key} reached the gateway`).not.toContain(`"${key}"`);
+      }
+      // POSITIVE CONTROL: the payload really was built, so the absences above are removals.
+      expect(serialized).toContain('"outcome_code"');
     });
   });
 

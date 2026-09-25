@@ -70,10 +70,25 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
   // columns never arrive and the tool emits null for every row -- a failure indistinguishable
   // from a customer who simply never bought a Full Property Trace. mcp-tools.test.ts projects
   // its stub rows through this exact string so a column dropped here turns the tests red.
+  //
+  // THE LAST SIX COLUMNS ARE THE ONE TRAP IN THIS SELECT, and it fails SILENTLY.
+  // outcome_code and found_by are echoed. The other four are NOT: they are what rowSkipReason
+  // needs to answer at all, and they are destructured out below alongside parcel_id_local and
+  // county. rowSkipReason gates the Tier 1 sentence on
+  // `trace_job_id === null || isTier1QueueRow(ai_research_status)` and answers tier 2 from
+  // property_trace_status, and a column missing from this string arrives as `undefined`.
+  // `undefined === null` is false and isTier1QueueRow(undefined) is false, so dropping any one
+  // of them does not throw and does not blank the payload: it makes EVERY row come back with a
+  // blank reason while outcome_code still shows the code, which reads exactly like a customer
+  // whose traces all simply succeeded. trace_steps is here because no_match is the only outcome
+  // whose sentence is built from the step log rather than being a constant (noMatchReason names
+  // the keys that answered), so without it the most common non-success outcome reports a code
+  // with no explanation while bulk_status, which selects '*', explains the very same row.
+  // Each of the four has its own SELECT FENCE test pinned to it alone.
   let q = admin
     .from("trace_history")
     .select(
-      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research, property_record, tier, parcel_id_local, county",
+      "id, normalized_address, city, state, zip, input_owner_name, status, is_successful, phone_count, email_count, charge, created_at, trace_result, ai_research, property_record, tier, parcel_id_local, county, outcome_code, found_by, ai_research_status, property_trace_status, trace_job_id, trace_steps",
     )
     .eq("user_id", profile.id)
     .order("created_at", { ascending: false })
@@ -88,15 +103,45 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
     // reordering the spread to the end cannot silently promote the raw 86-key object. The
     // actual guard is the filter, and the test that catches the reordering is the one that
     // scans the whole serialized trace for blocked key names.
-    const { trace_result, ai_research, property_record, tier, parcel_id_local, county, ...rest } =
-      row as Record<string, unknown> & {
-        trace_result: TraceResult | null;
-        ai_research: AIResearchResult | null;
-        property_record: unknown;
-        tier: number | null;
-        parcel_id_local: string | null;
-        county: string | null;
-      };
+    //
+    // The six columns added below split two ways, and the difference matters.
+    //
+    // ai_research_status, property_trace_status, trace_job_id and trace_steps are INTERNAL.
+    // For them the destructure IS the guard rather than defence in depth: nothing below writes
+    // them back, so leaving them in `rest` would hand a gateway caller our queue state and our
+    // internal job id. They exist in this scope only to be read by rowSkipReason.
+    //
+    // outcome_code and found_by ARE echoed, and are destructured only so they can be emitted
+    // through `?? null` below. Riding the spread would make a row written before migration
+    // 20260922 come back with the keys MISSING rather than null, which is a different answer.
+    const {
+      trace_result,
+      ai_research,
+      property_record,
+      tier,
+      parcel_id_local,
+      county,
+      ai_research_status,
+      property_trace_status,
+      trace_job_id,
+      trace_steps,
+      outcome_code,
+      found_by,
+      ...rest
+    } = row as Record<string, unknown> & {
+      trace_result: TraceResult | null;
+      ai_research: AIResearchResult | null;
+      property_record: unknown;
+      tier: number | null;
+      parcel_id_local: string | null;
+      county: string | null;
+      ai_research_status: string | null;
+      property_trace_status: string | null;
+      trace_job_id: string | null;
+      trace_steps: unknown;
+      outcome_code: string | null;
+      found_by: string | null;
+    };
     // THE NAME ONLY, never the source. resolveOwnerContact returns both, and a spread would
     // put the source back in the payload no matter how many other call sites removed it.
     //
@@ -123,6 +168,31 @@ export async function listTraces(admin: SupabaseClient, gatewaySub: string, raw:
       // Null on a tier 1 row and on every row written before migration 20260917. Never 0, never
       // a guess: an unknown tier is an absence.
       tier: tier ?? null,
+      // THE OUTCOME, matching what bulk_status reports for the same row. found_by is the KEY
+      // that found the owner ('address', 'parcel_id', 'company_name'), never the vendor.
+      // Emitted explicitly rather than left to ride the spread, so a row written before
+      // migration 20260922 reads as null rather than as a missing key.
+      found_by: found_by ?? null,
+      outcome_code: outcome_code ?? null,
+      // The sentence behind the code, asked of BOTH queues. Built from the four columns
+      // destructured out above; see the select string for why dropping one of them is silent.
+      skip_reason: rowSkipReason({
+        outcome_code,
+        trace_steps,
+        is_successful: rest.is_successful as boolean | null,
+        // THE RAW COLUMN, not the friendly label written into the payload above. A parcel-keyed
+        // row holds `APN|...` here and streetOf() reads that prefix to decide the row has no
+        // street; handing it "Parcel 0123-456, Travis County" would make it look like one, and
+        // a no_lookup_key row would then name the wrong missing field.
+        normalized_address: rest.normalized_address as string | null,
+        city: rest.city as string | null,
+        state: rest.state as string | null,
+        parcel_id_local,
+        county,
+        ai_research_status,
+        property_trace_status,
+        trace_job_id,
+      }),
     };
   });
   return { traces };
@@ -956,6 +1026,14 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // Which billing tier bought this row: 1 = per successful trace, 2 = per record submitted.
     // Null on a row written before migration 20260917 added the column.
     tier: row.tier ?? null,
+    // HOW the record ended and WHICH KEY found the owner. skip_reason below is the sentence;
+    // these two are the machine-readable pair behind it. found_by is the KEY ('address',
+    // 'parcel_id', 'company_name'), never the vendor, which stays internal on contact_vendor.
+    // Both null on a tier 2 row and on a row written before migration 20260922.
+    //
+    // ADDED TO BOTH TWINS IN ONE COMMIT, same line as the v1 bulk status twin.
+    found_by: row.found_by ?? null,
+    outcome_code: row.outcome_code ?? null,
     // Why a row came back with no contacts. Asked of BOTH queues through
     // rowSkipReason(): serving only the tier 1 accessor left every tier 2
     // terminal value speaking as a bare no_match, including the billed row whose
