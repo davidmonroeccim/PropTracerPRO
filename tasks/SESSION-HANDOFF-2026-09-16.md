@@ -1,5 +1,60 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-25 (later session, same day). **PHASE 2B IS IN EXECUTION. TASKS 1 TO 3 DONE, TASK 4 RUNNING.**
+>
+> **Branch `feat/tier1-phase2b-api-and-mcp-queue`, cut from main at `31ddcdd`, NOTHING PUSHED.** The two
+> docs commits on main are still unpushed too. Executing subagent-driven, one task at a time, with a
+> per-task review and a scoped re-review per fix round.
+>
+> **THE AUTHORITATIVE RECORD IS THE LEDGER**, `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md`
+> (gitignored). It holds 24 numbered rulings with what each costs if wrong, the pre-flight table, every
+> measured gate, and every mutation I ran myself. **This block is a summary; the ledger wins.**
+>
+> **COMMITS SO FAR:** `c6b61a3`, `f98ab91` (T1) -> `da9202c`, `3d0dc2c`, `72b30dd`, `9658a5e` (T2) ->
+> `f5e31f2` (T3). Gates at T3: vitest **2086 / 89 files / 0 failed**, tsc **0**, eslint **45** (the floor;
+> the 46 ceiling was never approached across seven commits), `next build` clean.
+>
+> **DAVID'S TWO DECISIONS, both named, both already wired into the remaining briefs:**
+> 1. **records_matched on v1 and MCP: option C.** Tasks 3 and 5 take the pending-gate fix ONLY and leave
+>    the flat `is_successful` count alone. The plan's three-arm `recordsMatchedFor` would have scored a
+>    matched Tracerfy-CSV row and a matched legacy entity row **0**, writing a permanently low
+>    `records_matched` for any job in flight across the deploy. T3 shipped exactly this; one prescribed
+>    test and one prescribed mutation were dropped as asserting the wrong thing.
+> 2. **bulk_job.completed from the crons: option A.** T2 shipped it, fired only by the compare-and-swap
+>    winner.
+>
+> **DAVID'S THIRD RULING, on the apn/county tool copy (T7 Step 1):** the descriptions must INSTRUCT, not
+> offer. *"The property is coming from the registry, either way, we should be choosing for them, not
+> letting them choose something they know absolutely nothing about."* Then he corrected my framing: PTP
+> having no registry access is the DESIGN, not a gap. The registry is reachable only through the API or
+> the Suite Gateway; a PTP-app trace never calls either and needs no parcel id; a suite or registry caller
+> reaches PTP through Claude and already holds `parcel_id_local` and `county`. **The exact strings still
+> need his named approval at T7 Step 1.** A Task 8 handoff item records that the gateway must always pass
+> the parcel and county rather than leaving it to a model.
+>
+> **THE PLAN'S OWN SAMPLE CODE CARRIED A CRITICAL, found by T1's review and fixed:**
+> `finalizeJobIfDrained` destructured only `data`, so a failed read became `rows = []`, `pending = 0`, and
+> the job was compare-and-swapped terminal with `records_matched: 0` returning `finalized: true` — the
+> one-shot token, so the crons would have fired `bulk_job.completed` at a customer with zero matches,
+> unrecoverably. The union now carries `read_failed` and `write_failed`, **neither `finalized: true`**.
+> **Every remaining brief carries a NEVER-SWALLOW-A-SUPABASE-ERROR amendment because of it.**
+>
+> **TWO THINGS T2 ALMOST SHIPPED SILENTLY, both caught by review:** the auto-rebill trigger disappeared
+> from the common path (a cron-finalized job is already `completed`, so `sweep-stale-traces:206`'s
+> `.eq('status','processing')` never sees it and `:451` never fires; the web route's own trigger was
+> already dead for these jobs because it gates on `attemptedTotal > 0`, incremented only in the CSV loop).
+> Restored and fenced. And the webhook David approved had **zero** tests in either cron suite; both suites
+> were only reaching its bail-out branch, with `console.error` muted so "pristine" output proved nothing.
+>
+> **STILL OPEN, and they are the only things that stop the phase:** T7 Step 1's two tool description
+> strings, and T8 Step 5's live-check dollar amount. Both are David's and both are unasked so far.
+>
+> **ALL EIGHT BRIEFS ARE STAGED** in the ledger directory with controller amendments appended, including
+> Task 5's Amendment 6 (widen `FinalizableRow.property_trace_status` and delete Task 3's wrapper rather
+> than copying it) and Task 8's money guardrails (the executor builds the runner and STOPS; the controller
+> runs the spend; refusal 0 is `PTP_LIVE_RUN=1`; the cap is strictly above the computed worst case).
+
+
 > # READ FIRST. STATE AS OF 2026-09-25. **PHASE 2A IS LIVE IN PRODUCTION. PHASE 2B IS PLANNED AND AWAITS DAVID'S GO.**
 >
 > **PHASE 2A: merged, pushed, deployed, verified.** Merge commit `2982627` (a single `--no-ff`
