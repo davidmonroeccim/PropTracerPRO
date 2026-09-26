@@ -4,6 +4,39 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-25: Phase 2B Task 8, BUILD HALF. Gates, the mutation table, the records and the runner. NOTHING SPENT.
+
+- **Gates, measured on `5abce8e`:** `npx vitest run` 2180 passed / 89 files / 0 failed;
+  `npx tsc --noEmit` exit 0; `npx eslint app lib components` 45 problems (ceiling 46, and it exits
+  non-zero at baseline, so it is judged by COUNT); `npx next build` compiles.
+- **The six greps.** 1, 3, 4 and 5 have zero live-code hits. Grep 6 (`isEntityTracePending`) still
+  prints the v1 and MCP status sites, which is correct: the legacy entity lane is alive until Phase 4.
+  Grep 2 (`isLikelyBusiness`) prints a live call in `lib/suite/mcp-tools.ts:267` inside
+  `isEntityRecord`, and the code is right: it no longer routes anything, both of its pricing branches
+  add the same tier 1 rate, and its only other use is the `persons`/`entities` counts in the payload.
+  The plan's own Self-Review row says the function survives to Phase 4, so the grep contradicts the
+  plan's table rather than the implementation. Nothing changed for it.
+- **The mutation table: 103 mutations across Tasks 1 to 7, 101 plain RED, every verdict measured.** Two
+  rows are not plain kills and both were already named and ruled: Task 6's M29 is an EQUIVALENT mutant
+  (RED at `tsc`, GREEN in the suite, because `traceKeyFor` already guards `city` with `?? ''`), and Task
+  6's M41 survived first and was then fenced (the ZIP under-quote). Three more honest-but-not-survivor
+  rows recorded so the table is not tidier than the measurement. **No open survivor.**
+- **The lane decided before any spend.** `origin/main` is already at the Phase 2A merge, so main knows
+  `tier1_*` and `vercel.json` runs both sweep crons every minute. 2A's accidental protection is already
+  gone. Decision: a BRANCH DEPLOY against the production database with production's two per-minute crons
+  PAUSED for the window, so branch code drains BOTH lanes. Pausing is a precondition.
+- **Nine records chosen from free, direct registry reads** across eight states and nine counties, none
+  used in Phase 0, the Phase 1 live check, the FastAppend probe or the 2A live check, no Indiana, no
+  Florida, no primary metro. C8 is two FRESH records rather than a re-send of C2 and C4, which would have
+  been dropped as duplicates.
+- **`tasks/research-scripts/phase2b/run-live.ts`.** `--plan` computes a worst case of **$2.80** from
+  `VENDOR_COST`, with the APN step included because these surfaces carry apn and county where the web
+  upload could not. All five refusals proven firing, R0 beating a $999 cap and a cap equal to $2.80
+  refused. `--live` was NEVER passed and `PTP_LIVE_RUN` was NEVER set; R0 and the cap guards were proven
+  on a neutered copy whose spend functions throw, then deleted.
+- **`tasks/phase2b-live-check.md` is a SKELETON.** The spend waits on David's dollar amount and the
+  controller runs it. Recommend authorising $5 and passing `--max-dollars 4`.
+
 ## 2026-09-24 (h): Tier 1 Phase 2B PLANNED. 8 tasks. Nothing built.
 
 - Plan committed: `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`.

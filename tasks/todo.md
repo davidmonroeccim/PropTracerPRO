@@ -61,16 +61,195 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
       Plan: `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`.
       8 tasks. Carried items 1-5 from the 2A plan, plus spec 6.3/D36 (align the bulk
       surfaces on the duplicate key), plus the job-completion fix David named first.
-  - [ ] Task 1: one derivation for job completion, with a guarded terminal write
-  - [ ] Task 2: finalize a job when its queue drains, from both crons
-  - [ ] Task 3: the v1 status route learns the Tier 1 queue
-  - [ ] Task 4: the v1 API bulk submit goes on the Tier 1 queue
-  - [ ] Task 5: MCP bulk_status learns the Tier 1 queue
-  - [ ] Task 6: skip_trace_bulk goes on the Tier 1 queue
-  - [ ] Task 7: found_by and outcome_code reach every per-record payload
+  - [x] Task 1: one derivation for job completion, with a guarded terminal write
+  - [x] Task 2: finalize a job when its queue drains, from both crons
+  - [x] Task 3: the v1 status route learns the Tier 1 queue
+  - [x] Task 4: the v1 API bulk submit goes on the Tier 1 queue
+  - [x] Task 5: MCP bulk_status learns the Tier 1 queue
+  - [x] Task 6: skip_trace_bulk goes on the Tier 1 queue
+  - [x] Task 7: found_by and outcome_code reach every per-record payload
   - [ ] Task 8: suite gates, then the live check
+        BUILD HALF DONE 2026-09-25 (gates, greps, mutation table, records, runner and its
+        refusals). The SPEND is not done: it waits on David's dollar amount and the
+        controller runs it. See the review section below.
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
+
+## Phase 2B Task 8 review, BUILD HALF: suite gates and the mutation table (2026-09-25)
+
+Branch `feat/tier1-phase2b-api-and-mcp-queue` at `5abce8e`. Nothing was spent. `--live` was never
+passed and `PTP_LIVE_RUN` was never set.
+
+### Gates, as measured
+
+| Gate | Measured | Bound |
+|---|---|---|
+| `npx vitest run` | **2180 passed / 89 files / 0 failed** | above the 2040 baseline, 0 failed |
+| `npx tsc --noEmit` | **exit 0**, no output | exit 0 |
+| `npx eslint app lib components` | **45 problems** (40 errors, 5 warnings), exit 1 | ceiling 46, hard cap 47. eslint exits non-zero at baseline; judged by COUNT |
+| `npx next build` | **compiles**, exit 0 | compiles |
+
+### The greps
+
+| # | Grep | Measured | Verdict |
+|---|---|---|---|
+| 1 | `submitBulkTrace` in the v1 bulk route and `mcp-tools.ts` | nothing | as expected |
+| 2 | `isLikelyBusiness` in those two files | v1 route: one COMMENT. `mcp-tools.ts`: the import and one live call at `:267` inside `isEntityRecord` | **the plan's "prints nothing" prediction is wrong for `mcp-tools.ts`, and the code is right.** See below |
+| 3 | `tier1: 0` across `app lib` | 24 lines, **every one in `__tests__`**; zero in live code | as expected once tests are excluded |
+| 4 | `invalidRecords` / `invalid_records` | 4 lines, all comments or test comments; zero in live code | as expected |
+| 5 | `normalizeAddress` in the v1 bulk route | one line, a COMMENT at `:355`; zero live calls | as expected |
+| 6 | `isEntityTracePending` | the v1 and MCP status sites, plus the single routes and the module itself | **correct and NOT "fixed"**: the legacy entity lane is alive until Phase 4 |
+
+**Grep 2 in full, because the plan and the code disagree and the code is right.** `isLikelyBusiness`
+survives in `mcp-tools.ts` only inside `isEntityRecord`, and `isEntityRecord` no longer ROUTES
+anything. The submit split at `mcp-tools.ts:350-351` and `:540` asks `isBlankOwnerRecord` alone, so
+tier 1 versus tier 2 never consults the classifier. Its two remaining uses are (a) `worstCaseCost`
+at `:309-311`, where the entity branch and the person branch both add the SAME `tier1Rate`, so the
+classification cannot change a price, and (b) the `persons`/`entities` counts echoed in the quote and
+submit payloads at `:381` and `:889`, which are reporting. The route comment at `:524-526` says
+exactly this. The plan's own Self-Review row agrees ("Spec 4.1: one classifier; `isLikelyBusiness` not
+used for routing -- Function survives to Phase 4"), so the grep as written contradicts the plan's own
+table, not the implementation. Not a defect, and nothing was changed for it.
+
+### The mutation table. 103 mutations across Tasks 1 to 7, every verdict MEASURED
+
+Sourced from each task report's measured result, never from the plan's prediction.
+
+| Task | Mutations | RED | Not a plain kill | Where |
+|---|---|---|---|---|
+| 1 | 8 | 8 | none | `task-1-report.md` master table (header says 7; the table lists 8 rows, the eighth being the Item-5 `user_id` scoping mutation) |
+| 2 | 8 | 8 | 2 documented partials, below | `task-2-report.md` main table plus three fix rounds |
+| 3 | 1 | 1 | 1 mutation DROPPED as non-existent, below | `task-3-report.md` |
+| 4 | 27 | 27 | none | `task-4-report.md` tables round 0 (1-12), round 1 (13-16), round 2 (17-27) |
+| 5 | 1 | 1 | none | `task-5-report.md` |
+| 6 | 43 | 42 | 1 equivalent (M29); 4 survived first and were then fenced (M24, M25, M26, M41) | `task-6-report.md` M1-M32, fix round 1 M33-M37, fix round 2 M38-M43 |
+| 7 | 15 | 14 | 1 deliberately GREEN, which is the defect proof, not a survivor | `task-7-report.md` two tables |
+| **Total** | **103** | **101** | **2 rows that are not plain kills, both already ruled** | |
+
+**The two rows that are not plain kills, both named and ruled before this task:**
+
+| Row | Verdict | Reason, measured |
+|---|---|---|
+| T6 **M29** — remove `skipTraceQuote`'s `city: record.city ?? ""` | **RED at `tsc`, GREEN in the suite. EQUIVALENT MUTANT, not a kill and not a coverage hole** | `removeBatchDuplicates` hashes with `traceKeyFor`, which already guards `city` with `?? ''` internally (`lib/utils/deduplication.ts:227`, `lib/utils/address-normalizer.ts:223`), so runtime behaviour is identical either way. The line reconciles the value with `AddressInput.city: string` and changes no behaviour, so no behavioural test can kill it. Reported as equivalent with its evidence rather than counted as a kill, and NOT "fixed" by manufacturing a test. |
+| T6 **M41** — pass the ZIP to `validateAddressInput` in the quote | **SURVIVED the first run, then FENCED and RED** | It is an UNDER-quote: a blank-owner record with a mangled ZIP reads as unlookupable in the quote while the submit, which deliberately passes no ZIP, queues and BILLS it. The caller would be told a record is free and then charged the tier 2 rate. Fenced by `still quotes a full property trace when only the ZIP is mangled`; re-run RED. |
+
+**Three more rows that are honest but not survivors, recorded so the table is not read as tidier than
+the measurement:**
+
+| Row | Verdict | Reason |
+|---|---|---|
+| T6 **M24, M25, M26** | survived the FIRST run, fences added by the same implementer, re-run **RED** | Only the Tier 1 bucket's `tracerfy_job_id: null` was fenced (by M15), so omitting it from the tier 2 or no-key buckets went unnoticed (M25, M26); M24's failed job-terminal write had no lever. All three closed in-task. |
+| T2 **mutation 1** | **RED**, 4 of 5 tests | The fifth (`ignores a row with no parent job`) stays green by design; its fence is the null-guard that mutation 3 exercises directly. Documented in the report, not hidden. |
+| T2 **mutation 3** | **RED** in `finalizeBulkJob`'s own suite, **GREEN** in both cron route suites | A named route-level blind spot: no route test asserts `jobsFinalized` or webhook firing for the "another row still queued" case. The fence lives in the shared module's tests, which is where the plan put it. Fenced somewhere, so not a survivor. |
+| T7 last row of table 2 | **GREEN on purpose, 139 passed** | The `trace_steps` leak with the PRE-round-2 three-key fence restored. It is the proof that the old guard was insufficient, not a survivor of the shipped code. |
+| T3 mutation (b) | **NOT RUN** | `recordsMatchedFor(rows, 0)` back to a flat count: there is no such line in Task 3's change, since `records_matched` was never touched. Dropped per that task's Amendment 2 rather than faked. |
+
+**No OPEN survivor. Nothing to fix before the live check.**
+
+### Step 1's lane decision (Amendment 4), decided before any spend
+
+**2A's accidental protection is ALREADY gone, not "gone once 2B merges".** `origin/main` is at
+`2982627`, "Merge Phase 2A: the Tier 1 queue, the cron, the shared rate budget and the web upload", and
+`git grep` on `origin/main` finds `tier1_queued`, `TIER1_QUEUED_STATUSES` and `tier1QueuedStatusFor`
+in `app/api/cron/sweep-entity-traces/route.ts`, `app/api/trace/bulk/route.ts` and
+`lib/trace/tier1Queue.ts`. Production's crons can see and drain `tier1_*` rows today, and `vercel.json`
+runs BOTH `sweep-entity-traces` and `sweep-property-traces` on `* * * * *` — every minute.
+
+So local-against-production is **not viable**: production would drain both lanes within 60 seconds on
+main's code, exactly the way it drained 2A's four tier 2 rows in 50 seconds. And main's
+`sweep-entity-traces` does **not** carry Task 1 and Task 2's `finalizeTouchedJobs` wiring, so a job
+drained by main would settle its rows and never write `trace_jobs.completed_at` — which would read as a
+failure of the one claim only this phase can prove.
+
+**Decision: a BRANCH DEPLOY of `feat/tier1-phase2b-api-and-mcp-queue` against the production database,
+with production's two per-minute crons PAUSED for the run window.** The runner takes
+`PTP_BASE_URL=<preview url>`, so the v1 submits and both cron drains hit BRANCH code. The MCP submit
+runs in-process from the branch checkout (`skipTraceBulk` directly), which is also branch code.
+
+**Which code drains which lane, for the record: branch code drains BOTH.** Tier 1 via the branch
+deploy's `sweep-entity-traces`, tier 2 via its `sweep-property-traces`, both invoked by the runner.
+
+**Pausing production's `sweep-entity-traces` and `sweep-property-traces` is a PRECONDITION the
+controller must confirm before submitting.** Without it the run cannot distinguish "the branch failed
+to finalize" from "main drained the rows", and the check proves nothing about job completion.
+
+### The nine records (C1 to C8), free registry reads only
+
+No owner names, streets or parcel ids here. Identifying detail is in the gitignored
+`tasks/research-test/phase2b/records.json`.
+
+| Id | Surface | Batch | Path | State | County | Type | What it could break |
+|---|---|---|---|---|---|---|---|
+| C1 | v1 API | v1-a | named record, full address | NY | Chautauqua | commercial | the enqueue replacing the CSV |
+| C2 | v1 API | v1-a | named record, NO city | NM | San Juan | residential | the whole-batch 400's removal |
+| C3 | v1 API | v1-a | named record, no city, with apn+county | MS | Warren | land | `traceKeyFor` vs the stored hash (D36) |
+| C4 | v1 API | v1-a | blank owner, unusable address | CO | Garfield | unclassified | the no-key bucket, free |
+| C5 | v1 API | v1-a | blank owner, good address | WI | Calumet | residential | tier 2 undisturbed |
+| C6 | MCP | mcp-a | named record, no city, with apn+county | CO | Mesa | multifamily | the gateway's actual blocker |
+| C7 | MCP | mcp-a | blank owner | WV | Cabell | residential | tier 2 via the gateway surface |
+| C8a | v1 API | v1-b | named record, NO city | VT | Rutland | commercial | per-record judging in one call |
+| C8b | v1 API | v1-b | blank owner, unusable address | TX | Bell | residential | per-record judging in one call |
+
+**C8 is TWO FRESH records, not a re-send of C2 and C4.** Re-sending either would collide with its own
+stored `address_hash` and be dropped as a duplicate, so the pairing would prove nothing. C8a is a
+C2-shaped record and C8b a C4-shaped one, both from counties nothing has touched, submitted in ONE v1
+call so per-record judging is isolated from the five-record batch.
+
+Picking rules, all the spec's: secondary and tertiary markets only, nine different counties in eight
+states, no Indiana, no Florida, no primary metro, and no county or parcel used in Phase 0 (17 pre-tested
+plus 8 sampled), the Phase 1 live check (5), the FastAppend probe (10) or the 2A live check (17). Types
+spread across commercial, residential, land, multifamily and unclassified. Registry reads went DIRECT
+to the registry Postgres (read-only session, `default_transaction_read_only = on`), never through the
+gateway, and `pg_stat_activity` was checked for other non-idle sessions before every scan because the
+registry is a 4GB box.
+
+### The runner, and the worst case it computed
+
+`tasks/research-scripts/phase2b/run-live.ts`, built on 2A's. `--plan` computes **$2.80** across the 9
+records, derived from `VENDOR_COST` in `lib/routing/ownerRoute` and never from a figure typed into the
+script: `DOSSIER 0.20`, `FASTAPPEND_ENTITY 0.10`, `TRACERFY_INSTANT 0.10`, `TRACERFY_PARCEL 0.10`.
+
+The ceiling is higher per record than 2A's because these surfaces DO carry apn and county, so
+`TRACERFY_PARCEL_APN` is reachable where the web upload could never reach it:
+
+    Tier 1:  (hasSitus ? TRACERFY_INSTANT : 0) + (hasApn ? TRACERFY_PARCEL : 0) + FASTAPPEND_ENTITY
+    Tier 2:  DOSSIER + owners * (that same per-owner ladder)
+
+The three step kinds are summed rather than maximised because the D3/D16 trust-and-unreadable ladder
+runs the person steps AND THEN FastAppend. `owners` is a declared BUDGET, not a bound: only one dossier
+key can hit so the dossier is bought once, but D21(c) with D40 then tries every owner the dossier names
+with no cap. Records expected to spend $0.00 are still budgeted at their full ladder, because a cap that
+assumes the code under test is correct is not a cap.
+
+**Recommend the owner authorise $5, and pass the runner `--max-dollars 4`.** The runner REFUSES a cap
+equal to $2.80.
+
+### The five refusals, every one proven firing
+
+Tested with `--live` ABSENT and with FAKE caps. `--live` was never passed to the real runner and
+`PTP_LIVE_RUN` was never set.
+
+| # | Refusal | How it was proven | Result |
+|---|---|---|---|
+| R1 | no records file | moved `records.json` aside, ran `--plan` | REFUSED, named the path it wants |
+| R2 | a duplicate record id | wrote a copy with C2's id set to C1's, ran `--plan` | `REFUSED: duplicate record id. Not run.` |
+| R3 | a path with no record | removed the `v1_named_no_city_apn` and `mcp_blank` records, ran `--plan` | REFUSED, naming both missing paths |
+| R4 | a tier 2 record declaring no owner count | dropped `owners` from C5, then set C7's `owners` to `"two"`, ran `--plan` each time | REFUSED both times, naming the record |
+| R0 | `--live` without `PTP_LIVE_RUN=1`, checked BEFORE the cap | on a NEUTERED COPY (see below), `--live` with no token, then `--live --max-dollars 999` | REFUSED both, exit 2. **R0 beat a $999 cap, which is the ordering proof** |
+
+Plus the cap guards, same neutered copy: no cap REFUSED; `--max-dollars 0` REFUSED; `abc` REFUSED;
+**`--max-dollars 2.80`, exactly equal to the worst case and the shape that spent real money on
+2026-09-23, REFUSED**; `1` REFUSED; and at `2.81` the copy reached its first credential read and threw
+`NEUTERED: SPEND PATH REACHED`, which proves every refusal sits in front of the spend path. Missing
+`--api-key` and missing `--gateway-sub` are refused too.
+
+**The neutered copy, and why R0 was proven that way.** R0 only fires when `--live` is passed, and this
+executor is forbidden to pass it. So a copy of the runner was made beside it with (a) the R0 token
+renamed to `PTP_NEUTERED_PROOF` so `PTP_LIVE_RUN` is never set anywhere, and (b) a
+`throw new Error('NEUTERED: SPEND PATH REACHED')` inserted as the first statement of `submitV1`,
+`submitMcp`, `drain`, `readback`, `loadEnvLocal` and `loadEnvIntoProcess`. Even a broken guard could
+not have spent a cent. The copy was deleted after the proofs; only `run-live.ts` remains in
+`tasks/research-scripts/phase2b/`.
 
 ## Phase 2A Task 9 review: suite gates and the mutation table (2026-09-24)
 
