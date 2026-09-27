@@ -67,10 +67,23 @@
  * a job drained by main would settle its rows and never write completed_at. That would read as a
  * failure of the one claim only this phase can prove.
  *
- * So: run against a BRANCH DEPLOY with PTP_BASE_URL set to its url, and PAUSE production's
- * sweep-entity-traces and sweep-property-traces crons for the window. BRANCH CODE THEN DRAINS BOTH
- * LANES. Pausing is a PRECONDITION, not a nicety: without it the run cannot tell "the branch failed to
- * finalize" from "main drained the rows".
+ * THE LANE AS ACTUALLY RUN, and it is NOT what the paragraph above proposed. David chose, 2026-09-27,
+ * to MERGE the branch to main and deploy it to production rather than pause anything, having told his
+ * users to hold off. Measured before the merge: every queue was EMPTY (zero rows in any tier1_queued*
+ * status, zero queued property traces, zero trace_jobs at 'processing'), so the deploy could touch
+ * nothing but this check's own records.
+ *
+ * That removes the race rather than dodging it: production's crons ARE this code now, so there is no
+ * main-versus-branch mismatch left to protect against and NO CRON NEEDS PAUSING. It also means this
+ * script must NOT drive the crons, for two reasons. First, .env.local's CRON_SECRET is a local-only
+ * value appended during 2A and does not authenticate against production (measured: HTTP 401), and
+ * reading production's is refused by the credential classifier. Second and better: production's own
+ * scheduler runs both crons every 60 s on this same commit, so letting it drain is a STRONGER proof
+ * than driving them by hand. Nobody drives the crons and nobody opens the status route.
+ *
+ * So: PTP_BASE_URL=https://proptracerpro.com, --live --no-drain, then wait for the queues to go quiet
+ * and run --readback. Latency comes from created_at -> completed_at in the database rather than from
+ * this script's own pass timings.
  *
  * DO NOT OPEN THE STATUS ROUTE. The one thing only this phase can prove is that the job reaches
  * `completed` with nobody polling it, so --readback queries trace_jobs and trace_history directly
@@ -548,8 +561,12 @@ async function main(): Promise<void> {
     process.exit(2)
   }
 
+  // --no-drain: do not drive the crons at all. Used when BASE is the PRODUCTION deployment, whose
+  // own Vercel scheduler already runs both crons every 60 s on the same code. See the lane note in
+  // the header. CRON_SECRET is only required when this script drives the crons itself.
+  const noDrain = process.argv.includes('--no-drain')
   const env = await loadEnvIntoProcess()
-  if (!env.CRON_SECRET) throw new Error('No CRON_SECRET in .env.local. Not run.')
+  if (!noDrain && !env.CRON_SECRET) throw new Error('No CRON_SECRET in .env.local. Not run.')
 
   console.log(`Worst case $${total.toFixed(2)}, under $${maxDollars.toFixed(2)} approved. Submitting.`)
   const submitted: SubmittedJob[] = []
@@ -566,6 +583,16 @@ async function main(): Promise<void> {
     writeFileSync(JOBS, JSON.stringify(submitted, null, 2))
   }
   console.log(`Wrote ${submitted.length} job id(s) to ${JOBS}.`)
+  if (noDrain) {
+    console.log(
+      'NOT driving the crons (--no-drain). Production runs sweep-entity-traces and ' +
+        'sweep-property-traces every 60 s on this same deployed commit, so its own scheduler drains ' +
+        'both lanes. Nobody drives the crons and nobody opens the status route, which is the ' +
+        'strongest available form of the one claim this phase can make. Wait for the queues to go ' +
+        'quiet, then run --readback.'
+    )
+    return
+  }
   await drain(env.CRON_SECRET)
 }
 
