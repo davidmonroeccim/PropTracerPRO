@@ -96,7 +96,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { VENDOR_COST } from '../../../lib/routing/ownerRoute'
-import { TRACE_HISTORY_WIDTH, traceKeyFor } from '../../../lib/utils/address-normalizer'
+import { TRACE_HISTORY_WIDTH, createAddressHash, traceKeyFor } from '../../../lib/utils/address-normalizer'
 
 type LivePath =
   | 'v1_named_full_address'
@@ -483,15 +483,26 @@ async function readback(records: LiveRecord[]): Promise<void> {
     for (const rid of job.recordIds) {
       const rec = records.find((r) => r.id === rid)
       if (!rec) continue
-      const expected = traceKeyFor({
+      // traceKeyFor returns the PLAINTEXT normalised key; the column stores
+      // createAddressHash(key), a sha256 hex digest. Comparing the key to the digest can never
+      // match, so the original form of this check reported "HAS NO stored row" for every record
+      // on a system where D36 actually holds. Measured 2026-09-27: 8 of 8 false negatives.
+      // Nothing caught it because tsconfig.json excludes tasks/research-scripts, so `tsc --noEmit`
+      // never typechecked this file and both values are `string`.
+      const expectedKey = traceKeyFor({
         address: rec.row.address || '',
         city: rec.row.city || '',
         state: rec.row.state || '',
         apn: rec.row.apn,
         county: rec.row.county,
       })
+      const expected = createAddressHash(expectedKey)
       const match = (rows ?? []).some((r) => r.address_hash === expected)
-      console.log(`  D36 ${rid}: traceKeyFor(input) ${match ? 'MATCHES a stored address_hash' : 'HAS NO stored row'}`)
+      console.log(
+        `  D36 ${rid}: createAddressHash(traceKeyFor(input)) ` +
+          `${match ? 'MATCHES a stored address_hash' : 'HAS NO stored row'}` +
+          (match ? '' : ` [expected ${expected.slice(0, 12)}..., key shape ${expectedKey.startsWith('APN|') ? 'APN' : 'address'}]`)
+      )
     }
   }
 
@@ -549,7 +560,21 @@ async function main(): Promise<void> {
     process.exit(2)
   }
 
-  const batches = batchesOf(records)
+  // --only <batch>: submit ONE batch. Applied AFTER loadRecords(), so refusals 1 to 4 still
+  // validate the whole records file, and the cap is still checked against the FULL $2.80 worst
+  // case above rather than the filtered subset, so filtering can only ever spend less than the
+  // approved figure and never loosens the guard. Exists because the run is resumable: batch v1-a
+  // submitted, then the MCP batch failed on a Next request-scope dependency, and re-running the
+  // whole runner would submit v1-a a second time, whose records would all be dropped as
+  // duplicates against their own stored address_hash and would pollute the evidence with a
+  // second job row.
+  const only = arg('only')
+  const allBatches = batchesOf(records)
+  if (only && !allBatches.some((b) => b.batch === only)) {
+    console.error(`REFUSED: --only ${only} matches no batch. Not run.`)
+    process.exit(2)
+  }
+  const batches = only ? allBatches.filter((b) => b.batch === only) : allBatches
   const apiKey = arg('api-key') || process.env.PTP_API_KEY
   const gatewaySub = arg('gateway-sub') || process.env.PTP_GATEWAY_SUB
   if (batches.some((b) => b.surface === 'v1') && !apiKey) {
@@ -579,8 +604,16 @@ async function main(): Promise<void> {
   } finally {
     // Written even on a partial failure: a job id that exists and is not recorded is unreadable
     // evidence and an un-drained queue.
+    //
+    // MERGED, never overwritten. A --only run must not erase a job id an earlier run recorded, or
+    // the spend that produced it becomes unreadable. Same batch submitted again replaces its entry;
+    // every other batch is kept.
     mkdirSync(OUT_DIR, { recursive: true })
-    writeFileSync(JOBS, JSON.stringify(submitted, null, 2))
+    const prior: SubmittedJob[] = existsSync(JOBS)
+      ? (JSON.parse(readFileSync(JOBS, 'utf8')) as SubmittedJob[])
+      : []
+    const merged = [...prior.filter((p) => !submitted.some((s) => s.batch === p.batch)), ...submitted]
+    writeFileSync(JOBS, JSON.stringify(merged, null, 2))
   }
   console.log(`Wrote ${submitted.length} job id(s) to ${JOBS}.`)
   if (noDrain) {
