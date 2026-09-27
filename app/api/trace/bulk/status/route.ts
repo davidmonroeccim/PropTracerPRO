@@ -9,7 +9,7 @@ import { chargePerTrace } from '@/lib/suite/pricing';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { rowSkipReason, type SkipReasonRow } from '@/lib/trace/rowSkipReason';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
-import { isTier1QueuePending, isTier1QueueRow } from '@/lib/trace/tier1Queue';
+import { isRowStillWorking, recordsMatchedFor, totalChargeFor } from '@/lib/trace/finalizeBulkJob';
 import type { TraceJob, TraceResult, TracerfyResult } from '@/types';
 
 /**
@@ -29,25 +29,22 @@ type SkipRow = SkipReasonRow;
  * whether a row still owes work: a queued row's `status` is 'processing' at
  * submit but the cron writes a delivery status the moment the dossier answers,
  * and the row is not finished then.
+ *
+ * BOTH QUEUE COLUMNS ARE REQUIRED HERE, narrower than SkipRow's optional declaration, because
+ * every select building a JobRow explicitly lists both columns -- no behaviour change, they were
+ * always selected. This is now narrower than lib/trace/finalizeBulkJob's FinalizableRow (which
+ * isRowStillWorking, recordsMatchedFor and totalChargeFor all take) as well: FinalizableRow still
+ * requires ai_research_status, but Task 5 widened property_trace_status to optional there so the
+ * shared predicate could be called point-free instead of through a per-row object literal at each
+ * call site. JobRow keeps both required regardless, since a required field is always assignable
+ * to an optional one.
  */
 type JobRow = SkipRow & {
   charge: number | null;
   is_successful: boolean | null;
-  property_trace_status?: string | null;
+  property_trace_status: string | null;
+  ai_research_status: string | null;
 };
-
-/**
- * Does this row still owe a cron some work?
- *
- * TWO QUEUES, ONE QUESTION. `property_trace_status` is the tier 2 queue and `ai_research_status`
- * now also carries the TIER 1 queue for rows the web upload wrote (spec 3.2). A row is on exactly
- * one of them: every submit path writes null into the other, for the reason
- * app/api/trace/bulk/route.ts spells out at length. Asking about one column and not the other is
- * how a job gets finalized over live, billable work, and the early return at the top of this
- * handler then makes that permanent.
- */
-const stillWorking = (row: JobRow): boolean =>
-  isPropertyTracePending(row.property_trace_status) || isTier1QueuePending(row.ai_research_status);
 
 /**
  * How many rows of this job came back with no contacts for a reason worth
@@ -176,15 +173,13 @@ export async function GET(request: Request) {
 
       const rows = (doneRows || []) as JobRow[];
 
-      const doneTotal = rows.reduce((sum, r) => sum + (r.charge || 0), 0);
-
       return NextResponse.json({
         success: true,
         status: traceJob.status,
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
         records_matched: traceJob.records_matched,
-        total_charge: Number(doneTotal.toFixed(4)),
+        total_charge: totalChargeFor(rows),
         // This is the branch every poll after the first one hits, and the one a
         // user who reloads the page lands on, so it has to carry the skip
         // summary too.
@@ -210,26 +205,15 @@ export async function GET(request: Request) {
     };
 
     /**
-     * Write the job terminal and report it.
-     *
-     * total_charge SUMS THE STORED PER-ROW CHARGES rather than what this poll
-     * happened to collect, which is the only number that can include the tier 2
-     * charges sweep-property-traces booked. It is also what the already-completed
-     * branch at the top of this handler reports, so both branches now answer the
-     * same question with the same arithmetic.
+     * The ONE terminal write this route performs, called from both places that finalize a job
+     * below. Still NOT lib/trace/finalizeBulkJob's CAS: this route already holds `rows` in memory
+     * from readJobRows() (or its own Tracerfy-poll loop) and must not re-read, which is exactly
+     * why this task does not switch it to finalizeJobIfDrained. What this route shares with that
+     * module is the ARITHMETIC (recordsMatchedFor / totalChargeFor); the write itself only needed
+     * to stop being copied twice in this file.
      */
-    const finalize = async (rows: JobRow[], tier1Matched: number) => {
-      // THREE DISJOINT ARMS, and the disjointness is what stops a row counting twice.
-      //   tier1Matched          the legacy Tracerfy CSV half, counted from the vendor's own
-      //                         results by the loop below. Those rows carry NEITHER queue column.
-      //   property_trace_status the tier 2 queue.
-      //   ai_research_status    the TIER 1 queue (spec 3.2). Without this arm every Tier 1 bulk
-      //                         match read as 0 matched, on the job summary and in the webhook.
-      const recordsMatched =
-        tier1Matched +
-        rows.filter((r) => r.property_trace_status && r.is_successful).length +
-        rows.filter((r) => isTier1QueueRow(r.ai_research_status) && r.is_successful).length;
-      await adminClient
+    const writeJobCompleted = (recordsMatched: number) =>
+      adminClient
         .from('trace_jobs')
         .update({
           status: 'completed',
@@ -237,13 +221,6 @@ export async function GET(request: Request) {
           completed_at: new Date().toISOString(),
         })
         .eq('id', traceJob.id);
-      return {
-        recordsMatched,
-        totalCharge: Number(
-          rows.reduce((sum, r) => sum + (r.charge || 0), 0).toFixed(4)
-        ),
-      };
-    };
 
     // A JOB WITH NO TRACERFY JOB ID IS THE NORMAL SHAPE OF A WEB JOB NOW. Before Phase 2A it meant
     // either an empty submit or an all-tier-2 job; since the web upload enqueues its Tier 1 rows
@@ -251,7 +228,7 @@ export async function GET(request: Request) {
     // this handler finalizing such a job seconds after submit.
     if (!traceJob.tracerfy_job_id) {
       const rows = await readJobRows();
-      const pending = rows.filter(stillWorking).length;
+      const pending = rows.filter(isRowStillWorking).length;
       if (pending > 0) {
         return NextResponse.json({
           success: true,
@@ -266,7 +243,9 @@ export async function GET(request: Request) {
           ).length,
         });
       }
-      const { recordsMatched, totalCharge } = await finalize(rows, 0);
+      const recordsMatched = recordsMatchedFor(rows, 0);
+      const totalCharge = totalChargeFor(rows);
+      await writeJobCompleted(recordsMatched);
       return NextResponse.json({
         success: true,
         status: 'completed',
@@ -317,7 +296,7 @@ export async function GET(request: Request) {
       // carry a tracerfy_job_id and Tier 1 queue rows at the same time, because the surface that
       // enqueues Tier 1 no longer submits a CSV. It is here so 2B cannot make it reachable
       // without anyone noticing.
-      const stillQueued = stallRows.filter(stillWorking).length;
+      const stillQueued = stallRows.filter(isRowStillWorking).length;
 
       if (stillQueued === 0) {
         await adminClient
@@ -390,7 +369,7 @@ export async function GET(request: Request) {
     const results = statusResult.results;
     let recordsMatched = 0;
     // Money THIS POLL collected, and only that. It is no longer what gets
-    // reported: finalize() below replaces it with the sum of the stored per-row
+    // reported: totalChargeFor() below replaces it with the sum of the stored per-row
     // charges before either the response body or the bulk_job.completed webhook
     // reads it.
     //
@@ -575,13 +554,13 @@ export async function GET(request: Request) {
     // sweep-stale-traces would later settle against another property's
     // contacts. Only the JOB-level completion waits.
     const jobRows = await readJobRows();
-    if (jobRows.some(stillWorking)) {
+    if (jobRows.some(isRowStillWorking)) {
       return NextResponse.json({
         success: true,
         status: 'processing',
         job_id: traceJob.id,
         records_submitted: traceJob.records_submitted,
-        records_pending: jobRows.filter(stillWorking).length,
+        records_pending: jobRows.filter(isRowStillWorking).length,
         records_pending_property_trace: jobRows.filter((r) =>
           isPropertyTracePending(r.property_trace_status)
         ).length,
@@ -589,9 +568,9 @@ export async function GET(request: Request) {
       });
     }
 
-    const finalized = await finalize(jobRows, recordsMatched);
-    recordsMatched = finalized.recordsMatched;
-    totalCharge = finalized.totalCharge;
+    recordsMatched = recordsMatchedFor(jobRows, recordsMatched);
+    totalCharge = totalChargeFor(jobRows);
+    await writeJobCompleted(recordsMatched);
 
     const skips = summarizeSkips(jobRows);
 

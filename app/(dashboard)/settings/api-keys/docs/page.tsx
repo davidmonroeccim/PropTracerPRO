@@ -455,14 +455,14 @@ export default function ApiDocsPage() {
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-blue-800 text-sm">
-                <strong>Required fields:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code>, <code className="bg-blue-100 px-1 rounded">state</code>. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional. A row without one still runs, as a full property trace on a different billing model, which the note below covers.
+                <strong>What to send:</strong> <code className="bg-blue-100 px-1 rounded">address</code>, <code className="bg-blue-100 px-1 rounded">city</code> and <code className="bg-blue-100 px-1 rounded">state</code> for every row you can, with <code className="bg-blue-100 px-1 rounded">state</code> as the two-letter code. Nothing is rejected at the door any more: records are judged one at a time, a state we cannot read is treated as no state, and a row nobody can be asked about at all is left untraced and costs nothing. Optional: <code className="bg-blue-100 px-1 rounded">zip</code>, <code className="bg-blue-100 px-1 rounded">mailing_address</code>. <code className="bg-blue-100 px-1 rounded">owner_name</code> is optional too, and a row without one still runs as a full property trace on a different billing model, which the note below covers.
               </p>
             </div>
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
               <p className="text-amber-900 text-sm font-semibold mb-1">Rows with no owner name run a full property trace, and they are billed</p>
               <p className="text-amber-800 text-sm">
-                They used to be skipped and free. They are not any more. We look up the county property record to find the owner, then go after their contacts, so you do not need to supply the owner yourself. That work is charged for every record you send rather than only when we find contacts, so those rows cost the same whether or not anything comes back. The submit response counts them in <code className="bg-amber-100 px-1 rounded">recordsQueued</code>, which replaced <code className="bg-amber-100 px-1 rounded">recordsSkipped</code> and <code className="bg-amber-100 px-1 rounded">skippedReason</code>. Those two keys are gone rather than zeroed, because this endpoint no longer skips anything: a whole batch is rejected up front if any record is missing the street, city or state.
+                They used to be skipped and free. They are not any more. We look up the county property record to find the owner, then go after their contacts, so you do not need to supply the owner yourself. That work is charged for every record you send rather than only when we find contacts, so those rows cost the same whether or not anything comes back. The submit response counts them in <code className="bg-amber-100 px-1 rounded">recordsQueued</code>. A row that arrives with no owner name and no address we can use is different: nobody can be asked about it, so it is left untraced and costs nothing. <code className="bg-amber-100 px-1 rounded">recordsSkipped</code> counts those and <code className="bg-amber-100 px-1 rounded">skippedReason</code> says why. Records are judged one at a time, so one unusable row no longer stops the rest of the batch.
               </p>
             </div>
 
@@ -480,9 +480,10 @@ export default function ApiDocsPage() {
   "totalRecords": 100,
   "duplicatesRemoved": 5,
   "recordsToProcess": 95,
-  "recordsDirectTrace": 80,
-  "recordsPendingResearch": 12,
+  "recordsDirectTrace": 0,
+  "recordsPendingResearch": 92,
   "recordsQueued": 3,
+  "recordsSkipped": 0,
   "recordsFailed": 0,
   "estimatedCost": 13.80,
   "status": "processing",
@@ -492,7 +493,7 @@ export default function ApiDocsPage() {
             />
 
             <p className="text-gray-600 text-sm">
-              <code className="bg-gray-100 px-1 rounded">recordsDirectTrace</code> is the rows whose owner looks like a person, sent straight to the person skip trace. <code className="bg-gray-100 px-1 rounded">recordsPendingResearch</code> is the rows whose owner looks like a company, queued for a background business trace that finds the human behind it. That field keeps its old name so existing integrations do not break. <code className="bg-gray-100 px-1 rounded">recordsSkipped</code> is the rows that arrived with no owner name.
+              <code className="bg-gray-100 px-1 rounded">recordsPendingResearch</code> is every row that arrived with an owner name. They all go on one queue now, and whether the owner is a person, a company or a trust is worked out when we run the trace rather than at submit, so one number covers all three. The field keeps its old name so existing integrations do not break, and <code className="bg-gray-100 px-1 rounded">recordsDirectTrace</code> stays in the response at 0 for the same reason. <code className="bg-gray-100 px-1 rounded">recordsQueued</code> is the rows that arrived with no owner name and are running a full property trace. <code className="bg-gray-100 px-1 rounded">recordsSkipped</code> is the rows nobody could be asked about at all.
             </p>
 
             <p className="text-gray-600 text-sm">

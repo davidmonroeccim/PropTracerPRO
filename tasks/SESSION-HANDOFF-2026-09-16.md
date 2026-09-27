@@ -1,5 +1,200 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-27. **PHASE 2B: ALL SEVEN BUILD TASKS DONE AND REVIEWED. TASK 8's BUILD HALF DONE. THE LIVE CHECK HAS NOT RUN. NOTHING SPENT, NOTHING PUSHED.**
+>
+> **Branch `feat/tier1-phase2b-api-and-mcp-queue` at `7ce2b6e`, 23 commits, cut from main at `31ddcdd`.**
+> Clean tree apart from the deliberately-untracked `tasks/research-scripts/phase0/select_samples.py`. The
+> two docs commits on main were already unpushed before this phase began.
+>
+> **THE LEDGER IS AUTHORITATIVE OVER THIS BLOCK:**
+> `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md` (gitignored). **34
+> numbered rulings**, each with what it costs if wrong, plus the pre-flight table, every measured gate and
+> every mutation the controller ran itself. Per-task reports sit beside it as `task-N-report.md`, and every
+> task brief as `task-N-brief.md` with its controller amendments appended.
+>
+> **GATES, measured by the controller at `7ce2b6e`:** vitest **2180 passed / 89 files / 0 failed**, tsc
+> **exit 0**, eslint **45 problems** (the floor; the 46 ceiling was never approached in 23 commits),
+> `next build` clean. eslint still exits non-zero; judge by the COUNT.
+>
+> **WHAT REMAINS, in order:** pause the two queue crons, run the live check (controller runs the spend),
+> read nine records back, write `tasks/phase2b-live-check.md`, tick `tasks/todo.md` and update `History.md`,
+> then the final whole-branch review, then `superpowers:finishing-a-development-branch`.
+>
+> **THE LIVE CHECK IS SET UP AND AUTHORISED BUT NOT RUN.** Runner at
+> `tasks/research-scripts/phase2b/run-live.ts`. Worst case **$2.80 across NINE records** (nine not eight:
+> C8 needs two FRESH records because re-sending C2 and C4 would be dropped as duplicates on their own stored
+> `address_hash`). **David authorised $5 and the controller passes `--max-dollars 4`.** The runner refuses a
+> cap equal to the worst case, and refusal 0 means `--live` does nothing without `PTP_LIVE_RUN=1` in the
+> environment. All five refusals were proven WITHOUT spending, on a neutered copy with the token renamed and
+> throws inserted. **The executor never passes `--live`; the CONTROLLER runs the spend** (L-031).
+>
+> **THE ONE THING BLOCKING THE RUN, and it is a mechanism question, not a decision.** David chose to pause
+> production's `sweep-entity-traces` and `sweep-property-traces` for the run rather than use a preview
+> deploy. But the crons are declared in `vercel.json` **in the repo**, so pausing them is either a dashboard
+> toggle (his, seconds, no deploy) or an edit-and-deploy off main (heavier, leaves a temporary commit in
+> main's history, and leaves the crons off if anything fails between the two deploys). **Ask him which
+> before touching anything.** The pause is a precondition: main already knows `tier1_*` since the 2A merge,
+> so 2A's accidental protection is gone and main's code, which lacks Task 1 and 2's finalize wiring, would
+> drain both lanes in under 60 seconds. Real customer jobs queue while the crons are off, so keep the window
+> short and confirm both are re-enabled before writing the report.
+>
+> **TWELVE DAVID DECISIONS THIS PHASE, all already implemented.** (a) `records_matched` on v1 + MCP: option
+> C, gate fix only, flat count kept. (b) `bulk_job.completed` fires from the crons. (c) apn/county copy
+> INSTRUCTS, does not offer, and PTP having no registry access is the DESIGN. (d) `recordsSkipped` /
+> `skippedReason` back on the v1 submit. (e) Three docs-page copy pairs approved verbatim; the stale
+> `estimatedCost: 13.80` deliberately left. (f) The "1 records" plural fixed in BOTH routes. (g) The MCP
+> no-key count named **`no_lookup_key`**, not `records_skipped`. (h) All four tool descriptions approved
+> verbatim, including `list_traces`, which deliberately does NOT restate per-code money consequences.
+> (i) Pause the crons. (j) $5 authorised, $4 cap.
+>
+> **THREE DEFECTS THE PLAN ITSELF CAUSED OR MISSED, all fixed:** its sample code swallowed Supabase errors
+> (a failed read became "job finished, zero matched", CAS'd permanently, firing the one-shot webhook at a
+> customer); `"Texas"` killed a 500-record batch because `trace_history.state` is VARCHAR(2) and a named
+> record is never validated; and the auto-rebill trigger vanished from the common path when the crons started
+> finalizing. **Task 6 would have recreated the second** — its only protection was the whole-batch 400 it
+> deleted.
+>
+> **WHY NO GATE CAN CATCH A WIDTH PROBLEM:** `lib/supabase/admin.ts:16` builds the client with **no
+> `Database` generic**, so `tsc` checks neither column names nor widths, and the test doubles carry none.
+> Column constraints are fenced by migrations, by the new `TRACE_HISTORY_WIDTH` pin, and by a live check.
+>
+> **FOUR FREE READS THE LIVE CHECK MUST DO** (ledger Rulings 30 and 32, Task 8 brief Amendments 9 and 10):
+> the four real column widths from production compared to `TRACE_HISTORY_WIDTH`; and a count of rows with
+> `trace_job_id` set, `outcome_code` non-null and no `tier1_` value, which sizes the legacy population
+> Ruling 32's gating closed. Both belong in the report.
+>
+> **THE GATEWAY HANDOFF MUST STATE THREE THINGS** (Task 8 brief Amendment 8): key must be present even when
+> its value is empty, so an omitted `address` key is still refused as a ZodError while `address: ''` is
+> accepted; **a parcel-keyed record must carry an `owner_name` or it is filed free and never traced**,
+> because the usability question has no parcel term; and the gateway must always pass `parcel_id_local` and
+> `county` from the registry rather than leaving it to a model. Do NOT claim the end-to-end path works —
+> no task in this phase tested it, and the gateway repo was never touched.
+>
+> **PARKED FOR THE FINAL WHOLE-BRANCH REVIEW:** the MCP `bulk_status` finalize is a bare update with no
+> error check, so a failed terminal write leaves the gateway polling forever (the plan deliberately left the
+> equivalent on the v1 route too); a pre-existing swallowed error on the v1 webhook-URL update; two stale
+> counts in `rowSkipReason.ts` (`:17`, `:54-57`); a blank-owner record with an over-long city landing free
+> rather than billed, with no single test pinning that combination; and `grep isLikelyBusiness` still prints
+> a live call at `lib/suite/mcp-tools.ts:267` inside `isEntityRecord`, which routes nothing and only feeds
+> payload counts — **the plan's grep table was over-broad, not the code**.
+
+
+> # READ FIRST. STATE AS OF 2026-09-25 (latest). **PHASE 2B: TASKS 1 TO 6 COMPLETE. TASK 7 RUNNING. NOTHING PUSHED.**
+>
+> **Branch `feat/tier1-phase2b-api-and-mcp-queue`, cut from main at `31ddcdd`.** Executing subagent-driven:
+> a per-task review, a scoped re-review per fix round, and every gate number and several mutations
+> re-measured by the controller rather than relayed.
+>
+> **THE LEDGER IS AUTHORITATIVE OVER THIS BLOCK:**
+> `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md` (gitignored). It holds
+> **30 numbered rulings**, each with what it costs if wrong, the pre-flight table, every measured gate, and
+> every mutation run.
+>
+> **COMMITS:** T1 `c6b61a3` `f98ab91` | T2 `da9202c` `3d0dc2c` `72b30dd` `9658a5e` | docs `d26b689` |
+> T3 `f5e31f2` | T4 `4077f8d` `adf7a5f` `c9a8db1` | T5 `e4939fa` `c030263` |
+> T6 `64a3853` `f703d37` `9f01f31` `1233c7a` `6b46518`.
+> **Gates at T6: vitest 2164 / 89 files / 0 failed, tsc 0, eslint 45 (the floor; the 46 ceiling was never
+> approached across 18 commits), `next build` clean.**
+>
+> **STILL OPEN AND BLOCKING NOTHING ELSE: the only two things left that need David.**
+> 1. **T7 Step 1: THREE tool description strings**, not two. The plan named `skip_trace_bulk` (`:91`) and
+>    `bulk_status` (`:97`); Task 6 found `skip_trace_quote` is stale too and it is in NO task's file list.
+>    All three go to him in one approval round.
+> 2. **T8 Step 5: the live-check dollar amount.**
+>
+> **DAVID'S SEVEN DECISIONS THIS SESSION, all wired into the briefs:**
+> (a) `records_matched` on v1 + MCP: **option C**, gate fix only, flat count kept. The plan's three-arm
+> count would have scored a matched Tracerfy-CSV row and a matched legacy row **0**.
+> (b) `bulk_job.completed` fires **from the crons** (option A).
+> (c) apn/county tool copy **INSTRUCTS, does not offer** — and PTP having no registry access is the
+> **design**: a PTP-app trace never calls the suite; a suite/registry caller reaches PTP through Claude and
+> already holds the parcel.
+> (d) `recordsSkipped`/`skippedReason` **back** on the v1 submit response.
+> (e) Three docs-page copy pairs **approved verbatim**; the stale `estimatedCost: 13.80` **deliberately
+> left**.
+> (f) The "1 records" plural bug fixed in **both** routes so they stay byte-identical.
+> (g) The MCP no-key count is named **`no_lookup_key`**, NOT `records_skipped`, because this surface retired
+> a `skipped` key for claiming such rows were free.
+>
+> **THE THREE DEFECTS THIS PHASE FOUND THAT THE PLAN ITSELF CAUSED OR MISSED:**
+> 1. **The plan's own sample code swallowed Supabase errors** — a failed read became "job finished, zero
+>    matched", CAS'd permanently, firing the one-shot webhook at a customer. Every brief now carries a
+>    never-swallow amendment.
+> 2. **`"Texas"` killed a 500-record batch** (`trace_history.state` is VARCHAR(2), and a record with an
+>    owner name is never validated). Fixed with `storableValue`, clamped BEFORE the key is derived or D36
+>    breaks. **Task 6 would have recreated it** — its protection was the whole-batch 400 it deleted.
+> 3. **The auto-rebill trigger vanished from the common path** when the crons started finalizing.
+>
+> **WHY NO GATE CAN CATCH A WIDTH PROBLEM, and it is worth remembering beyond this phase:**
+> `lib/supabase/admin.ts:16` builds the client with **no `Database` generic**, so `tsc` checks neither column
+> names nor widths, and the test doubles carry none. Column constraints are fenced by migrations and a live
+> check, and by nothing else.
+>
+> **CARRIED TO TASK 8'S HANDOFF (in its brief as Amendments 8 and 9):** key-must-be-present-value-may-be-
+> empty (omitted `address` still refused); **a parcel-keyed record must carry an `owner_name` or it is filed
+> free and never traced**; and the live check must read the four real column widths from production, because
+> the new width test pins the CHECKED-IN DDL, not the live database.
+>
+> **PARKED FOR THE FINAL WHOLE-BRANCH REVIEW:** the MCP `bulk_status` finalize is a bare update with no
+> error check (a failed write leaves the gateway polling forever); a pre-existing swallowed error on the v1
+> webhook-URL update; one invariant now documented in four places.
+
+
+> # READ FIRST. STATE AS OF 2026-09-25 (later session, same day). **PHASE 2B IS IN EXECUTION. TASKS 1 TO 3 DONE, TASK 4 RUNNING.**
+>
+> **Branch `feat/tier1-phase2b-api-and-mcp-queue`, cut from main at `31ddcdd`, NOTHING PUSHED.** The two
+> docs commits on main are still unpushed too. Executing subagent-driven, one task at a time, with a
+> per-task review and a scoped re-review per fix round.
+>
+> **THE AUTHORITATIVE RECORD IS THE LEDGER**, `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md`
+> (gitignored). It holds 24 numbered rulings with what each costs if wrong, the pre-flight table, every
+> measured gate, and every mutation I ran myself. **This block is a summary; the ledger wins.**
+>
+> **COMMITS SO FAR:** `c6b61a3`, `f98ab91` (T1) -> `da9202c`, `3d0dc2c`, `72b30dd`, `9658a5e` (T2) ->
+> `f5e31f2` (T3). Gates at T3: vitest **2086 / 89 files / 0 failed**, tsc **0**, eslint **45** (the floor;
+> the 46 ceiling was never approached across seven commits), `next build` clean.
+>
+> **DAVID'S TWO DECISIONS, both named, both already wired into the remaining briefs:**
+> 1. **records_matched on v1 and MCP: option C.** Tasks 3 and 5 take the pending-gate fix ONLY and leave
+>    the flat `is_successful` count alone. The plan's three-arm `recordsMatchedFor` would have scored a
+>    matched Tracerfy-CSV row and a matched legacy entity row **0**, writing a permanently low
+>    `records_matched` for any job in flight across the deploy. T3 shipped exactly this; one prescribed
+>    test and one prescribed mutation were dropped as asserting the wrong thing.
+> 2. **bulk_job.completed from the crons: option A.** T2 shipped it, fired only by the compare-and-swap
+>    winner.
+>
+> **DAVID'S THIRD RULING, on the apn/county tool copy (T7 Step 1):** the descriptions must INSTRUCT, not
+> offer. *"The property is coming from the registry, either way, we should be choosing for them, not
+> letting them choose something they know absolutely nothing about."* Then he corrected my framing: PTP
+> having no registry access is the DESIGN, not a gap. The registry is reachable only through the API or
+> the Suite Gateway; a PTP-app trace never calls either and needs no parcel id; a suite or registry caller
+> reaches PTP through Claude and already holds `parcel_id_local` and `county`. **The exact strings still
+> need his named approval at T7 Step 1.** A Task 8 handoff item records that the gateway must always pass
+> the parcel and county rather than leaving it to a model.
+>
+> **THE PLAN'S OWN SAMPLE CODE CARRIED A CRITICAL, found by T1's review and fixed:**
+> `finalizeJobIfDrained` destructured only `data`, so a failed read became `rows = []`, `pending = 0`, and
+> the job was compare-and-swapped terminal with `records_matched: 0` returning `finalized: true` — the
+> one-shot token, so the crons would have fired `bulk_job.completed` at a customer with zero matches,
+> unrecoverably. The union now carries `read_failed` and `write_failed`, **neither `finalized: true`**.
+> **Every remaining brief carries a NEVER-SWALLOW-A-SUPABASE-ERROR amendment because of it.**
+>
+> **TWO THINGS T2 ALMOST SHIPPED SILENTLY, both caught by review:** the auto-rebill trigger disappeared
+> from the common path (a cron-finalized job is already `completed`, so `sweep-stale-traces:206`'s
+> `.eq('status','processing')` never sees it and `:451` never fires; the web route's own trigger was
+> already dead for these jobs because it gates on `attemptedTotal > 0`, incremented only in the CSV loop).
+> Restored and fenced. And the webhook David approved had **zero** tests in either cron suite; both suites
+> were only reaching its bail-out branch, with `console.error` muted so "pristine" output proved nothing.
+>
+> **STILL OPEN, and they are the only things that stop the phase:** T7 Step 1's two tool description
+> strings, and T8 Step 5's live-check dollar amount. Both are David's and both are unasked so far.
+>
+> **ALL EIGHT BRIEFS ARE STAGED** in the ledger directory with controller amendments appended, including
+> Task 5's Amendment 6 (widen `FinalizableRow.property_trace_status` and delete Task 3's wrapper rather
+> than copying it) and Task 8's money guardrails (the executor builds the runner and STOPS; the controller
+> runs the spend; refusal 0 is `PTP_LIVE_RUN=1`; the cap is strictly above the computed worst case).
+
+
 > # READ FIRST. STATE AS OF 2026-09-25. **PHASE 2A IS LIVE IN PRODUCTION. PHASE 2B IS PLANNED AND AWAITS DAVID'S GO.**
 >
 > **PHASE 2A: merged, pushed, deployed, verified.** Merge commit `2982627` (a single `--no-ff`

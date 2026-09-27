@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { chargePerTrace } from "@/lib/suite/pricing";
+import { TIER1_SETTLED_STATUS } from "@/lib/trace/tier1Queue";
 
 // Mutation fence for the route -> settleBulkJob money SEAM: proves the v1 bulk
 // status route passes chargePerTrace(profile) as the personRate, not 0, a hardcoded constant,
@@ -357,6 +358,137 @@ describe("the tier 2 queue holds the job open too", () => {
 });
 
 /**
+ * THE TIER 1 QUEUE HOLDS THE JOB OPEN TOO, and it is not this route's own gate
+ * that used to do it. `isEntityTracePending` is the LEGACY predicate and holds
+ * no `tier1_` value at all, and the `status === 'processing'` arm catches a
+ * queued Tier 1 row only incidentally: the Tier 1 cron writes the row's
+ * delivery `status` before it clears the queue column, so the overlap ends on
+ * exactly the row that matters. Without `isRowStillWorking` in the disjunction
+ * this route finalizes over live, billable Tier 1 work, and the
+ * top-of-handler early return for a completed/failed job makes that verdict
+ * permanent.
+ */
+describe("the Tier 1 queue holds the job open too", () => {
+  beforeEach(() => {
+    H.profile = { id: "user-abc", subscription_tier: "wallet", is_acquisition_pro_member: false };
+  });
+
+  it("reports processing while a Tier 1 row is queued", async () => {
+    // MUTATION: drop the isRowStillWorking arm from the disjunction and this goes red. Neither
+    // remaining arm recognizes a tier1_ value, so this job would read as finished and the
+    // top-of-handler early return would make that verdict permanent.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 2,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_queued",
+        property_trace_status: null,
+        is_successful: true,
+      },
+      {
+        id: "row-2",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+    expect(H.updates.find((u) => u.table === "trace_jobs")).toBeUndefined();
+  });
+
+  it("stays processing even after the cron has flipped status off processing", async () => {
+    // The incidental status === 'processing' arm cannot be what holds this row open: the Tier 1
+    // cron writes the row's delivery status before it clears ai_research_status, so a poll that
+    // lands in between sees a terminal `status` next to a still-queued Tier 1 value.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "no_match",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_queued_3",
+        property_trace_status: null,
+        is_successful: false,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("processing");
+  });
+
+  it("completes once every Tier 1 row is settled, and counts the successes", async () => {
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 2,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+        charge: 0,
+      },
+      {
+        id: "row-2",
+        status: "no_match",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: false,
+        charge: 0,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    const body = await (
+      await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"))
+    ).json();
+
+    expect(body.status).toBe("completed");
+    expect(body.records_matched).toBe(1);
+  });
+});
+
+/**
  * THE SIZE FENCE ON THE v1 PAYLOAD, AND IT IS ADDITIVE.
  *
  * Restoring parity with the MCP twin in 5c-3B put a 65-key `property_record` on
@@ -669,5 +801,124 @@ describe("v1 bulk status never pushes to HighLevel", () => {
     expect(body.success).toBe(true);
     expect(body.status).toBe("completed");
     expect(body.results).toHaveLength(2);
+  });
+});
+
+/**
+ * THE WEBHOOK CARRIES THE OUTCOME, ASSERTED RATHER THAN INFERRED.
+ *
+ * `bulk_job.completed` sends `results: enrichedResults`, which spreads
+ * buildPerRecordResult, so adding a key to that function reaches the webhook with no
+ * change here. "So it gains both keys automatically" is exactly the kind of claim that
+ * is true until someone rebuilds the webhook body from the raw rows, and nothing would
+ * have gone red. This test is what makes that claim fail out loud.
+ *
+ * RECORDED, NOT FIXED HERE: the WEB route's webhook (app/api/trace/bulk) builds
+ * `successfulResults` from the raw Tracerfy result rather than from trace_history, so it
+ * gains nothing from this phase. That asymmetry is deliberate for now.
+ */
+describe("the v1 bulk_job.completed webhook reports the outcome", () => {
+  const tier1Row = {
+    id: "row-1",
+    address_hash: "hash-1",
+    status: "success",
+    tracerfy_job_id: null,
+    normalized_address: "500 MAIN ST",
+    city: "Austin",
+    state: "TX",
+    charge: 0.15,
+    is_successful: true,
+    // ON THE TIER 1 QUEUE, which is what Task 4 made this submit write, and what opens the
+    // tier1MaySpeak gate for a bulk row. A fixture with no trace_job_id and no tier1_ status is a
+    // pre-Phase-2B row whose outcome is not trusted, so the pair below would correctly come back
+    // null and this test would be asserting the gate rather than the payload.
+    trace_job_id: "job-1",
+    ai_research_status: TIER1_SETTLED_STATUS,
+    property_trace_status: "property_trace_done",
+    tier: 1,
+    outcome_code: "found_by_parcel_id",
+    found_by: "parcel_id",
+  };
+
+  let bodies: Array<Record<string, unknown>>;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    bodies = [];
+    H.profile = {
+      id: "user-abc",
+      subscription_tier: "wallet",
+      is_acquisition_pro_member: false,
+      webhook_url: "https://customer.example.com/hook",
+    };
+    // 'processing', NOT 'completed'. A job whose STORED status is already completed returns
+    // early at the top of the route and never dispatches a webhook, because the webhook fires
+    // on the TRANSITION. A fixture that said 'completed' would make this test pass or fail for
+    // a reason that has nothing to do with the payload.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      records_matched: 1,
+      error_message: null,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [tier1Row] as never;
+    // The network is the ONE thing mocked here. Everything that builds the body stays real:
+    // a stub of buildPerRecordResult would make this test assert on itself.
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      bodies.push(JSON.parse(String((init as RequestInit).body)));
+      return new Response("{}", { status: 200 });
+    }) as never;
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("puts found_by and outcome_code on a record in the webhook body", async () => {
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    const posted = bodies.find((b) => b.event === "bulk_job.completed");
+    expect(posted, "no bulk_job.completed webhook was dispatched").toBeDefined();
+    const record = (posted!.results as Array<Record<string, unknown>>)[0];
+    // MUTATION: remove found_by from buildPerRecordResult and this goes red alongside parity.
+    expect(record.found_by).toBe("parcel_id");
+    expect(record.outcome_code).toBe("found_by_parcel_id");
+  });
+
+  it("withholds the outcome on a row whose outcome it does not trust, webhook included", async () => {
+    // THE GATE REACHES THE WEBHOOK TOO, which is worth asserting separately: the webhook body is
+    // built from buildPerRecordResult, so a caller who never polls the endpoint and only consumes
+    // the webhook is exactly as exposed to a stale charge claim as one who does.
+    //
+    // A bulk row the v1 submit wrote BEFORE Task 4 added the reuse clear: trace_job_id set, no
+    // tier1_ status, so its outcome_code can only be stale.
+    // MUTATION: ungate the pair in buildPerRecordResult and this goes red while skip_reason
+    // stays null.
+    H.rows = [
+      {
+        ...tier1Row,
+        is_successful: false,
+        ai_research_status: null,
+        outcome_code: "no_match",
+        found_by: "address",
+        trace_steps: [{ kind: "TRACERFY_INSTANT_NAMED", outcome: "miss", cost: 0 }],
+      },
+    ] as never;
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+    await flushDeferred();
+
+    const posted = bodies.find((b) => b.event === "bulk_job.completed");
+    expect(posted, "no bulk_job.completed webhook was dispatched").toBeDefined();
+    const record = (posted!.results as Array<Record<string, unknown>>)[0];
+    expect(record.skip_reason).toBeNull();
+    expect(record.outcome_code).toBeNull();
+    expect(record.found_by).toBeNull();
+    // POSITIVE CONTROL: the record really was built and really did reach the webhook.
+    expect(record).toHaveProperty("owner_contact_name");
   });
 });

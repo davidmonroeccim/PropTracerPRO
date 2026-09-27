@@ -6,8 +6,8 @@ import { deductOrZero } from '@/lib/wallet/deduct';
 import { TRACE_TIER, foldBillingWrite, excludeBilledRows } from '@/lib/trace/billedRows';
 import { PRICING, STALE_PROCESSING } from '@/lib/constants';
 import { chargePerTrace } from '@/lib/suite/pricing';
-import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
-import { isTier1QueuePending, isTier1QueueRow } from '@/lib/trace/tier1Queue';
+import { isTier1QueueRow } from '@/lib/trace/tier1Queue';
+import { isRowStillWorking } from '@/lib/trace/finalizeBulkJob';
 import type { TraceResult, TracerfyResult } from '@/types';
 
 /**
@@ -249,10 +249,7 @@ export async function GET(request: Request) {
         const tier2Rows = rows.filter((r) => r.property_trace_status);
         const tier1QueueRows = rows.filter((r) => isTier1QueueRow(r.ai_research_status));
 
-        if (
-          tier2Rows.some((r) => isPropertyTracePending(r.property_trace_status)) ||
-          tier1QueueRows.some((r) => isTier1QueuePending(r.ai_research_status))
-        ) {
+        if (rows.some(isRowStillWorking)) {
           // Still real work in flight, whatever the Tracerfy half is doing. Not
           // stale, so leave the job entirely alone.
           //

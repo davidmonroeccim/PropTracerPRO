@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PRICING } from "@/lib/constants";
 import { chargePerTrace } from "@/lib/suite/pricing";
 import { BLANK_OWNER_SKIP_STATUS, skipReasonFor } from "@/lib/trace/blankOwnerSkip";
@@ -11,6 +11,11 @@ import { planRoute, type RouteStep, type StepKind } from "@/lib/routing/ownerRou
 import type { Tier1RecordResult } from "@/lib/trace/singleTier1";
 import { TIER1_OUTCOME } from "@/lib/trace/tier1Outcome";
 import { VENDOR_RATE_LIMIT } from "@/lib/trace/vendorRateBudget";
+// Namespace import, spied on for exactly one test (fix round 2): proves the CRON reads `failed`
+// off finalizeTouchedJobs' return and puts it in the response body as finalizeFailed. The counting
+// logic itself is fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts; a shared helper's
+// own tests cannot prove any of its callers actually wire its result anywhere.
+import * as finalizeBulkJobModule from "@/lib/trace/finalizeBulkJob";
 
 /**
  * Money fences for the entity sweep, the cron that resolves the entity-owned
@@ -75,6 +80,17 @@ const H = vi.hoisted(() => ({
   profiles: new Map<string, Record<string, unknown> | null>(),
   /** trace_jobs rows, keyed by id. The Tier 1 lane reads created_at off one to bound its probe. */
   jobs: new Map<string, Record<string, unknown>>(),
+  /**
+   * A row's post-settle columns, keyed by id, LAYERED ONTO `H.queuedRows` by every read.
+   *
+   * runTier1Record is fully mocked in this file (see below), so its real persist -- the write that
+   * actually moves a row from tier1_queued to tier1_done -- never reaches this stub on its own. A
+   * test that needs finalizeJobIfDrained's OWN read (added by Task 2, after the lane's Promise.all)
+   * to see a row as settled sets this from inside runTier1RecordMock's implementation, at the exact
+   * moment the real function would have persisted. Empty by default, so every pre-Task-2 test is
+   * completely unaffected: `rowsMatching` merges nothing in and returns the seeded row unchanged.
+   */
+  settledOverrides: new Map<string, Record<string, unknown>>(),
   /** Every deduct_wallet_balance the route asked the database for, as a spy. */
   deductWallet: vi.fn(),
   businessTrace: { success: true, hit: false, contacts: null } as Record<string, unknown>,
@@ -108,7 +124,11 @@ function orMatches(expr: string, row: Record<string, unknown>): boolean {
  * whether or not that held.
  */
 function rowsMatching(filters: Filter[]): Array<Record<string, unknown>> {
-  let rows = H.queuedRows;
+  let rows = H.queuedRows.map((r) => {
+    const id = r.id as string | undefined;
+    const override = id ? H.settledOverrides.get(id) : undefined;
+    return override ? { ...r, ...override } : r;
+  });
   for (const f of filters) {
     const column = String(f[1]);
     if (f[0] === "in") {
@@ -255,6 +275,16 @@ vi.mock("@/lib/trace/singleTier1", async (importOriginal) => ({
   runTier1Record: vi.fn(),
 }));
 
+/**
+ * Fix round 1, finding 1: triggerAutoRebillIfNeeded creates its OWN admin client internally
+ * (lib/utils/auto-rebill.ts does not take one as a parameter) and runs a multi-step RPC-plus-Stripe
+ * flow that has nothing to do with this cron. Mocked here the same way pruneVendorRateWindows and
+ * reserveVendorCalls are above: a spy this file asserts against, not a path this file re-verifies.
+ */
+vi.mock("@/lib/utils/auto-rebill", () => ({
+  triggerAutoRebillIfNeeded: vi.fn(async () => {}),
+}));
+
 const {
   GET,
   parcelForTier1Row,
@@ -266,6 +296,7 @@ const { lookupBusinessTrace, submitSingleTrace, lookupPersonTrace } = await impo
   "@/lib/tracerfy/client"
 );
 const { runTier1Record, VendorBudgetThrottledError } = await import("@/lib/trace/singleTier1");
+const { triggerAutoRebillIfNeeded } = await import("@/lib/utils/auto-rebill");
 const { reserveVendorCalls } = await import("@/lib/trace/vendorRateBudget");
 
 const runTier1RecordMock = vi.mocked(runTier1Record);
@@ -273,6 +304,9 @@ const reserveVendorCallsMock = vi.mocked(reserveVendorCalls);
 const lookupBusinessTraceMock = vi.mocked(lookupBusinessTrace);
 const tracePersonMock = vi.mocked(lookupPersonTrace);
 const deductWalletMock = H.deductWallet;
+const triggerAutoRebillIfNeededMock = vi.mocked(triggerAutoRebillIfNeeded);
+/** The webhook fetch notifyBulkJobCompleted fires, stubbed globally so it never reaches a network. */
+let fetchMock: ReturnType<typeof vi.fn>;
 
 const ROW = {
   id: "row-1",
@@ -427,6 +461,7 @@ beforeEach(() => {
   };
   H.profiles = new Map();
   H.jobs = new Map();
+  H.settledOverrides = new Map();
   H.businessTrace = { success: true, hit: false, contacts: null };
   H.submit = { success: true, jobId: "tf-person-1" };
   vi.mocked(lookupBusinessTrace).mockClear();
@@ -437,8 +472,19 @@ beforeEach(() => {
   reserveVendorCallsMock.mockResolvedValue(true);
   runTier1RecordMock.mockReset();
   runTier1RecordMock.mockResolvedValue(okResult());
+  triggerAutoRebillIfNeededMock.mockClear();
+  fetchMock = vi.fn().mockResolvedValue({ ok: true });
+  vi.stubGlobal("fetch", fetchMock);
+  // MUTED, DELIBERATELY, FOR THE WHOLE FILE. A test whose only visible signal was "console stayed
+  // clean" would pass just as well if the code under test silently did nothing at all -- see the
+  // notify/auto-rebill fencing in "finalizing the parent job" below, which asserts the mocked fetch
+  // and triggerAutoRebillIfNeeded calls directly rather than trusting an absence of log noise.
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "log").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("auth", () => {
@@ -1435,6 +1481,168 @@ describe("the TIER 1 lane", () => {
     expect(body.noMatch).toBe(1);
     expect(body.tier1.processed).toBe(0);
     expect(runTier1RecordMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 2: finalize a bulk job when its Tier 1 queue drains, in THIS run, rather than waiting for a
+ * browser tab to poll or for sweep-stale-traces' 60-minute cutoff.
+ *
+ * WHY THE MOCK IMPLEMENTATION SETS H.settledOverrides. runTier1Record is fully mocked in this file
+ * (its own persist is fenced in lib/trace/__tests__/singleTier1.test.ts), so the ONLY way a row can
+ * read back settled from finalizeJobIfDrained's fresh trace_history read -- which happens AFTER
+ * this run's own Promise.all, using the SAME stubbed admin client -- is for the test itself to say
+ * so, at the moment the real function would have persisted. See the H.settledOverrides docblock.
+ *
+ * `finalizeReadRanFor` and `anyFinalizeReadHappened` exist because two of these tests would
+ * otherwise pass VACUOUSLY: "no trace_jobs update happened" is also true when the finalize code
+ * does not run at all, so on its own it cannot tell "asked and correctly declined" apart from
+ * "never asked". Both helpers detect finalizeJobIfDrained's OWN read by its distinctive shape (the
+ * four named columns, never `*`), which nothing else in this cron selects.
+ *
+ * FIX ROUND 1, FINDING 3: the notify/auto-rebill loop needs its OWN fence, separate from the
+ * trace_jobs write above. Before this, `seedJob`/`H.profile.webhook_url` were never set for either
+ * test here, so notifyBulkJobCompleted's own `trace_jobs` read found no row and it bailed at its
+ * `!job` guard -- its `console.error` was invisible because `beforeEach` mutes console for the
+ * whole file (see the beforeEach comment). The suite was green because the path never ran, not
+ * because it worked. "finalizes the parent job..." now seeds a real job row and a webhook URL and
+ * asserts the stubbed global `fetch` and the mocked `triggerAutoRebillIfNeeded` were actually
+ * called; "does NOT finalize..." asserts neither was.
+ */
+describe("finalizing the parent job when the Tier 1 queue drains", () => {
+  const settleAsDone = (isSuccessful: boolean) => {
+    runTier1RecordMock.mockImplementation(async (input) => {
+      H.settledOverrides.set(input.row.id, {
+        ai_research_status: "tier1_done",
+        is_successful: isSuccessful,
+      });
+      return okResult();
+    });
+  };
+
+  const finalizeReadRanFor = (jobId: string): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        ) &&
+        o.filters.some((f) => f[0] === "eq" && f[1] === "trace_job_id" && f[2] === jobId)
+    );
+
+  const anyFinalizeReadHappened = (): boolean =>
+    H.ops.some(
+      (o) =>
+        o.table === "trace_history" &&
+        o.op === "select" &&
+        o.filters.some(
+          (f) =>
+            f[0] === "select" &&
+            String(f[1]) === "property_trace_status, ai_research_status, is_successful, charge"
+        )
+    );
+
+  const traceJobsUpdate = () => H.ops.find((o) => o.table === "trace_jobs" && o.op === "update");
+
+  it("finalizes the parent job once its last queued row settles, and fires the webhook and the auto-rebill check", async () => {
+    // One job, one row, and the row settles in this run. The job must come out completed.
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    seedJob("job-1", { user_id: "u1", records_submitted: 3 });
+    H.profile = { ...H.profile, webhook_url: "https://example.com/hook" };
+    const body = await runCron();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.payload).toMatchObject({ status: "completed", records_matched: expect.any(Number) });
+    expect(body.tier1.jobsFinalized).toBe(1);
+
+    // Fix round 1, finding 3: the notify loop is exercised for real, not bailed out early.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://example.com/hook");
+    const payload = JSON.parse(init.body);
+    expect(payload).toMatchObject({
+      event: "bulk_job.completed",
+      job_id: "job-1",
+      records_submitted: 3,
+    });
+
+    // Fix round 1, finding 1: auto-rebill restored, mirroring sweep-stale-traces:451.
+    expect(triggerAutoRebillIfNeededMock).toHaveBeenCalledWith("u1");
+  });
+
+  // MUTATION: delete the finalizeTouchedJobs call after the Promise.all and this goes red. Without
+  // it the job sits at 'processing' until a tab polls it or the 60-minute sweep runs.
+  it("does NOT finalize while another row of the same job is still queued, and fires neither the webhook nor auto-rebill", async () => {
+    settleAsDone(true);
+    seedRows([
+      { id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "sibling", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued_2" },
+    ]);
+    seedJob("job-1", { user_id: "u1", records_submitted: 3 });
+    H.profile = { ...H.profile, webhook_url: "https://example.com/hook" };
+    // The sibling loses its claim -- another worker (or a past run) has it -- so it is NOT settled
+    // by this run and stays on the queue when finalizeJobIfDrained reads the job's rows.
+    failTheClaim("sibling");
+    await runCron();
+    // Non-vacuous: proves the finalize read for job-1 actually ran and correctly declined, rather
+    // than never running at all (both would otherwise leave `traceJobsUpdate()` undefined).
+    expect(finalizeReadRanFor("job-1")).toBe(true);
+    expect(traceJobsUpdate()).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(triggerAutoRebillIfNeededMock).not.toHaveBeenCalled();
+  });
+
+  it("guards the terminal write on status=processing", async () => {
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    await runCron();
+    const jobUpdate = traceJobsUpdate();
+    expect(jobUpdate?.filters).toContainEqual(["eq", "id", "job-1"]);
+    expect(jobUpdate?.filters).toContainEqual(["eq", "status", "processing"]);
+  });
+
+  it("asks about each touched job exactly once, not once per row", async () => {
+    settleAsDone(true);
+    seedRows([
+      { id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "r2", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" },
+      { id: "r3", trace_job_id: "job-2", user_id: "u1", ai_research_status: "tier1_queued" },
+    ]);
+    await runCron();
+    const jobUpdates = H.ops.filter((o) => o.table === "trace_jobs" && o.op === "update");
+    expect(jobUpdates).toHaveLength(2);
+  });
+
+  // MUTATION: drop the `.filter((id): id is string => Boolean(id))` guard on touchedJobs and this
+  // goes red -- a null trace_job_id would be asked about as a literal job id, and
+  // anyFinalizeReadHappened() would flip to true.
+  it("ignores a row with no parent job", async () => {
+    settleAsDone(true);
+    seedRows([{ id: "r1", trace_job_id: null, user_id: "u1", ai_research_status: "tier1_queued" }]);
+    await runCron();
+    expect(traceJobsUpdate()).toBeUndefined();
+    expect(anyFinalizeReadHappened()).toBe(false);
+  });
+
+  // Fix round 2: a WIRING test, not a re-test of finalizeTouchedJobs' own counting logic (that is
+  // fenced directly in lib/trace/__tests__/finalizeBulkJob.test.ts, and stays there per the
+  // controller's ruling). This proves the CRON reads the `failed` count off whatever
+  // finalizeTouchedJobs returns and puts it in the response body as finalizeFailed -- something no
+  // test of the shared helper itself can prove about either of its callers.
+  //
+  // MUTATION: delete `finalizeFailed: number` from Tier1LaneResult, or delete
+  // `out.finalizeFailed = failed;`, and this goes red: `body.tier1.finalizeFailed` reads `undefined`.
+  it("puts finalizeTouchedJobs' failed count into the response as finalizeFailed", async () => {
+    seedRows([{ id: "r1", trace_job_id: "job-1", user_id: "u1", ai_research_status: "tier1_queued" }]);
+    const spy = vi
+      .spyOn(finalizeBulkJobModule, "finalizeTouchedJobs")
+      .mockResolvedValueOnce({ finalized: [], failed: 2 });
+    const body = await runCron();
+    expect(body.tier1.finalizeFailed).toBe(2);
+    spy.mockRestore();
   });
 });
 

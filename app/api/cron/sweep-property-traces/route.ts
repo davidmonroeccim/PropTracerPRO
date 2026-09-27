@@ -18,6 +18,9 @@ import {
 } from '@/lib/trace/fullPropertyTrace';
 import { TRACE_TIER, foldBillingWrite } from '@/lib/trace/billedRows';
 import { isParcelKey } from '@/lib/trace/historyDisplay';
+import { finalizeTouchedJobs } from '@/lib/trace/finalizeBulkJob';
+import { notifyBulkJobCompleted } from '@/lib/trace/notifyBulkJobCompleted';
+import { triggerAutoRebillIfNeeded } from '@/lib/utils/auto-rebill';
 import {
   pruneVendorRateWindows,
   reservationForSteps,
@@ -822,6 +825,23 @@ export async function GET(request: Request) {
       Array.from({ length: Math.min(CONCURRENCY, rows.length) }, () => worker())
     );
 
+    /**
+     * RELEASE THE PARENT JOBS WHOSE QUEUE JUST DRAINED. See sweep-entity-traces' copy of this block
+     * for the full rationale (the customer defect it closes, why auto-rebill is restored here, why
+     * the webhook is one-shot) and finalizeTouchedJobs' own docblock (lib/trace/finalizeBulkJob.ts)
+     * for why the dedup and the failure count live in one shared module rather than two loops.
+     *
+     * Mirrors sweep-stale-traces:451 for auto-rebill: fire-and-forget, one call per job this run
+     * actually finalized, never for one still working or one this run could not judge.
+     */
+    const { finalized, failed } = await finalizeTouchedJobs(adminClient, rows);
+    const jobsFinalized = finalized.length;
+    const finalizeFailed = failed;
+    for (const { jobId, userId, recordsMatched } of finalized) {
+      await notifyBulkJobCompleted(adminClient, jobId, recordsMatched);
+      triggerAutoRebillIfNeeded(userId).catch(() => {});
+    }
+
     return NextResponse.json({
       success: true,
       processed,
@@ -835,6 +855,8 @@ export async function GET(request: Request) {
       errored,
       exhausted,
       staleReverted,
+      jobsFinalized,
+      finalizeFailed,
     });
   } catch (error) {
     console.error('[sweep-property-traces] fatal error:', error);

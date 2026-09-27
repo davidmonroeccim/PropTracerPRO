@@ -52,6 +52,14 @@ export const TRACE_SOURCE = {
   MCP: "mcp",
   /** The signed-in dashboard (app/api/trace/**). */
   WEB: "web",
+  /**
+   * The public API-key surface (app/api/v1/**).
+   *
+   * Added in Phase 2B, when the v1 bulk submit stopped sending a Tracerfy CSV and started writing
+   * Tier 1 queue rows indistinguishable from the dashboard's. Its whole value is that a live check
+   * can tell those rows apart; it switches no price, exactly like its two siblings.
+   */
+  API: "api",
 } as const;
 
 /**

@@ -8,10 +8,11 @@ import { chargePerTrace } from '@/lib/suite/pricing';
 import { settleBulkJob, type TraceHistoryRow } from '@/lib/trace/settleBulkJob';
 import { resolveOwnerContact } from '@/lib/ai-research/contacts';
 import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
-import { rowSkipReason } from '@/lib/trace/rowSkipReason';
+import { rowSkipReason, tier1MaySpeak } from '@/lib/trace/rowSkipReason';
 import { toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import { isEntityTracePending } from '@/lib/trace/entityTraceAttempts';
 import { isPropertyTracePending } from '@/lib/trace/propertyTraceAttempts';
+import { isRowStillWorking } from '@/lib/trace/finalizeBulkJob';
 import type { TraceJob } from '@/types';
 
 // Polling N entity rows means N sequential Tracerfy getJobStatus() calls; without
@@ -246,36 +247,23 @@ export async function GET(request: Request) {
 
     // --- Decide overall bulk job state ------------------------------------
 
-    // A bulk job is not finished while any row is still awaiting its business
-    // trace or its Tracerfy result. `ai_research_status` is still the entity
-    // state machine (sweep-entity-traces drives it); only the engine behind it
-    // changed. Pendingness is asked of lib/trace/entityTraceAttempts.ts rather
-    // than compared against two literals, because a retried row carries its
-    // attempt number in that column. A row skipped for having no owner name,
-    // and a row whose attempts ran out, are NOT pending: both carry a terminal
-    // status, which is what stops them holding a job open forever.
-    //
-    // AND WHILE ANY ROW STILL OWES ITS FULL PROPERTY TRACE. Same shape as the
-    // entity gate above and deliberately not a different one: that gate is
-    // already load-bearing and correct, and two near-identical checks that
-    // differ slightly is how one of them rots. Asked of
-    // lib/trace/propertyTraceAttempts.ts rather than compared against literals,
-    // because a retried row carries its attempt number in the column.
-    //
-    // A tier 2 row is written `status: 'processing'` at submit, so the arm below
-    // catches it too. That overlap is not a reason to drop this one: the cron
-    // writes the row's delivery status the moment the dossier answers, while the
-    // queue column is what says whether the ROW is finished, and the two part
-    // company on exactly the row that matters. Without this the job finalizes
-    // over rows the customer is about to be billed for, and a completed job is
-    // never polled again.
-    const anyPendingResearch = rows.some((r) => isEntityTracePending(r.ai_research_status));
-    const anyPendingProperty = rows.some((r) =>
-      isPropertyTracePending(r.property_trace_status)
-    );
+    // THREE POPULATIONS, and until Phase 4 a job can hold all three at once.
+    //   isEntityTracePending  the LEGACY entity ladder, bare queued/processing on ai_research_status.
+    //   isRowStillWorking     the tier 2 queue AND the Tier 1 queue (spec 3.2), the shared predicate.
+    //   status === 'processing'  a row the Tracerfy CSV half still owns.
+    // Asking only the first is how this route would finalize over live Tier 1 work, and the
+    // early return at the top of this handler would then make that verdict permanent.
+    const anyPendingLegacyEntity = rows.some((r) => isEntityTracePending(r.ai_research_status));
+    // FinalizableRow.property_trace_status was widened to accept TraceHistoryRow's optional
+    // (string | null | undefined) shape directly (2026-09-25 controller ruling, Task 5
+    // Amendment 6), so this reads point-free instead of building a fresh object literal per row.
+    // Safe for every consumer: isPropertyTracePending already accepts undefined, recordsMatchedFor's
+    // tier 2 arm uses bare truthiness (undefined and null are equally falsy), and matchedRowCount
+    // never reads this field at all.
+    const anyPendingQueue = rows.some(isRowStillWorking);
     const anyPendingTrace = rows.some((r) => r.status === 'processing');
 
-    if (anyPendingResearch || anyPendingProperty || anyPendingTrace) {
+    if (anyPendingLegacyEntity || anyPendingQueue || anyPendingTrace) {
       return NextResponse.json({
         success: true,
         status: 'processing',
@@ -431,6 +419,9 @@ function buildPerRecordResult(row: TraceHistoryRow) {
   // THE NAME ONLY. owner_contact_source is ours, not the customer's, and it was wrong on
   // every tier 2 FastAppend row until contact_vendor existed. See the MCP twin.
   const { owner_contact_name } = resolveOwnerContact(row);
+  // Computed ONCE from the same exported predicate rowSkipReason gates on, so the pair below and
+  // the sentence can never disagree about whether this row's outcome is trustworthy.
+  const tier1Speaks = tier1MaySpeak(row);
   return {
     // D38: never the internal `APN|...` duplicate key. Same line as the MCP bulk_status twin.
     address: propertyAddressLabel(row),
@@ -457,6 +448,25 @@ function buildPerRecordResult(row: TraceHistoryRow) {
     // record submitted. Null on a row written before migration 20260917. Never
     // 0 and never a guess, because an unknown tier is an absence.
     tier: row.tier ?? null,
+    // HOW the record ended and WHICH KEY found the owner. skip_reason below is
+    // the sentence; these two are the machine-readable pair behind it, so a
+    // caller can branch on the outcome without parsing English. found_by is the
+    // KEY ('address', 'parcel_id', 'company_name'), never the vendor, which
+    // stays internal on contact_vendor. Both are null on a tier 2 row and on a
+    // row written before migration 20260922, because an absence is an absence.
+    //
+    // GATED ON tier1MaySpeak, THE SAME PREDICATE AS skip_reason, and that is a
+    // money-disclosure fence rather than tidiness. Echoed raw, a gate-closed row
+    // came back as outcome_code 'no_match' beside skip_reason null, and this
+    // tool's own approved description tells the caller that no_match means the
+    // record was not charged. So the raw code handed over the exact claim the
+    // gate withholds from a bulk trace that charged. The three outcome fields
+    // speak together or stay silent together.
+    //
+    // ADDED TO BOTH TWINS IN ONE COMMIT. payloadParity compares the two key sets
+    // by source scan, so either one alone goes red.
+    found_by: tier1Speaks ? row.found_by ?? null : null,
+    outcome_code: tier1Speaks ? row.outcome_code ?? null : null,
     // Why a row came back with no contacts. Asked of BOTH queues: serving only
     // the tier 1 accessor left every tier 2 terminal value speaking as a bare
     // no_match, including the billed row whose contact vendor never answered.
