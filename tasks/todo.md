@@ -61,6 +61,13 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
       Plan: `docs/superpowers/plans/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue.md`.
       8 tasks. Carried items 1-5 from the 2A plan, plus spec 6.3/D36 (align the bulk
       surfaces on the duplicate key), plus the job-completion fix David named first.
+      **ALL 8 TASKS DONE AND THE LIVE CHECK IS RUN. What remains is the final whole-branch
+      review, then `superpowers:finishing-a-development-branch`.** Left unticked because of that.
+      NOTE ON ORDER: David chose 2026-09-27 to MERGE (`495a012`, one `--no-ff` commit) and deploy
+      to production BEFORE the live check, so production's own crons would run branch code and
+      nothing needed pausing. So the integration decision precedes the final review, deliberately
+      and at his instruction. If that review finds a Critical, the remedy is `git revert 495a012`
+      plus a redeploy.
   - [x] Task 1: one derivation for job completion, with a guarded terminal write
   - [x] Task 2: finalize a job when its queue drains, from both crons
   - [x] Task 3: the v1 status route learns the Tier 1 queue
@@ -68,10 +75,17 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
   - [x] Task 5: MCP bulk_status learns the Tier 1 queue
   - [x] Task 6: skip_trace_bulk goes on the Tier 1 queue
   - [x] Task 7: found_by and outcome_code reach every per-record payload
-  - [ ] Task 8: suite gates, then the live check
-        BUILD HALF DONE 2026-09-25 (gates, greps, mutation table, records, runner and its
-        refusals). The SPEND is not done: it waits on David's dollar amount and the
-        controller runs it. See the review section below.
+  - [x] Task 8: suite gates, then the live check
+        BUILD HALF 2026-09-25 (gates, greps, mutation table, records, runner and its refusals).
+        LIVE HALF RUN 2026-09-27 by the controller: **$0.50 charged, $0.30 vendor cost**, against a
+        $2.80 worst case, a $4 cap and David's $5. Report: `tasks/phase2b-live-check.md`.
+        8 of 9 records across 7 of 8 paths. All three jobs reached `completed` UNPOLLED and with
+        the crons undriven, in **55.3s / 10.6s / 29.5s** (2A's equivalent took 39 minutes).
+        D36 holds 8/8 including the `APN|` key form. Amendment 9: all four live column widths
+        match `TRACE_HISTORY_WIDTH`. Amendment 10: **zero**, so that exposure was theoretical.
+        C6 was NOT sent and could not be: the gateway's own schema requires address+city+state,
+        so the parcel-keyed shape is blocked gateway-side (Phase 3). Two runner defects found and
+        fixed (`ef50fc2`, `12b1b09`), one of which reported D36 broken on a system where it holds.
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 

@@ -4,6 +4,58 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-27: Phase 2B Task 8, LIVE HALF. Merged, deployed, and the live check run. $0.50 spent.
+
+**Phase 2B is built, reviewed, merged and live.** Merge `495a012`, one `--no-ff` commit so a single
+`git revert` undoes the phase. Report: `tasks/phase2b-live-check.md`.
+
+- **Merged and deployed BEFORE the live check, on David's decision.** He asked why the check could not
+  just run in production, having told his users to hold off. The premise needed one correction: the race
+  is not with users, it is with Vercel's scheduler running the two queue crons every 60 s on whatever code
+  production carries. So either pause them, or make production be the branch. He chose the merge.
+  Measured before doing it: every queue was empty (zero `tier1_queued*`, zero queued property traces, zero
+  `trace_jobs` at `processing`), so the deploy could touch nothing but the check's own records.
+  Verified after: deployment SHA `495a012`, READY, aliased to proptracerpro.com, `aliasError: null`.
+- **No cron was paused, and nobody drove the crons or polled a status route.** Production's own scheduler
+  drained both lanes on branch code.
+- **The result only this phase could produce: all three jobs reached `completed` unpolled, in 55.3s,
+  10.6s and 29.5s.** 2A's equivalent job took 39 minutes, finalized by the 60-minute stale-sweep cutoff.
+  A customer who closes the upload tab no longer waits an hour for their download.
+- **Money, exact.** $0.50 charged, $0.30 vendor cost, against a $2.80 computed worst case, a $4 cap and
+  David's $5 authorisation. Wallet $12.23 -> $11.73, two ledger debits at the Pro $0.25 rate, one per
+  charged record, none charged twice. Auto-rebill measured beforehand as armed with $2.23 of headroom
+  against a $1.75 maximum charge; it did not fire, and had it fired it would have hit his card for $25.
+- **Per-record judging proven in one API call:** a named city-less record and a blank-owner unusable one
+  sent together, each judged on its own merits, both free, batch not rejected. That call was a whole-batch
+  400 before Task 4.
+- **D36 holds 8 of 8**, including the `APN|` key form on the v1 surface.
+- **Amendment 9: all four live production column widths match `TRACE_HISTORY_WIDTH`** (2/100/64/64). No
+  schema drift. The only check in the phase that could catch it.
+- **Amendment 10: zero.** The legacy exposure Ruling 32 closed was theoretical; the gating is
+  belt-and-braces.
+- **First ever exercise of the Tier 2 rate budget.** Reserved equals spent on both vendors, exactly. 2A
+  lists this as explicitly unproven.
+- **The MCP submit lane was proven through the REAL Suite Gateway**, which the Task 8 report called
+  impossible from a script: `withMcpAuth`, `verifyToken`, the entitlement cache and tool registration all
+  work on the deployed commit, and `no_lookup_key` came back present-with-0 on a success path.
+- **C6 could not be sent, and that is the finding.** The gateway's own tool schema requires
+  `address`+`city`+`state`, so the parcel-keyed shape is blocked GATEWAY-side, exactly where spec Section
+  10 puts it (Phase 3). PTP accepts it; the gateway refuses it. The end-to-end path does NOT work and this
+  phase never claimed it would.
+- **Two defects found in the live-check runner itself, both fixed.** `ef50fc2` added `--no-drain` and
+  `--only` with a merged `jobs.json`; `12b1b09` fixed a D36 check that compared the plaintext key to the
+  sha256 digest and so **reported D36 broken for all 8 records on a system where it holds**. Neither was
+  catchable by any gate: `tsconfig.json` excludes `tasks/research-scripts`.
+- **`user_profiles.api_key` was NULL**, which nothing in the brief, report or handoff mentioned and which
+  blocked 7 of 9 records. Minted onto the profile at David's instruction, read back and verified, then
+  confirmed against production with a free probe that spends nothing.
+
+**What remains: the final whole-branch review, then `superpowers:finishing-a-development-branch`.** The
+merge deliberately precedes that review at David's instruction; if it finds a Critical, the remedy is
+`git revert 495a012` plus a redeploy.
+
+---
+
 ## 2026-09-25: Phase 2B Task 8, BUILD HALF. Gates, the mutation table, the records and the runner. NOTHING SPENT.
 
 - **Gates, measured on `5abce8e`:** `npx vitest run` 2180 passed / 89 files / 0 failed;

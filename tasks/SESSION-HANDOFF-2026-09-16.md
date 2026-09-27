@@ -1,5 +1,90 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-27 (latest). **PHASE 2B IS BUILT, REVIEWED, MERGED, DEPLOYED AND LIVE-CHECKED. $0.50 SPENT. ONE THING REMAINS: THE FINAL WHOLE-BRANCH REVIEW.**
+>
+> **`main` is at `12b1b09`. The phase merged as `495a012`, ONE `--no-ff` commit, so `git revert 495a012`
+> undoes all of Phase 2B.** Production is deployed and serving it (SHA-verified `495a012`, READY, aliased to
+> proptracerpro.com, `aliasError: null`). The branch `feat/tier1-phase2b-api-and-mcp-queue` is merged and can
+> be deleted by `finishing-a-development-branch`.
+>
+> **THE LEDGER IS AUTHORITATIVE OVER THIS BLOCK:**
+> `.superpowers/sdd/2026-09-24-tier1-phase2b-api-and-mcp-onto-the-queue/progress.md` (gitignored). Now **41
+> rulings**; the live half starts at the "Task 8, THE LIVE HALF" heading.
+>
+> **WHAT REMAINS, and it is one thing:** the final whole-branch review over `31ddcdd..12b1b09`, then
+> `superpowers:finishing-a-development-branch`. **The parked list for that review is in the 2026-09-27
+> block below** (the MCP `bulk_status` bare update, the v1 webhook-URL swallow, two stale counts in
+> `rowSkipReason.ts`, the blank-owner/over-long-city combination with no single test, and `isLikelyBusiness`
+> still live at `mcp-tools.ts:267` inside `isEntityRecord` where it routes nothing).
+>
+> **ORDER INVERSION, DELIBERATE AND DAVID'S.** He chose on 2026-09-27 to merge and deploy BEFORE the live
+> check, so production's own crons would run branch code and no cron would need pausing. So the integration
+> decision precedes the final review. If that review finds a Critical, the remedy is `git revert 495a012`
+> plus a redeploy. Do not read the order as an oversight.
+>
+> **GATES at the merge, measured not relayed:** vitest **2180 passed / 89 files / 0 failed**, tsc **exit 0**,
+> eslint **45 problems** (the floor; the 46 ceiling was never approached across 24 commits), `next build`
+> **exit 0**. The merged tree is **byte-identical** to the branch tip, so those numbers are the merge's too.
+> eslint exits non-zero; judge by the COUNT.
+>
+> **THE LIVE CHECK: `tasks/phase2b-live-check.md`. 8 of 9 records, 7 of 8 paths, $0.50 charged / $0.30 vendor
+> cost** against a $2.80 worst case, a $4 cap and David's $5.
+> - **The one thing only this phase could prove, proven three times: all three jobs reached `completed`
+>   UNPOLLED, with the crons undriven, in 55.3s / 10.6s / 29.5s.** 2A's equivalent took 39 minutes.
+> - **D36 holds 8/8**, including the `APN|` key form (C3, v1 surface).
+> - **Amendment 9: all four LIVE column widths match `TRACE_HISTORY_WIDTH`** (state 2, city 100,
+>   parcel_id_local 64, county 64). No drift. Read by direct SQL: the runner CANNOT do it, because it
+>   queries `information_schema` through PostgREST, which does not serve it.
+> - **Amendment 10: ZERO**, both LIKE forms, against 1,291 rows with a `trace_job_id`. That exposure was
+>   theoretical.
+> - **First ever exercise of the Tier 2 rate budget**; reserved equals spent exactly on both vendors.
+> - Money exact: wallet $12.23 -> $11.73, two ledger debits at the Pro $0.25 rate, one per charged record.
+>
+> **C6 WAS NOT SENT AND COULD NOT BE. This is a finding, not a gap in the run.** All three routes measured:
+> the runner's in-process MCP lane is unrunnable (`lib/utils/deduplication.ts:36` calls `createClient()` from
+> `@/lib/supabase/server`, so `checkDuplicates` needs a Next request scope); **the Suite Gateway's own tool
+> schema requires `address`+`city`+`state`**, so a parcel-keyed city-less record cannot reach PTP through it
+> at all (Phase 3, spec Section 10); and a direct MCP call needs a gateway JWT no script can mint. **PTP now
+> accepts that shape; the gateway refuses it.** So the MCP surface's TIER 1 enqueue has no production
+> evidence. The MCP surface's tier 2 lane DOES, through the real gateway (see below).
+>
+> **THE MCP LANE WAS PROVEN THROUGH THE REAL GATEWAY**, which the Task 8 report called impossible from a
+> script: `withMcpAuth`, `verifyToken`, the entitlement cache and tool registration all work on the deployed
+> commit, `no_lookup_key` came back present-with-0 on a success path, and quote $0.25 >= submit $0.25.
+>
+> **TWO DEFECTS IN THE RUNNER ITSELF, both fixed, and NEITHER was catchable by any gate** because
+> `tsconfig.json` excludes `tasks/research-scripts`, so `tsc --noEmit` never typechecks it:
+> 1. `12b1b09` — the D36 check compared `traceKeyFor(input)` (plaintext key) against `address_hash`
+>    (sha256 digest), so it **reported D36 broken for all 8 records on a system where D36 holds.** The most
+>    serious thing the check looks for, reported as failing, falsely.
+> 2. `ef50fc2` — `--no-drain` (production's scheduler drains; `.env.local`'s `CRON_SECRET` is a local-only
+>    2A value that 401s against production, and reading the real one is classifier-blocked) and `--only`
+>    with a MERGED `jobs.json`, because overwriting it would have erased a completed spend's job id.
+>
+> **THINGS NOBODY HAD WRITTEN DOWN THAT BLOCKED OR NEARLY BLOCKED THE RUN:**
+> - **`user_profiles.api_key` was NULL**, blocking 7 of 9 records. Not in the brief, report or handoff. Keys
+>   are stored **plaintext** (`lib/api/auth.ts` does `.eq('api_key', apiKey)`). Minted at David's
+>   instruction, read back, and verified against production with a free `records: []` probe that returns 400
+>   after authenticating (401 would mean the key is bad).
+> - **Auto-rebill is ARMED and Task 2 put it back on this exact path.** Threshold is
+>   `user_profiles.wallet_low_balance_threshold` ($10.00), read from `check_wallet_needs_rebill`'s body,
+>   **not** the `WALLET_MIN_BALANCE_THRESHOLD` env var, which that function never reads. $2.23 headroom
+>   against a $1.75 max charge. It would have charged David's CARD $25, outside the $5 authorised.
+> - **`vercel.json` declares FOUR crons, not two.** The other two are harmless and were checked rather than
+>   assumed: `sweep-stale-traces` needs `created_at < now - 60 min` (`CRON_TIMEOUT_MINUTES: 60`) so it cannot
+>   reach a fresh job, and `sweep-business-traces` drives off a separate `business_trace_jobs` table.
+> - **`vendor_rate_windows` is a pruning per-second window.** A single final snapshot UNDERSTATES a run; the
+>   report's figures are cumulative across two captures.
+>
+> **FOR THE GATEWAY TEAM, one thing this session could not settle:** the `ptp_skip_trace_bulk` description
+> served to this session still carries the OLD apn/county copy David rejected on 2026-09-25 and Task 7
+> replaced. This session's tool list was fetched BEFORE the deploy, so it is most likely a client-side cache
+> rather than a gateway defect, but confirm a gateway caller now reads the approved copy.
+>
+> **DAVID'S DECISIONS THIS SESSION (11, 12, 13 of the phase):** merge+deploy rather than pause the crons;
+> write the API key onto his profile directly; send C7 through the real gateway with `confirm: true`.
+
+
 > # READ FIRST. STATE AS OF 2026-09-27. **PHASE 2B: ALL SEVEN BUILD TASKS DONE AND REVIEWED. TASK 8's BUILD HALF DONE. THE LIVE CHECK HAS NOT RUN. NOTHING SPENT, NOTHING PUSHED.**
 >
 > **Branch `feat/tier1-phase2b-api-and-mcp-queue` at `7ce2b6e`, 23 commits, cut from main at `31ddcdd`.**
