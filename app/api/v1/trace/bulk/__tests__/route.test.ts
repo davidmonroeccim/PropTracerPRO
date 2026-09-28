@@ -993,18 +993,40 @@ describe("the duplicate key aligns with the single surfaces (spec 6.3, D36)", ()
 });
 
 describe("D33: a reused row does not answer with a stale outcome", () => {
-  it("clears outcome_code, found_by and trace_steps on a reused row", async () => {
+  it("clears outcome_code and found_by on a reused row", async () => {
     await post([rec("Jane Smith", 1)]);
-    expect(historyRows()[0]).toMatchObject({
-      outcome_code: null,
-      found_by: null,
-      trace_steps: null,
-    });
+    expect(historyRows()[0]).toMatchObject({ outcome_code: null, found_by: null });
   });
 
-  it("does NOT clear them on a busy resume, which needs the step log", async () => {
-    // The one exemption, and it is money: a busy row's step log is what stops the resend buying
-    // the answers this record already paid for.
+  // THE MONEY HALF, AND IT IS THE REAL PATH -- no mock anywhere in this test.
+  //
+  // trace_steps used to be cleared in the same spread as the two fields above, guarded by the
+  // busy-resume exemption. THAT EXEMPTION IS INERT ON THIS SURFACE: busyResumeHashes is built
+  // from checkDuplicates, which opens a COOKIE-SCOPED client (lib/utils/deduplication.ts), and an
+  // API-key request carries no cookie, so cachedResults comes back empty and the set is always
+  // empty here. The clear therefore ran on EVERY row. A Tier 1 record that settles busy_try_again
+  // is terminal and free, and its step log is the receipt for the vendor lookups it already
+  // bought; wiping it made the cron resume from an empty log and made executeRoute buy them
+  // again on the resend the customer was invited to send.
+  //
+  // Leaving a stale log is safe: executeRoute reuses a logged answer only inside
+  // STEP_REUSE_WINDOW_MS (24h) measured on the entry's own timestamp, so an old one is skipped.
+  //
+  // MUTATION: put `trace_steps: null` back into the spread in route.ts and this goes red.
+  it("never writes trace_steps, so a resend keeps the step log it already paid for", async () => {
+    await post([rec("Jane Smith", 1)]);
+    expect(Object.keys(historyRows()[0])).not.toContain("trace_steps");
+  });
+
+  it("leaves outcome_code and found_by alone on a busy resume", async () => {
+    // THIS BRANCH IS UNREACHABLE IN PRODUCTION ON THIS SURFACE and the mock below is the only
+    // thing that reaches it: the real checkDuplicates cannot return cachedResults to an API-key
+    // request, for the cookie reason spelled out above. What the mock makes invisible is exactly
+    // that blindness; it is fenced instead by the docblock on checkDuplicates and by the test
+    // above, which asserts the contract that holds on the REAL path. The branch is still live
+    // code, so it is still covered here -- and it is what the day someone fixes that client will
+    // run.
+    // MUTATION: delete found_by from the exemption spread and this goes red.
     vi.mocked(checkDuplicates).mockResolvedValueOnce({
       newRecords: [rec("Jane Smith", 1)],
       duplicates: [],
@@ -1017,9 +1039,9 @@ describe("D33: a reused row does not answer with a stale outcome", () => {
     } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
     await post([rec("Jane Smith", 1)]);
     const row = historyRows()[0];
-    expect(row.outcome_code).toBeUndefined();
-    expect(row.found_by).toBeUndefined();
-    expect(row.trace_steps).toBeUndefined();
+    expect(Object.keys(row)).not.toContain("outcome_code");
+    expect(Object.keys(row)).not.toContain("found_by");
+    expect(Object.keys(row)).not.toContain("trace_steps");
     expect(row.ai_research_status).toBe(tier1QueuedStatusFor(1));
   });
 });

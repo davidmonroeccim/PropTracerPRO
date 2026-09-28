@@ -1509,17 +1509,45 @@ describe("skip_trace_bulk", () => {
   });
 
   describe("D33: a reused row does not answer with a stale outcome", () => {
-    it("clears outcome_code, found_by and trace_steps on a reused row", async () => {
+    it("clears outcome_code and found_by on a reused row", async () => {
       // A trace_history row is REUSED (UNIQUE(user_id, address_hash)), and this surface never
       // cleared the Tier 1 answer on it, so a sentence written for an earlier trace could answer
       // for this one: "You were not charged" over a row this job is about to charge.
       const { rows } = await submit([rec("Jane Smith", 1)]);
-      expect(rows[0]).toMatchObject({ outcome_code: null, found_by: null, trace_steps: null });
+      expect(rows[0]).toMatchObject({ outcome_code: null, found_by: null });
     });
 
-    it("does NOT clear them on a busy resume, which needs the step log", async () => {
-      // The one exemption, and it is money: a busy row's step log is what stops the resend buying
-      // the answers this record already paid for.
+    // THE MONEY HALF, AND IT IS THE REAL PATH -- no mock anywhere in this test.
+    //
+    // trace_steps used to be cleared in the same spread as the two fields above, guarded by the
+    // busy-resume exemption. THAT EXEMPTION IS INERT ON THIS SURFACE: busyResumeHashes is built
+    // from checkDuplicates, which opens a COOKIE-SCOPED client (lib/utils/deduplication.ts), and a
+    // gateway call carries no cookie, so cachedResults comes back empty and the set is always
+    // empty here. The clear therefore ran on EVERY row. A Tier 1 record that settles
+    // busy_try_again is terminal and free, and its step log is the receipt for the vendor lookups
+    // it already bought; wiping it made the cron resume from an empty log and made executeRoute
+    // buy them again on the resend the customer was invited to send.
+    //
+    // Leaving a stale log is safe: executeRoute reuses a logged answer only inside
+    // STEP_REUSE_WINDOW_MS (24h) measured on the entry's own timestamp, so an old one is skipped.
+    //
+    // MUTATION: put `trace_steps: null` back into the spread in mcp-tools.ts and this goes red.
+    it("never writes trace_steps, so a resend keeps the step log it already paid for", async () => {
+      const { rows } = await submit([rec("Jane Smith", 1)]);
+      expect(Object.keys(rows[0])).not.toContain("trace_steps");
+    });
+
+    it("leaves outcome_code and found_by alone on a busy resume", async () => {
+      // THIS BRANCH IS UNREACHABLE IN PRODUCTION ON THIS SURFACE and the mock below is the only
+      // thing that reaches it: the real checkDuplicates cannot return cachedResults to a gateway
+      // call, for the cookie reason spelled out above. What the mock makes invisible is exactly
+      // that blindness; it is fenced instead by the docblock on checkDuplicates and by the test
+      // above, which asserts the contract that holds on the REAL path. The branch is still live
+      // code, so it is still covered here.
+      //
+      // `found_by` is the field carrying the disclosed cost this exemption exists to avoid: it is
+      // the label on a row that may already hold paid contacts.
+      // MUTATION: delete found_by from the exemption spread and this goes red.
       vi.mocked(checkDuplicates).mockResolvedValueOnce({
         newRecords: [rec("Jane Smith", 1)],
         duplicates: [],
@@ -1531,11 +1559,6 @@ describe("skip_trace_bulk", () => {
         ],
       } as unknown as Awaited<ReturnType<typeof checkDuplicates>>);
       const { rows } = await submit([rec("Jane Smith", 1)]);
-      // ALL THREE FIELDS THE SPREAD CLEARS TOGETHER. Asserting two of them let the third be
-      // deleted from the exemption unnoticed, and `found_by` is the one carrying the disclosed cost
-      // this exemption exists to avoid paying twice: it is the label on a row that may already hold
-      // paid contacts.
-      // MUTATION: delete found_by from the exemption spread and this goes red.
       expect(Object.keys(rows[0])).not.toContain("outcome_code");
       expect(Object.keys(rows[0])).not.toContain("found_by");
       expect(Object.keys(rows[0])).not.toContain("trace_steps");

@@ -749,8 +749,21 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       // one: "You were not charged" over a row this job is about to charge. D33 chose to gate the
       // sentence on trace_job_id instead and recorded this half as Phase 2 code.
       //
-      // NOT on a busy resume: that row's step log is what spares the resend from buying its
-      // answered lookups again.
+      // THE STEP LOG IS NOT IN THIS SPREAD, AND THAT IS THE POINT. `trace_steps: null` used to sit
+      // here beside the other two, guarded by the same busy-resume exemption -- and that exemption
+      // is INERT on this surface. busyResumeHashes is built from checkDuplicates, which opens a
+      // COOKIE-SCOPED client; a gateway call carries no cookie, so it returns no cachedResults and
+      // the set is always empty (its own docblock records this as a known defect, and the
+      // busyResumeHashes docblock above says the same). The clear therefore ran UNCONDITIONALLY. A
+      // Tier 1 record that settles busy_try_again is terminal and free, and its step log is the
+      // receipt for lookups already BOUGHT; wiping it made the cron resume from an empty log and
+      // made executeRoute re-buy those vendor calls on the resend the customer was invited to
+      // send. So this submit does not write trace_steps at all: an omitted key on an onConflict
+      // upsert leaves the row's own log untouched.
+      //
+      // A STALE LOG IS SAFE TO LEAVE. lib/routing/executeRoute.ts reuses a logged answer only when
+      // it is younger than STEP_REUSE_WINDOW_MS (24h) by its OWN `at` timestamp, so an older entry
+      // is skipped and the step runs fresh. Stale is ignored, never served.
       //
       // DISCLOSED COST, and it is D33's own trade. This clear runs on EVERY reused row. A row that
       // already holds PAID contacts from an earlier single trace loses its `found_by` label here.
@@ -759,9 +772,7 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       // empty on a row holding real, paid-for numbers. The alternative is a stale sentence from an
       // earlier trace answering for this one, which is a row saying "You were not charged" over
       // work this job is about to charge for. Blank, never wrong (CLAUDE.md rule 7).
-      ...(busyResumeHashes.has(addressHash)
-        ? {}
-        : { outcome_code: null, found_by: null, trace_steps: null }),
+      ...(busyResumeHashes.has(addressHash) ? {} : { outcome_code: null, found_by: null }),
     };
   };
 
