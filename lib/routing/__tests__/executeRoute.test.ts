@@ -104,6 +104,38 @@ const dossierSequence = (...results: DossierResult[]) => {
   return fn as unknown as RouteDeps['lookupDossier']
 }
 
+/**
+ * THE GUARD ON THE LANE THAT ACTUALLY WORKS (D18, D22, 2026-09-28).
+ *
+ * TN Hickman is measured 3,918 LAST FIRST against 117 FIRST LAST, so planRoute will read a
+ * signal-less two-token name there as LAST FIRST. A DOSSIER name is not a county string: it is
+ * built from Tracerfy's structured first_name/last_name and is natural by construction.
+ * contactParcelFor must therefore force ownerNameOrder 'natural' on re-entry, and it returns the
+ * parcel with `county` STILL SET whenever the mailing address is incomplete, which is this case.
+ *
+ * Without the guard the contact call goes out as first Gray / last Wayne and misses.
+ */
+describe('a dossier name never inherits the county order', () => {
+  const DOSSIER_PLAIN_PERSON: DossierResult = {
+    ...HIT_INDIVIDUAL,
+    owners: [{ first_name: 'Wayne', last_name: 'Gray', age: '' }],
+    // null, so contactParcelFor takes the `return base` path with the county intact.
+    mailingAddress: null,
+  }
+
+  it('keeps the dossier order in a county measured LAST FIRST', async () => {
+    const plan = tier2Plan({ state: 'TN', county: 'Hickman', parcelIdLocal: '041003    00504' })
+    const d = deps({
+      lookupDossier: dossierSequence(DOSSIER_PLAIN_PERSON),
+      tracePerson: vi.fn(async () => CONTACT_HIT),
+    })
+    await executeRoute(plan, d)
+    expect(d.tracePerson).toHaveBeenCalledWith(expect.objectContaining({
+      first_name: 'Wayne', last_name: 'Gray',
+    }))
+  })
+})
+
 describe('executeRoute — stop at the first hit', () => {
   it('never runs the address key after the APN key hits', async () => {
     // Both keys are planned because they fail independently. Running the second after

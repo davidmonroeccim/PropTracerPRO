@@ -5,6 +5,7 @@ import {
   hasApn, hasSitus, canDiscoverOwner,
   type ParcelInput, type PricePlan, type RoutePlan,
 } from '../ownerRoute'
+import { countyNameOrder, MEASURED_COUNTY_COUNT } from '../countyNameOrder'
 
 /**
  * Entity names, dollar figures and parcel facts are real values observed in the
@@ -53,6 +54,65 @@ describe('classifyOwnerName', () => {
     expect(classifyOwnerName('')).toBe('unknown')
     expect(classifyOwnerName(null)).toBe('unknown')
     expect(classifyOwnerName(undefined)).toBe('unknown')
+  })
+})
+
+describe('county name order (D18, D22)', () => {
+  // TN Hickman is measured 3,918 LAST FIRST against 117 FIRST LAST. On 2026-09-28 PTP sent
+  // "GRAY WAYNE" to Tracerfy as first GRAY / last WAYNE and missed.
+  it('swaps a signal-less two-token name in a county measured LAST FIRST', () => {
+    expect(splitPersonName('GRAY WAYNE', 'assessor')).toEqual({ first_name: 'WAYNE', last_name: 'GRAY' })
+  })
+
+  it('leaves an unmeasured county exactly as it is today', () => {
+    expect(splitPersonName('GRAY WAYNE', null)).toEqual({ first_name: 'GRAY', last_name: 'WAYNE' })
+    expect(splitPersonName('GRAY WAYNE')).toEqual({ first_name: 'GRAY', last_name: 'WAYNE' })
+  })
+
+  it('respects the three counties measured FIRST LAST', () => {
+    expect(countyNameOrder('MN', 'Ramsey')).toBe('natural')
+    expect(countyNameOrder('WI', 'Milwaukee')).toBe('natural')
+    expect(countyNameOrder('WI', 'Dane')).toBe('natural')
+  })
+
+  it('reads a measured county through any of its written forms, and null when unmeasured', () => {
+    expect(countyNameOrder('TN', 'Hickman')).toBe('assessor')
+    expect(countyNameOrder('TN', 'Hickman County')).toBe('assessor')
+    expect(countyNameOrder('tn', ' hickman ')).toBe('assessor')
+    expect(countyNameOrder('TX', 'Bexar')).toBeNull()
+    expect(countyNameOrder('', 'Hickman')).toBeNull()
+    // Coverage is a fact to report, not to round up: 59 counties measured of 1,854 ingested.
+    // Pinned so the map cannot be silently emptied and read as "no county is measured".
+    expect(MEASURED_COUNTY_COUNT).toBeGreaterThanOrEqual(59)
+  })
+
+  it('never lets the county order beat a signal the name itself carries', () => {
+    // An explicit LAST, FIRST, a shared surname and a trailing initial each resolve the order on
+    // their own. A county rule must not be able to re-invert them.
+    expect(splitPersonName('BOTT, RUSSELL L', 'assessor')).toEqual({ first_name: 'RUSSELL', last_name: 'BOTT' })
+    expect(splitPersonName('BECK JAMES;BECK HELEN', 'assessor')).toEqual({ first_name: 'JAMES', last_name: 'BECK' })
+    expect(splitPersonName('Marcus T Halloway', 'natural')).toEqual({ first_name: 'Marcus', last_name: 'Halloway' })
+  })
+
+  it('routes a Hickman owner as WAYNE GRAY through the real planRoute', () => {
+    const plan = planRoute(
+      { state: 'TN', county: 'Hickman', parcelIdLocal: '041003    00504', ownerName: 'GRAY WAYNE' },
+      'pro',
+    )
+    const step = plan.steps.find(s => s.kind === 'TRACERFY_PARCEL_APN')
+    expect(step?.request).toMatchObject({ first_name: 'WAYNE', last_name: 'GRAY' })
+  })
+
+  // THE GUARD ON THE LANE THAT ACTUALLY WORKS. A dossier name is built from Tracerfy's structured
+  // first_name/last_name, so it is natural however the county stores its own strings.
+  it('never applies a county order to a dossier-discovered name', () => {
+    const plan = planRoute(
+      { state: 'TN', county: 'Hickman', parcelIdLocal: '041003    00504',
+        ownerName: 'Wayne Gray', ownerNameOrder: 'natural' },
+      'pro',
+    )
+    const step = plan.steps.find(s => s.kind === 'TRACERFY_PARCEL_APN')
+    expect(step?.request).toMatchObject({ first_name: 'Wayne', last_name: 'Gray' })
   })
 })
 

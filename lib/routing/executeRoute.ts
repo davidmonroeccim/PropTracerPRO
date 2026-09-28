@@ -704,7 +704,13 @@ function contactParcelFor(
   situsZip: string | null,
   mailing: DossierMailingAddress | null,
 ): ParcelInput {
-  const base: ParcelInput = { ...parcel, ownerName: owner, situsZip }
+  // ownerNameOrder 'natural' ON BOTH RETURN PATHS, and it is load-bearing. `owner` here is built
+  // by ownerNamesFrom() from the dossier's STRUCTURED first_name and last_name, so it is natural
+  // by construction. The spread keeps `county`, so without this a county measured LAST FIRST
+  // (D18) would invert a dossier name on re-entry -- on the lane that produced every tier 2
+  // success on 2026-09-28. The county rule applies to a COUNTY's own owner string, never to a
+  // vendor's structured one.
+  const base: ParcelInput = { ...parcel, ownerName: owner, situsZip, ownerNameOrder: 'natural' }
   const mailingComplete =
     mailing !== null && Boolean(mailing.address.trim() && mailing.city.trim() && mailing.state.trim())
   if (!hasSitus(parcel) && mailingComplete && classifyOwnerName(owner) === 'individual') {

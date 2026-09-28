@@ -3247,3 +3247,28 @@ successes.
 
 `GRAY WAYNE` is deliberately not fixed: it is the same shape as `Gerald Pentland`, which the suite
 pins as natural order, so it needs provenance or a retry rather than a parser change.
+
+## 2026-09-28 (later still): owner name order per county, D18/D22 implemented
+
+Gates: vitest **2248 passed / 89 files / 0 failed**, tsc **exit 0**, eslint **45** (the floor),
+`next build` **exit 0**.
+
+`GRAY WAYNE` was never an unsolvable ambiguity. D18 named the defect on 2026-09-21 with the line
+numbers in it, D22 scoped the fix to records where the county is known, and Phase 0 measured the
+order per county. I rediscovered it in a paid live test instead of reading the decision register,
+and then designed a migration and a three-surface wire change that contradicted D22. See L-040.
+
+Implemented as David scoped it, 2026-09-28: *"Wherever the county is known."*
+`lib/routing/countyNameOrder.ts` holds 59 measured counties (55 from Phase 0, 4 measured today),
+56 assessor and 3 natural. `planRoute` resolves the order from the parcel's state and county;
+`splitPersonName` uses it ONLY for a name carrying no other signal, since an explicit `LAST, FIRST`
+comma, a shared surname across multi-owner parts and a trailing middle initial each resolve the
+order on their own and are checked first.
+
+An absent county means NOT MEASURED and keeps today's behaviour. 59 of 1,854 is the honest coverage
+and it is pinned in a test; extending it is a measurement job, not a code change.
+
+`contactParcelFor` forces natural order, because a dossier name is built from Tracerfy's structured
+first/last and is natural by construction while the parcel it re-enters on still carries its county.
+Deleting that line left the whole suite green until the guard was moved into executeRoute's own
+tests.

@@ -12,6 +12,8 @@
  * Misses are free on all four.
  */
 
+import { countyNameOrder, type NameOrder } from './countyNameOrder'
+
 export type OwnerType = 'entity' | 'individual' | 'trust' | 'unknown'
 export type BillingTier = 1 | 2
 
@@ -94,6 +96,17 @@ export interface ParcelInput {
   ownerName?: string | null
   /** State of registration, if already resolved. FastAppend keys on this, NOT the property state. */
   registrationState?: string | null
+  /**
+   * INTERNAL OVERRIDE, NOT A WIRE FIELD. No submit surface accepts this and none should: D22 fixes
+   * name order per COUNTY, and the county is already on the row.
+   *
+   * It exists for one caller. `contactParcelFor` (executeRoute.ts) re-enters planRoute with the
+   * owner the DOSSIER named, and that name is built from Tracerfy's structured first_name and
+   * last_name, so it is natural by construction. On the entity path it returns the parcel with
+   * `county` still set, so without this the county's assessor order would be applied to a natural
+   * name and invert it -- on the lane that produced every tier 2 success on 2026-09-28.
+   */
+  ownerNameOrder?: NameOrder | null
 }
 
 export type StepKind =
@@ -470,7 +483,14 @@ export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan 
   } else {
     // Person, trust and unknown share one ladder (spec 4.2; D2, D3). A trust runs its person
     // steps on the name with the trust words removed; an unknown name runs them as given.
-    const who = personNameFor(ownerType === 'trust' ? stripTrustWords(ownerName) : ownerName)
+    // D18 with D22, and David 2026-09-28: "Wherever the county is known." The county's own
+    // measured order decides ONLY a name that carries no other signal; every signal inside
+    // splitPersonName is checked first. An unmeasured county returns null and nothing changes.
+    const order = parcel.ownerNameOrder ?? countyNameOrder(parcel.state, parcel.county)
+    const who = personNameFor(
+      ownerType === 'trust' ? stripTrustWords(ownerName) : ownerName,
+      order,
+    )
     if (!who) {
       // D16: no first name or initial left, so no person step can be asked. FastAppend on the
       // FULL name, as an entity. An individual-looking name that leaves none ("SMITH JR") is read
@@ -540,8 +560,11 @@ function entityStep(parcel: ParcelInput, name: string, warnings: string[]): Rout
 const TRUSTEE_SURNAME = /^(TRS|TR|TTEE)\.?$/i
 
 /** A first name or initial AND a last name, or null when the name leaves no such pair (D16). */
-function personNameFor(name: string): { first_name: string; last_name: string } | null {
-  const who = splitPersonName(name)
+function personNameFor(
+  name: string,
+  order?: NameOrder | null,
+): { first_name: string; last_name: string } | null {
+  const who = splitPersonName(name, order)
   if (!who.first_name || !who.last_name) return null
   // No person step. The caller falls back to FastAppend on the FULL name, exactly as D16 does for
   // a name that leaves no first name at all.
@@ -612,7 +635,16 @@ function personSteps(
  * Naive whitespace splitting produces last_name "Trust" for the first and
  * "& Shaolan Wu" for the second. Both have shipped in this codebase before.
  */
-export function splitPersonName(name: string): { first_name: string; last_name: string } {
+export function splitPersonName(
+  name: string,
+  /**
+   * The order this name's COUNTY stores owner names in (D18/D22), or null/absent when the county
+   * is unknown or unmeasured. It decides ONLY a name carrying no other signal; every signal below
+   * is checked first. Never pass a county order for a DOSSIER name: those are built from
+   * Tracerfy's structured first_name/last_name and are natural by construction.
+   */
+  order?: NameOrder | null,
+): { first_name: string; last_name: string } {
   const parts = splitOwners(name)
 
   // 1. A surname repeated as the LEADING token of EVERY part is the assessor's multi-owner
@@ -661,7 +693,14 @@ export function splitPersonName(name: string): { first_name: string; last_name: 
     return { first_name: tokens[1], last_name: tokens[0] }
   }
 
-  // 7. Natural order, and it stays the DEFAULT deliberately. ownerNamesFrom()
+  // 7. NO SIGNAL LEFT, so the county's own measured order decides (D18, D22). This is the only
+  //    branch the county rule touches, and it is the one that sent "GRAY WAYNE" to Tracerfy as
+  //    first GRAY / last WAYNE on 2026-09-28 from a county measured 3,918 LAST FIRST to 117.
+  if (order === 'assessor' && tokens.length >= 2) {
+    return { first_name: tokens[1], last_name: tokens[0] }
+  }
+
+  // 8. Natural order, and it stays the DEFAULT deliberately. ownerNamesFrom()
   //    (executeRoute.ts:685) joins the dossier's structured first_name and last_name, so every
   //    dossier-derived name arrives here in natural order, and that is the path that produced
   //    all three tier 2 successes on 2026-09-28. Widening assessor detection must never flip it.
