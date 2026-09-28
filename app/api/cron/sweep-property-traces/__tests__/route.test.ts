@@ -546,8 +546,11 @@ describe("parcelForRow", () => {
 
   it("never reads the literal APN out of a parcel-keyed row as the street (D38)", () => {
     // A row keyed APN|<parcel>|<COUNTY>|<STATE> has no street at all. split('|')[0] on it is the
-    // word "APN", which would be sent to the dossier as an address. Not reachable from today's
-    // bulk uploads, which all carry a street; guarded so it cannot become reachable quietly.
+    // word "APN", which would be sent to the dossier as an address. REACHABLE AS OF 2026-09-28:
+    // a blank-owner record with apn + county + state and no city is queued rather than filed
+    // no-key, because both bulk submits now ask canDiscoverOwner() instead of
+    // validateAddressInput. The guard was written for the shape before anything produced it, and
+    // this is the test that proves it handles the real thing: no street, and DOSSIER_APN alone.
     // MUTATION: drop the isParcelKey() arm and this goes red with situsAddress "APN".
     const parcel = parcelForRow({
       ...baseRow,

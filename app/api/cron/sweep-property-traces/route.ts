@@ -202,9 +202,21 @@ interface QueueRow {
 export function parcelForRow(row: QueueRow): ParcelInput {
   // D38: a row keyed on a PARCEL carries `APN|<parcel>|<COUNTY>|<STATE>` here and has no street
   // in it at all, so splitting on the pipe would hand the dossier the literal word "APN" as an
-  // address. Such a row cannot reach this queue today (every bulk upload carries a street), and
-  // the guard is here so it cannot start to without anyone noticing. No street is '', never a
-  // fabricated one: parcelForFullTrace then plans from the apn and county columns alone.
+  // address.
+  //
+  // SUCH A ROW NOW REACHES THIS QUEUE, as of 2026-09-28. It used to be unreachable -- the comment
+  // here said so, because every bulk upload carried a street -- and the guard was written for a
+  // shape nothing produced. The path it arrives by: a blank-owner record carrying apn + county +
+  // state and NO city, submitted through app/api/v1/trace/bulk or the Suite Gateway's
+  // skip_trace_bulk (lib/suite/mcp-tools.ts). Both used to file that record no-key at submit,
+  // because they asked validateAddressInput, which has no parcel term; both now ask
+  // canDiscoverOwner() from lib/routing/ownerRoute.ts, so the record is queued for the Full
+  // Property Trace that planRoute() would have planned for it all along -- DOSSIER_APN, the owner's
+  // Tier 2 step 1 on the APN key. traceKeyFor gives exactly that row this `APN|` normalized_address,
+  // and nothing else in it holds a street.
+  //
+  // No street is '', never a fabricated one: parcelForFullTrace then plans from the apn and county
+  // columns alone, and hasApn() is satisfied by them plus the state column.
   const streetAddress = isParcelKey(row.normalized_address)
     ? ''
     : row.normalized_address.split('|')[0] || row.normalized_address;
