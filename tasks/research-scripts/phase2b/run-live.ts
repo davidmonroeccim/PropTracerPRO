@@ -520,7 +520,50 @@ async function readback(records: LiveRecord[]): Promise<void> {
   )
 }
 
+/**
+ * KNOWN-ANSWER SELF-CHECK ON THE D36 COMPARISON, RUN BEFORE ANY READ AND BEFORE ANY SPEND.
+ *
+ * The D36 assertion in readback() shipped comparing `traceKeyFor(input)` -- the PLAINTEXT normalised
+ * key -- against the stored `address_hash`, which is a sha256 hex digest. Both sides are `string`,
+ * and tsconfig.json excludes tasks/research-scripts, so nothing could have caught it. It reported
+ * that invariant BROKEN for all 8 production records on a system where it holds.
+ *
+ * THE RULE THIS ENCODES: any assertion inside a money-spending runner whose PASS and whose FAIL are
+ * both plausible readings needs a fixture that MUST pass and one that MUST fail, run before the
+ * first dollar. A check that could only ever print FAIL is not evidence, and by the time anyone
+ * reads it the spend that produced it has already happened.
+ *
+ * Two fixtures, on a hardcoded throwaway address never submitted anywhere:
+ *   MUST FAIL   the digest must NOT equal its own input. That IS the broken comparison, so if this
+ *               ever passes, key and digest are interchangeable and D36 cannot be read either way.
+ *   MUST PASS   the digest must be 64 lowercase hex characters, i.e. really a sha256 hex digest and
+ *               really the same shape trace_history.address_hash stores.
+ *
+ * Throws rather than exiting, so it surfaces through main()'s catch like every other hard stop.
+ */
+function assertD36ComparesLikeWithLike(): void {
+  const probe = '1 SELF CHECK WAY|NOWHERE|ZZ'
+  const digest = createAddressHash(probe)
+  if (digest === probe) {
+    throw new Error(
+      'SELF-CHECK FAILED: createAddressHash returned its own input, so the D36 check would be ' +
+        'comparing a plaintext key against a stored digest and could never match. Not run.'
+    )
+  }
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw new Error(
+      `SELF-CHECK FAILED: createAddressHash produced a ${digest.length}-character value that is ` +
+        'not a 64-character lowercase sha256 hex digest, so it is not the shape ' +
+        'trace_history.address_hash stores and the D36 check cannot be trusted either way. Not run.'
+    )
+  }
+}
+
 async function main(): Promise<void> {
+  // FIRST, ahead of loadRecords(), ahead of --readback's reads and ahead of every refusal: this is
+  // the one check whose failure invalidates the EVIDENCE rather than the run, so it has to be
+  // settled before a dollar is spent producing evidence nobody can read.
+  assertD36ComparesLikeWithLike()
   const records = loadRecords()
   const total = worstCase(records)
 

@@ -354,3 +354,69 @@ describe('TRACE_HISTORY_WIDTH matches the checked-in DDL', () => {
     expect(Object.keys(TRACE_HISTORY_WIDTH).sort()).toEqual(PINNED.map((p) => p.key).sort());
   });
 });
+
+/**
+ * THE LIVE-CHECK RUNNER'S D36 SELF-CHECK.
+ *
+ * tasks/research-scripts/phase2b/run-live.ts spends real vendor money and then asserts D36: that
+ * the stored `address_hash` equals the hash of what was submitted. It shipped comparing
+ * traceKeyFor(input) -- the PLAINTEXT key -- against the digest column, so it reported that
+ * invariant BROKEN for all 8 production records on a system where it holds. Both sides are
+ * `string`, and tsconfig.json excludes tasks/research-scripts, so neither the typechecker nor
+ * `tsc --noEmit` could ever have caught it.
+ *
+ * ASSERTED AT THE SOURCE, and the runner is deliberately NOT imported: it calls main() at module
+ * scope, so importing it would RUN it. A source scan is also the exact shape of this failure -- the
+ * defect was which expression appeared on each side of a comparison.
+ *
+ * The first two tests below are the runner's own two fixtures, executed here against the real
+ * functions, so the property the runner asserts is proven rather than only asserted about.
+ */
+describe("the phase2b live runner's D36 self-check", () => {
+  const RUNNER = 'tasks/research-scripts/phase2b/run-live.ts';
+  const source = readFileSync(join(process.cwd(), RUNNER), 'utf8');
+
+  it('MUST FAIL fixture: a digest is never equal to its own input', () => {
+    // This IS the broken comparison. If it ever held, key and digest would be interchangeable and
+    // D36 could not be read in either direction.
+    const probe = '1 SELF CHECK WAY|NOWHERE|ZZ';
+    expect(createAddressHash(probe)).not.toBe(probe);
+    // And the same for a real key, not only a hand-written one.
+    const key = traceKeyFor({ address: '1 Main St', city: 'Dallas', state: 'TX' });
+    expect(createAddressHash(key)).not.toBe(key);
+  });
+
+  it('MUST PASS fixture: the digest is a 64-character lowercase sha256 hex string', () => {
+    // The shape trace_history.address_hash stores. A digest of another shape would mean the
+    // comparison is against something else again.
+    expect(createAddressHash('1 SELF CHECK WAY|NOWHERE|ZZ')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('runs that self-check before any read and before any spend', () => {
+    // MUTATION: delete assertD36ComparesLikeWithLike, or move its call below loadRecords(), and
+    // this goes red.
+    expect(source).toContain('function assertD36ComparesLikeWithLike');
+    // Both fixtures are present in the runner itself, not just here.
+    expect(source).toContain('/^[0-9a-f]{64}$/');
+
+    // FIRST STATEMENT OF main(): ahead of loadRecords(), which every path runs, and therefore ahead
+    // of --readback's reads and of --live's refusals and spend. Searched from main() onward, because
+    // the declaration `function assertD36ComparesLikeWithLike(): void` also contains `...()`.
+    const mainIndex = source.indexOf('async function main()');
+    expect(mainIndex).toBeGreaterThan(-1);
+    const callIndex = source.indexOf('assertD36ComparesLikeWithLike()', mainIndex);
+    expect(callIndex, 'the self-check is never called from main()').toBeGreaterThan(-1);
+    // The STATEMENT, not a mention of loadRecords in a comment.
+    const loadIndex = source.indexOf('const records = loadRecords()', mainIndex);
+    expect(loadIndex).toBeGreaterThan(-1);
+    expect(callIndex).toBeLessThan(loadIndex);
+  });
+
+  it('still refuses --live without PTP_LIVE_RUN, and still caps strictly', () => {
+    // ANTI-REGRESSION FLOOR for the edit above: the self-check must be ADDED to the runner's
+    // guards, never substituted for one. R0 is the token check and the cap is strictly-greater;
+    // both are what stopped the 2026-09-23 spend.
+    expect(source).toContain("process.env.PTP_LIVE_RUN !== '1'");
+    expect(source).toContain('total >= maxDollars');
+  });
+});
