@@ -39,7 +39,7 @@
  */
 
 import { propertyAddressLabel } from '@/lib/trace/historyDisplay';
-import { rowSkipReason } from '@/lib/trace/rowSkipReason';
+import { rowSkipReason, tier1MaySpeak } from '@/lib/trace/rowSkipReason';
 import { DOSSIER_EXPORT_KEYS, toPublicPropertyRecord } from '@/lib/trace/publicPropertyRecord';
 import type { AIResearchResult, TraceHistory, TraceResult } from '@/types';
 
@@ -150,8 +150,16 @@ export const EXPORT_COLUMNS: readonly string[] = [
   // contact_vendor, which is internal and deliberately has no column here. `outcome_code` is the
   // machine-readable twin of `skip_reason` at column 21, which carries the sentence.
   //
-  // Blank on every row written before 2026-09-22 and on every tier 2 row, because both columns are
-  // NULL there. Blank, never a plausible guess (CLAUDE.md rule 7).
+  // BLANK IN THREE CASES, AND ONLY THE FIRST TWO USED TO BE STATED HERE. On a row written before
+  // 2026-09-22 and on a PURE tier 2 row, because both columns are NULL there. And now on any row
+  // tier1MaySpeak() closes the gate on, whatever those columns hold: the cells are gated at
+  // toExportValues() beside skip_reason, so the three outcome fields speak together or stay silent
+  // together on this surface as on the other three.
+  //
+  // "every tier 2 row" was the part that had gone false, and it was load-bearing: the gate-closed
+  // row that motivated this is a REUSED row carrying a tier 2 status AND a stale outcome_code from
+  // an earlier single trace, so it is a tier 2 row on which the column was not NULL at all.
+  // Blank, never a plausible guess (CLAUDE.md rule 7).
   'found_by',
   'outcome_code',
 ];
@@ -355,6 +363,22 @@ export function toExportValues(row: TraceHistory): unknown[] {
   // reader following the pattern finds it where they expect it.
   const dossier = toPublicPropertyRecord(row.property_record) ?? {};
 
+  // THE THREE OUTCOME FIELDS SPEAK TOGETHER OR STAY SILENT TOGETHER, and this
+  // CSV was the surface where they did not. `skip_reason` below is gated inside
+  // rowSkipReason, while `found_by` and `outcome_code` at the end of the row
+  // were echoed raw -- so a gate-closed row downloaded with skip_reason blank, a
+  // real charge, and an outcome_code whose approved meaning is "the record was
+  // not charged". That is not a smaller version of the withheld sentence, it is
+  // the same claim about the customer's own money by another route, in their
+  // favour, on a charge they can see on their wallet.
+  //
+  // Computed ONCE here, beside the rowSkipReason() call it has to agree with,
+  // rather than inline at each of the two cells: two call sites is two places
+  // for a money-safety rule to drift apart. The predicate itself lives in
+  // lib/trace/rowSkipReason.ts, which is the single derivation all four bulk
+  // surfaces share.
+  const tier1Speaks = tier1MaySpeak(row);
+
   return [
     // D38: a row keyed by parcel carries an INTERNAL key here (`APN|0123-456|TRAVIS|TX`).
     // It is never exported as the address; the customer gets "Parcel 0123-456, Travis County".
@@ -391,8 +415,12 @@ export function toExportValues(row: TraceHistory): unknown[] {
     ...appendedEmailColumns.map((_, i) => emails[i + LEGACY_EMAIL_COLUMNS] ?? null),
     result?.mailing_zip ?? null,
     ...DOSSIER_EXPORT_KEYS.map((key) => dossier[key] ?? null),
-    row.found_by ?? null,
-    row.outcome_code ?? null,
+    // GATED, for the reason set out where tier1Speaks is computed above. A row
+    // whose Tier 1 outcome this system does not trust says nothing in these two
+    // cells, exactly as it says nothing in skip_reason. Blank, never wrong
+    // (CLAUDE.md rule 7). No column is added and no header changes.
+    tier1Speaks ? row.found_by ?? null : null,
+    tier1Speaks ? row.outcome_code ?? null : null,
   ];
 }
 

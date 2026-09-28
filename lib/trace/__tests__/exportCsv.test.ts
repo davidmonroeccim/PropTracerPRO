@@ -375,10 +375,19 @@ describe('the base columns', () => {
   it('exports the KEY that found the owner, never the vendor', () => {
     // spec 7.1: found_by names the key (address, parcel_id, company_name). The vendor stays in
     // contact_vendor, which is internal and has no column here.
-    expect(cells(row({ found_by: 'parcel_id', outcome_code: 'found_by_parcel_id' })).found_by).toBe(
-      '"parcel_id"'
-    );
-    expect(cells(row({ found_by: 'parcel_id' })).outcome_code).toBe('');
+    //
+    // `trace_job_id: null` IS NOW PART OF THE FIXTURE, because these two cells are gated on
+    // tier1MaySpeak() and this test is about what an OPEN gate exports. The bare `row()` helper
+    // omits trace_job_id entirely, and tier1MaySpeak deliberately tests `=== null` rather than
+    // falsiness so that a caller which never SELECTED the column stays silent instead of guessing.
+    // Both production callers select '*' (app/api/trace/bulk/download, app/api/trace/single/
+    // download), so an absent column is a fixture shape rather than a real row; null is what a
+    // single-trace row actually carries.
+    expect(
+      cells(row({ found_by: 'parcel_id', outcome_code: 'found_by_parcel_id', trace_job_id: null }))
+        .found_by
+    ).toBe('"parcel_id"');
+    expect(cells(row({ found_by: 'parcel_id', trace_job_id: null })).outcome_code).toBe('');
     expect(EXPORT_COLUMNS).not.toContain('contact_vendor');
     // trace_steps is "Internal; never in a customer payload" (types/index.ts), and this task reads
     // it through rowSkipReason for every exported row. Nothing exports the log itself.
@@ -608,9 +617,34 @@ describe('the file itself', () => {
         trace_job_id: 'job-1',
         property_trace_status: 'property_trace_done',
         charge: 0.4,
+        found_by: 'company_name',
       })
     );
     expect(c.skip_reason).toBe('');
+    // AND THE TWO MACHINE-READABLE COLUMNS WITH IT. They used to be echoed raw while skip_reason
+    // was gated, so this exact row downloaded with skip_reason blank, charge 0.40, and
+    // outcome_code 'owner_name_not_matched' -- a code whose approved meaning is that the record
+    // was NOT charged. Blanking the sentence and shipping the same claim two columns later is not
+    // a smaller disclosure, it is the same false statement about the customer's own money.
+    // MUTATION: drop the tier1Speaks gate on either cell in exportCsv.ts and this goes red.
+    expect(c.outcome_code).toBe('');
+    expect(c.found_by).toBe('');
+  });
+
+  it('still shows all three when the gate is OPEN, so the fix silenced only the untrusted row', () => {
+    // The other half of the gate, and the reason it has to be here: a change that blanked these
+    // columns unconditionally would pass the test above and destroy a real answer the customer
+    // paid for. trace_job_id null is a row a single trace wrote itself, so its gate is open.
+    const c = cells(
+      row({
+        outcome_code: 'owner_name_not_matched',
+        is_successful: false,
+        trace_job_id: null,
+        found_by: 'company_name',
+      })
+    );
+    expect(c.outcome_code).toBe('"owner_name_not_matched"');
+    expect(c.found_by).toBe('"company_name"');
   });
 
   it('emits skip_reason and the research block on every job, blank when unused', () => {
