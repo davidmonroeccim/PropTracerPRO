@@ -773,6 +773,38 @@ describe("per-record judging replaces the whole-batch 400", () => {
     expect(row.charge ?? 0).toBe(0);
   });
 
+  it("states is_successful false on a no-key row, so a reused match cannot be recounted", async () => {
+    // THE ROW IS REUSED. insertHistoryRows upserts on (user_id, address_hash), so a record whose
+    // EARLIER trace settled is_successful: true lands back on that same row -- and this write used
+    // to omit the column, which on an upsert leaves the old `true` exactly where it was.
+    //
+    // WHY THAT COSTS SOMETHING. records_submitted deliberately EXCLUDES no-key rows, while
+    // matchedRowCount (lib/trace/finalizeBulkJob.ts) and both status routes' flat counts include
+    // every row of the job. So the stale `true` was scored a match on a job that never submitted
+    // the record, and records_matched could come out LARGER than records_submitted.
+    //
+    // ASSERTED ON THE WRITTEN PAYLOAD, because that is where the bug lives: this harness records
+    // upserts rather than keeping a table, and a stored value surviving is precisely what an
+    // omitted key does. So the column must be PRESENT and false, not merely not-true -- absent
+    // would satisfy `not.toBe(true)` while leaving the bug in place.
+    // MUTATION: delete is_successful from the no-key write, or set it true, and this goes red.
+    await post([rec(undefined, 1, { address: "", state: "" })]);
+    const row = historyRows()[0];
+    expect(row.property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+    expect(Object.keys(row)).toContain("is_successful");
+    expect(row.is_successful).toBe(false);
+  });
+
+  it("does not touch a money column on that row, because those are receipts", async () => {
+    // `charge` and `cost` are deliberately monotonic on a reused row. This row is free, but
+    // WRITING a zero would overwrite what an earlier trace legitimately billed -- destroying a
+    // receipt rather than correcting one. Saying nothing is the only safe thing to say.
+    await post([rec(undefined, 1, { address: "", state: "" })]);
+    const row = historyRows()[0];
+    expect(Object.keys(row)).not.toContain("charge");
+    expect(Object.keys(row)).not.toContain("cost");
+  });
+
   it("never files a NAMED record as no-key, however broken its address (D4)", async () => {
     // The rule Step 3 states in as many words: a Tier 1 record is never no-key at submit. A company
     // traces on name and state alone, and a person with no lookup key settles no_lookup_key, free,

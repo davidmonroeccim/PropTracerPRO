@@ -286,6 +286,36 @@ describe("a blank-owner row no vendor can be asked about", () => {
     expect(isPropertyTracePending(String(historyRows()[0].property_trace_status))).toBe(false);
   });
 
+  it("states is_successful false, so a reused match cannot be recounted", async () => {
+    // THE ROW IS REUSED. insertHistoryRows upserts on (user_id, address_hash), so a record whose
+    // EARLIER trace settled is_successful: true lands back on that same row -- and this write used
+    // to omit the column, which on an upsert leaves the old `true` exactly where it was.
+    //
+    // WHY THAT COSTS SOMETHING. records_submitted deliberately EXCLUDES no-key rows, while
+    // matchedRowCount (lib/trace/finalizeBulkJob.ts) and both status routes' flat counts include
+    // every row of the job. So the stale `true` was scored a match on a job that never submitted
+    // the record, and records_matched could come out LARGER than records_submitted.
+    //
+    // ASSERTED ON THE WRITTEN PAYLOAD, because that is where the bug lives: this harness records
+    // upserts rather than keeping a table, and a stored value surviving is precisely what an
+    // omitted key does. So the column must be PRESENT and false, not merely not-true.
+    // MUTATION: delete is_successful from the no-key write, or set it true, and this goes red.
+    await post([noKeyRec(1)]);
+    const row = historyRows()[0];
+    expect(Object.keys(row)).toContain("is_successful");
+    expect(row.is_successful).toBe(false);
+  });
+
+  it("does not touch a money column, because those are receipts", async () => {
+    // `charge` and `cost` are deliberately monotonic on a reused row. This row is free, but
+    // WRITING a zero would overwrite what an earlier trace legitimately billed -- destroying a
+    // receipt rather than correcting one.
+    await post([noKeyRec(1)]);
+    const row = historyRows()[0];
+    expect(Object.keys(row)).not.toContain("charge");
+    expect(Object.keys(row)).not.toContain("cost");
+  });
+
   it("is NOT written as a blank-owner skip, whose advice would be false here", async () => {
     // BLANK_OWNER_SKIP_REASON ends "send it again with the owner of record and
     // we will run it". For a row missing its city, doing exactly that still

@@ -1230,6 +1230,16 @@ describe("skip_trace_bulk", () => {
       expect(rows[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
       expect(rows[0].ai_research_status).toBeNull();
       expect(rows[0].status).toBe("no_match");
+      // NOT A MATCH, AND STATED. The row is REUSED on an upsert, so a record whose earlier trace
+      // settled is_successful: true lands back on that same row, and this write used to OMIT the
+      // column, leaving the old `true` in place. records_submitted deliberately excludes no-key
+      // rows while matchedRowCount and both status surfaces count every row of the job, so the
+      // stale `true` was scored a match on a job that never submitted the record, and
+      // records_matched could come out larger than records_submitted. Present-and-false, not
+      // merely not-true: absent is exactly the state that preserved the bug.
+      // MUTATION: delete is_successful from the no-key write, or set it true, and this goes red.
+      expect(Object.keys(rows[0])).toContain("is_successful");
+      expect(rows[0].is_successful).toBe(false);
       // FREE MEANS THE KEY IS NEVER WRITTEN, not that it is written as zero. `charge ?? 0` passed
       // either way, so it could not detect a row that started carrying a charge it should not. The
       // row is REUSED on an upsert, so writing 0 would also overwrite a real charge from an earlier

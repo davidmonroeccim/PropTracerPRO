@@ -459,6 +459,19 @@ export async function POST(request: Request) {
             ...buildHistoryRow(r),
             property_trace_status: PROPERTY_TRACE_NO_KEY_STATUS,
             status: 'no_match' as const,
+            // NOT A MATCH, AND NOW IT SAYS SO. This is an upsert on
+            // (user_id, address_hash), so a REUSED row keeps whatever is_successful it already
+            // carried, and this write used to omit the column. records_submitted deliberately
+            // EXCLUDES no-key rows, while matchedRowCount (lib/trace/finalizeBulkJob.ts) and both
+            // status routes' flat counts include EVERY row of the job -- so a row that settled
+            // `true` on an earlier trace was counted as a match on a job that never submitted it,
+            // and records_matched could come out larger than records_submitted. A no-key row
+            // delivered nothing, so it states false rather than inheriting an older answer.
+            //
+            // NO MONEY COLUMN IS TOUCHED. `charge` and `cost` are receipts, deliberately monotonic
+            // on a reused row: this row was free, and zeroing what an earlier trace legitimately
+            // billed would destroy a receipt rather than correct one.
+            is_successful: false,
             // Written for the same reason as the two queued writes below: this row is terminal, and
             // a stale job id left on a REUSED row would hand a finished, free row to a CSV settle
             // path that bills.
