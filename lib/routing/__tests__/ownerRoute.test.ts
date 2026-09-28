@@ -56,6 +56,16 @@ describe('classifyOwnerName', () => {
   })
 })
 
+describe('classifyOwnerName, the 2026-09-28 coverage test', () => {
+  it('calls a contracting company an entity, not an individual', () => {
+    // WV Monongalia's owner of record. Classified individual, so PTP sent first VALLEY /
+    // last CONTRACTING to Tracerfy's PERSON lookup instead of FastAppend. Missed.
+    expect(classifyOwnerName('VALLEY GENERAL CONTRACTING')).toBe('entity')
+    expect(classifyOwnerName('Hilltop Construction')).toBe('entity')
+    expect(classifyOwnerName('Baker Contractors')).toBe('entity')
+  })
+})
+
 describe('splitPersonName', () => {
   it.each([
     ['Marcus T Halloway | Halloway Living Trust', 'Marcus', 'Halloway'],
@@ -74,6 +84,41 @@ describe('splitPersonName', () => {
     // Regression: produced last_name "Trust". Same failure shape as the documented
     // owner_name.split(' ') bug that yielded "& Shaolan Wu".
     expect(splitPersonName('Marcus T Halloway | Halloway Living Trust').last_name).not.toBe('Trust')
+  })
+
+  // THE 2026-09-28 COVERAGE TEST. Four of five Arm C names were mangled before the vendor saw
+  // them. Each case below is a real county owner string that cost a real lookup.
+  it.each([
+    // NC Buncombe. splitOwners knew '|' and '&' but the county published ';', so the whole
+    // string was read as ONE person: first BECK, last HELEN. Tracerfy then resolved the parcel,
+    // returned two real people and we discarded them as name_not_matched, for $0.10.
+    ['BECK JAMES R;BECK HELEN', 'JAMES', 'BECK'],
+    // ND Ward. Order was right (trailing initial) but the comma rode along into the request.
+    ['BOTT, RUSSELL L', 'RUSSELL', 'BOTT'],
+    // The comma alone must be enough; it must not depend on a middle initial following.
+    ['BOTT, RUSSELL', 'RUSSELL', 'BOTT'],
+    ['Halloway, Marcus', 'Marcus', 'Halloway'],
+    // A repeated leading token across multi-owner parts is the shared surname.
+    ['SMITH JOHN A;SMITH MARY', 'JOHN', 'SMITH'],
+    // No middle initial anywhere, so the trailing-initial rule cannot help: the ONLY signal
+    // that BECK is the surname is that it leads BOTH parts.
+    ['BECK JAMES;BECK HELEN', 'JAMES', 'BECK'],
+    // A surname left carrying a comma by the county, with no comma-split to strip it.
+    ['RUSSELL BOTT,', 'RUSSELL', 'BOTT'],
+  ])('%s splits to %s / %s', (input, first, last) => {
+    expect(splitPersonName(input)).toEqual({ first_name: first, last_name: last })
+  })
+
+  // THE REGRESSION GUARD THAT MATTERS MOST. ownerNamesFrom() joins the dossier's STRUCTURED
+  // first_name and last_name, so every dossier-derived name arrives in NATURAL order, and that
+  // path produced all three tier-2 successes on 2026-09-28. Widening assessor detection must
+  // never flip these.
+  it.each([
+    ['Robert White', 'Robert', 'White'],
+    ['Gerald Pentland', 'Gerald', 'Pentland'],
+    ['Marcus T Halloway', 'Marcus', 'Halloway'],
+  ])('keeps dossier natural order: %s -> %s / %s', (input, first, last) => {
+    expect(splitPersonName(input)).toEqual({ first_name: first, last_name: last })
   })
 
   it('survives a single token and an empty string', () => {

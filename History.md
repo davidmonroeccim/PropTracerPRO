@@ -3211,3 +3211,39 @@ both defects happened.
 under an exact-anchor check with the total test count watched for a drop, all 26 red — but ONE
 survived first at 0 red (a flat tier on settleBulkJob's FastAppend branch, a tautology because every
 fixture there had no tier at all); a test now covers it. Table in `tasks/todo.md`.
+
+## 2026-09-28 (later): commercial coverage test, 20 records, and the owner-name fixes it forced
+
+`main` += the coverage test and the parser fix. Gates: vitest **2240 passed / 89 files / 0 failed**,
+tsc **exit 0**, eslint **45 problems** (the floor), `next build` **exit 0**.
+
+### The test
+
+$3.90 charged, $1.50 vendor cost, against $20 authorised and a $13.00 worst case (cap $19). Job
+`f2dc14df`, 20 records over 4 arms, 10 fresh counties in 10 states, **completed in 48.0s unpolled**.
+Commercial was selected from each county's OWN land-use vocabulary, never the curated
+`property_type` column (L-039).
+
+- **The APN dossier works.** 5 of 15 tier-2 keys resolved, 3 returned contacts. The morning's
+  0-for-2 was sample size. UT Cache ran the first complete Tier 2 chain end to end.
+- **`TRACERFY_PARCEL_APN` fired in production for the first time since Phase 1 and hit** on AR
+  Greene: `found_by=parcel_id`, 5 phones, 5 emails.
+- **Registry key vs county key is 1-1-3, not a one-way defect.** MN Clay's county key hit where
+  `parcel_id_local` missed; TN Hickman's `parcel_id_local` hit where the county key missed. This
+  retires the earlier claim that the registry form is the defective one, and makes "carry both keys
+  and try each" the cheap fix rather than a migration.
+
+### The answer was our own code
+
+4 of 5 Arm C owner names were mangled before the request left PTP. NC Buncombe is the proof:
+Tracerfy resolved the parcel, returned two real people for $0.10, and PTP discarded them because it
+had asked for a person called "BECK HELEN". `splitOwners` knew `|` and `&`; the county published `;`.
+
+Fixed: `;` as an owner separator, an explicit `LAST, FIRST` comma signal, a shared surname repeated
+across multi-owner parts, edge punctuation stripped from tokens, and `CONTRACTING`/`CONTRACTORS`/
+`CONSTRUCTION` added to the entity markers. Natural order stays the DEFAULT on purpose, because
+`ownerNamesFrom` joins the dossier's structured names and that path produced all three tier-2
+successes.
+
+`GRAY WAYNE` is deliberately not fixed: it is the same shape as `Gerald Pentland`, which the suite
+pins as natural order, so it needs provenance or a retry rather than a parser change.

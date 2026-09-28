@@ -150,7 +150,7 @@ export interface RoutePlan {
  * misclassifies as a four-token individual.
  */
 const ENTITY_ANYWHERE =
-  /\b(L\s*\.?\s*L\s*\.?\s*C|L\s*\.?\s*L\s*\.?\s*P|P\s*\.?\s*L\s*\.?\s*L\s*\.?\s*C|INC(ORPORATED)?|CORP(ORATION)?|LTD|LIMITED|L\s*\.?\s*P|PARTNERSHIP|ASSOCIATES?|ASSOCIATION|HOLDINGS?|PROPERT(Y|IES)|INVESTMENTS?|INVESTORS?|ENTERPRISES?|VENTURES?|REALTY|REAL ESTATE|MANAGEMENT|MGMT|DEVELOPMENT|RENTALS?|APARTMENTS?|ESTATES|STORAGE|GROUP|BANK|CHURCH|MINISTRIES|FOUNDATION|AUTHORITY|DISTRICT|CITY OF|COUNTY OF|STATE OF|BOARD OF|UNIVERSITY|COLLEGE|HOSPITAL)\b/i
+  /\b(L\s*\.?\s*L\s*\.?\s*C|L\s*\.?\s*L\s*\.?\s*P|P\s*\.?\s*L\s*\.?\s*L\s*\.?\s*C|INC(ORPORATED)?|CORP(ORATION)?|LTD|LIMITED|L\s*\.?\s*P|PARTNERSHIP|ASSOCIATES?|ASSOCIATION|HOLDINGS?|PROPERT(Y|IES)|INVESTMENTS?|INVESTORS?|ENTERPRISES?|VENTURES?|REALTY|REAL ESTATE|MANAGEMENT|MGMT|DEVELOPMENT|RENTALS?|APARTMENTS?|ESTATES|STORAGE|GROUP|CONTRACTING|CONTRACTORS?|CONSTRUCTION|BANK|CHURCH|MINISTRIES|FOUNDATION|AUTHORITY|DISTRICT|CITY OF|COUNTY OF|STATE OF|BOARD OF|UNIVERSITY|COLLEGE|HOSPITAL)\b/i
 
 /**
  * Ambiguous tokens that only count as entity markers at the END of the name.
@@ -172,7 +172,10 @@ const INDIVIDUAL_MARKER = /\b(ET AL|ET UX|ET VIR|JR|SR|III|IV|MRS?|DR)\b|&| AND 
  * e.g. "Marcus T Halloway | Halloway Living Trust".
  */
 const splitOwners = (name: string): string[] =>
-  name.split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean)
+  name.split(/\s*[|;]\s*/).map(s => s.trim()).filter(Boolean)
+
+/** Edge punctuation a county leaves on a token. `BOTT,` reached Tracerfy as a surname. */
+const stripEdgePunct = (t: string): string => t.replace(/^[.,;]+|[.,;]+$/g, '')
 
 /**
  * The fixed trust-word list (spec 4.2, D28). A trust's person steps run on the name with these
@@ -610,23 +613,59 @@ function personSteps(
  * "& Shaolan Wu" for the second. Both have shipped in this codebase before.
  */
 export function splitPersonName(name: string): { first_name: string; last_name: string } {
-  // 1. Of the pipe-separated owners, keep the first that reads as a person.
-  const person = splitOwners(name).find(looksLikePerson) ?? splitOwners(name)[0] ?? name
+  const parts = splitOwners(name)
 
-  // 2. Drop generational and legal suffixes; they are never the surname.
+  // 1. A surname repeated as the LEADING token of EVERY part is the assessor's multi-owner
+  //    form, and the repetition is the evidence of assessor order. NC Buncombe published
+  //    "BECK JAMES R;BECK HELEN"; read as one person that became first BECK / last HELEN,
+  //    Tracerfy resolved the parcel, returned two real people, and we discarded them as
+  //    name_not_matched having paid $0.10 (coverage test, 2026-09-28).
+  const leadOf = (s: string): string => stripEdgePunct(s.trim().split(/\s+/)[0] ?? '')
+  const sharedSurname =
+    parts.length > 1 && parts.every(p => leadOf(p) && leadOf(p).toUpperCase() === leadOf(parts[0]).toUpperCase())
+      ? leadOf(parts[0])
+      : null
+
+  // 2. Of the separated owners, keep the first that reads as a person.
+  const person = parts.find(looksLikePerson) ?? parts[0] ?? name
+
+  // 3. Drop generational and legal suffixes; they are never the surname.
   const cleaned = person.replace(/\b(ET AL|ET UX|ET VIR|JR|SR|II|III|IV|MRS?|DR)\b\.?/gi, ' ')
-  const tokens = cleaned.split(/\s+/).filter(t => t && t !== '&')
+
+  // 4. A COMMA AFTER THE FIRST TOKEN IS AN EXPLICIT "LAST, FIRST" AND NEEDS NO MIDDLE INITIAL.
+  //    Before this, order was recovered ONLY from a trailing initial, so "BOTT, RUSSELL" (no
+  //    initial) would have inverted, and "BOTT, RUSSELL L" kept the comma on the surname.
+  const comma = cleaned.indexOf(',')
+  if (comma > 0) {
+    const left = cleaned.slice(0, comma).trim().split(/\s+/).map(stripEdgePunct).filter(Boolean)
+    const right = cleaned.slice(comma + 1).trim().split(/\s+/).map(stripEdgePunct).filter(t => t && t !== '&')
+    if (left.length && right.length) {
+      return { first_name: right[0], last_name: left[left.length - 1] }
+    }
+  }
+
+  const tokens = cleaned.split(/\s+/).map(stripEdgePunct).filter(t => t && t !== '&')
   if (!tokens.length) return { first_name: '', last_name: '' }
   if (tokens.length === 1) return { first_name: tokens[0], last_name: '' }
 
-  // 3. A trailing single-letter token is a middle initial, which means the string is
+  // 5. The shared surname from step 1 wins: the leading token is the surname and the token
+  //    after it is the given name.
+  if (sharedSurname && tokens.length >= 2) {
+    return { first_name: tokens[1], last_name: tokens[0] }
+  }
+
+  // 6. A trailing single-letter token is a middle initial, which means the string is
   //    in assessor order (LAST FIRST MI) rather than natural order.
   const trailingInitial = /^[A-Za-z]\.?$/.test(tokens[tokens.length - 1])
   if (trailingInitial && tokens.length >= 3) {
     return { first_name: tokens[1], last_name: tokens[0] }
   }
 
-  // 4. Natural order. With joint owners the shared surname is the final token, and the
-  //    first given name precedes the ampersand, so take the ends rather than a split.
+  // 7. Natural order, and it stays the DEFAULT deliberately. ownerNamesFrom()
+  //    (executeRoute.ts:685) joins the dossier's structured first_name and last_name, so every
+  //    dossier-derived name arrives here in natural order, and that is the path that produced
+  //    all three tier 2 successes on 2026-09-28. Widening assessor detection must never flip it.
+  //    With joint owners the shared surname is the final token, and the first given name
+  //    precedes the ampersand, so take the ends rather than a split.
   return { first_name: tokens[0], last_name: tokens[tokens.length - 1] }
 }
