@@ -1235,3 +1235,50 @@ zero.
 - **Query the database.** A CSV in `docs/` is a report about the database, with a date on it.
 - **A four-orders-of-magnitude answer is a bug report about your method,** not a finding about the
   world. 3,000 out of 119,000,000 should have stopped me before it reached David.
+
+## L-040: I measured the wrong module and called it verification. The decision register already had the answer. (2026-09-28)
+
+**What happened.** Designing the owner-name-order fix, I needed to know whether gateway records
+carry county-ordered names. I said, correctly, that this should be settled by measurement rather
+than by asking David. I then opened the `suite-gateway` repo, read `lib/tools/crm-push-owners.ts`
+and `lib/crm-eligibility.ts`, found that `CuratedProperty` merges MPS with the registry, and
+concluded the surface was "mixed provenance" so the hint had to travel per record.
+
+**Spec D17 says the opposite, in David's own words**
+(`docs/superpowers/specs/2026-09-21-tier1-planroute-design.md:57`): *"The multifamily records are
+coming from the registry NOT MPS."* It is restated at
+`plans/2026-09-21-tier1-phase0-measurement.md:91` as **"MPS is not used at all (D17)"**, in
+`tasks/research-scripts/phase0/select_samples.py:2`, and in the handoff at :974. `crm_push_owners`
+is a CRM push tool; it is not the path D17 governs. **I measured a module the decision does not
+apply to and reported the result as if it settled the decision.**
+
+**And the fix was already designed and already measured.** D18 (:58) names the exact defect with
+the line numbers -- *"Today splitPersonName reads any two-word name as FIRST LAST
+(lib/routing/ownerRoute.ts:487-490)"* -- and sets the fix as the order each county's own data
+shows. D22 (:62) scopes it: *"name order is fixed per county only on gateway records, where the
+county is known."* Phase 0 measured it: **52 of 55 counties store LAST FIRST**, only MN Ramsey, WI
+Milwaukee and WI Dane read FIRST LAST, with a per-county table in
+`tasks/phase0-county-shortlist.md`. The handoff even calls the trailing comma "the D18 defect".
+
+So I spent a paid live test rediscovering a defect the spec had named a week earlier, then designed
+a migration and a three-surface wire change that contradicts D22, when the county was already on
+the row. David found it in one sentence: *"go back in the records and tell me if you see the rule."*
+
+**The mechanism, and it is the part worth keeping.** "Verify, do not assume" is not satisfied by
+running a query. A measurement answers only the question its subject governs. I picked the subject
+by grepping for a symbol (`owner_name`) and took the first module that matched, which is search by
+string rather than search by authority. The decision register is small, indexed and written in the
+owner's words, and I never opened it.
+
+**The rules.**
+- **Read the decision register BEFORE designing, not after being corrected.** For this repo that is
+  `docs/superpowers/specs/*-design.md` (D1-D41) and `tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md`. A
+  design that cannot name the decision it implements is a design nobody asked for.
+- **A measurement is scoped to its subject.** Before believing one, name which decision or contract
+  the thing you measured actually governs. Reading a neighbouring module is not verification, it is
+  a coincidence with citations.
+- **Grep for the DECISION, not for the symbol.** `grep -rn "D17"` would have taken one second and
+  changed everything. I grepped `owner_name` and got the wrong repo.
+- **When a defect looks new, search the spec for it before writing it up as a discovery.** Both
+  defects I "found" in the coverage test were already recorded, one of them with line numbers.
+- **The cheapest question is "has this already been decided?"** It outranks "can I measure it?".
