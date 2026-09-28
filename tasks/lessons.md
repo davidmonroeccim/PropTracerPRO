@@ -1186,3 +1186,52 @@ had already said the thing; what was left was code, not a question.
 - **A gap whose landing pad is already built, guarded, and commented as unreachable is not a future
   phase.** It is a finished feature with one line missing, and that shape should be treated as a bug.
 
+
+## L-039: A curated column answers "none" for data the county publishes. I had been told this three times. (2026-09-28)
+
+**What happened.** Asked to find commercial parcels with no owner name, I reported that fewer than
+3,000 existed nationwide. The real figure, from `county_coverage` in the registry database, is
+**34,099,080 parcels with no owner name out of 119,644,805**. Wrong by four orders of magnitude, and
+David caught it with one sentence: *"out of ~119M parcels you only have less than 3000 to choose
+from? You obviously are looking for the wrong fields, or you pulled the data from a source other
+than the database itself."* Both halves were right.
+
+**Mistake 1, the curated column.** I filtered `registry_search_parcels` on `property_type:
+["commercial"]`. That is a CROSSWALK output, not county data. The tool said so in EVERY response:
+*"24 of the 44 measured counties searched publish property_type. The rest hold no value in that
+column, so they were excluded by this filter rather than searched and found empty"* and *"A curated
+column came back empty is NOT the same as the registry holding nothing ... filter on any of them
+with the raw argument."* I read past both, ten times over. "WY has zero commercial" was a fact about
+the crosswalk that I reported as a fact about Wyoming.
+
+**Mistake 2, the stale snapshot.** The per-state owner picture came from
+`docs/registry-inventory/county-searchable-coverage.csv`, a 2026-09-01 file, not the database. On
+its authority I excluded OH, NJ, WA, MD, UT and NE as "policy confounds" -- and those six states
+hold **over 17 million** of the no-owner parcels. I discarded the answer and reported what was left.
+
+**Mistake 3, and this is the one that shows the pattern is a reflex.** Correcting mistake 1, I
+replaced the curated column with a regex I invented: `~* '(commerc|retail|office|...)'`. Lorain
+County OH codes its uses `510: Res-Single Family` and `400: Com-Vacant Land`. `Com-` does not match
+`commerc`, so my "corrected" count of 1,619 missed a bucket THE SAME QUERY PRINTED at 3,767 rows. I
+swapped someone else's invented vocabulary for my own.
+
+**Mistake 4, nearly.** Reaching for `ptype_counts` as a precomputed census. It is populated for 23
+counties out of 1,854.
+
+**The mechanism.** Every one of these columns is partially populated by construction, and every one
+of them returns a number rather than an error when it has nothing. A zero from a filter is
+indistinguishable from a zero from the market unless you go and ask which one it is. A NULL screams;
+a zero looks like a measurement. Four different columns in one session each handed me a confident
+zero.
+
+**The rules.**
+- **The county's own fields are the data; everything else is a convenience.** `land_use_code_raw`,
+  `land_use_desc_raw` and `raw_attributes` are the product (see the raw-fidelity rule). `property_type`,
+  `property_subtype`, `ptype_counts` and the inventory CSV are derived, partial, and silent about it.
+- **Before believing a small count, measure the DENOMINATOR of the filter itself.** "How many counties
+  populate this column at all" costs one query and would have caught this at the first step.
+- **A regex over a vocabulary you have not read is a curated column you wrote yourself.** Pull the
+  county's DISTINCT values first and count what is there, then filter.
+- **Query the database.** A CSV in `docs/` is a report about the database, with a date on it.
+- **A four-orders-of-magnitude answer is a bug report about your method,** not a finding about the
+  world. 3,000 out of 119,000,000 should have stopped me before it reached David.
