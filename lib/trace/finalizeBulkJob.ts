@@ -3,7 +3,32 @@ import { isPropertyTracePending } from './propertyTraceAttempts';
 import { isTier1QueuePending, isTier1QueueRow } from './tier1Queue';
 
 /**
- * THE ONE ANSWER TO "IS THIS BULK JOB FINISHED", AND THE ONE WRITER THAT ENDS IT.
+ * THE ONE ANSWER TO "IS THIS BULK JOB FINISHED" -- AND, FOR THE TWO QUEUE-DRAIN CRONS, THE ONE
+ * WRITER THAT ENDS IT.
+ *
+ * THE CLAIM IS SCOPED BECAUSE THE FLAT ONE WAS FALSE. This titled itself "THE ONE WRITER THAT ENDS
+ * IT" unqualified. Measured at HEAD, NINE other writes set trace_jobs.status terminal, in six
+ * files, and a reader who believed the flat claim would not go looking for them:
+ *
+ *   app/api/trace/bulk/status/route.ts        writeJobCompleted ('completed'); the stall arm ('failed')
+ *   app/api/v1/trace/bulk/status/route.ts     the finalize ('completed'); the stall arm ('failed')
+ *   lib/suite/mcp-tools.ts                    bulkStatus's finalize ('completed'); skipTraceBulk's
+ *                                             failed-enqueue arm ('failed')
+ *   app/api/trace/bulk/route.ts               failed enqueue ('failed'); nothing-to-wait-for ('completed')
+ *   app/api/v1/trace/bulk/route.ts            failed enqueue ('failed')
+ *   app/api/cron/sweep-stale-traces/route.ts  FOUR: the drained-queue rescue, the no-Tracerfy-job
+ *                                             arm, the timeout arm, and the result-loop finalize
+ *
+ * "The one writer from the crons" would be wrong too, for the last entry: sweep-stale-traces lives
+ * under app/api/cron and ends jobs itself. What is true is narrower and still worth saying. This is
+ * the only terminal writer the two QUEUE-DRAIN crons use -- sweep-property-traces and
+ * sweep-entity-traces read trace_jobs for `created_at` and never touch its status, going through
+ * finalizeTouchedJobs instead -- and it is the only terminal write in the repo that is a
+ * compare-and-swap. (sweep-business-traces writes trace_jobs too, but only records_matched, so it
+ * ends nothing.)
+ *
+ * The code was always right; only the title overclaimed. The flat counts on the other surfaces stay
+ * by the owner's ruling, and a compare-and-swap on the three status routes is ticketed separately.
  *
  * WHAT WAS HERE BEFORE. Five places computed records_matched and they disagreed: the web status
  * route used three disjoint arms, the v1 status route and the MCP bulk_status tool used a flat
