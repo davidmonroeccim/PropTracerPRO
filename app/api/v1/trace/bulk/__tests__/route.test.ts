@@ -47,6 +47,7 @@ const H = vi.hoisted(() => ({
   inFlight: 0,
   upsertError: null as { message: string } | null,
   jobUpdateError: null as { message: string } | null,
+  profileUpdateError: null as { message: string } | null,
 }));
 
 function recordingClient() {
@@ -61,16 +62,19 @@ function recordingClient() {
       for (const m of ["eq", "select"]) node[m] = add();
       node.single = async () => ({ data: H.job, error: null });
       // `rec` is read at AWAIT time, not at definition time, so it is the op this chain ended up
-      // being. Two writes get their own lever: the trace_history upsert, because that write IS the
-      // submit on this surface now, and the trace_jobs update, because it is what makes a failed
-      // submit terminal instead of a job that polls forever.
+      // being. Three writes get their own lever: the trace_history upsert, because that write IS
+      // the submit on this surface now; the trace_jobs update, because it is what makes a failed
+      // submit terminal instead of a job that polls forever; and the user_profiles update, because
+      // it moves the delivery address every bulk_job.completed emitter reads.
       node.then = (res: (v: unknown) => unknown) =>
         Promise.resolve(
           rec?.op === "upsert" && rec.table === "trace_history"
             ? { data: null, error: H.upsertError }
             : rec?.op === "update" && rec.table === "trace_jobs"
               ? { data: null, error: H.jobUpdateError }
-              : { data: null, error: null }
+              : rec?.op === "update" && rec.table === "user_profiles"
+                ? { data: null, error: H.profileUpdateError }
+                : { data: null, error: null }
         ).then(res);
       return {
         insert: (payload: unknown) => {
@@ -157,11 +161,11 @@ const rec = (owner_name?: string, n = 1, extra: Record<string, unknown> = {}) =>
   ...extra,
 });
 
-function post(records: unknown[]) {
+function post(records: unknown[], extraBody: Record<string, unknown> = {}) {
   return POST(
     new Request("http://localhost/api/v1/trace/bulk", {
       method: "POST",
-      body: JSON.stringify({ records }),
+      body: JSON.stringify({ records, ...extraBody }),
       headers: { "content-type": "application/json" },
     })
   );
@@ -187,6 +191,7 @@ beforeEach(() => {
   H.inFlight = 0;
   H.upsertError = null;
   H.jobUpdateError = null;
+  H.profileUpdateError = null;
   H.profile = {
     id: "user-1",
     subscription_tier: "wallet",
@@ -1075,5 +1080,51 @@ describe("D33: a reused row does not answer with a stale outcome", () => {
     expect(Object.keys(row)).not.toContain("found_by");
     expect(Object.keys(row)).not.toContain("trace_steps");
     expect(row.ai_research_status).toBe(tier1QueuedStatusFor(1));
+  });
+});
+
+/**
+ * THE WEBHOOK DELIVERY ADDRESS, AND WHY A FAILED WRITE HERE HAS TO BE AUDIBLE.
+ *
+ * `user_profiles.webhook_url` is the single column every emitter of bulk_job.completed reads
+ * (the v1 status route, app/api/trace/bulk/status, app/api/cron/sweep-stale-traces and
+ * lib/trace/notifyBulkJobCompleted, which the two Phase 2B crons call). This route's update of
+ * it destructured no `error` at all, so a failed write left the caller with a 200, a job id, and
+ * completion notifications going to whatever address was there before -- or nowhere -- with
+ * nothing in the response and nothing in the logs.
+ *
+ * The submit deliberately still SUCCEEDS: the batch is valid and every record in it is
+ * traceable. Only the visibility changes.
+ */
+describe("the webhook_url write is logged when it fails", () => {
+  it("logs the error, naming the user and the operation, and still accepts the batch", async () => {
+    // MUTATION: drop the `error:` destructure and the console.error from the webhookUrl
+    // branch in the route and this goes red.
+    H.profileUpdateError = { message: "permission denied for table user_profiles" };
+    const res = await post([rec("John Smith", 1)], {
+      webhookUrl: "https://example.test/hook",
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+
+    const logged = vi.mocked(console.error).mock.calls.map((c) => c.join(" "));
+    const hit = logged.find((line) => line.includes("webhook_url"));
+    expect(hit, `console.error calls were: ${JSON.stringify(logged)}`).toBeTruthy();
+    // Enough context to identify BOTH the user and what failed -- an unattributed
+    // "update failed" in a log is not an observability fix.
+    expect(hit).toContain("user-1");
+    expect(hit).toContain("permission denied for table user_profiles");
+  });
+
+  it("logs nothing about webhook_url when the write succeeds", async () => {
+    // The guard is `if (webhookError)`, not an unconditional log: a healthy submit must not
+    // start emitting a line that reads as a failure.
+    const res = await post([rec("John Smith", 1)], {
+      webhookUrl: "https://example.test/hook",
+    });
+    expect(res.status).toBe(200);
+    const logged = vi.mocked(console.error).mock.calls.map((c) => c.join(" "));
+    expect(logged.filter((line) => line.includes("webhook_url"))).toEqual([]);
   });
 });

@@ -282,10 +282,25 @@ export async function POST(request: Request) {
 
     // Save webhook URL if provided (overrides profile setting for this job)
     if (webhookUrl) {
-      await adminClient
+      const { error: webhookError } = await adminClient
         .from('user_profiles')
         .update({ webhook_url: webhookUrl })
         .eq('id', profile.id);
+      // DO NOT FAIL THE SUBMIT ON THIS, BUT NEVER LET IT BE SILENT. The batch is valid and
+      // every record in it is traceable; what failed is only the DELIVERY ADDRESS. That
+      // address is `user_profiles.webhook_url`, and it is the single column every emitter of
+      // bulk_job.completed reads: this route's status twin, app/api/trace/bulk/status,
+      // app/api/cron/sweep-stale-traces, and lib/trace/notifyBulkJobCompleted (which the two
+      // Phase 2B crons call). The column is ACCOUNT-level, so a swallowed error here means the
+      // caller supplied a URL, got a 200 with a job id, and completion notifications keep
+      // going to whatever address was there before -- or nowhere -- with nothing in the
+      // response and nothing in the logs to say why. Logged the same way jobError is below.
+      if (webhookError) {
+        console.error(
+          `API v1 bulk trace - failed to save webhook_url for user ${profile.id}:`,
+          webhookError.message
+        );
+      }
     }
 
     // Create trace_jobs row
