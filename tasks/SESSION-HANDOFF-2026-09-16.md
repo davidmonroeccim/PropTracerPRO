@@ -1,5 +1,65 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-28 (LATEST). **PTP's SIDE OF PHASE 3 IS DONE. EVERYTHING LEFT IS IN THE `suite-gateway` REPO.**
+>
+> **`main` = `4cb1cc4`, clean tree, SIX COMMITS UNPUSHED.** They include real routing changes
+> (owner-name parsing and per-county name order), so pushing deploys a behaviour change to
+> production. **That is David's call and he has not made it.** Do not push without asking.
+>
+> **Gates at `4cb1cc4`, measured:** vitest **2248 passed / 89 files / 0 failed**, tsc **exit 0**,
+> eslint **45 problems** (the floor), `next build` **exit 0**. eslint exits non-zero; judge by the
+> COUNT.
+>
+> **TODAY'S TWO PAID RUNS, both reported in full:** `tasks/dossier-test-2026-09-28.md` ($0.50) and
+> `tasks/commercial-coverage-test-2026-09-28.md` ($3.90 of a $20 authorisation). David added a $100
+> wallet credit; balance is $107.33. **The APN dossier WORKS**: 5 of 15 tier-2 keys resolved, 3
+> returned contacts, and `TRACERFY_PARCEL_APN` hit in production for the first time since Phase 1.
+>
+> ## PHASE 3 IS GATEWAY WORK. PTP NEEDS NO FURTHER CHANGE FOR IT.
+>
+> Three items, and **two were re-measured live on 2026-09-28 rather than relayed**:
+>
+> 1. **THE CITY GUARD IS STILL THERE.** `ptp_skip_trace_bulk` and `ptp_skip_trace_quote` both still
+>    declare `"required": ["address","city","state"]` in the schema served to a calling model. A
+>    city-less parcel-keyed record still cannot reach PTP through the gateway. This is the blocker.
+> 2. **THE APPROVED WORDING IS NOT WHAT A CALLING MODEL READS, AND THE SOURCE IS UNIDENTIFIED.** The
+>    description served today still carries the copy David rejected on 2026-09-25 ("...not a more
+>    accurate one; either key can find an owner the other misses"). **Ruled out by measurement:**
+>    the gateway does not hardcode it (absent from its source); PTP does not still contain it
+>    (absent from PTP's source); and `lib/aggregator/catalog.ts` caches downstream `tools/list` with
+>    `DEFAULT_TTL_MS` 5 min and `DEFAULT_MAX_AGE_MS` 30 min, so the cache CANNOT explain staleness
+>    days old. PTP's own route already serves the approved text, including *"Only address and state
+>    are required, so send a record that has no city rather than dropping it"*
+>    (`app/api/[transport]/route.ts:85`). **Most likely the Claude connector's stored tool snapshot
+>    rather than a live proxy. Settle this BEFORE item 1**, because it decides whether the schema
+>    fix is one line or gets silently undone.
+> 3. **THE D17 DISCLOSURE** is untouched: tell the user a dossier search is happening, and pass the
+>    parcel.
+>
+> ## TWO MEASURED INPUTS PHASE 3 MUST ABSORB
+>
+> - **CARRY BOTH PARCEL KEYS, do not pick one.** Arm D of the coverage test came back **1-1-3**: MN
+>   Clay's county key HIT where `parcel_id_local` missed; TN Hickman's `parcel_id_local` HIT where
+>   the county key missed; ND Ward, WV Monongalia and WA Yakima missed both. The standing design has
+>   the gateway always passing `parcel_id_local`. The measurement says pass BOTH and try each, since
+>   a miss is free. **This supersedes the registry `parcel_id_county` migration** proposed earlier
+>   today as the cheap fix.
+> - **County name order is measured for 59 counties of 1,854.** `lib/routing/countyNameOrder.ts`.
+>   Gateway records carry a county so they get the rule; an unmeasured county keeps today's
+>   behaviour. Extending it is a MEASUREMENT job against the registry, not a code change.
+>
+> ## SETTLED TODAY. DO NOT RE-RAISE OR RE-DERIVE.
+>
+> - **D17: records come from the REGISTRY, never MPS.** D18: name order follows each county's own
+>   measured order. D22 with David 2026-09-28: it applies **"wherever the county is known."**
+>   `docs/superpowers/specs/2026-09-21-tier1-planroute-design.md`, rows D17, D18, D22.
+> - The owner-name defects the coverage test exposed are FIXED (`b40d50e`, `4cb1cc4`). Do not
+>   re-litigate `splitPersonName`.
+> - **David, 2026-09-28: stop foregrounding billing.** The per-record tier 2 charge is settled and
+>   repeatedly surfacing it caused real confusion. Report money when asked or when a run spends it.
+> - **L-040 is the one to read before designing anything**: read the decision register FIRST. A plan
+>   that cannot cite the decision number it implements is a plan nobody asked for.
+
 > # READ FIRST. STATE AS OF 2026-09-28, LATEST. **THE DOSSIER TEST HAS RUN. `DOSSIER_APN` WENT LIVE FOR THE FIRST TIME AND MISSED 2 OF 2.**
 >
 > **Full report: `tasks/dossier-test-2026-09-28.md`. Read it before re-running anything paid.**

@@ -3272,3 +3272,22 @@ and it is pinned in a test; extending it is a measurement job, not a code change
 first/last and is natural by construction while the parcel it re-enters on still carries its county.
 Deleting that line left the whole suite green until the guard was moved into executeRoute's own
 tests.
+
+## 2026-09-28 (close): Phase 3 readiness, measured against the live gateway
+
+PTP's side of Phase 3 is complete; everything remaining is in `suite-gateway`. Two of the three open
+items were re-measured live rather than relayed from the handoff:
+
+- **The city guard is still in place.** Both `ptp_skip_trace_bulk` and `ptp_skip_trace_quote` still
+  declare `"required": ["address","city","state"]` in the schema a calling model is served.
+- **The approved apn/county wording is still not what a calling model reads**, and the source is
+  NOT identified. Ruled out: the gateway does not hardcode it, PTP no longer contains it, and the
+  aggregator cache is 5 min TTL / 30 min max age so it cannot explain staleness days old. PTP's own
+  route serves the approved text. Most likely the connector's stored snapshot; settle it before
+  touching the schema.
+
+Arm D of the coverage test (1-1-3) supersedes the registry `parcel_id_county` migration proposed
+earlier in the day: carry BOTH parcel keys and try each, since a miss is free.
+
+`main` = 4cb1cc4, six commits unpushed. They carry routing behaviour changes, so the deploy is
+David's call.
