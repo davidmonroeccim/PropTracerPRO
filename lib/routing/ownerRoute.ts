@@ -350,10 +350,16 @@ export const hasSitus = (p: ParcelInput): boolean =>
  * THE APN KEY IS THREE PARTS, NOT TWO: "property id/APN + county + state", in the owner's own
  * words (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md, Tier 1 row 2). Both APN-keyed steps send all
  * three -- DOSSIER_APN sends { apn, county, state } and TRACERFY_PARCEL_APN sends
- * { parcel_id, county, state } -- so an apn and county with no state is a MALFORMED vendor call,
- * answered with a free silent miss, exactly as an apn with no county would be. The state test is
- * the 2-letter form because that is the only form either vendor takes and the only form
- * trace_history.state can hold (VARCHAR(2)).
+ * { parcel_id, county, state }.
+ *
+ * AND BOTH VENDOR CLIENTS ALREADY REFUSE THE TWO-PART KEY BEFORE SPENDING, which is what makes
+ * this a correction rather than a preference: lookupDossier returns 'APN mode requires apn, county
+ * and state' (lib/tracerfy/dossier.ts validateKey) and lookupPersonTrace returns 'Parcel lookup
+ * requires a state' (lib/tracerfy/client.ts), each without a network call. So an apn and county
+ * with no state was a step planRoute emitted for its own client to throw away: not a free vendor
+ * miss but a burnt attempt on the row, answered by nobody. The state test is the 2-letter form
+ * because that is the only form either vendor takes and the only form trace_history.state can hold
+ * (VARCHAR(2)).
  *
  * Exported because the submit surfaces must ask this same question rather than a second one of
  * their own; see canDiscoverOwner below.

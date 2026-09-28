@@ -696,8 +696,9 @@ describe("skip_trace_quote", () => {
   });
 
   it("still quotes nothing for that parcel key when the state is missing", async () => {
-    // "property id/APN + county + state" is three parts. DOSSIER_APN sends state, so two of three
-    // is a malformed call. MUTATION: drop the state clause from hasApn and this goes red.
+    // "property id/APN + county + state" is three parts. DOSSIER_APN sends state, and lookupDossier
+    // refuses a key without one before any network call, so two of three is an attempt nobody can
+    // answer. MUTATION: drop the state clause from hasApn and this goes red.
     const out = expectQuote(
       await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
         records: [{ ...apnRecord, state: "" }],

@@ -343,8 +343,10 @@ describe('the APN key, and the one predicate both submits ask (Tier 1 row 2, Tie
 
   it('REFUSES an apn and county with no usable state', () => {
     // MUTATION: delete the state clause from hasApn and the first four lines here go red. Both
-    // APN-keyed steps put `state` in the request, so two of the three parts is a call the vendor
-    // answers with a free, silent miss.
+    // APN-keyed steps put `state` in the request, and BOTH vendor clients refuse a two-part key
+    // before any network call -- lookupDossier with 'APN mode requires apn, county and state',
+    // lookupPersonTrace with 'Parcel lookup requires a state' -- so the step planRoute used to emit
+    // for such a parcel was one its own client threw away, burning an attempt on the row.
     expect(hasApn(apnOnly({ state: '' }))).toBe(false)
     expect(hasApn(apnOnly({ state: '   ' }))).toBe(false)
     expect(hasApn(apnOnly({ state: 'T' }))).toBe(false)

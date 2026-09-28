@@ -1047,8 +1047,10 @@ describe("a blank-owner record keyed on its PARCEL reaches the tier 2 queue", ()
   });
 
   it("STILL refuses the same parcel key with no state, because the table wants three parts", async () => {
-    // "property id/APN + county + state". DOSSIER_APN sends state, so two parts of three is a
-    // malformed call. MUTATION: drop the state clause from hasApn and this goes red.
+    // "property id/APN + county + state". DOSSIER_APN sends state, and lookupDossier refuses a
+    // key without one before any network call ('APN mode requires apn, county and state'), so
+    // queueing this row would burn an attempt nobody could answer.
+    // MUTATION: drop the state clause from hasApn and this goes red.
     const body = await (await post([apnRow({ state: "" })])).json();
     expect(body.recordsQueued).toBe(0);
     expect(body.recordsSkipped).toBe(1);
