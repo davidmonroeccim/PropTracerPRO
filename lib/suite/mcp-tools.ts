@@ -26,8 +26,9 @@ import {
   storableValue,
   traceKeyFor,
   usableZip,
-  validateAddressInput,
 } from "@/lib/utils/address-normalizer";
+import { canDiscoverOwner } from "@/lib/routing/ownerRoute";
+import { parcelForFullTrace } from "@/lib/trace/fullPropertyTrace";
 import { settleBulkJob, type TraceHistoryRow } from "@/lib/trace/settleBulkJob";
 import type { AddressInput, TraceJob, TraceResult, AIResearchResult } from "@/types";
 
@@ -237,7 +238,8 @@ export const recordSchema = z.object({
   // at the door, since skipTraceBulk fails the batch if any one record is invalid. The
   // property-registry supplies a city for 804 counties and a ZIP for only 766, so requiring it
   // made 241 counties / 16,062,225 parcels untraceable for a field nothing downstream reads.
-  // Still validated by validateAddressInput when supplied; absent is fine, wrong is not.
+  // A malformed one is dropped at the row write by usableZip rather than allowed to veto its row;
+  // absent is a fact about the source, wrong is a caller bug, and neither can make a row unlookable.
   zip: z.string().optional(),
   /** The dossier's SECOND lookup key, with county and state. Optional: every caller before
    *  the Suite Gateway sent an address only, and address mode stays the proven key. The two
@@ -333,12 +335,12 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   );
   // THE SUBMIT'S OWN SPLIT, ASKED IN THE SUBMIT'S OWN ORDER, so the two surfaces cannot drift
   // again. skipTraceBulk asks exactly these two questions: a record with an owner of record is
-  // tier 1, and a BLANK-owner record is tier 2 only if validateAddressInput says a vendor can be
+  // tier 1, and a BLANK-owner record is tier 2 only if canDiscoverOwner() says a vendor can be
   // asked about it at all. Otherwise it is no-key: terminal at submit, FREE, and never traced.
   //
-  // `validateAddressInput` used to appear NOWHERE in this function, and that was the bug. This
-  // quote counted every blank-owner record as a full property trace, so it told the caller that a
-  // record with no owner AND no usable address WILL run and WILL be billed, about a record that
+  // THE USABILITY QUESTION USED TO APPEAR NOWHERE IN THIS FUNCTION, and that was the first bug.
+  // This quote counted every blank-owner record as a full property trace, so it told the caller that
+  // a record with no owner AND no usable address WILL run and WILL be billed, about a record that
   // does neither. The tool description tells the caller to show that count to the user beside the
   // words "those records are billed whether or not anything is found", so the falsehood was
   // repeated to the user in the one place that exists to tell them what a batch will cost.
@@ -346,11 +348,27 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   // It only became observable in Phase 2B: before it, the submit refused the whole batch over such
   // a record, so no submit ever accepted one to contradict the quote.
   //
+  // IT THEN ASKED validateAddressInput, WHICH WAS THE SECOND BUG AND THE SAME BUG AS THE SUBMIT'S.
+  // That function demands a street AND a city AND a state and has no parcel term, so a blank-owner
+  // record carrying APN + county + state and no city was quoted as free and unrunnable -- and the
+  // quote is the MANDATORY first step, so a caller who obeyed it was told the gateway's own
+  // parcel-keyed rows would not run, before a submit that now runs and bills them. The quote and the
+  // submit must answer this question with the same expression or they disagree about what will run.
+  //
   // NO ZIP ARGUMENT, matching the submit exactly. A malformed ZIP must never make a row unlookable.
   const tier1Records = unique.filter((r) => !isBlankOwnerRecord(r.owner_name));
   const blankOwnerRecords = unique.filter((r) => isBlankOwnerRecord(r.owner_name));
-  const tier2Records = blankOwnerRecords.filter(
-    (r) => validateAddressInput(r.address, r.city, r.state).valid,
+  const tier2Records = blankOwnerRecords.filter((r) =>
+    canDiscoverOwner(
+      parcelForFullTrace({
+        address: r.address,
+        city: r.city,
+        state: r.state,
+        zip: r.zip,
+        apn: r.apn,
+        county: r.county,
+      }),
+    ),
   );
   const billableRecords = [...tier1Records, ...tier2Records];
   // PRICED OVER THE RECORDS THAT WILL ACTUALLY RUN, which is the same set skipTraceBulk reserves
@@ -372,8 +390,10 @@ export async function skipTraceQuote(admin: SupabaseClient, gatewaySub: string, 
   //      records into one, never split one into two.
   //
   // Both directions therefore subtract, so quoted >= committed for every record shape, not merely
-  // for the ones anyone has tried. The one observable consequence is a blank-owner record whose
-  // city exceeds VARCHAR(100): this quote prices it tier 2 and the submit files it no-key and free.
+  // for the ones anyone has tried. The one observable consequence is a blank-owner record whose ONLY
+  // key is its situs and whose city exceeds VARCHAR(100): this quote prices it tier 2 and the submit
+  // files it no-key and free. (A record that also carries APN + county + state keeps its APN key
+  // through the clamp and is tier 2 on both sides.)
   // That over-states, which is the safe direction. Both are pinned by tests in skip_trace_quote,
   // including one where history dedup drops a record so the inequality is STRICT rather than an
   // equality dressed as a proof.
@@ -541,16 +561,48 @@ export async function skipTraceBulk(admin: SupabaseClient, gatewaySub: string, r
       tier1Records.push(record);
       continue;
     }
-    // NO ZIP ARGUMENT, AND ITS ABSENCE IS THE POINT. This asks one question: can a vendor be asked
-    // about this row at all. validateAddressInput also carries a ZIP rule, and joining that rule
-    // to this question would file rows with a perfectly good street, city and state as no-key over
-    // a ZIP Excel had stripped a leading zero from, then lock them out of a resend for 90 days,
-    // because the dedup key excludes the ZIP so a corrected resend hashes identically. That is
-    // every MA, NJ, CT, RI, NH, ME, VT and PR county file, wholesale. A malformed ZIP is dropped
-    // at the row write by usableZip instead, and PROPERTY_TRACE_NO_KEY_STATUS is reserved for a
-    // row genuinely missing something the lookup needs.
-    const usable = validateAddressInput(record.address, record.city, record.state);
-    if (usable.valid) tier2Records.push(record);
+    // THE QUESTION IS ASKED BY THE MODULE THAT OWNS ROUTING, and that is the whole point.
+    //
+    // This asks one question: can a vendor be asked about this row at all. It used to ask
+    // validateAddressInput, which is a DIFFERENT question -- street AND city AND state, with no
+    // parcel term anywhere in it. So a blank-owner record carrying APN + county + state and no city
+    // was filed no-key, free and never traced, while planRoute() would have emitted DOSSIER_APN for
+    // exactly that row: the owner's Tier 1 "no city, but property id/APN + county + state" case,
+    // arriving with no owner name, which is his Tier 2 row
+    // (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md). That row is the Suite Gateway's own shape -- the
+    // gateway holds a county parcel id and is why `city` became optional on recordSchema at all --
+    // so this surface refused the very records the schema change was made to admit.
+    // canDiscoverOwner() is the submit-side form of the question planRoute's own Tier 2 branch
+    // answers with `steps.length`, so the two cannot disagree about which rows are answerable.
+    //
+    // ASKED OF THE PARCEL THE CRON WILL ACTUALLY PLAN FROM. parcelForFullTrace() is the builder
+    // app/api/cron/sweep-property-traces feeds planRoute() through parcelForRow(), so the submit
+    // judges the identical ParcelInput rather than a second hand-built approximation of it.
+    //
+    // THE CLAMPED VALUES, NEVER THE RAW ONES (spec 6.3, D36). `newRecords` descends from
+    // `submitted` above, where storableValue has already emptied anything the column cannot hold,
+    // and the dedup key is derived from those same clamped values. Judging the raw record here
+    // would let a row whose state is "Texas" be queued under a hash built from state ''.
+    //
+    // NO ZIP ARGUMENT, AND ITS ABSENCE IS STILL THE POINT -- neither hasApn nor hasSitus has a ZIP
+    // term. validateAddressInput carries a ZIP rule, and joining that rule to this question would
+    // file rows with a perfectly good street, city and state as no-key over a ZIP Excel had stripped
+    // a leading zero from, then lock them out of a resend for 90 days, because the dedup key
+    // excludes the ZIP so a corrected resend hashes identically. That is every MA, NJ, CT, RI, NH,
+    // ME, VT and PR county file, wholesale. A malformed ZIP is dropped at the row write by usableZip
+    // instead, and PROPERTY_TRACE_NO_KEY_STATUS is reserved for a row genuinely missing something
+    // the lookup needs.
+    const canAsk = canDiscoverOwner(
+      parcelForFullTrace({
+        address: record.address,
+        city: record.city,
+        state: record.state,
+        zip: record.zip,
+        apn: record.apn,
+        county: record.county,
+      }),
+    );
+    if (canAsk) tier2Records.push(record);
     else noKeyRecords.push(record);
   }
 

@@ -542,12 +542,12 @@ describe("skip_trace_quote", () => {
           { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
           { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
           { owner_name: "Jane Realty Holdings", address: "3 C St", city: "X", state: "TX", zip: "75001" }, // entity
-          // THE CITY IS A REAL ONE NOW, AND IT HAS TO BE. This fixture said `city: "X"`, and a
-          // one-character city fails validateAddressInput ("City is required", which wants 2+).
-          // That made this record UNLOOKUPABLE, which contradicts the premise the comment below
-          // states: it was never a tier 2 record at all, and the submit files it no-key and free.
-          // The quote only agreed with the fixture because it did not ask the question. Every
-          // assertion below is unchanged; only the record now means what the test says it means.
+          // THE CITY IS A REAL ONE, AND IT STAYS ONE. It was written `city: "X"`, which is a real
+          // street|city|state situs key to the router (hasSitus wants each part non-empty, nothing
+          // more) but was refused by the validateAddressInput this surface used to ask, which wants
+          // a city of 2+ characters. A one-character city is now tier 2 on both surfaces, so the
+          // fixture would pass either way -- it is spelled out so the record plainly means what the
+          // comment below says it means rather than resting on a boundary rule.
           { address: "4 D St", city: "Dallas", state: "TX", zip: "75001" }, // no owner_name -> tier 2
         ],
       }),
@@ -637,21 +637,103 @@ describe("skip_trace_quote", () => {
     expect(out.worst_case_cost).toBeCloseTo(0.4);
   });
 
-  it("treats a one-character city as unlookupable, exactly as the submit does", async () => {
-    // FOUND BY THIS FIX, and pinned so it is not lost. validateAddressInput wants a city of at
-    // least two characters, so a blank-owner record carrying `city: "X"` is no-key, not tier 2 --
-    // and the submit has always filed it that way. The quote disagreed only because it never asked.
-    // A terse test fixture elsewhere in this file relied on the old answer and had to be corrected.
+  it("treats a one-character city as a situs key, because the ROUTER does", async () => {
+    // MEASURED CHANGE, 2026-09-28, and it is the point of moving this question into the routing
+    // module rather than a side effect of it. This test used to assert the opposite, on the premise
+    // that validateAddressInput's two-character city rule was "exactly what the submit does".
+    //
+    // It is not what the ROUTER does. hasSitus() -- the test planRoute uses to decide whether to
+    // emit DOSSIER_ADDRESS at all -- wants a street, a city and a state, each merely non-empty. So
+    // planRoute emits the address dossier for `city: "X"`, and a submit that filed the row no-key
+    // was refusing a row the router would have routed and telling the customer it could not be
+    // looked up. Both surfaces now ask canDiscoverOwner(), so both agree with planRoute.
+    //
+    // MUTATION: put validateAddressInput back in either surface and this goes red.
+    const record = { address: "4 D St", city: "X", state: "TX", zip: "75001" };
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", { records: [record] }),
+    );
+    expect(out.full_property_trace).toBe(1);
+    expect(out.worst_case_cost).toBeCloseTo(0.4);
+    // And it is NOT silently promoted to a person: it has no owner of record.
+    expect(out.persons).toBe(0);
+    expect(out.entities).toBe(0);
+    // THE SUBMIT AGREES, which is the only reason the quote is allowed to say this.
+    const { admin } = submitAdminStub({ profile: quoteProfile });
+    const submitted = (await skipTraceBulk(admin, "sub-1", {
+      records: [record],
+      confirm: true,
+    })) as { full_property_trace: number; no_lookup_key: number };
+    expect(submitted.full_property_trace).toBe(1);
+    expect(submitted.no_lookup_key).toBe(0);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * THE ROW THE QUOTE AND THE SUBMIT BOTH USED TO REFUSE.
+   *
+   * The owner's table (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md): "If there is no city, and we have
+   * the property id/APN + county + state..." -- and, arriving with no owner name, his Tier 2 step 1,
+   * "submitted to Tracerfy as a Dossier request for the owner name and all the property fields".
+   *
+   * validateAddressInput demands a street AND a city AND a state and has no parcel term at all, so
+   * this record was quoted free-and-unrunnable and submitted no-key -- on the surface whose whole
+   * reason for making `city` optional was to admit exactly this shape from the Suite Gateway.
+   * ------------------------------------------------------------------ */
+  /** Blank owner, no street, no city: the APN key is the only key it has. */
+  const apnRecord = { address: "", city: "", state: "TX", apn: "R-123", county: "Travis" };
+
+  it("quotes a blank-owner PARCEL-keyed record as a full property trace", async () => {
+    // MUTATION: put validateAddressInput back in the quote's tier 2 filter and this goes red.
     const out = expectQuote(
       await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
-        records: [{ address: "4 D St", city: "X", state: "TX", zip: "75001" }],
+        records: [apnRecord],
+      }),
+    );
+    expect(out.full_property_trace).toBe(1);
+    expect(out.worst_case_cost).toBeCloseTo(0.4);
+    expect(out.persons).toBe(0);
+    expect(out.entities).toBe(0);
+  });
+
+  it("still quotes nothing for that parcel key when the state is missing", async () => {
+    // "property id/APN + county + state" is three parts. DOSSIER_APN sends state, so two of three
+    // is a malformed call. MUTATION: drop the state clause from hasApn and this goes red.
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [{ ...apnRecord, state: "" }],
       }),
     );
     expect(out.full_property_trace).toBe(0);
     expect(out.worst_case_cost).toBe(0);
-    // And it is NOT silently promoted to a person: it has no owner of record.
-    expect(out.persons).toBe(0);
-    expect(out.entities).toBe(0);
+  });
+
+  it("still quotes nothing for a blank-owner record with no situs AND no parcel key", async () => {
+    const out = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", {
+        records: [{ ...apnRecord, apn: "", county: "" }],
+      }),
+    );
+    expect(out.full_property_trace).toBe(0);
+    expect(out.worst_case_cost).toBe(0);
+  });
+
+  it("AGREES WITH THE SUBMIT about the parcel-keyed record, both ways", async () => {
+    // The quote is the MANDATORY first step, so a disagreement here is the caller being told what a
+    // batch will do by the one surface that exists to tell them, and then being charged for
+    // something else. Asserted on both answers so neither surface can be "fixed" alone.
+    const batch = [apnRecord, { ...apnRecord, state: "" }];
+    const quoted = expectQuote(
+      await skipTraceQuote(adminStub({ profile: quoteProfile }), "sub-1", { records: batch }),
+    );
+    const { admin } = submitAdminStub({ profile: quoteProfile });
+    const submitted = (await skipTraceBulk(admin, "sub-1", {
+      records: batch,
+      confirm: true,
+    })) as { full_property_trace: number; no_lookup_key: number; committed_worst_case: number };
+    expect(quoted.full_property_trace).toBe(1);
+    expect(submitted.full_property_trace).toBe(1);
+    expect(submitted.no_lookup_key).toBe(1);
+    expect(quoted.worst_case_cost).toBeCloseTo(submitted.committed_worst_case);
   });
 
   it("stops charging for the record it stopped promising to trace", async () => {
@@ -1320,6 +1402,56 @@ describe("skip_trace_bulk", () => {
       expect(rows[0].property_trace_status).toBeNull();
     });
 
+    /* ---------------------------------------------------------------- *
+     * THE ROW THIS SURFACE REFUSED WHILE THE ROUTER WOULD HAVE ROUTED IT.
+     *
+     * The owner's table: "If there is no city, and we have the property id/APN + county + state..."
+     * -- and, with no owner name in the record, his Tier 2 step 1, a Dossier request for the owner
+     * name. validateAddressInput has no parcel term, so a blank-owner record carrying APN + county +
+     * state and no city was filed no-key, free and never traced, on the very surface whose `city`
+     * field was made optional to admit that shape from the Suite Gateway.
+     * ---------------------------------------------------------------- */
+    /** Blank owner, no street, no city: the APN key is the only key it has. */
+    const apnRow = (extra: Record<string, unknown> = {}) =>
+      rec(undefined, 1, { address: "", city: "", apn: "R-123", county: "Travis", ...extra });
+
+    it("queues a blank-owner PARCEL-keyed record for a Full Property Trace", async () => {
+      // MUTATION: put validateAddressInput back in the blank-owner branch and this goes red.
+      const { out, rows } = await submit([apnRow()]);
+      expect(out).not.toHaveProperty("error");
+      expect(out.full_property_trace).toBe(1);
+      expect(out.no_lookup_key).toBe(0);
+      expect(out.accepted).toBe(1);
+      expect(rows[0].property_trace_status).toBe(queuedStatusFor(1));
+      expect(rows[0].ai_research_status).toBeNull();
+      expect(rows[0].status).toBe("processing");
+      // The columns the cron rebuilds the APN key from, stored beside a key with no street in it.
+      expect(rows[0].normalized_address).toBe("APN|R-123|TRAVIS|TX");
+      expect(rows[0].parcel_id_local).toBe("R-123");
+      expect(rows[0].county).toBe("Travis");
+    });
+
+    it("tells the credit-pool check about it, because it is a real tier 2 record now", async () => {
+      await submit([apnRow()]);
+      expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 0, tier2: 1 });
+    });
+
+    it("STILL refuses the same parcel key with no state, because the table wants three parts", async () => {
+      // MUTATION: drop the state clause from hasApn and this goes red.
+      const { out, rows } = await submit([apnRow({ state: "" })]);
+      expect(out.full_property_trace).toBe(0);
+      expect(out.no_lookup_key).toBe(1);
+      expect(rows[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+      expect(rows[0].status).toBe("no_match");
+    });
+
+    it("still refuses a blank-owner record with no situs AND no parcel key at all", async () => {
+      // The no-key bucket is narrowed, never emptied.
+      const { out, rows } = await submit([apnRow({ apn: "", county: "" })]);
+      expect(out.no_lookup_key).toBe(1);
+      expect(out.full_property_trace).toBe(0);
+      expect(rows[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+    });
   });
 
   /* ---------------------------------------------------------------- *

@@ -7,8 +7,9 @@ import {
   storableValue,
   traceKeyFor,
   usableZip,
-  validateAddressInput,
 } from '@/lib/utils/address-normalizer';
+import { canDiscoverOwner } from '@/lib/routing/ownerRoute';
+import { parcelForFullTrace } from '@/lib/trace/fullPropertyTrace';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
 import { tier1QueuedStatusFor } from '@/lib/trace/tier1Queue';
@@ -98,7 +99,8 @@ export async function POST(request: Request) {
     // THIS IS NOT FABRICATING DATA (CLAUDE.md rule 7). Absent and blank say the identical thing --
     // the caller gave us no state -- and every other line of this route already reads them as one:
     // `record.state || ''` and `(record.state || '').toUpperCase()` in the row builder below, and
-    // `!address` inside validateAddressInput. Only the key derivation disagreed. The record is not
+    // the `?? ''` trims inside parcelForFullTrace, which is what the tier 2 usability question is
+    // asked of. Only the key derivation disagreed. The record is not
     // rescued by this: with no street, city or state it still lands in the no-key bucket, free,
     // with the reason that tells the caller exactly which component to send. What changes is that
     // the OTHER 499 records run.
@@ -195,19 +197,49 @@ export async function POST(request: Request) {
         tier1Records.push(record);
         continue;
       }
-      // NO ZIP ARGUMENT, AND ITS ABSENCE IS THE POINT. This asks one question: can a vendor be asked
-      // about this row at all. validateAddressInput also carries a ZIP rule, and joining that rule
-      // to this question filed rows with a perfectly good street, city and state as no-key over a
-      // ZIP Excel had stripped a leading zero from -- told they were missing a component they had,
-      // and locked out of a resend for 90 days, because the dedup key excludes the ZIP entirely so a
-      // corrected resend hashes identically. That is every MA, NJ, CT, RI, NH, ME, VT and PR file
-      // wholesale. The ZIP is not load-bearing for the lookup either: the tier 2 dossier accepts
-      // address mode with no zip and BACKFILLS the property's own on a hit. So a malformed one is
-      // dropped at the row write below by usableZip, and PROPERTY_TRACE_NO_KEY_STATUS is reserved
-      // for a row genuinely missing something the lookup needs -- which is also the only population
-      // its sentence's resend advice is true for.
-      const usable = validateAddressInput(record.address, record.city, record.state);
-      if (usable.valid) tier2Records.push(record);
+      // THE QUESTION IS ASKED BY THE MODULE THAT OWNS ROUTING, and that is the whole point.
+      //
+      // This asks one question: can a vendor be asked about this row at all. It used to ask
+      // validateAddressInput, which is a DIFFERENT question -- street AND city AND state, with no
+      // parcel term anywhere in it. So a blank-owner record carrying APN + county + state and no
+      // city was filed no-key, free and never traced, while planRoute() would have emitted
+      // DOSSIER_APN for exactly that row: the owner's Tier 1 "no city, but property id/APN +
+      // county + state" case, arriving with no owner name, which is his Tier 2 row
+      // (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md). canDiscoverOwner() is the submit-side form of
+      // the question planRoute's own Tier 2 branch answers with `steps.length`, so the two cannot
+      // disagree about which rows are answerable.
+      //
+      // ASKED OF THE PARCEL THE CRON WILL ACTUALLY PLAN FROM. parcelForFullTrace() is the builder
+      // app/api/cron/sweep-property-traces feeds planRoute() through parcelForRow(), so the submit
+      // judges the identical ParcelInput rather than a second hand-built approximation of it.
+      //
+      // THE CLAMPED VALUES, NEVER THE RAW ONES (spec 6.3, D36). `newRecords` descends from
+      // `submitted` above, where storableValue has already emptied anything the column cannot hold,
+      // and the dedup key is derived from those same clamped values. Judging the raw record here
+      // would let a row whose state is "Texas" be queued under a hash built from state ''.
+      //
+      // NO ZIP ARGUMENT, AND ITS ABSENCE IS STILL THE POINT -- neither hasApn nor hasSitus has a ZIP
+      // term. validateAddressInput carries a ZIP rule, and joining that rule to this question filed
+      // rows with a perfectly good street, city and state as no-key over a ZIP Excel had stripped a
+      // leading zero from -- told they were missing a component they had, and locked out of a resend
+      // for 90 days, because the dedup key excludes the ZIP entirely so a corrected resend hashes
+      // identically. That is every MA, NJ, CT, RI, NH, ME, VT and PR file wholesale. The ZIP is not
+      // load-bearing for the lookup either: the tier 2 dossier accepts address mode with no zip and
+      // BACKFILLS the property's own on a hit. So a malformed one is dropped at the row write below
+      // by usableZip, and PROPERTY_TRACE_NO_KEY_STATUS is reserved for a row genuinely missing
+      // something the lookup needs -- which is also the only population its sentence's resend
+      // advice is true for.
+      const canAsk = canDiscoverOwner(
+        parcelForFullTrace({
+          address: record.address,
+          city: record.city,
+          state: record.state,
+          zip: record.zip,
+          apn: record.apn,
+          county: record.county,
+        })
+      );
+      if (canAsk) tier2Records.push(record);
       else noKeyRecords.push(record);
     }
 

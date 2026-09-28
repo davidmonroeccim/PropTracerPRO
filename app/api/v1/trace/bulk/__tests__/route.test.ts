@@ -997,6 +997,97 @@ describe("the Tier 1 enqueue", () => {
   });
 });
 
+/**
+ * THE ROW THE SUBMIT USED TO REFUSE AND THE ROUTER WOULD HAVE ROUTED.
+ *
+ * The owner's table (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md): "If there is no city, and we have
+ * the property id/APN + county + state..." -- and Tier 2, for the same row arriving with no owner
+ * name, "submitted to Tracerfy as a Dossier request for the owner name and all the property fields".
+ *
+ * This surface asked validateAddressInput instead, which demands a street AND a city AND a state and
+ * has NO parcel term anywhere in it. So a blank-owner record carrying APN + county + state and no
+ * city was filed no-key, free and never traced -- while planRoute() emits DOSSIER_APN for exactly
+ * that parcel and sweep-property-traces' parcelForRow already carries a D38 guard written for the
+ * street-less `APN|` row. It now asks canDiscoverOwner(), which is the routing module's own
+ * predicate, so the submit cannot refuse a row the router would route.
+ */
+describe("a blank-owner record keyed on its PARCEL reaches the tier 2 queue", () => {
+  /** No street, no city: the APN key is the only key this record has. */
+  const apnRow = (extra: Record<string, unknown> = {}) =>
+    rec(undefined, 1, { address: "", city: "", apn: "R-123", county: "Travis", ...extra });
+
+  it("queues it for a Full Property Trace instead of filing it no-key", async () => {
+    // MUTATION: put validateAddressInput back in the blank-owner branch and this goes red -- the
+    // row lands on PROPERTY_TRACE_NO_KEY_STATUS with recordsQueued 0.
+    const res = await post([apnRow()]);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.recordsQueued).toBe(1);
+    expect(body.recordsSkipped).toBe(0);
+    expect(body.skippedReason).toBeUndefined();
+    const row = historyRows()[0];
+    expect(row.property_trace_status).toBe(queuedStatusFor(1));
+    expect(row.status).toBe("processing");
+    expect(row.ai_research_status).toBeNull();
+    // Keyed on the parcel, and the parcel columns the cron plans from are stored beside it (D23),
+    // which is what lets parcelForFullTrace rebuild the APN key with no street at all.
+    expect(row.normalized_address).toBe("APN|R-123|TRAVIS|TX");
+    expect(row.parcel_id_local).toBe("R-123");
+    expect(row.county).toBe("Travis");
+  });
+
+  it("is BILLED, and the credit-pool check is told about it", async () => {
+    // It was free before because nobody was ever asked about it. It is asked about now, and tier 2
+    // is per record submitted, so the quote and the pool check both have to see it.
+    const body = await (await post([apnRow()])).json();
+    expect(body.estimatedCost).toBeCloseTo(TIER2);
+    expect(body.recordsToProcess).toBe(1);
+    expect(tracerfyCanRun).toHaveBeenCalledWith(expect.anything(), { tier1: 0, tier2: 1 });
+    expect(jobInsert()?.records_submitted).toBe(1);
+  });
+
+  it("STILL refuses the same parcel key with no state, because the table wants three parts", async () => {
+    // "property id/APN + county + state". DOSSIER_APN sends state, so two parts of three is a
+    // malformed call. MUTATION: drop the state clause from hasApn and this goes red.
+    const body = await (await post([apnRow({ state: "" })])).json();
+    expect(body.recordsQueued).toBe(0);
+    expect(body.recordsSkipped).toBe(1);
+    expect(body.skippedReason).toBe(PROPERTY_TRACE_NO_KEY_REASON);
+    expect(body.estimatedCost).toBe(0);
+    const row = historyRows()[0];
+    expect(row.property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+    expect(row.status).toBe("no_match");
+  });
+
+  it("still refuses a blank-owner record with no situs AND no parcel key at all", async () => {
+    // The no-key bucket is not emptied, only narrowed to the rows the predicate genuinely refuses.
+    const body = await (await post([apnRow({ apn: "", county: "" })])).json();
+    expect(body.recordsSkipped).toBe(1);
+    expect(body.recordsQueued).toBe(0);
+    expect(historyRows()[0].property_trace_status).toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+  });
+
+  it("queues it beside a no-key row in the same batch, each judged on its own", async () => {
+    const res = await post([apnRow(), rec(undefined, 2, { address: "", city: "", state: "" })]);
+    const body = await res.json();
+    expect(body.recordsQueued).toBe(1);
+    expect(body.recordsSkipped).toBe(1);
+    const statuses = historyRows().map((r) => r.property_trace_status);
+    expect(statuses).toContain(queuedStatusFor(1));
+    expect(statuses).toContain(PROPERTY_TRACE_NO_KEY_STATUS);
+  });
+
+  it("keeps a NAMED parcel-keyed record on the Tier 1 queue, untouched by this change", async () => {
+    // The tier 1 branch never asked the usability question and still does not: an owner name makes
+    // the record tier 1 whatever its address, and planRoute picks the Advanced Lookup inside the
+    // cron from the same apn and county columns.
+    await post([{ ...apnRow(), owner_name: "Jane Smith" }]);
+    const row = historyRows()[0];
+    expect(row.ai_research_status).toBe(tier1QueuedStatusFor(1));
+    expect(row.property_trace_status).toBeNull();
+  });
+});
+
 describe("the duplicate key aligns with the single surfaces (spec 6.3, D36)", () => {
   // MUTATION: put normalizeAddress back in buildHistoryRow and this goes red. The dedup hash
   // and the stored hash would then disagree for any parcel-keyed record, and the same address
