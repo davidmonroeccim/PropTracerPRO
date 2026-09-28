@@ -103,6 +103,12 @@ type LivePath =
   | 'v1_named_no_city'
   | 'v1_named_no_city_apn'
   | 'v1_blank_unusable'
+  /** THE DOSSIER TEST (2026-09-28). Blank owner, apn + county + 2-letter state, and NO city, so
+   *  hasSitus is false and DOSSIER_APN is the ONLY step planRoute can emit. This key has never been
+   *  sent to Tracerfy by this application in any phase: 0, 1, 2A and 2B's live check all exercised
+   *  address-keyed paths. Both records are genuinely city-less IN THE REGISTRY, so the shape is the
+   *  one a gateway caller would pass, not one manufactured by dropping a city we hold. */
+  | 'v1_blank_apn_no_city'
   | 'v1_blank_good_address'
   | 'mcp_named_no_city_apn'
   | 'mcp_blank'
@@ -142,6 +148,7 @@ const ALL_PATHS: readonly LivePath[] = [
   'v1_named_no_city',
   'v1_named_no_city_apn',
   'v1_blank_unusable',
+  'v1_blank_apn_no_city',
   'v1_blank_good_address',
   'mcp_named_no_city_apn',
   'mcp_blank',

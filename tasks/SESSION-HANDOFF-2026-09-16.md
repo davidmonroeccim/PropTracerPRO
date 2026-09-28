@@ -1,6 +1,57 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
-> # READ FIRST. STATE AS OF 2026-09-28 (latest). **THE TIER 2 PARCEL KEY IS BUILT, DEPLOYED AND VERIFIED LIVE. `main` = `9752c31`.**
+> # READ FIRST. STATE AS OF 2026-09-28, LATEST. **THE DOSSIER TEST HAS RUN. `DOSSIER_APN` WENT LIVE FOR THE FIRST TIME AND MISSED 2 OF 2.**
+>
+> **Full report: `tasks/dossier-test-2026-09-28.md`. Read it before re-running anything paid.**
+>
+> David authorised $5 for two records; cap passed was `--max-dollars 4.50` against a $4.00 whole-file
+> worst case. **Spent $0.50 charged, $0.00 vendor cost.** Records D1 (NC Pitt) and D2 (TX Randall),
+> both blank owner + apn + county + state + NO city, both genuinely city-less in the registry, both
+> counties fresh against all 66 touched pairs. Job `44715ee4-7672-4afe-8e66-c20e766fc572`,
+> **`completed` in 23.9s UNPOLLED**, crons undriven, status route never opened. Wallet $11.73 ->
+> $11.23, two $0.25 debits, $10 rebill threshold never approached.
+>
+> **ITEM 1 IS PROVEN. ITEMS 2 TO 5 WERE NOT REACHED.** `DOSSIER_APN` was really sent, keyed
+> `{apn, county, state}` with no situs, proven three ways: `planRoute` pre-flight emitted it as the
+> ONLY step; `vendor_rate_windows` recorded `tracerfy calls_used: 2` at `13:36:45Z`, the second the
+> job settled; and `trace_history` holds exactly 2 rows created system-wide since 13:30Z, so nothing
+> else could account for those calls. Tracerfy returned no parcel on either key, so there was no
+> owner to classify and no contact call. **This is vendor coverage, not a PTP defect.** Prior
+> evidence is mixed the same way: Salt Lake missed on APN and hit on address, Napa did the reverse.
+> Two records is a "does it work" sample, NOT a hit rate.
+>
+> **TWO NEW DEFECTS, NEITHER PREVIOUSLY IN ANY HANDOFF. Per L-038 they are recorded ONCE and raised,
+> not described again. They are the next build, not the next note.**
+>
+> 1. **THE BILLED SILENT MISS.** `rowSkipReason()` returns **null** for a settled tier 2 miss
+>    (`propertyTraceSkipReason('property_trace_done')` is null, `tier1MaySpeak` is false because
+>    `trace_job_id` is set and `ai_research_status` is not tier-1, `skipReasonFor(null)` is null). So
+>    the customer pays $0.25, sees `no_match`, and is told **nothing**: not that we looked by parcel
+>    id, not that the provider has no record of it, not that tier 2 bills per record submitted
+>    either way. The three sentences that exist (`_failed`, `_no_key`, `_no_reach`) all cover cases
+>    where NOTHING WAS SPENT. The billed-miss case, the one the customer actually pays for, has no
+>    sentence. This is the shape the whole initiative was built for.
+> 2. **THE TIER 2 LANE HAS NO STEP LOG AT ALL.** `sweep-property-traces/route.ts` contains
+>    `trace_steps` **zero times** and passes **no `onStep`** to `executeRoute`. `sweep-entity-traces`
+>    does write it. So no tier 2 row has ever carried a step log, item 6 cannot be satisfied on this
+>    lane by any record, and 2B's C5 reporting `steps none` on a real $0.30 hit was the lane, not a
+>    quirk. The ONLY reason item 1 was provable is `vendor_rate_windows`, a **pruning per-second
+>    window**: an hour later that evidence would have been gone.
+>
+> **A THIRD RISK, measured while selecting records, and it belongs to Phase 3.** NY Jefferson's
+> registry `parcel_id_local` is a 26-digit SWIS+SBL composite, not the tax map id the county prints.
+> Phase 3 has the gateway ALWAYS passing `parcel_id_local` from the registry. Where that column holds
+> a registry-constructed composite rather than the county's own key, the dossier is handed something
+> no vendor can recognise and it misses silently AND bills. Measured on NY only, not generalised.
+>
+> **STILL UNCHANGED:** the gateway's `ptp_skip_trace_bulk` / `ptp_skip_trace_quote` schemas still
+> declare `"required": ["address","city","state"]`, so a city-less parcel-keyed record still cannot
+> reach PTP through the gateway. Phase 3.
+>
+> **NOT YET ANSWERED, and it is David's:** on v1 and MCP, should a failed trace inside the 90-day
+> window block a resend? A named answer unblocks a one-line client swap.
+
+> # STATE AS OF 2026-09-28 (earlier). **THE TIER 2 PARCEL KEY IS BUILT, DEPLOYED AND VERIFIED LIVE. `main` = `9752c31`.**
 >
 > **READ `tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md` BEFORE ANY ROUTING OR SUBMIT WORK. It is David's own
 > wording and it is THE AUTHORITY.** Anything in this repo that disagrees with it is wrong, including a
