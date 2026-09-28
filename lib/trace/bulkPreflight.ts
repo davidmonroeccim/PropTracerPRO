@@ -260,6 +260,21 @@ export async function tracerfyCanRun(
  * actually observed: a user submitting a second job after the first one's rows
  * are on the table.
  */
+/**
+ * PostgREST's own default cap on an unlimited select, measured on this project:
+ * a select with no range returned exactly 1000 rows of 3,874. Matching it
+ * exactly is what lets a short page mean "the end" below.
+ */
+const PAGE_SIZE = 1000;
+
+/**
+ * A BOUND, NOT AN EXPECTATION. 50 pages is 50,000 rows in flight for ONE user,
+ * a hundred times the 500-record submit cap. It exists so that a client which
+ * ever ignored `.range()` turns into an error rather than a loop that never
+ * ends holding the table in memory.
+ */
+const MAX_PAGES = 50;
+
 export async function inFlightUnbilledCost(
   admin: SupabaseClient,
   userId: string,
@@ -276,23 +291,70 @@ export async function inFlightUnbilledCost(
     Date.now() - STALE_PROCESSING.CRON_TIMEOUT_MINUTES * 60 * 1000
   ).toISOString();
 
-  const { data, error } = await admin
-    .from('trace_history')
-    .select('status, property_trace_status, ai_research_status')
-    .eq('user_id', userId)
-    .or(
-      `and(status.eq.processing,created_at.gte.${tier1Cutoff}),property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')}),ai_research_status.in.(${TIER1_PENDING_STATUSES.join(',')})`
-    );
+  // THE READ IS PAGED, AND THAT IS A MONEY FIX, NOT TIDINESS. An unlimited
+  // select is capped by the server: measured on this project, one returned
+  // exactly 1000 rows of 3,874. A user with more than 1000 rows in flight
+  // therefore had every row past the first 1000 silently dropped from this sum,
+  // and the batch priced below what it is going to cost. Under-reserving is the
+  // one direction this check is not allowed to fail in -- the same reason the
+  // tier 2 arm above carries no age bound and the same reason the error branch
+  // below throws instead of returning a number.
+  //
+  // REBUILT PER PAGE. A PostgREST builder is a one-shot thenable, so handing the
+  // same one two ranges is how a paginated read quietly returns page 1 twice.
+  //
+  // ORDERED BY THE PRIMARY KEY, which is what makes the paging well defined.
+  // `.range()` over an unordered query has no defined order across a page
+  // boundary, which drops one row and repeats another -- and a dropped row here
+  // is the under-reserve this whole change exists to remove. `id` is a UUID
+  // PRIMARY KEY, so it is a total order on its own and needs no tiebreaker.
+  const pageOf = (from: number) =>
+    admin
+      .from('trace_history')
+      .select('status, property_trace_status, ai_research_status')
+      .eq('user_id', userId)
+      .or(
+        `and(status.eq.processing,created_at.gte.${tier1Cutoff}),property_trace_status.in.(${PROPERTY_TRACE_PENDING_STATUSES.join(',')}),ai_research_status.in.(${TIER1_PENDING_STATUSES.join(',')})`
+      )
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
 
-  if (error) {
-    // NOT ZERO. Zero is the claim that this user owes nothing, and making that
-    // claim because a query failed is precisely the fabricated result the
-    // reserve exists to stop anyone acting on. The route's catch owns this.
-    throw new Error(`could not size in-flight work: ${error.message}`);
+  const rows: UnsettledRow[] = [];
+  for (let page = 0; ; page++) {
+    if (page >= MAX_PAGES) {
+      // SAME REASONING AS THE ERROR BRANCH BELOW, AND DELIBERATELY THE SAME
+      // ANSWER. Summing the pages read so far would be a number, and a number
+      // is a claim about what this user owes; making that claim while knowing
+      // rows were left unread is the under-reserve in a new place. If the loop
+      // cannot converge, the honest answer is that we do not know.
+      throw new Error(
+        `could not size in-flight work: more than ${MAX_PAGES * PAGE_SIZE} rows still in flight`
+      );
+    }
+
+    const { data, error } = await pageOf(page * PAGE_SIZE);
+
+    if (error) {
+      // NOT ZERO. Zero is the claim that this user owes nothing, and making that
+      // claim because a query failed is precisely the fabricated result the
+      // reserve exists to stop anyone acting on. The route's catch owns this.
+      //
+      // A FAILED PAGE IS A FAILED READ, not a short one: breaking out with the
+      // pages already read would hand back a confident, too-small reserve.
+      throw new Error(`could not size in-flight work: ${error.message}`);
+    }
+
+    const rowsOnPage = (data || []) as UnsettledRow[];
+    rows.push(...rowsOnPage);
+    // A SHORT PAGE IS THE END. Unlike the export in app/api/trace/bulk/download,
+    // which stops on an EMPTY page because a short one could also mean the
+    // server's cap sits below its page size, PAGE_SIZE here IS that cap, so a
+    // page returning fewer rows than were asked for has no rows behind it.
+    if (rowsOnPage.length < PAGE_SIZE) break;
   }
 
   let total = 0;
-  for (const row of (data || []) as UnsettledRow[]) {
+  for (const row of rows) {
     // ELSE-IF, NOT THREE IFS. A queued row of EITHER tier is also `status: 'processing'`, so
     // counting more than one column would reserve two rates added together for a row that can
     // only ever cost one of them, and 402 a wallet that can afford the batch.

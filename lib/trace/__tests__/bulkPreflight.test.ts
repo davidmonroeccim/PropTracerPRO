@@ -37,6 +37,14 @@ const H = vi.hoisted(() => ({
   inFlightRows: [] as Array<Record<string, unknown>>,
   inFlightError: null as { message: string } | null,
   filters: [] as Array<[string, unknown, unknown]>,
+  // Every `.range(from, to)` the module asked for, in order. The in-flight read
+  // is paged, and a harness that served the whole array to every page could not
+  // tell a correct paged read from one that never advances.
+  ranges: [] as Array<[number, number]>,
+  // Set to ignore `.range()` entirely and answer every page with the full array,
+  // which is how a client that does not honour ranges behaves. Only the
+  // loop-bound test needs it.
+  ignoreRange: false,
 }));
 
 vi.mock("@/lib/tracerfy/client", () => ({
@@ -51,6 +59,13 @@ const {
   inFlightUnbilledCost,
   tracerfyCanRun,
 } = await import("@/lib/trace/bulkPreflight");
+
+/**
+ * What a select with no `.range()` returns at most. PostgREST's own cap,
+ * measured on this project: an unlimited select on trace_history came back with
+ * exactly 1000 rows of 3,874.
+ */
+const SERVER_ROW_CAP = 1000;
 
 /** A client that records its filters and answers the two shapes this module uses. */
 function fakeClient() {
@@ -80,13 +95,38 @@ function fakeClient() {
         counting = opts?.head === true;
         return node;
       };
+      node.order = track("order");
+      // THE PAGE THIS BUILDER WAS ASKED FOR. Recorded and honoured, so the
+      // in-flight read only sees the slice it requested -- a harness answering
+      // the full array to every page would make a loop that never advances look
+      // identical to one that pages correctly.
+      let sliceFrom: number | null = null;
+      let sliceTo: number | null = null;
+      node.range = (from: number, to: number) => {
+        H.ranges.push([from, to]);
+        sliceFrom = from;
+        sliceTo = to;
+        return node;
+      };
       node.then = (res: (v: unknown) => unknown) =>
         Promise.resolve(
           counting
             ? countColumn === "ai_research_status"
               ? { count: H.queuedTier1Count, error: H.queuedTier1Error }
               : { count: H.queuedCount, error: H.queuedError }
-            : { data: H.inFlightRows, error: H.inFlightError }
+            : {
+                data: H.ignoreRange
+                  ? H.inFlightRows
+                  : sliceFrom === null
+                    ? // THE SERVER'S OWN CAP ON AN UNRANGED SELECT, measured on
+                      // this project: exactly 1000 rows of 3,874. Modelled here
+                      // because without it a harness answers the whole array to
+                      // an unranged read, and the unpaged bug this suite exists
+                      // to fence passes its own test.
+                      H.inFlightRows.slice(0, SERVER_ROW_CAP)
+                    : H.inFlightRows.slice(sliceFrom, sliceTo! + 1),
+                error: H.inFlightError,
+              }
         ).then(res);
       return node;
     },
@@ -106,6 +146,8 @@ beforeEach(() => {
   H.inFlightRows = [];
   H.inFlightError = null;
   H.filters = [];
+  H.ranges = [];
+  H.ignoreRange = false;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -379,6 +421,103 @@ describe("in-flight unbilled work", () => {
     H.inFlightError = { message: "statement timeout" };
     await expect(inFlightUnbilledCost(fakeClient(), "u1", RATES)).rejects.toThrow(
       /statement timeout/
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE READ IS PAGED. An unlimited select is capped by the server -- measured on
+ * this project, one returned exactly 1000 rows of 3,874 -- so every row past
+ * the first 1000 used to be dropped from the sum and the batch priced below
+ * what it will cost. Under-reserving is the one direction this check is not
+ * allowed to fail in.
+ * ------------------------------------------------------------------ */
+
+describe("inFlightUnbilledCost pages the read, so the reserve covers every row", () => {
+  const RATES = { tier1: 0.25, tier2: 0.4 };
+
+  /** `n` unsettled tier 1 rows: status 'processing', neither queue column set. */
+  const tier1Rows = (n: number) =>
+    Array.from({ length: n }, () => ({
+      status: "processing",
+      property_trace_status: null,
+      ai_research_status: null,
+    }));
+
+  it("sums rows past the first page, not just the first 1000", async () => {
+    // 1001 ROWS, WHICH IS THE SMALLEST NUMBER THAT PROVES IT. At 1000 the bug
+    // and the fix agree; at 1001 an unpaged read reserves $250.00 for work that
+    // costs $250.25, and the 1001st trace is bought with money nobody held.
+    // MUTATION: delete the paging loop, go back to one unranged select, and
+    // this goes red at 250 instead of 250.25.
+    H.inFlightRows = tier1Rows(1001);
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(1001 * RATES.tier1, 4);
+  });
+
+  it("keeps paging while pages come back full, over several pages", async () => {
+    // Two full pages and a short one. A loop that stopped after the second page
+    // would still be short by 500 rows, which is a whole submit's worth.
+    H.inFlightRows = tier1Rows(2500);
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(2500 * RATES.tier1, 4);
+    expect(H.ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+      [2000, 2999],
+    ]);
+  });
+
+  it("asks for one page only when that page is short", async () => {
+    // The common case must not cost extra round trips: a first page that comes
+    // back short has nothing behind it, so nothing more is asked for.
+    H.inFlightRows = tier1Rows(3);
+    expect(await inFlightUnbilledCost(fakeClient(), "u1", RATES)).toBeCloseTo(3 * RATES.tier1, 4);
+    expect(H.ranges).toEqual([[0, 999]]);
+  });
+
+  it("orders by the primary key, so a page boundary cannot drop a row", async () => {
+    // `.range()` over an unordered query has no defined order across a page
+    // boundary, which drops one row and repeats another -- and a dropped row
+    // here is the under-reserve this change exists to remove.
+    // MUTATION: delete the .order('id') and this goes red.
+    await inFlightUnbilledCost(fakeClient(), "u1", RATES);
+    expect(H.filters.some((f) => f[0] === "order" && f[1] === "id")).toBe(true);
+  });
+
+  it("raises rather than under-reserving when the pages never stop coming", async () => {
+    // A client that ignored `.range()` answers every page in full and the loop
+    // never converges. Summing what was read would be a confident number that
+    // is known to be short, which is the same fabricated result the error
+    // branch refuses to give. So it throws, in the same words.
+    H.inFlightRows = tier1Rows(1000);
+    H.ignoreRange = true;
+    await expect(inFlightUnbilledCost(fakeClient(), "u1", RATES)).rejects.toThrow(
+      /could not size in-flight work: more than 50000 rows still in flight/
+    );
+  });
+
+  it("raises on a LATER page's error, instead of banking the pages it did read", async () => {
+    // A failed page is a failed read, not a short one. Returning the first
+    // page's total here would hand back a reserve that is confidently too
+    // small, which is the under-reserve arriving through the error branch.
+    H.inFlightRows = tier1Rows(1500);
+    let calls = 0;
+    const flakyClient = () => {
+      const real = fakeClient();
+      const from = real.from.bind(real);
+      return {
+        from: (...args: Parameters<typeof from>) => {
+          const node = from(...args) as unknown as Record<string, unknown>;
+          const then = node.then as (res: (v: unknown) => unknown) => Promise<unknown>;
+          node.then = (res: (v: unknown) => unknown) =>
+            ++calls === 2
+              ? Promise.resolve({ data: null, error: { message: "connection reset" } }).then(res)
+              : then(res);
+          return node;
+        },
+      } as unknown as SupabaseClient;
+    };
+    await expect(inFlightUnbilledCost(flakyClient(), "u1", RATES)).rejects.toThrow(
+      /connection reset/
     );
   });
 });
