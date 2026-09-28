@@ -39,8 +39,8 @@ import {
  *
  * These tests hold two separate things. The first block is the accessor: which
  * sentence comes back for which row, and who wins a collision. The second is the
- * WIRING, asserted at the source of all four surfaces, because an accessor that
- * is right and unreferenced is the bug this dispatch existed to fix.
+ * WIRING, asserted at the source of the four surfaces it scans, because an
+ * accessor that is right and unreferenced is the bug this dispatch existed to fix.
  */
 
 const ROOT = process.cwd();
@@ -235,8 +235,14 @@ describe('every reason carries its own charge statement', () => {
  * calling the tier 1 accessor alone and therefore behaving CONSISTENTLY and
  * wrongly. The failure has a shape a source scan catches exactly, and the
  * per-surface behaviour is already covered by those surfaces' own tests.
+ *
+ * THE FOUR BELOW ARE THE FILES THIS SCAN COVERS, NOT EVERY CALLER. There are six
+ * rowSkipReason callers at HEAD (lib/trace/rowSkipReason.ts's header lists them).
+ * mcp-tools' listTraces shares a file with bulkStatus, so it rides the
+ * lib/suite/mcp-tools.ts entry. app/(dashboard)/history/page.tsx is NOT scanned
+ * here: that is an open coverage gap, not an assertion made and passed.
  */
-describe('all four surfaces that serve a bulk row serve both queues', () => {
+describe('the four source-scanned surfaces that serve a bulk row serve both queues', () => {
   const SURFACES: [string, string][] = [
     ['the results CSV', 'lib/trace/exportCsv.ts'],
     ['the session job summary', 'app/api/trace/bulk/status/route.ts'],

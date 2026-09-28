@@ -14,14 +14,23 @@
  * lib/trace/blankOwnerSkip.ts, propertyTraceSkipReason() in
  * lib/trace/propertyTraceAttempts.ts.
  *
- * Four surfaces serve a bulk row: the results CSV, the session job summary, the
- * v1 REST status payload and the MCP status payload. Every one of them called
- * skipReasonFor() alone, so every tier 2 terminal value reached the customer as
- * a bare `no_match` with nothing beside it. On a PROPERTY_TRACE_NO_REACH row
- * that is a BILLED row being told we looked and found nobody, when what actually
- * happened is that we bought the property record and the contact vendor fell
- * over. Leaving each surface to remember two calls is how three of them stay
- * right and the fourth silently does not.
+ * SIX CALLERS serve a bulk row's reason at HEAD, and the list has grown twice
+ * since this dispatch was written:
+ *
+ *   lib/trace/exportCsv.ts                  the results CSV (a TraceHistory)
+ *   app/api/trace/bulk/status/route.ts      the session job summary (its own narrow select)
+ *   app/api/v1/trace/bulk/status/route.ts   the v1 REST status payload (a TraceHistoryRow)
+ *   lib/suite/mcp-tools.ts bulkStatus       the MCP status payload (a TraceHistoryRow)
+ *   app/(dashboard)/history/page.tsx        the history page (a TraceHistory)
+ *   lib/suite/mcp-tools.ts listTraces       list_traces (a bespoke `skipRow` object literal)
+ *
+ * The four this dispatch was built for each called skipReasonFor() alone, so every
+ * tier 2 terminal value reached the customer as a bare `no_match` with nothing
+ * beside it. On a PROPERTY_TRACE_NO_REACH row that is a BILLED row being told we
+ * looked and found nobody, when what actually happened is that we bought the
+ * property record and the contact vendor fell over. Leaving each surface to
+ * remember two calls is how most of them stay right and one silently does not,
+ * and every caller added since is another chance at that.
  *
  * ------------------------------------------------------------------------
  * TIER 2 WINS A COLLISION, AND THAT ORDER IS THE POINT OF THE FUNCTION
@@ -51,13 +60,22 @@ import { isTier1QueueRow } from '@/lib/trace/tier1Queue';
 import { tier1OutcomeReason, type Tier1OutcomeRow } from '@/lib/trace/tier1Outcome';
 
 /**
- * A row read down to the two queue columns. Structural, so every caller's own
- * row type satisfies it without a cast: the v1 and MCP surfaces pass a
- * TraceHistoryRow, the CSV passes a TraceHistory, the session summary passes its
- * own narrow select.
+ * A row read down to the two queue columns. Structural, so every caller's own row
+ * type satisfies it without a cast. SIX callers (see the header above) carry FOUR
+ * distinct shapes between them:
  *
- * Both optional, because a row written before either migration carries neither
- * and absent has to read as "nothing to explain" rather than throw.
+ *   TraceHistoryRow        the v1 status route, and mcp-tools' bulkStatus
+ *   TraceHistory           the results CSV, and app/(dashboard)/history/page.tsx
+ *   a narrow select        app/api/trace/bulk/status/route.ts's own SkipRow
+ *   a bare object literal  mcp-tools' listTraces builds `skipRow` by hand
+ *
+ * DO NOT TIGHTEN THIS TYPE on the strength of the first two. The hand-built literal
+ * and the narrow select are why structural-and-optional is the only shape that
+ * works here: neither is a named row type that can be widened to meet a stricter
+ * one.
+ *
+ * Both queue columns optional, because a row written before either migration
+ * carries neither and absent has to read as "nothing to explain" rather than throw.
  */
 export type SkipReasonRow = Tier1OutcomeRow & {
   ai_research_status?: string | null;

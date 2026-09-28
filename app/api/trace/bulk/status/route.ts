@@ -57,9 +57,10 @@ type JobRow = SkipRow & {
  *
  * THE REASON NOW COMES FROM rowSkipReason(), WHICH ASKS BOTH QUEUES. It used to
  * ask only skipReasonFor(), the tier 1 accessor, so every tier 2 terminal value
- * counted as nothing and explained nothing. The same accessor serves the v1
- * status route, the MCP tool and the CSV, so the wording cannot drift between
- * the four.
+ * counted as nothing and explained nothing. The same accessor serves every other
+ * caller -- the v1 status route, the CSV, mcp-tools' bulk_status AND its
+ * list_traces, and app/(dashboard)/history/page.tsx; six in all, listed in
+ * lib/trace/rowSkipReason.ts's header -- so the wording cannot drift between them.
  *
  * `records_skipped` IS NO LONGER AN ALL-FREE COUNT, and that is why nothing
  * around it may promise the rows were free. Four of the five reasons are free

@@ -375,8 +375,8 @@ export function toExportValues(row: TraceHistory): unknown[] {
   // Computed ONCE here, beside the rowSkipReason() call it has to agree with,
   // rather than inline at each of the two cells: two call sites is two places
   // for a money-safety rule to drift apart. The predicate itself lives in
-  // lib/trace/rowSkipReason.ts, which is the single derivation all four bulk
-  // surfaces share.
+  // lib/trace/rowSkipReason.ts, which is the single derivation every caller
+  // shares -- six of them at HEAD; that file's header carries the list.
   const tier1Speaks = tier1MaySpeak(row);
 
   return [
