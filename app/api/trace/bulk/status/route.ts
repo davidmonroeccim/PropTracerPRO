@@ -213,8 +213,20 @@ export async function GET(request: Request) {
      * module is the ARITHMETIC (recordsMatchedFor / totalChargeFor); the write itself only needed
      * to stop being copied twice in this file.
      */
-    const writeJobCompleted = (recordsMatched: number) =>
-      adminClient
+    // NEVER REPORT A COMPLETION WE DID NOT VERIFY. This write had no `error` destructured, so a
+    // failed one answered the page `completed` while the row stayed at 'processing' with
+    // completed_at null -- and no cron claims those rows again, because every queue column on them
+    // is already terminal. The job is then invisible to everything except an operator reading logs,
+    // which is why there has to be a line in the logs. Logged INSIDE the helper so both call sites
+    // are covered by one guard. Same shape as finalizeTouchedJobs' (lib/trace/finalizeBulkJob.ts):
+    // the job id and the underlying error.
+    //
+    // NO COMPARE-AND-SWAP HERE ON PURPOSE. finalizeJobIfDrained's terminal write adds
+    // .eq('status','processing'); this one deliberately does not, and adding it is a behaviour
+    // change on a surface the plan excluded -- ticketed separately, and it has to land on all three
+    // status surfaces at once or the asymmetry is worse than the race.
+    const writeJobCompleted = async (recordsMatched: number) => {
+      const { error } = await adminClient
         .from('trace_jobs')
         .update({
           status: 'completed',
@@ -222,6 +234,12 @@ export async function GET(request: Request) {
           completed_at: new Date().toISOString(),
         })
         .eq('id', traceJob.id);
+      if (error) {
+        console.error(
+          `[trace/bulk/status] job ${traceJob.id} terminal write failed: ${error.message}`
+        );
+      }
+    };
 
     // A JOB WITH NO TRACERFY JOB ID IS THE NORMAL SHAPE OF A WEB JOB NOW. Before Phase 2A it meant
     // either an empty submit or an all-tier-2 job; since the web upload enqueues its Tier 1 rows

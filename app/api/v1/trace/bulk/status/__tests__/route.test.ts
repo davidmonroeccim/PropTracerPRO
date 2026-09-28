@@ -25,6 +25,10 @@ const H = vi.hoisted(() => ({
   settleBulkJobSpy: vi.fn(),
   /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
   scheduled: [] as Array<() => unknown>,
+  /** The trace_jobs UPDATE's own error. Its own lever because that write is the ONLY thing that
+   *  ends the job: if it fails and nobody says so, the caller is told `completed` while the row
+   *  sits at 'processing' with completed_at null, and no cron ever claims those rows again. */
+  jobUpdateError: null as { message: string } | null,
 }));
 
 vi.mock("@/lib/api/auth", () => ({
@@ -46,7 +50,10 @@ const updateChain = (table: string) => (payload: Record<string, unknown>) => {
       return node;
     };
   node.then = (res: (v: unknown) => unknown) =>
-    Promise.resolve({ data: null, error: null }).then(res);
+    Promise.resolve({
+      data: null,
+      error: table === "trace_jobs" ? H.jobUpdateError : null,
+    }).then(res);
   return node;
 };
 
@@ -123,6 +130,7 @@ const { pushTraceToHighLevel } = await import("@/lib/highlevel/client");
 beforeEach(() => {
   H.updates = [];
   H.scheduled = [];
+  H.jobUpdateError = null;
   H.settleBulkJobSpy.mockReset();
   H.settleBulkJobSpy.mockResolvedValue({ stalledErrorReason: null });
 });
@@ -485,6 +493,96 @@ describe("the Tier 1 queue holds the job open too", () => {
 
     expect(body.status).toBe("completed");
     expect(body.records_matched).toBe(1);
+  });
+
+  /**
+   * THE TERMINAL WRITE ITSELF, ASSERTED POSITIVELY.
+   *
+   * The only other assertion on H.updates' trace_jobs entries in this file is NEGATIVE -- that no
+   * update happened on a still-processing path. MEASURED: deleting the terminal write from this
+   * route outright left the whole suite green (2196 passed), so the write that ends every
+   * API-submitted job was unfenced. These two close that.
+   */
+  it("writes the job terminal, with records_matched and completed_at", async () => {
+    // MUTATION: delete the trace_jobs update from this route's finalize and this goes red.
+    H.job = {
+      id: "job-1",
+      status: "processing",
+      records_submitted: 1,
+      created_at: new Date().toISOString(),
+    };
+    H.rows = [
+      {
+        id: "row-1",
+        status: "success",
+        tracerfy_job_id: null,
+        city: "Austin",
+        state: "TX",
+        ai_research_status: "tier1_done",
+        property_trace_status: null,
+        is_successful: true,
+        charge: 0.25,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-1"));
+
+    const terminal = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(terminal).toHaveLength(1);
+    // The number the caller was just told, on the row, not a 0 left from the insert.
+    expect(terminal[0].payload.records_matched).toBe(1);
+    // A job read as completed with completed_at null is the shape no cron reclaims.
+    expect(typeof terminal[0].payload.completed_at).toBe("string");
+    // And it is addressed at THIS job.
+    expect(terminal[0].filters).toEqual(expect.arrayContaining([["eq", "id", "job-1"]]));
+  });
+
+  it("logs the job id and the error when that terminal write fails", async () => {
+    // The caller is still told `completed` -- pre-existing behaviour this round does not change --
+    // but the failure can no longer be silent. Without a line in the log the row stays
+    // 'processing' with completed_at null, and no cron claims it again because every queue column
+    // on it is already terminal.
+    // MUTATION: drop the `error:` destructure and the console.error from that write and this goes
+    // red.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      H.jobUpdateError = { message: "trace_jobs is unreachable" };
+      H.job = {
+        id: "job-77",
+        status: "processing",
+        records_submitted: 1,
+        created_at: new Date().toISOString(),
+      };
+      H.rows = [
+        {
+          id: "row-1",
+          status: "success",
+          tracerfy_job_id: null,
+          city: "Austin",
+          state: "TX",
+          ai_research_status: "tier1_done",
+          property_trace_status: null,
+          is_successful: true,
+          charge: 0.25,
+        },
+      ];
+
+      const { GET } = await import("@/app/api/v1/trace/bulk/status/route");
+      const body = await (
+        await GET(new Request("https://proptracerpro.com/api/v1/trace/bulk/status?job_id=job-77"))
+      ).json();
+      expect(body.status).toBe("completed");
+
+      const logged = spy.mock.calls.map((c) => c.join(" "));
+      const hit = logged.find((line) => line.includes("job-77"));
+      expect(hit, `console.error calls were: ${JSON.stringify(logged)}`).toBeTruthy();
+      expect(hit).toContain("trace_jobs is unreachable");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

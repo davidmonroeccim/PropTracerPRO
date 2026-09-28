@@ -315,7 +315,18 @@ export async function GET(request: Request) {
     const recordsMatched = rows.filter((r) => r.is_successful).length;
     const totalCharge = rows.reduce((sum, r) => sum + (r.charge || 0), 0);
 
-    await adminClient
+    // NEVER REPORT A COMPLETION WE DID NOT VERIFY. This write had no `error` destructured, so a
+    // failed one answered the caller `completed` while the row stayed at 'processing' with
+    // completed_at null -- and no cron claims those rows again, because every queue column on them
+    // is already terminal. The job is then invisible to everything except an operator reading logs,
+    // which is why there has to be a line in the logs. Same shape as finalizeTouchedJobs'
+    // (lib/trace/finalizeBulkJob.ts): the job id and the underlying error.
+    //
+    // NO COMPARE-AND-SWAP HERE ON PURPOSE. finalizeJobIfDrained's terminal write adds
+    // .eq('status','processing'); this one deliberately does not, and adding it is a behaviour
+    // change on a surface the plan excluded -- ticketed separately, and it has to land on all three
+    // status surfaces at once or the asymmetry is worse than the race.
+    const { error: terminalWriteError } = await adminClient
       .from('trace_jobs')
       .update({
         status: 'completed',
@@ -323,6 +334,11 @@ export async function GET(request: Request) {
         completed_at: new Date().toISOString(),
       })
       .eq('id', traceJob.id);
+    if (terminalWriteError) {
+      console.error(
+        `[v1/trace/bulk/status] job ${traceJob.id} terminal write failed: ${terminalWriteError.message}`
+      );
+    }
 
     if (totalCharge > 0) {
       triggerAutoRebillIfNeeded(profile.id).catch(() => {});

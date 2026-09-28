@@ -37,6 +37,10 @@ const H = vi.hoisted(() => ({
   rpcCalls: [] as Array<[string, Record<string, unknown>]>,
   /** Callbacks handed to `after()`, run explicitly by flushDeferred(). */
   scheduled: [] as Array<() => unknown>,
+  /** The trace_jobs UPDATE's own error. Its own lever because writeJobCompleted is the ONLY thing
+   *  that ends the job: if it fails and nobody says so, the page is told `completed` while the row
+   *  sits at 'processing' with completed_at null, and no cron ever claims those rows again. */
+  jobUpdateError: null as { message: string } | null,
 }));
 
 /**
@@ -118,7 +122,10 @@ vi.mock("@/lib/supabase/admin", () => ({
           };
         for (const m of ["eq", "in", "or", "is", "ilike"]) node[m] = add(m);
         node.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
-          Promise.resolve({ data: null, error: null }).then(res, rej);
+          Promise.resolve({
+            data: null,
+            error: table === "trace_jobs" ? H.jobUpdateError : null,
+          }).then(res, rej);
         return node;
       },
     }),
@@ -174,6 +181,7 @@ beforeEach(() => {
   H.rpcCalls = [];
   H.scheduled = [];
   H.deductResult = true;
+  H.jobUpdateError = null;
   fetchSpy.mockClear();
   vi.stubGlobal("fetch", fetchSpy);
 
@@ -565,6 +573,71 @@ describe("a job whose rows are all tier 2", () => {
       (u) => u.table === "trace_jobs" && u.payload.status === "completed"
     );
     expect(completed).toHaveLength(1);
+  });
+
+  /**
+   * THE TERMINAL WRITE'S FULL PAYLOAD, AND WHAT HAPPENS WHEN IT FAILS.
+   *
+   * The test above already pins that a terminal write HAPPENS (this surface is the one of the
+   * three that was positively fenced; MEASURED: no-op'ing writeJobCompleted turns it red). What it
+   * does not pin is the payload beyond `status`, or whether a failed write is audible at all.
+   */
+  it("writes records_matched and completed_at on that terminal write, addressed at this job", async () => {
+    // MUTATION: drop records_matched or completed_at from writeJobCompleted's payload and this
+    // goes red. A job read as completed with completed_at null is the shape no cron reclaims.
+    H.jobRows = [
+      {
+        charge: 0.4,
+        ai_research_status: null,
+        property_trace_status: "property_trace_done",
+        is_successful: true,
+      },
+    ];
+
+    const { GET } = await import("@/app/api/trace/bulk/status/route");
+    await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"));
+
+    const terminal = H.updates.filter(
+      (u) => u.table === "trace_jobs" && u.payload.status === "completed"
+    );
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0].payload.records_matched).toBe(1);
+    expect(typeof terminal[0].payload.completed_at).toBe("string");
+    expect(terminal[0].filters).toEqual(expect.arrayContaining([["eq", "id", "job-1"]]));
+  });
+
+  it("logs the job id and the error when that terminal write fails", async () => {
+    // The page is still told `completed` -- pre-existing behaviour this round does not change --
+    // but the failure can no longer be silent. Without a line in the log the row stays
+    // 'processing' with completed_at null, and no cron claims it again because every queue column
+    // on it is already terminal.
+    // MUTATION: drop the `error:` destructure and the console.error from writeJobCompleted and
+    // this goes red.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      H.jobUpdateError = { message: "trace_jobs is unreachable" };
+      H.jobRows = [
+        {
+          charge: 0.4,
+          ai_research_status: null,
+          property_trace_status: "property_trace_done",
+          is_successful: true,
+        },
+      ];
+
+      const { GET } = await import("@/app/api/trace/bulk/status/route");
+      const body = await (
+        await GET(new Request("https://proptracerpro.com/api/trace/bulk/status?job_id=job-1"))
+      ).json();
+      expect(body.status).toBe("completed");
+
+      const logged = spy.mock.calls.map((c) => c.join(" "));
+      const hit = logged.find((line) => line.includes("job-1") && line.includes("terminal"));
+      expect(hit, `console.error calls were: ${JSON.stringify(logged)}`).toBeTruthy();
+      expect(hit).toContain("trace_jobs is unreachable");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("asks no vendor at all, because there is no Tracerfy job to poll", async () => {

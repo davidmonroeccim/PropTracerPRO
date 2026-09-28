@@ -1203,10 +1203,26 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   // Finalize.
   const recordsMatched = rows.filter((r) => r.is_successful).length;
   const totalCharge = rows.reduce((sum, r) => sum + (r.charge || 0), 0);
-  await admin
+  // NEVER REPORT A COMPLETION WE DID NOT VERIFY. This write had no `error` destructured, so a
+  // failed one returned `completed` to the caller while the row stayed at 'processing' with
+  // completed_at null -- and no cron claims those rows again, because every queue column on them
+  // is already terminal. The job is then invisible to everything except an operator reading logs,
+  // which is why there has to be a line in the logs. Same shape as finalizeTouchedJobs'
+  // (lib/trace/finalizeBulkJob.ts): the job id and the underlying error.
+  //
+  // NO COMPARE-AND-SWAP HERE ON PURPOSE. finalizeJobIfDrained's terminal write adds
+  // .eq('status','processing'); this one deliberately does not, and adding it is a behaviour
+  // change on a surface the plan excluded -- ticketed separately, and it has to land on all three
+  // status surfaces at once or the asymmetry is worse than the race.
+  const { error: terminalWriteError } = await admin
     .from("trace_jobs")
     .update({ status: "completed", records_matched: recordsMatched, completed_at: new Date().toISOString() })
     .eq("id", job.id);
+  if (terminalWriteError) {
+    console.error(
+      `[bulk_status] job ${job.id} terminal write failed: ${terminalWriteError.message}`,
+    );
+  }
 
   return {
     status: "completed",

@@ -1749,8 +1749,16 @@ describe("skip_trace_bulk carries the dossier parcel key", () => {
 /** Admin stub for the poll/settle path: profile + job come back from
  *  `.maybeSingle()` keyed by table; the trace_history rows come back from the
  *  awaited (`.then`) builder. */
-function statusAdminStub(opts: { profile: unknown; job: unknown; rows?: unknown[] }) {
-  const { profile, job, rows = [] } = opts;
+function statusAdminStub(opts: {
+  profile: unknown;
+  job: unknown;
+  rows?: unknown[];
+  /** The trace_jobs UPDATE's own error. Its own lever because that write is the ONLY thing that
+   *  ends the job: if it fails and nobody says so, the caller is told `completed` while the row
+   *  sits at 'processing' with completed_at null, and no cron ever claims those rows again. */
+  jobUpdateError?: { message: string } | null;
+}) {
+  const { profile, job, rows = [], jobUpdateError = null } = opts;
   const captured = { traceJobsUpdates: [] as unknown[] };
   // Same projection fence as adminStub: bulkStatus reads trace_history with select("*"), and
   // narrowing that select to a list without property_record / tier must turn the tests red
@@ -1777,7 +1785,7 @@ function statusAdminStub(opts: { profile: unknown; job: unknown; rows?: unknown[
       then: (resolve: (v: unknown) => unknown) =>
         resolve({
           data: table === "trace_history" ? rows.map((r) => projectRow(r, historySelect)) : null,
-          error: null,
+          error: table === "trace_jobs" ? jobUpdateError : null,
         }),
     };
     return chain;
@@ -2185,6 +2193,62 @@ describe("bulk_status", () => {
       });
       const out = await bulkStatus(admin, "sub-1", { job_id: "job-1" });
       expect(out).toMatchObject({ status: "completed", records_matched: 1 });
+    });
+
+    /**
+     * THE TERMINAL WRITE ITSELF, ASSERTED POSITIVELY.
+     *
+     * Every other assertion on captured.traceJobsUpdates in this file is NEGATIVE -- that no
+     * update happened on a still-processing path. MEASURED: deleting the terminal write from
+     * bulkStatus outright left the whole suite green (2196 passed), so the write that ends
+     * every MCP-submitted job was unfenced. These two close that.
+     */
+    it("writes the job terminal, with records_matched and completed_at", async () => {
+      // MUTATION: delete the trace_jobs update from bulkStatus's finalize and this goes red.
+      const { admin, captured } = statusAdminStub({
+        profile,
+        job: { id: "job-1", user_id: "p1", status: "processing", records_submitted: 2 },
+        rows: [
+          { id: "r1", status: "success", tracerfy_job_id: null, is_successful: true, charge: 0.25, ai_research_status: "tier1_done", property_trace_status: null },
+          { id: "r2", status: "no_match", tracerfy_job_id: null, is_successful: false, charge: 0, ai_research_status: "tier1_done", property_trace_status: null },
+        ],
+      });
+      await bulkStatus(admin, "sub-1", { job_id: "job-1" });
+      expect(captured.traceJobsUpdates).toHaveLength(1);
+      const payload = captured.traceJobsUpdates[0] as Record<string, unknown>;
+      expect(payload.status).toBe("completed");
+      // The number the caller was just told, on the row, not a 0 left from the insert.
+      expect(payload.records_matched).toBe(1);
+      // A job read as completed with completed_at null is the shape no cron reclaims.
+      expect(typeof payload.completed_at).toBe("string");
+    });
+
+    it("logs the job id and the error when that terminal write fails", async () => {
+      // The caller is still told `completed` -- that is the pre-existing behaviour and this round
+      // does not change it -- but the failure can no longer be silent. Without a line in the log
+      // the row stays 'processing' with completed_at null, and no cron claims it again because
+      // every queue column on it is already terminal.
+      // MUTATION: drop the `error:` destructure and the console.error from that write and this
+      // goes red.
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { admin } = statusAdminStub({
+          profile,
+          job: { id: "job-9", user_id: "p1", status: "processing", records_submitted: 1 },
+          rows: [
+            { id: "r1", status: "success", tracerfy_job_id: null, is_successful: true, charge: 0.25, ai_research_status: "tier1_done", property_trace_status: null },
+          ],
+          jobUpdateError: { message: "trace_jobs is unreachable" },
+        });
+        const out = await bulkStatus(admin, "sub-1", { job_id: "job-9" });
+        expect(out).toMatchObject({ status: "completed" });
+        const logged = spy.mock.calls.map((c) => c.join(" "));
+        const hit = logged.find((line) => line.includes("job-9"));
+        expect(hit, `console.error calls were: ${JSON.stringify(logged)}`).toBeTruthy();
+        expect(hit).toContain("trace_jobs is unreachable");
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });
