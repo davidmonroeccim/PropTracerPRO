@@ -2078,7 +2078,8 @@ describe("bulk_status", () => {
 
   /**
    * THE TIER 1 QUEUE HOLDS THE JOB OPEN TOO, and it is not this tool's own gate that used to do
-   * it. `lib/trace/tier1Queue` is not imported into mcp-tools.ts at all: isPendingResearch asks
+   * it. mcp-tools.ts imports no `lib/trace/tier1Queue` PREDICATE -- only tier1QueuedStatusFor, for
+   * the submit path's enqueue: isPendingResearch asks
    * isEntityTracePending, the LEGACY predicate, which holds no tier1_ value, and the
    * status === 'processing' arm catches a queued Tier 1 row only incidentally -- the Tier 1 cron
    * writes the row's delivery `status` before it clears the queue column, so the overlap ends on

@@ -1179,7 +1179,9 @@ export async function bulkStatus(admin: SupabaseClient, gatewaySub: string, raw:
   const anyPendingResearch = rows.some(isPendingResearch);
   const anyPendingProperty = rows.some(isPendingProperty);
   const anyPendingTrace = rows.some((r) => r.status === "processing");
-  // lib/trace/tier1Queue is not imported into this file at all, so without this arm a queued
+  // No tier1Queue PREDICATE is imported into this file: the import at the top of the file brings
+  // in tier1QueuedStatusFor alone, for the submit path's enqueue, and neither isTier1QueueRow nor
+  // isTier1QueuePending is in scope here. So without this arm a queued
   // Tier 1 row (ai_research_status: 'tier1_queued...') would not hold the job open here:
   // isPendingResearch asks the LEGACY entity ladder, which holds no tier1_ value, and status
   // reads as a terminal 'success'/'no_match' the moment the Tier 1 cron delivers its outcome,
