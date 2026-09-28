@@ -346,9 +346,39 @@ function saleIsFresh(date?: string | null): boolean {
 export const hasSitus = (p: ParcelInput): boolean =>
   Boolean(p.situsAddress?.trim() && p.situsCity?.trim() && p.situsState?.trim())
 
-/** Both halves or neither: the APN-keyed endpoints reject an apn without its county. */
-const hasApn = (p: ParcelInput): boolean =>
-  Boolean(p.parcelIdLocal?.trim() && p.county?.trim())
+/**
+ * THE APN KEY IS THREE PARTS, NOT TWO: "property id/APN + county + state", in the owner's own
+ * words (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md, Tier 1 row 2). Both APN-keyed steps send all
+ * three -- DOSSIER_APN sends { apn, county, state } and TRACERFY_PARCEL_APN sends
+ * { parcel_id, county, state } -- so an apn and county with no state is a MALFORMED vendor call,
+ * answered with a free silent miss, exactly as an apn with no county would be. The state test is
+ * the 2-letter form because that is the only form either vendor takes and the only form
+ * trace_history.state can hold (VARCHAR(2)).
+ *
+ * Exported because the submit surfaces must ask this same question rather than a second one of
+ * their own; see canDiscoverOwner below.
+ */
+export const hasApn = (p: ParcelInput): boolean =>
+  Boolean(p.parcelIdLocal?.trim() && p.county?.trim() && (p.state ?? '').trim().length === 2)
+
+/**
+ * CAN A VENDOR BE ASKED ABOUT THIS PARCEL AT ALL, with no owner name in hand?
+ *
+ * This is the SUBMIT-SIDE FORM of the question the Tier 2 branch of planRoute() below answers
+ * with `steps.length`: a dossier needs one of its two keys, and the two keys are the APN key
+ * (apn + county + state) and the situs key (street + city + state). A record holding either is a
+ * record the owner's Tier 2 row applies to -- "submitted to Tracerfy as a Dossier request for the
+ * owner name and all the property fields" -- and a record holding neither is one nobody can be
+ * asked about.
+ *
+ * THE TWO MUST NEVER DIVERGE. When a submit asked a DIFFERENT question (validateAddressInput,
+ * which demands a street AND a city AND a state and has no parcel term at all), a blank-owner
+ * record carrying APN + county + state and no city was filed no-key, free and never traced, while
+ * planRoute would have emitted DOSSIER_APN for it. That is the whole reason this predicate is
+ * exported from the module that owns routing instead of restated at each submit: one expression,
+ * so the submit cannot decide a row is unanswerable that the router would have routed.
+ */
+export const canDiscoverOwner = (p: ParcelInput): boolean => hasApn(p) || hasSitus(p)
 
 export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan {
   const warnings: string[] = []
@@ -387,7 +417,9 @@ export function planRoute(parcel: ParcelInput, pricePlan: PricePlan): RoutePlan 
     if (hasApn(parcel)) steps.push(apnStep)
     if (hasSitus(parcel)) steps.push(addressStep)
 
-    if (!steps.length) {
+    // ASKED THROUGH THE EXPORTED PREDICATE, NOT THROUGH `steps.length`, so the expression the two
+    // submits ask is the same expression this branch answers with and drift is impossible.
+    if (!canDiscoverOwner(parcel)) {
       warnings.push('No parcel id with county, and no complete situs. Neither dossier key is available.')
     } else {
       warnings.push('Stop at the first hit. Both steps bill only on success, so the fallback is free unless it works.')

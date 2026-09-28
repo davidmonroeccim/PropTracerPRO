@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   classifyOwnerName, splitPersonName, assessLoan, planRoute, stripTrustWords,
   PRICE, FAILSAFE_PRICE_PLAN, VENDOR_COST,
+  hasApn, hasSitus, canDiscoverOwner,
   type ParcelInput, type PricePlan, type RoutePlan,
 } from '../ownerRoute'
 
@@ -308,6 +309,110 @@ describe('planRoute with an address-only parcel (B6)', () => {
       addressOnly({ ownerName: 'Marcus T Halloway', situsAddress: null, situsCity: null, situsState: null }),
       'wallet',
     )
+    expect(r.steps).toHaveLength(0)
+    expect(r.warnings.join(' ')).toMatch(/manual review/)
+  })
+})
+
+/**
+ * THE APN KEY IS THREE PARTS, AND THE SUBMIT MUST ASK THE SAME QUESTION AS THE ROUTER.
+ *
+ * The owner's own table (tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md) says "no city, and we have the
+ * property id/APN + county + state". Three parts, and both APN-keyed steps send all three, so an
+ * apn and county with no state is a malformed vendor call rather than a cheaper one.
+ *
+ * canDiscoverOwner is the SUBMIT-SIDE form of the question the Tier 2 branch of planRoute answers
+ * with `steps.length`. The two bulk submits used to ask validateAddressInput instead -- street AND
+ * city AND state, no parcel term at all -- so a blank-owner record with APN + county + state and no
+ * city was filed no-key, free and never traced, while planRoute would have emitted DOSSIER_APN for
+ * it. These tests pin the predicate and pin the agreement.
+ */
+describe('the APN key, and the one predicate both submits ask (Tier 1 row 2, Tier 2 step 1)', () => {
+  /** Blank owner, a parcel key, and NO city at all: the row the submits used to refuse. */
+  const apnOnly = (over: Partial<ParcelInput> = {}): ParcelInput => ({
+    state: 'TX', parcelIdLocal: 'R-123', county: 'Travis',
+    situsAddress: null, situsCity: null, situsState: null, situsZip: null,
+    ownerName: null, ...over,
+  })
+
+  it('wants the apn AND the county, as it always has', () => {
+    expect(hasApn(apnOnly())).toBe(true)
+    expect(hasApn(apnOnly({ county: null }))).toBe(false)
+    expect(hasApn(apnOnly({ parcelIdLocal: null }))).toBe(false)
+  })
+
+  it('REFUSES an apn and county with no usable state', () => {
+    // MUTATION: delete the state clause from hasApn and the first four lines here go red. Both
+    // APN-keyed steps put `state` in the request, so two of the three parts is a call the vendor
+    // answers with a free, silent miss.
+    expect(hasApn(apnOnly({ state: '' }))).toBe(false)
+    expect(hasApn(apnOnly({ state: '   ' }))).toBe(false)
+    expect(hasApn(apnOnly({ state: 'T' }))).toBe(false)
+    expect(hasApn(apnOnly({ state: 'Texas' }))).toBe(false)
+    // A padded two-letter state is still two letters, which is what the column holds.
+    expect(hasApn(apnOnly({ state: ' TX ' }))).toBe(true)
+  })
+
+  it('plans the APN dossier for a blank-owner parcel that has no city at all', () => {
+    const r = planRoute(apnOnly(), 'wallet')
+    expect(r.tier).toBe(2)
+    expect(r.needsOwnerDiscovery).toBe(true)
+    expect(r.steps.map(s => s.kind)).toEqual(['DOSSIER_APN'])
+    expect(r.steps[0].request).toEqual({ apn: 'R-123', county: 'Travis', state: 'TX' })
+    expect(r.warnings.join(' ')).not.toMatch(/Neither dossier key/)
+  })
+
+  it('plans NOTHING when the state is missing, rather than a malformed call', () => {
+    const r = planRoute(apnOnly({ state: 'Texas' }), 'wallet')
+    expect(r.steps).toHaveLength(0)
+    expect(r.warnings.join(' ')).toMatch(/Neither dossier key/)
+  })
+
+  it('answers exactly what planRoute answers with steps.length, for every shape', () => {
+    // ONE EXPRESSION, TWO CALLERS. This is the fence that makes drift impossible: if the tier 2
+    // branch stops asking canDiscoverOwner, or canDiscoverOwner stops matching the two keys the
+    // branch pushes steps for, one of these rows disagrees.
+    const shapes: ParcelInput[] = [
+      apnOnly(),                                                                  // APN key only
+      apnOnly({ state: 'Texas' }),                                                // no usable state
+      apnOnly({ parcelIdLocal: null, county: null,
+        situsAddress: '1 Main St', situsCity: 'Dallas', situsState: 'TX' }),       // situs key only
+      apnOnly({ parcelIdLocal: null, county: null }),                             // neither key
+      apnOnly({ situsAddress: '1 Main St', situsCity: 'Dallas', situsState: 'TX' }), // both keys
+      apnOnly({ county: null }),                                                  // half an APN key
+    ]
+    for (const p of shapes) {
+      expect(canDiscoverOwner(p)).toBe(planRoute(p, 'wallet').steps.length > 0)
+    }
+    // NOT VACUOUS: the set genuinely contains both answers.
+    const answers = shapes.map(p => canDiscoverOwner(p))
+    expect(answers).toContain(true)
+    expect(answers).toContain(false)
+  })
+
+  it('is the union of the two dossier keys, and nothing else', () => {
+    const situsOnly = apnOnly({
+      parcelIdLocal: null, county: null,
+      situsAddress: '1 Main St', situsCity: 'Dallas', situsState: 'TX',
+    })
+    expect(hasApn(situsOnly)).toBe(false)
+    expect(hasSitus(situsOnly)).toBe(true)
+    expect(canDiscoverOwner(situsOnly)).toBe(true)
+    expect(canDiscoverOwner(apnOnly())).toBe(true)
+    expect(hasSitus(apnOnly())).toBe(false)
+    expect(canDiscoverOwner(apnOnly({ parcelIdLocal: null, county: null }))).toBe(false)
+  })
+
+  it('sends a NAMED person with the same parcel key to the Advanced Lookup (Tier 1 row 2)', () => {
+    const r = planRoute(apnOnly({ ownerName: 'Marcus T Halloway' }), 'wallet')
+    expect(r.steps.map(s => s.kind)).toEqual(['TRACERFY_PARCEL_APN'])
+    expect(r.steps[0].request).toMatchObject({
+      parcel_id: 'R-123', county: 'Travis', state: 'TX',
+    })
+  })
+
+  it('refuses that Advanced Lookup too when the state is missing', () => {
+    const r = planRoute(apnOnly({ ownerName: 'Marcus T Halloway', state: 'Texas' }), 'wallet')
     expect(r.steps).toHaveLength(0)
     expect(r.warnings.join(' ')).toMatch(/manual review/)
   })
