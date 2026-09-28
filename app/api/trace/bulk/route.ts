@@ -461,6 +461,11 @@ export async function POST(request: Request) {
             // on a reused row: this row was free, and zeroing what an earlier trace legitimately
             // billed would destroy a receipt rather than correct one.
             is_successful: false,
+            // WRITTEN, NOT OMITTED, for the reason the Tier 1 block below sets out in full: the
+            // upsert is onConflict: 'user_id,address_hash', so this row is REUSED, and an omitted
+            // key leaves whatever it already carried. This row is terminal and FREE, and a stale
+            // job id left on it would hand it to a CSV settle path that bills.
+            tracerfy_job_id: null,
           }))
         );
       }
@@ -471,17 +476,25 @@ export async function POST(request: Request) {
       // returns, and so a failed person submit does not strand them.
       //
       // `status: 'processing'` because the row genuinely is in flight. It carries
-      // no tracerfy_job_id, which is what keeps every tier 1 settle path away
-      // from it: bulk/status finds its billable rows by that column, and a tier 2
-      // row settled there would be billed the tier 1 rate by the wrong engine.
-      // sweep-stale-traces cannot reach it either, because its single-trace stage
-      // filters on `trace_job_id IS NULL`.
+      // `tracerfy_job_id: null`, which is what keeps every tier 1 settle path
+      // away from it: bulk/status finds its billable rows by that column, and a
+      // tier 2 row settled there would be billed the tier 1 rate by the wrong
+      // engine. sweep-stale-traces cannot reach it either, because its
+      // single-trace stage filters on `trace_job_id IS NULL`.
+      //
+      // IT IS WRITTEN, AND THIS COMMENT USED TO CLAIM IT WITHOUT THE CODE DOING
+      // IT. The payload merely OMITTED the key, and on an onConflict upsert an
+      // omitted key leaves whatever the REUSED row already carried -- so a
+      // CSV-era row rewritten as tier 2 kept a live job id, which is exactly the
+      // stale value the paragraph above says cannot be there. The v1 route has
+      // written null on all three buckets since Phase 2B for this reason.
       if (tier2Records.length > 0) {
         await insertHistoryRows(
           tier2Records.map((r) => ({
             ...buildHistoryRow(r),
             property_trace_status: queuedStatusFor(1),
             status: 'processing' as const,
+            tracerfy_job_id: null,
           }))
         );
       }

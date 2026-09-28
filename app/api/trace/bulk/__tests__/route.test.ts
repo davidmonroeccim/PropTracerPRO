@@ -252,12 +252,24 @@ describe("a row with no owner name", () => {
     expect(named.property_trace_status).toBeNull();
   });
 
-  it("carries no tracerfy_job_id, so no status route settles it", async () => {
+  it("writes tracerfy_job_id null, so no status route settles it", async () => {
     // bulk/status finds its billable rows by that column. A queued tier 2 row
     // holding one would be settled and billed at the TIER 1 rate by the wrong
     // engine, before the cron ever saw it.
+    //
+    // THIS ASSERTS THE KEY IS PRESENT, NOT MERELY THAT ITS VALUE READS NULL,
+    // AND THE OLD FORM IS WHY. `expect(row.tracerfy_job_id ?? null).toBeNull()`
+    // passes whether the key is written null or omitted altogether -- and
+    // OMITTED is what this route did. On an onConflict upsert an omitted key
+    // leaves whatever the REUSED row already carried, so a CSV-era row
+    // rewritten as tier 2 kept a LIVE job id: exactly the state this test
+    // claimed to rule out. It could not fail; adding `tracerfy_job_id: null` to
+    // the write left all 2180 tests green.
+    // MUTATION: omit the key on the tier 2 write and this goes red.
     await post([rec(undefined, 1)]);
-    expect(historyRows()[0].tracerfy_job_id ?? null).toBeNull();
+    const row = historyRows()[0];
+    expect(Object.keys(row)).toContain("tracerfy_job_id");
+    expect(row.tracerfy_job_id).toBeNull();
   });
 
   it("writes nothing money-shaped at submit, because nothing has been billed yet", async () => {
@@ -304,6 +316,19 @@ describe("a blank-owner row no vendor can be asked about", () => {
     const row = historyRows()[0];
     expect(Object.keys(row)).toContain("is_successful");
     expect(row.is_successful).toBe(false);
+  });
+
+  it("writes tracerfy_job_id null, so a CSV settle path cannot bill this free row", async () => {
+    // Same defect as the tier 2 write, same shape of harm and one step worse:
+    // this row is TERMINAL AND FREE. An omitted key on an onConflict upsert
+    // leaves whatever the reused row carried, so a CSV-era row refiled as
+    // no-key kept a live job id, and both CSV settle paths find their rows by
+    // that column -- handing a finished, free row to an engine that bills.
+    // MUTATION: omit the key on the no-key write and this goes red.
+    await post([noKeyRec(1)]);
+    const row = historyRows()[0];
+    expect(Object.keys(row)).toContain("tracerfy_job_id");
+    expect(row.tracerfy_job_id).toBeNull();
   });
 
   it("does not touch a money column, because those are receipts", async () => {
