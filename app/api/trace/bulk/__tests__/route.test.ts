@@ -298,6 +298,23 @@ describe("a blank-owner row no vendor can be asked about", () => {
     expect(isPropertyTracePending(String(historyRows()[0].property_trace_status))).toBe(false);
   });
 
+  it("QUEUES a blank-owner row whose city is one character, because the router and the vendor both take it", async () => {
+    // THE THIRD SURFACE, and the last one that asked the wrong question. `validateAddressInput`
+    // demands a city of 2+ characters, so this row was filed no-key here and told it could not be
+    // looked up -- while `hasSitus`, which is what planRoute asks before emitting DOSSIER_ADDRESS,
+    // and `validateKey` in lib/tracerfy/dossier.ts, which is what the vendor client enforces, both
+    // ask only that street, city and state be NON-EMPTY. A submit must not refuse a row the router
+    // would route and the vendor would accept.
+    //
+    // MUTATION: put `validateAddressInput(record.address, record.city, record.state)` back in the
+    // blank-owner branch and this goes red.
+    await post([{ owner_name: "", address: "1 Main St", city: "X", state: "TX", zip: "75001" }]);
+    const row = historyRows()[0];
+    expect(row.property_trace_status).toBe(queuedStatusFor(1));
+    expect(row.property_trace_status).not.toBe(PROPERTY_TRACE_NO_KEY_STATUS);
+    expect(isPropertyTracePending(String(row.property_trace_status))).toBe(true);
+  });
+
   it("states is_successful false, so a reused match cannot be recounted", async () => {
     // THE ROW IS REUSED. insertHistoryRows upserts on (user_id, address_hash), so a record whose
     // EARLIER trace settled is_successful: true lands back on that same row -- and this write used

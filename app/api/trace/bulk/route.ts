@@ -5,8 +5,9 @@ import {
   createAddressHash,
   traceKeyFor,
   usableZip,
-  validateAddressInput,
 } from '@/lib/utils/address-normalizer';
+import { canDiscoverOwner } from '@/lib/routing/ownerRoute';
+import { parcelForFullTrace } from '@/lib/trace/fullPropertyTrace';
 import { removeBatchDuplicates, checkDuplicates } from '@/lib/utils/deduplication';
 import { TIER1_OUTCOME } from '@/lib/trace/tier1Outcome';
 import { tier1QueuedStatusFor } from '@/lib/trace/tier1Queue';
@@ -166,8 +167,10 @@ export async function POST(request: Request) {
         tier1Records.push(record);
         continue;
       }
-      // NO ZIP ARGUMENT, AND ITS ABSENCE IS THE POINT. This split asks one
-      // question: can a vendor be ASKED about this row. validateAddressInput
+      // THE ZIP CANNOT VETO A ROW, AND THAT IS THE POINT. The parcel below is built WITH the zip,
+      // but neither arm of canDiscoverOwner consults it: hasSitus asks street + city + state and
+      // hasApn asks apn + county + state. So the zip rides along for the vendor call and decides
+      // nothing here. The rule this protects against is the old one: validateAddressInput
       // also carries a ZIP rule, and joining that rule to this question filed a
       // row with a perfectly good street, city and state as no-key over a
       // mangled ZIP -- told it was missing a component it had, and locked out of
@@ -183,8 +186,30 @@ export async function POST(request: Request) {
       // veto the row, and PROPERTY_TRACE_NO_KEY_STATUS is reserved for a row
       // genuinely missing something the lookup needs -- which is also the only
       // population its sentence's resend advice is true for.
-      const usable = validateAddressInput(record.address, record.city, record.state);
-      if (usable.valid) tier2Records.push(record);
+      // ASK THE ROUTER, NOT AN INPUT VALIDATOR. This is the third surface to get this change and
+      // the last one that had it wrong. `validateAddressInput` demands a street of 3+ and a city
+      // of 2+; `hasSitus`, which is what planRoute actually uses to decide DOSSIER_ADDRESS, and
+      // `validateKey` in lib/tracerfy/dossier.ts, which is what the vendor client enforces, both
+      // ask only that street, city and state be non-empty. So a blank-owner row with a
+      // one-character city was filed no-key here and told it could not be looked up, while the
+      // router would have routed it and the vendor would have accepted it. One question, asked in
+      // the module that owns routing, so a submit can no longer refuse a row the router would run.
+      //
+      // The parcel half of canDiscoverOwner cannot fire on this surface today: the web upload has
+      // no parcel id column (D5), so record.apn is always absent here. It is asked anyway rather
+      // than special-cased, because a submit that asks a narrower question than the router is
+      // exactly the divergence this change exists to delete.
+      const canAsk = canDiscoverOwner(
+        parcelForFullTrace({
+          address: record.address,
+          city: record.city,
+          state: record.state,
+          zip: record.zip,
+          apn: record.apn,
+          county: record.county,
+        })
+      );
+      if (canAsk) tier2Records.push(record);
       else noKeyRecords.push(record);
     }
 
