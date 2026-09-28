@@ -4,6 +4,71 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-09-28: Phase 2B final review, two fix rounds, and the Tier 2 parcel key. Deployed.
+
+`main` = `745adad`, production verified on it by SHA and by behaviour. Gates: vitest **2229 passed /
+89 files / 0 failed**, tsc **exit 0**, eslint **45 problems** (the floor, unmoved across 19 commits).
+
+### The thing that actually mattered
+
+**A property with no owner name, an APN, a county and a state now gets traced.** It used to be filed
+free, never looked at, and handed a sentence telling the customer to resend a full street address.
+
+David had to state the routing rules again to get here, so they are now committed verbatim as
+`tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md`, which is THE AUTHORITY over every plan, brief, handoff and
+lesson in this repo.
+
+**The routing engine already implemented his whole table.** `planRoute` emits `TRACERFY_INSTANT_NAMED`
+for a person with a full address, `TRACERFY_PARCEL_APN` for a person with no city but apn+county+state,
+`FASTAPPEND_ENTITY` for an entity, and for a blank owner a dossier then re-entry that classifies the
+discovered owner and sends an individual to Tracerfy or an entity to FastAppend. `contactParcelFor`
+even substitutes the dossier's mailing address as the situs for a parcel-only individual. Every stage
+existed and was guarded. **Three bulk submits refused to let the record in**, each asking
+`validateAddressInput` (street AND city AND state, no parcel term) instead of asking the router.
+
+- `hasApn` is now three parts (apn + county + **state**), because both vendor clients refuse a
+  state-less key before any network call, so `planRoute` had been emitting a step its own client threw
+  away: a burnt attempt, not a free miss.
+- One exported `canDiscoverOwner = hasApn || hasSitus` lives in the routing module and is asked by
+  **all three submits and the quote**, so a submit can no longer refuse a row the router would run.
+- A deliberate widening beyond parcels: `validateAddressInput` wanted a city of 2+, while `hasSitus`
+  and the vendor client's own `validateKey` ask only that street, city and state be non-empty. A
+  one-character city was refused by the submit alone.
+- The no-key sentence was NOT changed and must not be. With the capability in place it is true for its
+  remaining audience. An earlier draft tried to reword it and asserted a parcel id and county "are not
+  enough on their own", which is false.
+
+### The final whole-branch review, three reviewers plus six controller-run mutations
+
+The phase's core proved sound: removing the queue arm from the v1 gate (4 failed), from the MCP gate
+(2 failed) and the CAS predicate (1 failed) all went RED. No revert warranted.
+
+Fixed across two rounds: the results CSV no longer serves `outcome_code`/`found_by` ungated beside a
+withheld `skip_reason`; the v1 and MCP submits no longer wipe a paid `trace_steps` log (their
+busy-resume exemption is inert because `checkDuplicates` is cookie-scoped); the wallet reserve pages
+instead of truncating at PostgREST's **live, measured 1000-row cap**; a no-key row writes
+`is_successful: false` so it cannot count as a match on a job that never submitted it; the web route
+writes `tracerfy_job_id: null` on all three buckets; three terminal writes and a swallowed
+`webhook_url` write now log their errors; the live-check runner self-checks its D36 comparison before
+spending; and four false or stale comments were corrected.
+
+### THE OPEN GAP THAT NEEDS A PAID TEST
+
+**The APN dossier key has never once run live, in any phase.** Phase 0, Phase 1, 2A and 2B's live check
+all exercised address-keyed paths only. The quote proves the record now classifies correctly and reaches
+the queue; nothing has yet proven dossier -> owner -> contacts on a parcel key end to end. See the
+handoff's DOSSIER TEST block for the exact shape.
+
+### Process
+
+L-038 records why this took four passes: the gap was documented in four places and built in none, and
+each pass wrote a BETTER deferral note than the last, which made the next reader more comfortable
+inheriting it. The second half is the controller's: after being corrected, asking whether to fix it,
+three times. Asking permission to fix something the owner has already called broken is deferral with
+his signature on it.
+
+---
+
 ## 2026-09-27: Phase 2B Task 8, LIVE HALF. Merged, deployed, and the live check run. $0.50 spent.
 
 **Phase 2B is built, reviewed, merged and live.** Merge `495a012`, one `--no-ff` commit so a single

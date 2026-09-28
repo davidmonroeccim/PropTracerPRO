@@ -53,6 +53,89 @@
 > excluded from `tsconfig.json` AND outside the eslint scope, so every money-spending runner there is
 > unchecked).
 >
+> # PHASE 3 HAS CHANGED. Read this before planning it.
+>
+> Spec Section 10 defines it as: *"the owner rule, the multifamily registry lookup and opt-in fallback
+> (D17: records come from the registry; no registry owner means a dossier search the user is told about),
+> the relaxed city guard, outcome mapping, corrected sentences and descriptions."*
+>
+> **IT GOT SMALLER. D17's PTP half is BUILT AND DEPLOYED (2026-09-28).** "No registry owner means a
+> dossier search" now works on the PropTracerPRO side: a blank-owner record with apn + county + state
+> reaches `DOSSIER_APN`. What remains of that item is gateway-side only: telling the user the dossier
+> search is happening (the opt-in and the disclosure), and passing the parcel.
+>
+> **THE RELAXED CITY GUARD IS NOW MEASURED, NOT INFERRED, AND IT IS THE WHOLE REMAINING BLOCKER.** Both
+> `ptp_skip_trace_bulk` and `ptp_skip_trace_quote` declare `"required": ["address", "city", "state"]` in
+> the gateway's own tool schema. So a city-less parcel-keyed record **cannot reach PTP through the
+> gateway at all**, whatever PTP now accepts. PTP takes that record; the gateway refuses it. That is one
+> schema change on the gateway, and it is the difference between the capability existing and being usable
+> by a gateway caller.
+>
+> **NEW PHASE 3 ITEM, and it needs checking from the gateway side.** The `ptp_skip_trace_bulk` description
+> served to the 2026-09-27 session still carried the OLD apn/county copy David rejected on 2026-09-25 and
+> Task 7 replaced ("optional ... not a more accurate one; either key can find an owner the other misses").
+> That session's tool list was fetched before the deploy, so it is most likely a client-side cache rather
+> than a gateway defect — but **if the gateway caches PTP's `tools/list` for any length of time, the
+> wording David approved is not what a calling model reads.** Confirm which it is.
+>
+> **UNCHANGED in Phase 3:** the owner rule; outcome mapping; the gateway's own whole-batch rejection
+> (PTP has now removed its on all three submits); and that **the gateway always passes `parcel_id_local`
+> and `county` from the registry rather than leaving it to a model** (David, 2026-09-25: *"The property is
+> coming from the registry, either way, we should be choosing for them, not letting them choose something
+> they know absolutely nothing about."*). Record that as the DESIGN, not as a PTP limitation.
+>
+> **THREE PTP-SIDE ITEMS ARE TICKETED AND HOMELESS.** They are not Phase 3 scope as written, and they
+> should not be rediscovered a fifth time:
+> 1. **The three status routes can steal the cron's compare-and-swap** and silently lose the one-shot
+>    `bulk_job.completed`, which has no dispatched flag. Fixing one of three would create an asymmetry, so
+>    all three or none.
+> 2. **`checkDuplicates` is on the cookie-scoped client** (`lib/utils/deduplication.ts:36`), so v1 and MCP
+>    dedupe NOTHING and a resent address is traced and billed again. Its own docblock calls this a known
+>    defect and hands the decision to "whoever owns the bulk routes". The product question is: **on v1 and
+>    MCP, should a failed trace inside the 90-day window block a resend?** A named answer unblocks a
+>    one-line client swap.
+> 3. **`tasks/research-scripts` is outside BOTH gates** — excluded from `tsconfig.json` and outside
+>    eslint's `app lib components` scope. Every money-spending runner there is unlinted and untypechecked,
+>    which is how a runner shipped a comparison bug that falsely reported a core invariant broken on 8 of
+>    8 production records.
+
+> # ⚠ THE DOSSIER TEST. THIS IS THE NEXT PAID THING AND IT HAS NEVER BEEN RUN.
+>
+> **The APN dossier key has never once run live, in ANY phase.** Phase 0, Phase 1, 2A and 2B's live
+> check between them exercised only address-keyed paths. `DOSSIER_APN` has therefore never been sent to
+> Tracerfy by this application, in production, ever. What IS proven: a free gateway quote returns
+> `full_property_trace: 1` for a blank-owner record with an empty city plus apn+county+state, so the
+> record classifies correctly, prices correctly and reaches the queue. What is NOT proven is everything
+> after that.
+>
+> **What the test has to prove, in order, for ONE record:**
+> 1. `DOSSIER_APN` is actually sent, keyed on apn + county + state, with no situs.
+> 2. It comes back with an owner name (and note whether it also returns a mailing address).
+> 3. PTP classifies that discovered owner as an individual or an entity.
+> 4. **Individual** -> Tracerfy is called for contacts. If the dossier returned a complete mailing
+>    address, `contactParcelFor` (`lib/routing/executeRoute.ts:701`) substitutes it as the situs and the
+>    call is an Instant Lookup; if it did not, the call is the parcel/Advanced lookup.
+> 5. **Entity** -> FastAppend is called on the owner name plus state.
+> 6. The row settles with contacts, or with an honest outcome code, and the step log records which key
+>    answered.
+>
+> **The record shape:** blank `owner_name`, a real `apn` + bare `county` + 2-letter `state`, and NO city.
+> It must be a county nothing has touched before (Phase 0's tested set, the Phase 1 check, the FastAppend
+> probe, and the twenty records in `tasks/phase2a-live-check.md`, plus the nine in
+> `tasks/research-test/phase2b/records.json`). Secondary or tertiary markets only, never Indiana, never
+> Florida, never a primary metro.
+>
+> **How to run it:** the runner at `tasks/research-scripts/phase2b/run-live.ts` already supports
+> `--only <batch>` and `--no-drain`, and its five refusals and strictly-greater cap are intact and
+> fenced. Add the record to `records.json` as its own batch. **The CONTROLLER runs the spend, never an
+> implementer, and never without David's named dollar amount (L-031).** Note that the runner's in-process
+> MCP lane does NOT work (`checkDuplicates` needs a Next request scope), so a v1 API submit is the path;
+> the gateway cannot carry a city-less record because its own schema requires a city.
+>
+> **Why it matters more than a normal coverage gap:** this is the one path the whole Tier 1/Tier 2
+> initiative was built for, it is the shape David has had to explain repeatedly, and every layer of it is
+> now written and deployed on nothing but unit tests.
+
 > **READ L-038.** The gap above was documented in four places and built in none, and each pass wrote a
 > BETTER deferral note than the last, which made the next reader more comfortable inheriting it. Quality
 > of documentation carried the defect. The second half is the controller's: after being corrected, asking

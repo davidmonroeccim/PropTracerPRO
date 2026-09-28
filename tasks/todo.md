@@ -87,6 +87,23 @@ block of `tasks/SESSION-HANDOFF-2026-09-16.md` first.
         so the parcel-keyed shape is blocked gateway-side (Phase 3). Two runner defects found and
         fixed (`ef50fc2`, `12b1b09`), one of which reported D36 broken on a system where it holds.
 - [ ] Phase 3: gateway owner rule and mapping (plan written after Phase 2)
+      **SCOPE CHANGED 2026-09-28 — read the "PHASE 3 HAS CHANGED" block in
+      `tasks/SESSION-HANDOFF-2026-09-16.md` before planning it.**
+      SMALLER: D17's "no registry owner means a dossier search" is BUILT AND DEPLOYED on the PTP
+      side; only the gateway's disclosure/opt-in half remains.
+      THE WHOLE REMAINING BLOCKER, now measured: the gateway's own `ptp_skip_trace_bulk` and
+      `ptp_skip_trace_quote` schemas declare `"required": ["address","city","state"]`, so a
+      city-less parcel-keyed record cannot reach PTP through the gateway at all. PTP accepts it;
+      the gateway refuses it.
+      NEW: confirm whether the gateway caches PTP's `tools/list`. The apn/county description
+      David approved on 2026-09-25 may not be what a gateway caller reads.
+  - [ ] **THE DOSSIER TEST, unrun and paid.** `DOSSIER_APN` has never been sent live in ANY phase.
+        Needs David's dollar amount; the controller runs it. Full spec in the handoff's
+        "THE DOSSIER TEST" block. Not Phase 3 work, but it gates confidence in what 2B shipped.
+  - [ ] Ticketed, homeless, do not rediscover: the three status routes can steal the cron's CAS and
+        lose the one-shot `bulk_job.completed`; `checkDuplicates` is cookie-scoped so v1 and MCP
+        dedupe nothing (needs David's answer: should a failed trace inside 90 days block a resend?);
+        `tasks/research-scripts` is outside both the tsc and eslint gates.
 - [ ] Phase 4: cleanup (plan written after Phase 3)
 
 ## Phase 2B Task 8 review, BUILD HALF: suite gates and the mutation table (2026-09-25)
