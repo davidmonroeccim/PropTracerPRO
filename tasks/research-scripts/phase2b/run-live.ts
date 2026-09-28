@@ -109,6 +109,19 @@ type LivePath =
    *  address-keyed paths. Both records are genuinely city-less IN THE REGISTRY, so the shape is the
    *  one a gateway caller would pass, not one manufactured by dropping a city we hold. */
   | 'v1_blank_apn_no_city'
+  /** THE COMMERCIAL COVERAGE TEST (2026-09-28). Four arms, one question: when the APN dossier
+   *  misses, is it the vendor, the county record, or the key the registry chose?
+   *    A  registry holds NO owner name        -> blank owner, registry key      -> DOSSIER_APN
+   *    B  registry HOLDS an owner (ground truth, withheld on the wire)          -> DOSSIER_APN
+   *    C  owner SENT and it is an individual, so the entity route cannot eat it -> TRACERFY_PARCEL_APN
+   *    D  the SAME parcel as its pair, carrying the COUNTY's own printed key rather than
+   *       parcel_id_local. Five counties publish a second, shorter id that ours is built from
+   *       (ND 38101-X vs X, WA 077-X vs X, MN state_pin vs county_pin, WV, TN). D is what
+   *       sizes the registry fix: a hit here against a miss in its pair is the whole answer. */
+  | 'v1_dossier_no_registry_owner'
+  | 'v1_dossier_owner_withheld'
+  | 'v1_tier1_parcel_rung'
+  | 'v1_dossier_county_key'
   | 'v1_blank_good_address'
   | 'mcp_named_no_city_apn'
   | 'mcp_blank'
@@ -144,15 +157,17 @@ interface LiveRecord {
 }
 
 const ALL_PATHS: readonly LivePath[] = [
-  'v1_named_full_address',
-  'v1_named_no_city',
-  'v1_named_no_city_apn',
-  'v1_blank_unusable',
-  'v1_blank_apn_no_city',
-  'v1_blank_good_address',
-  'mcp_named_no_city_apn',
-  'mcp_blank',
-  'v1_mixed_batch',
+  // SCOPED TO THE 2026-09-28 COVERAGE TEST. Phase 2B's own eight paths and the morning's
+  // v1_blank_apn_no_city are deliberately NOT listed: those records are SPENT and must never be
+  // resubmitted, and their row payloads no longer exist locally. Their evidence is committed in
+  // tasks/phase2b-live-check.md and tasks/dossier-test-2026-09-28.md, and the rows themselves are
+  // readable from production by trace_job_id (jobs.json still holds every job id). Reconstructing
+  // owner names here to satisfy refusal 3 would be fabricated data (CLAUDE.md rule 7), so the
+  // refusal is satisfied by narrowing the path list rather than by inventing rows.
+  'v1_dossier_no_registry_owner',
+  'v1_dossier_owner_withheld',
+  'v1_tier1_parcel_rung',
+  'v1_dossier_county_key',
 ]
 
 const ROOT = process.cwd()
