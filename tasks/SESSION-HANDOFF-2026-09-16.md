@@ -1,5 +1,65 @@
 # SESSION HANDOFF, 2026-09-16, amended through 2026-09-21
 
+> # READ FIRST. STATE AS OF 2026-09-28 (latest). **THE TIER 2 PARCEL KEY IS BUILT, DEPLOYED AND VERIFIED LIVE. `main` = `9752c31`.**
+>
+> **READ `tasks/ROUTING-SPEC-AS-DAVID-STATED-IT.md` BEFORE ANY ROUTING OR SUBMIT WORK. It is David's own
+> wording and it is THE AUTHORITY.** Anything in this repo that disagrees with it is wrong, including a
+> plan, a brief, a handoff block or a lesson. He had to state it more than once over nearly three weeks.
+> Do not re-derive it and do not ask whether it is what he meant.
+>
+> **WHAT WAS WRONG, and it was one line in each of three submits.** The routing engine already
+> implemented his whole table. `planRoute` emits `TRACERFY_INSTANT_NAMED` for a person with a full
+> address, `TRACERFY_PARCEL_APN` for a person with no city but apn+county+state, `FASTAPPEND_ENTITY` for
+> an entity, and for a blank owner a dossier then re-entry that classifies the discovered owner and
+> routes an individual to Tracerfy or an entity to FastAppend. `contactParcelFor`
+> (`executeRoute.ts:701`) even substitutes the dossier's mailing address as the situs for a parcel-only
+> individual. **Every stage existed.** The three bulk submits refused to let the record in, because each
+> asked `validateAddressInput` (street AND city AND state, no parcel term) instead of asking the router.
+>
+> **THE FIX.** `hasApn` is now three parts (apn + county + **state**, 2-letter), because both vendor
+> clients refuse a state-less key before any network call (`lib/tracerfy/dossier.ts:148`,
+> `lib/tracerfy/client.ts:706`), so `planRoute` had been emitting a step its own client threw away. One
+> exported `canDiscoverOwner = hasApn || hasSitus` lives in `lib/routing/ownerRoute.ts` and is asked by
+> **all three submits and the quote**. Verified live: a free gateway quote on a blank-owner record with
+> an EMPTY city plus apn+county+state returns `full_property_trace: 1`, where the old code returned 0.
+>
+> **A WIDENING BEYOND THE PARCEL CASE, deliberate.** `validateAddressInput` demanded a city of 2+ and a
+> street of 3+; `hasSitus` and the vendor client's own `validateKey` both ask only that street, city and
+> state be NON-EMPTY. So a blank-owner row with a one-character city was refused by the submit alone
+> while the router would have routed it and the vendor would have accepted it. All three layers now ask
+> one question.
+>
+> **THE NO-KEY SENTENCE WAS NOT CHANGED, and must not be.** With the capability in place its remaining
+> audience is a row with no owner, no usable situs and no parcel key, for whom it is true. An earlier
+> draft of mine tried to reword it and stated that a parcel id and county "are not enough on their own",
+> which is FALSE. Do not write copy to paper over a missing capability.
+>
+> **GATES at `9752c31`, measured:** vitest **2229 passed / 89 files / 0 failed**, tsc **exit 0**, eslint
+> **45 problems** (the floor). Production deployment `dpl_FrBVr9Nmkqvm5gRA9GGkBJSPVowa`, SHA verified,
+> READY, `proptracerpro.com` aliased, `aliasError: null`.
+>
+> **WHAT ELSE SHIPPED IN THE SAME PUSH (18 commits), all from the final whole-branch review:** the
+> results CSV no longer serves `outcome_code`/`found_by` ungated beside a withheld `skip_reason`; the v1
+> and MCP submits no longer wipe a paid `trace_steps` log (the busy-resume exemption is inert on those
+> surfaces because `checkDuplicates` is cookie-scoped); the wallet reserve pages instead of truncating at
+> PostgREST's **live 1000-row cap**; a no-key row writes `is_successful: false` so it cannot count as a
+> match on a job that never submitted it; the web route writes `tracerfy_job_id: null` on all three
+> buckets; three terminal writes and a swallowed `webhook_url` write now log their errors; and four false
+> or stale comments were corrected.
+>
+> **STILL OPEN, ticketed, NOT done:** the compare-and-swap on the three status routes (they can steal the
+> cron's CAS and silently lose the one-shot `bulk_job.completed`); `checkDuplicates` on the anon client,
+> so v1 and MCP dedupe nothing; and whether `tasks/research-scripts` should be typechecked (it is
+> excluded from `tsconfig.json` AND outside the eslint scope, so every money-spending runner there is
+> unchecked).
+>
+> **READ L-038.** The gap above was documented in four places and built in none, and each pass wrote a
+> BETTER deferral note than the last, which made the next reader more comfortable inheriting it. Quality
+> of documentation carried the defect. The second half is the controller's: after being corrected, asking
+> whether to fix it, three times. **Asking permission to fix something the owner has already said is
+> broken is deferral with his signature on it.**
+
+
 > # READ FIRST. STATE AS OF 2026-09-27 (latest). **PHASE 2B IS BUILT, REVIEWED, MERGED, DEPLOYED AND LIVE-CHECKED. $0.50 SPENT. ONE THING REMAINS: THE FINAL WHOLE-BRANCH REVIEW.**
 >
 > **`main` is at `12b1b09`. The phase merged as `495a012`, ONE `--no-ff` commit, so `git revert 495a012`
