@@ -445,9 +445,13 @@ describe("worstCaseCost", () => {
     expect(out.entities).toBe(0);
   });
 
-  // CONSISTENCY: the set worstCaseCost prices as entities is EXACTLY the set skipTraceBulk routes
-  // to entityRecords, because both classify through isEntityRecord AND isBlankOwnerRecord.
-  it("prices exactly the named-entity set as entities (gate == submit split)", () => {
+  // CONSISTENCY: the set worstCaseCost prices as entities is EXACTLY the set skipTraceBulk REPORTS
+  // as `entities` on its submit payload, because both classify through isEntityRecord AND
+  // isBlankOwnerRecord (skipTraceBulk counts isEntityRecord over tier1Records, and tier1Records is
+  // built by excluding blank owners). There is no `entityRecords` bucket in skipTraceBulk any more
+  // and this is no longer a ROUTE split -- every owner-bearing record takes the one Tier 1 lane --
+  // so what this pins is that the wallet gate and the reported count cannot drift apart.
+  it("prices exactly the named-entity set as entities (gate == submit count)", () => {
     const records = [
       { owner_name: "John Smith", address: "1 A St", city: "X", state: "TX", zip: "75001" }, // person
       { owner_name: "Acme LLC", address: "2 B St", city: "X", state: "TX", zip: "75001" }, // entity
