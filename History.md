@@ -4,6 +4,66 @@ A running log of completed tasks, changes, and decisions. Updated after every ta
 
 ---
 
+## 2026-10-05: Dossier key test on owner-less UT and NH registry parcels (registry Phase 2 Step 1). $3.80 spent.
+
+Research only, no app code changed. Harness `tasks/research-scripts/dossier-key-test.ts` (each dossier key on its own,
+via the shipped `lib/tracerfy/dossier.ts`; control first; `--max-dollars` checked before every call; refuses `--live`
+without exactly one control). Sample of 5 UT + 5 NH parcels + the Salt Lake control, built read-only by the property
+registry. Raw responses (PII, gitignored): `tasks/research-test/ut-nh-dossier-2026-10-05/live/`.
+- **Utah, Salt Lake County (5 sampled): the APN key fails on its FORMAT.** The 14-digit parcel id production sends: 0/5.
+  The dashed 10-digit form (e.g. `16-18-306-029`): **5/5 right parcel** (a truncation, tested only on ids ending
+  `0000`). Address + the county's city: 2/5; with the ZIP 3/5 (the ZIP fixed a metro-township label, White City).
+- **New Hampshire: neither parcel id the registry holds is recognised (0/5 each).** The vendor writes NH APNs as
+  `<TOWN> M:<map> B:<block> L:<lot>`. Address + town found the right parcel 3/5, 4/5 with the correct ZIP (a village post
+  office, Center Tuftonboro).
+- **A wrong ZIP returned a different property** in another town (billed). A ZIP must be right or omitted.
+- The control reproduced its 2026-09-16 record (APN miss, address hit). 44 calls, 19 hits, 190 credits, **$3.80** (cap $7).
+- Known defect, kept as run: the harness's own summary cannot score NH's vendor-format APN and logged the wrong
+  Manchester parcel as same-address; fix it before reuse.
+- Follow-up approved by David: the gateway sends Salt Lake's dashed APN form (suite-gateway, separate work).
+
+---
+
+## 2026-10-02 (b): Registry acceptance check on written VT situs values. $1.10 spent.
+
+Research only, no app code changed. After the property registry wrote VT `situs_city` (the TOWN, a municipal name) and
+`situs_zip` (the owner's own mail ZIP), 5 owner-occupied individual owners in 5 VT counties, written town != mail city:
+- written town, no ZIP: **3/5**; postal city: **5/5**; **written town + written ZIP: 5/5** (the ZIP rescued Moretown ->
+  Waterbury and Ferrisburgh -> Vergennes). Same shape as the city-form test.
+- 14 live calls, 55 credits, **$1.10** (cap $2), sandbox first. Ran a scratchpad copy of `city-form-test.py` with only its
+  folder changed, so the standing 25-pair set was not overwritten. Sample + raw responses (PII, gitignored):
+  `tasks/research-test/vt-acceptance-2026-10-02/`.
+
+---
+
+## 2026-10-02: City-form test. Does a municipal / township / place name break the named lookup? $4.90 spent.
+
+Research only, no app code changed. Asked by David after the property registry spent a month
+withholding municipal city names on the UNTESTED claim that PTP "matches on a postal city" (its only
+source was one sentence in the vendor's autocomplete docs: "/lookup/ requires the canonical city").
+
+- **Design (David's):** named lookup only (`find_owner:false`, the production person path), no dossier.
+  25 owner-occupied individual owners, 5 states x 5 counties (NY, CT, MA, MN, WI; NJ dropped because its
+  owner names are redacted). Per address: municipal name first, then the USPS mail city as validation,
+  both WITHOUT ZIP; a municipal miss was retried once WITH the ZIP. Sample built read-only from the
+  registry with the audit's own owner-occupancy test.
+- **Result, 25 of 25 pairs valid (the postal-city run hit every time):**
+  - municipal name, no ZIP: **8 hit / 17 miss**. By state: CT 4/5, MA 2/5, NY 2/5, MN 0/5, WI 0/5.
+    Townships never matched without a ZIP; New England town names often did.
+  - municipal name + ZIP: **16 of the 17 misses hit**. Municipal name works **24/25** when the ZIP is sent.
+    The one failure: WI Grand Chute -> Appleton.
+  - 24/25 pairs returned the named owner. CT 09007 returned a person with the owner's first name and a
+    different surname on both the postal and the ZIP run (possibly the same person after a name change;
+    identity unconfirmed).
+- **What it means:** the vendor really does need the USPS city when no ZIP is sent. With a ZIP, the city
+  form barely matters for an individual's named trace. Entity traces (FastAppend) never send an address,
+  so this test does not reach them. 25 pairs is a "does it work" sample, not a rate study.
+- Spend: 67 calls, 245 credits, **$4.90** against a $10 cap. Harness `tasks/research-scripts/city-form-test.py`
+  (refuses `--live` without `--max-dollars`; sandbox-verified first, including the miss and 402 paths).
+  Raw responses, sample and selector in `tasks/research-test/city-form-2026-10-02/` (gitignored, PII).
+
+---
+
 ## 2026-09-28: Phase 2B final review, two fix rounds, and the Tier 2 parcel key. Deployed.
 
 `main` = `745adad`, production verified on it by SHA and by behaviour. Gates: vitest **2229 passed /
