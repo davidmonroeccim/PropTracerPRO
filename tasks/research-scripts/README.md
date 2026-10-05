@@ -18,6 +18,8 @@ All require an explicit `--live` flag to spend.
 | `tracerfy-individual.ts` | `find_owner:true` MISSES on an absentee owner; the named lookup HITS. | $0.10 |
 | `ohio-test.ts` | Full dossier + FastAppend pipeline, 12 parcels, 4 Ohio counties. 12/12 owners, 8/12 entity hits. | $3.20 |
 | `address-mode.ts` | The dossier answers from an ADDRESS with no parcel id. 5/6, and it found a parcel APN mode missed. | $1.00 |
+| `city-form-test.py` | 2026-10-02. Named lookup with a municipal/township name: 8/25 hit with no ZIP, 24/25 with the ZIP. The vendor needs the USPS city only when no ZIP is sent. Python, no deps; `--sandbox` or `--live --max-dollars N`. | $4.90 |
+| `dossier-key-test.ts` | 2026-10-05. Registry Phase 2 Step 1: each dossier key on its own (APN, printed APN, address + county city, + ZIP) on owner-less UT/NH parcels, via the shipped client. Control first. `--self-test`, `--dry-run`, `--sandbox`, `--live --max-dollars N`. | see History |
 | `run-research.ts` | The `researchProperty` harness. Built, dry-run verified, NEVER RUN live. | $0 |
 | `dossier-client-check.ts` | Not a research probe — the **visible slice of Full Property Trace phase 1**. Runs the shipped `lib/tracerfy/dossier.ts` and prints the parsed record: owners, mailing address, and all 86 property keys. `--dry-run` reads a committed sanitized fixture and spends nothing; `--live` does ONE lookup. | $0 dry-run, $0.20/hit live |
 
