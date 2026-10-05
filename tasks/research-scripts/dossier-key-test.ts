@@ -82,6 +82,10 @@ export function classify(p: Parcel, r: Pick<DossierResult, 'success' | 'hit' | '
 
 export const capAllows = (spentCredits: number, capCredits: number) => spentCredits + HIT_CREDITS <= capCredits
 export const outDirError = (dir: string) => (existsSync(dir) ? `REFUSING: ${dir} exists; a result set is never overwritten` : null)
+export const liveSampleError = (parcels: Parcel[]) => {
+  const n = parcels.filter((p) => p.role === 'control').length
+  return n === 1 ? null : `REFUSING: --live needs exactly one control parcel in the sample, found ${n}`
+}
 
 const FOUND = new Set<string>(['RIGHT_APN'])
 export function summarize(rows: Row[]) {
@@ -126,13 +130,15 @@ function selfTest(): number {
   eq('a hit on another parcel is WRONG_PARCEL', classify(ut, { success: true, hit: true, property: { apn: '999', address: '12 Elm St' } }), 'WRONG_PARCEL')
   eq('the cap refuses the call that could cross it', [capAllows(40, 50), capAllows(41, 50)], [true, false])
   eq('an existing out dir is refused', outDirError('/tmp') !== null, true)
+  eq('live refuses a sample with no control', liveSampleError([ut]) !== null, true)
+  eq('live accepts exactly one control', liveSampleError([ctl, ut]), null)
   const rows: Row[] = [
     { id: 'u', role: 'disagree', state: 'UT', county: 'Davis', arm: 'apn', verdict: 'MISS', credits: 0, returned_apn: null, returned_zip: null, error: null },
     { id: 'u', role: 'disagree', state: 'UT', county: 'Davis', arm: 'address_city', verdict: 'RIGHT_APN', credits: 10, returned_apn: '1', returned_zip: null, error: null },
   ]
   eq('an address hit after an APN miss is a rescue', summarize(rows).rescued_by_address, 1)
   if (fails.length) { console.error(`FAIL -- ${fails.join('\n  ')}`); return 1 }
-  console.log('OK -- 13 cases'); return 0
+  console.log('OK -- 15 cases'); return 0
 }
 
 function loadEnvLocal(path: string) {
@@ -174,6 +180,7 @@ async function main() {
   const { lookupDossier, buildDossierRequest } = await import('../../lib/tracerfy/dossier')
 
   const parcels: Parcel[] = JSON.parse(readFileSync(samplePath, 'utf8'))
+  if (mode === '--live') { const e = liveSampleError(parcels); if (e) { console.error(e); process.exit(2) } }
   parcels.sort((a, b) => Number(b.role === 'control') - Number(a.role === 'control'))
   mkdirSync(out, { recursive: false })
   const rows: Row[] = []
